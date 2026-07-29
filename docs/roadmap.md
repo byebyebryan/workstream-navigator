@@ -2,7 +2,8 @@
 
 Date: 2026-07-29
 
-Status: D0, D1, and D1.5 complete; D2 is next
+Status: D0, D1, and D1.5 complete; D2 local implementation is ready for
+operator-trusted native acceptance
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -30,7 +31,7 @@ This document owns sequencing, exit gates, and progress.
 | D0 | Contract kernel and durable state | Complete |
 | D1 | Local Codex CLI vertical slice | Complete (reconciled by D1.5) |
 | D1.5 | Reconcile native trust and same-workstream tip transitions | Complete |
-| D2 | Minimal directly interactive navigator | Planned |
+| D2 | Minimal directly interactive navigator | Active: automated local presentation passed; native acceptance pending |
 | D3 | Local and SSH hosts through one protocol | Planned |
 | D4 | Independent and conversation-forked Workstreams | Planned |
 | D5 | Recovery, combined acceptance, and V1 closure | Planned |
@@ -170,6 +171,11 @@ and its [D1.5 reconciliation fixture](../spikes/fixtures/d1.5-local-codex-reconc
 ## D2 - Minimal navigator
 
 Deliver the first normal user-facing terminal workflow.
+
+Implementation status: the bounded local snapshot, private presentation tmux
+owner, direct attachment helper, Ratatui navigator, and disposable isolation
+acceptance are implemented. D2 remains active until an operator completes the
+native Codex terminal acceptance below and its sanitized evidence is recorded.
 
 Scope:
 

@@ -9,14 +9,17 @@ use uuid::Uuid;
 
 use crate::domain::{
     AttentionState, CheckoutId, CompoundOperation, DomainError, HostId, IdGenerator, LocationId,
-    OperationId, OperationKind, OperationPhase, RandomIdGenerator, Revision, RuntimeId,
-    RuntimeStatus, WorkstreamId,
+    OperationId, OperationKind, OperationPhase, ProjectId, RandomIdGenerator, Revision, RuntimeId,
+    RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 use crate::provider::codex::hooks::{HookObservation, LifecycleEvent};
+use crate::provider::codex::names::NameState;
 use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 
 const HOST_SCHEMA_VERSION: i64 = 1;
 const CLIENT_SCHEMA_VERSION: i64 = 1;
+const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
+const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
 
 const HOST_SCHEMA_SQL: &str = "
     CREATE TABLE host_identity (
@@ -182,6 +185,14 @@ pub struct HostIdentity {
     pub registry_generation: String,
 }
 
+/// Client-local project grouping for one registered host location. This is
+/// presentation metadata only; the host registry remains operation authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientProjectLocation {
+    pub project_id: ProjectId,
+    pub display_name: String,
+}
+
 /// One V1 external checkout and its initial workstream registration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalWorkstream {
@@ -214,9 +225,25 @@ pub struct ProviderBinding {
     pub start_source: String,
     pub last_settled_turn_id: Option<String>,
     pub observed_thread_name: Option<String>,
+    pub name_state: NameState,
     pub predecessor_native_session_id: Option<String>,
     pub predecessor_effective_name: Option<String>,
     pub revision: Revision,
+}
+
+/// One bounded host-local record needed to render and act on a Workstream.
+/// It deliberately excludes provider turns, prompts, terminal contents, and
+/// process details.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkstreamOverview {
+    pub workstream_id: WorkstreamId,
+    pub location_id: LocationId,
+    pub checkout_path: PathBuf,
+    pub lifecycle: WorkstreamLifecycle,
+    pub revision: Revision,
+    pub runtime: Option<RuntimeRecord>,
+    pub binding: Option<ProviderBinding>,
+    pub attention: Option<AttentionState>,
 }
 
 /// Persisted ownership and native-trust state for the only managed Codex profile.
@@ -554,13 +581,14 @@ impl HostRegistry {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
-        let checkout_path: String = transaction
+        let (checkout_path, workstream_lifecycle): (String, String) = transaction
             .query_row(
-                "SELECT checkouts.path FROM workstreams
+                "SELECT checkouts.path, workstreams.lifecycle FROM workstreams
                  JOIN checkouts ON checkouts.checkout_id = workstreams.checkout_id
-                 WHERE workstreams.workstream_id = ?1 AND workstreams.lifecycle = 'open'",
+                 WHERE workstreams.workstream_id = ?1
+                   AND workstreams.lifecycle IN ('open', 'parked')",
                 [workstream_id.to_string()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(StateError::Sqlite)?
@@ -636,6 +664,9 @@ impl HostRegistry {
                 .map_err(StateError::Sqlite)?;
             record
         };
+        if workstream_lifecycle == "parked" {
+            reopen_parked_workstream(&transaction, workstream_id)?;
+        }
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(record)
     }
@@ -659,6 +690,80 @@ impl HostRegistry {
             )
             .optional()
             .map_err(StateError::Sqlite)
+    }
+
+    /// Returns the bounded state needed by one local navigator snapshot.
+    /// Provider content, terminal captures, and hook payloads are not queried
+    /// or returned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a persisted identity, lifecycle, or revision is
+    /// malformed, or when the registry cannot be queried.
+    pub fn workstream_overviews(&self) -> Result<Vec<WorkstreamOverview>, StateError> {
+        let bases = {
+            let mut statement = self
+                .connection
+                .prepare(
+                    "SELECT workstreams.workstream_id, workstreams.location_id,
+                            checkouts.path, workstreams.lifecycle, workstreams.revision
+                     FROM workstreams
+                     JOIN checkouts ON checkouts.checkout_id = workstreams.checkout_id
+                     ORDER BY checkouts.path, workstreams.workstream_id
+                     LIMIT ?1",
+                )
+                .map_err(StateError::Sqlite)?;
+            let bases = statement
+                .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })
+                .map_err(StateError::Sqlite)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(StateError::Sqlite)?;
+            if bases.len() > MAX_NAVIGATOR_WORKSTREAMS {
+                return Err(StateError::NavigatorSnapshotTooLarge);
+            }
+            bases
+        };
+
+        bases
+            .into_iter()
+            .map(
+                |(workstream_id, location_id, checkout_path, lifecycle, revision)| {
+                    let workstream_id = Uuid::parse_str(&workstream_id)
+                        .map(WorkstreamId::from)
+                        .map_err(StateError::InvalidPersistedUuid)?;
+                    let location_id = Uuid::parse_str(&location_id)
+                        .map(LocationId::from)
+                        .map_err(StateError::InvalidPersistedUuid)?;
+                    let lifecycle = workstream_lifecycle_from_text(&lifecycle)?;
+                    let revision = Revision::try_from(revision)?;
+                    let runtime = self.runtime_for_workstream(workstream_id)?;
+                    let binding = runtime
+                        .as_ref()
+                        .map(|runtime| self.binding_for_runtime(runtime.runtime_id))
+                        .transpose()?
+                        .flatten();
+                    let attention = self.attention(workstream_id)?;
+                    Ok(WorkstreamOverview {
+                        workstream_id,
+                        location_id,
+                        checkout_path: PathBuf::from(checkout_path),
+                        lifecycle,
+                        revision,
+                        runtime,
+                        binding,
+                        attention,
+                    })
+                },
+            )
+            .collect()
     }
 
     /// Reads the current exact native-session binding for one runtime.
@@ -752,13 +857,36 @@ impl HostRegistry {
         native_session_id: &str,
         name: &str,
     ) -> Result<(), StateError> {
-        validate_registry_text("thread name", name)?;
+        self.record_thread_metadata(runtime_id, native_session_id, Some(name))
+    }
+
+    /// Records only the bounded canonical name from an exact provider metadata
+    /// read. A missing native name is distinct from an unavailable read; the
+    /// latter leaves the existing cached value untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the binding is missing, changed, or cannot be
+    /// transactionally updated.
+    pub fn record_thread_metadata(
+        &mut self,
+        runtime_id: RuntimeId,
+        native_session_id: &str,
+        name: Option<&str>,
+    ) -> Result<(), StateError> {
+        let (name, name_state) = match name.filter(|value| !value.trim().is_empty()) {
+            Some(name) => {
+                validate_registry_text("thread name", name)?;
+                (Some(name), "named")
+            }
+            None => (None, "known_empty"),
+        };
         let changed = self
             .connection
             .execute(
-                "UPDATE provider_bindings SET observed_thread_name = ?1, name_state = 'named',
-             revision = revision + 1 WHERE runtime_id = ?2 AND native_session_id = ?3",
-                params![name, runtime_id.to_string(), native_session_id],
+                "UPDATE provider_bindings SET observed_thread_name = ?1, name_state = ?2,
+             revision = revision + 1 WHERE runtime_id = ?3 AND native_session_id = ?4",
+                params![name, name_state, runtime_id.to_string(), native_session_id],
             )
             .map_err(StateError::Sqlite)?;
         if changed == 1 {
@@ -790,6 +918,54 @@ impl HostRegistry {
             return Err(StateError::ConcurrentWrite);
         }
         Ok(())
+    }
+
+    /// Records an explicit user park after the exact private tmux server has
+    /// stopped. Provider history and the checkout are retained, while the
+    /// Workstream's durable lifecycle becomes `parked`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown or stale runtime, or when the
+    /// Workstream state cannot be updated atomically with the stopped Runtime.
+    pub fn park_runtime(
+        &mut self,
+        runtime_id: RuntimeId,
+        expected: Revision,
+    ) -> Result<(), StateError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let workstream_id: String = transaction
+            .query_row(
+                "SELECT workstream_id FROM runtimes WHERE runtime_id = ?1 AND revision = ?2",
+                params![runtime_id.to_string(), expected.value()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::ConcurrentWrite)?;
+        let runtime_changed = transaction
+            .execute(
+                "UPDATE runtimes SET lifecycle = 'stopped', revision = revision + 1
+                 WHERE runtime_id = ?1 AND revision = ?2",
+                params![runtime_id.to_string(), expected.value()],
+            )
+            .map_err(StateError::Sqlite)?;
+        let workstream_changed = transaction
+            .execute(
+                "UPDATE workstreams SET lifecycle = CASE
+                    WHEN lifecycle = 'open' THEN 'parked' ELSE lifecycle END,
+                    revision = revision + 1
+                 WHERE workstream_id = ?1",
+                [workstream_id],
+            )
+            .map_err(StateError::Sqlite)?;
+        if runtime_changed != 1 || workstream_changed != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        transaction.commit().map_err(StateError::Sqlite)
     }
 
     /// Applies one already-authorized lifecycle observation to its exact runtime.
@@ -1150,6 +1326,127 @@ impl ClientCatalog {
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(StateError::Sqlite)
     }
+
+    /// Creates the local client-side Project grouping for a newly registered
+    /// host location. The generated Project identity is never inferred from a
+    /// path; the supplied label is only initial presentation text.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the local host identity changes unexpectedly, a
+    /// display label is unsafe, or the client catalog cannot commit atomically.
+    pub fn register_local_project_location(
+        &mut self,
+        host: &HostIdentity,
+        location_id: LocationId,
+        executable_path: &Path,
+        display_name: &str,
+    ) -> Result<ClientProjectLocation, StateError> {
+        validate_project_display_name(display_name)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        transaction
+            .execute(
+                "INSERT OR IGNORE INTO hosts (host_alias, host_id, executable_path, revision)
+                 VALUES ('local', ?1, ?2, 1)",
+                params![host.host_id.to_string(), executable_path.to_string_lossy()],
+            )
+            .map_err(StateError::Sqlite)?;
+        let stored_host_id: String = transaction
+            .query_row(
+                "SELECT host_id FROM hosts WHERE host_alias = 'local'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StateError::Sqlite)?;
+        if stored_host_id != host.host_id.to_string() {
+            return Err(StateError::ClientHostIdentityMismatch);
+        }
+        let existing: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT projects.project_id, projects.display_name
+                 FROM project_locations
+                 JOIN projects ON projects.project_id = project_locations.project_id
+                 WHERE project_locations.host_id = ?1 AND project_locations.location_id = ?2",
+                params![host.host_id.to_string(), location_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?;
+        let project = if let Some((project_id, display_name)) = existing {
+            ClientProjectLocation {
+                project_id: Uuid::parse_str(&project_id)
+                    .map(ProjectId::from)
+                    .map_err(StateError::InvalidPersistedUuid)?,
+                display_name,
+            }
+        } else {
+            let project_id = ProjectId::new();
+            transaction
+                .execute(
+                    "INSERT INTO projects (project_id, display_name, revision) VALUES (?1, ?2, 1)",
+                    params![project_id.to_string(), display_name],
+                )
+                .map_err(StateError::Sqlite)?;
+            transaction
+                .execute(
+                    "INSERT INTO project_locations (project_id, host_id, location_id)
+                     VALUES (?1, ?2, ?3)",
+                    params![
+                        project_id.to_string(),
+                        host.host_id.to_string(),
+                        location_id.to_string()
+                    ],
+                )
+                .map_err(StateError::Sqlite)?;
+            ClientProjectLocation {
+                project_id,
+                display_name: display_name.to_owned(),
+            }
+        };
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(project)
+    }
+
+    /// Looks up the client-local Project label for one exact local host
+    /// location. Missing data is a normal fallback condition during D2.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog cannot be queried or contains an
+    /// invalid persisted identity.
+    pub fn local_project_location(
+        &self,
+        host_id: HostId,
+        location_id: LocationId,
+    ) -> Result<Option<ClientProjectLocation>, StateError> {
+        self.connection
+            .query_row(
+                "SELECT projects.project_id, projects.display_name
+                 FROM project_locations
+                 JOIN projects ON projects.project_id = project_locations.project_id
+                 WHERE project_locations.host_id = ?1 AND project_locations.location_id = ?2",
+                params![host_id.to_string(), location_id.to_string()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)
+            .and_then(|row| {
+                row.map_or(Ok(None), |(project_id, display_name)| {
+                    Uuid::parse_str(&project_id)
+                        .map(ProjectId::from)
+                        .map(|project_id| {
+                            Some(ClientProjectLocation {
+                                project_id,
+                                display_name,
+                            })
+                        })
+                        .map_err(StateError::InvalidPersistedUuid)
+                })
+            })
+    }
 }
 
 fn configure_connection(connection: &Connection) -> Result<(), StateError> {
@@ -1327,7 +1624,7 @@ fn load_binding(
     transaction
         .query_row(
             "SELECT native_session_id, start_source, last_settled_turn_id,
-                    observed_thread_name, predecessor_native_session_id,
+                    observed_thread_name, name_state, predecessor_native_session_id,
                     predecessor_effective_name, revision
              FROM provider_bindings WHERE runtime_id = ?1",
             [runtime_id.to_string()],
@@ -1338,9 +1635,11 @@ fn load_binding(
                     start_source: row.get(1)?,
                     last_settled_turn_id: row.get(2)?,
                     observed_thread_name: row.get(3)?,
-                    predecessor_native_session_id: row.get(4)?,
-                    predecessor_effective_name: row.get(5)?,
-                    revision: Revision::try_from(row.get::<_, i64>(6)?)
+                    name_state: name_state_from_text(&row.get::<_, String>(4)?)
+                        .map_err(to_from_sql_error)?,
+                    predecessor_native_session_id: row.get(5)?,
+                    predecessor_effective_name: row.get(6)?,
+                    revision: Revision::try_from(row.get::<_, i64>(7)?)
                         .map_err(to_from_sql_error)?,
                 })
             },
@@ -1476,6 +1775,24 @@ fn update_runtime_lifecycle(
         )
         .map_err(StateError::Sqlite)?;
     if updated == 1 {
+        Ok(())
+    } else {
+        Err(StateError::ConcurrentWrite)
+    }
+}
+
+fn reopen_parked_workstream(
+    transaction: &rusqlite::Transaction<'_>,
+    workstream_id: WorkstreamId,
+) -> Result<(), StateError> {
+    let changed = transaction
+        .execute(
+            "UPDATE workstreams SET lifecycle = 'open', revision = revision + 1
+             WHERE workstream_id = ?1 AND lifecycle = 'parked'",
+            [workstream_id.to_string()],
+        )
+        .map_err(StateError::Sqlite)?;
+    if changed == 1 {
         Ok(())
     } else {
         Err(StateError::ConcurrentWrite)
@@ -1638,6 +1955,24 @@ fn runtime_status_from_text(value: &str) -> Result<RuntimeStatus, StateError> {
     }
 }
 
+fn workstream_lifecycle_from_text(value: &str) -> Result<WorkstreamLifecycle, StateError> {
+    match value {
+        "open" => Ok(WorkstreamLifecycle::Open),
+        "parked" => Ok(WorkstreamLifecycle::Parked),
+        "recovery_required" => Ok(WorkstreamLifecycle::RecoveryRequired),
+        _ => Err(StateError::InvalidPersistedValue(value.to_owned())),
+    }
+}
+
+fn name_state_from_text(value: &str) -> Result<NameState, StateError> {
+    match value {
+        "named" => Ok(NameState::Named),
+        "known_empty" => Ok(NameState::KnownEmpty),
+        "unavailable" => Ok(NameState::Unavailable),
+        _ => Err(StateError::InvalidPersistedValue(value.to_owned())),
+    }
+}
+
 const fn integration_lifecycle_text(lifecycle: IntegrationLifecycle) -> &'static str {
     match lifecycle {
         IntegrationLifecycle::TrustPending => "trust_pending",
@@ -1660,6 +1995,14 @@ fn integration_lifecycle_from_text(value: &str) -> Result<IntegrationLifecycle, 
 fn validate_registry_text(name: &'static str, value: &str) -> Result<(), StateError> {
     if value.is_empty() || value.len() > 4096 || value.contains('\0') || value.contains('\n') {
         return Err(StateError::InvalidRegistryField(name));
+    }
+    Ok(())
+}
+
+fn validate_project_display_name(value: &str) -> Result<(), StateError> {
+    if value.trim().is_empty() || value.chars().count() > 128 || value.contains(['\0', '\n', '\r'])
+    {
+        return Err(StateError::InvalidProjectDisplayName);
     }
     Ok(())
 }
@@ -1704,6 +2047,10 @@ pub enum StateError {
     InvalidPersistedValue(String),
     #[error("invalid registry field {0}")]
     InvalidRegistryField(&'static str),
+    #[error("too many Workstreams for one bounded navigator snapshot")]
+    NavigatorSnapshotTooLarge,
+    #[error("client project display name is invalid")]
+    InvalidProjectDisplayName,
     #[error("invalid persisted UUID: {0}")]
     InvalidPersistedUuid(uuid::Error),
     #[error("I/O at {path}: {source}")]
@@ -1729,6 +2076,8 @@ pub enum StateError {
     UnknownRuntime(RuntimeId),
     #[error("Codex observer ownership does not match the recorded profile")]
     IntegrationOwnershipMismatch,
+    #[error("local client catalog host identity does not match the host registry")]
+    ClientHostIdentityMismatch,
 }
 
 #[cfg(test)]
@@ -1868,6 +2217,30 @@ mod tests {
     }
 
     #[test]
+    fn client_catalog_groups_a_location_with_an_explicit_project_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let registry = HostRegistry::open(&root).unwrap();
+        let host = registry.identity().unwrap();
+        let location_id = LocationId::new();
+        let mut catalog = ClientCatalog::open(&root).unwrap();
+        let recorded = catalog
+            .register_local_project_location(
+                &host,
+                location_id,
+                Path::new("/workspace/wsnav"),
+                "wsnav",
+            )
+            .unwrap();
+        let loaded = catalog
+            .local_project_location(host.host_id, location_id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded, recorded);
+    }
+
+    #[test]
     fn fresh_registry_identity_is_stable_and_uses_the_injected_source() {
         let temporary = tempfile::tempdir().unwrap();
         let root = StateRoot::create(temporary.path()).unwrap();
@@ -1942,6 +2315,99 @@ mod tests {
         assert_eq!(resumed.runtime_id, first.runtime_id);
         assert_ne!(resumed.tmux_generation, first.tmux_generation);
         assert_eq!(resumed.status, RuntimeStatus::Starting);
+    }
+
+    #[test]
+    fn explicit_park_is_distinct_from_an_observed_runtime_stop() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        registry
+            .park_runtime(runtime.runtime_id, runtime.revision)
+            .unwrap();
+        assert_eq!(
+            registry.workstream_overviews().unwrap()[0].lifecycle,
+            WorkstreamLifecycle::Parked
+        );
+
+        registry.reserve_runtime(registered.workstream_id).unwrap();
+        assert_eq!(
+            registry.workstream_overviews().unwrap()[0].lifecycle,
+            WorkstreamLifecycle::Open
+        );
+    }
+
+    #[test]
+    fn navigator_overview_joins_only_bounded_workstream_metadata() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        registry
+            .apply_hook_observation(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                HookObservation {
+                    event: LifecycleEvent::SessionStart,
+                    cwd: runtime.cwd.to_string_lossy().into_owned(),
+                    native_session_id: "session-a".to_owned(),
+                    turn_id: None,
+                    source: Some("startup".to_owned()),
+                },
+            )
+            .unwrap();
+        registry
+            .record_thread_metadata(runtime.runtime_id, "session-a", Some("Native title"))
+            .unwrap();
+        let overview = registry.workstream_overviews().unwrap();
+
+        assert_eq!(overview.len(), 1);
+        assert_eq!(overview[0].workstream_id, registered.workstream_id);
+        assert_eq!(overview[0].lifecycle, WorkstreamLifecycle::Open);
+        assert_eq!(
+            overview[0]
+                .binding
+                .as_ref()
+                .and_then(|binding| binding.observed_thread_name.as_deref()),
+            Some("Native title")
+        );
+        assert_eq!(
+            overview[0]
+                .binding
+                .as_ref()
+                .map(|binding| binding.name_state),
+            Some(NameState::Named)
+        );
+    }
+
+    #[test]
+    fn navigator_snapshot_fails_closed_above_its_bounded_workstream_limit() {
+        let (_temporary, mut registry) = registry();
+        for index in 0..=MAX_NAVIGATOR_WORKSTREAMS {
+            registry
+                .register_external_workstream(
+                    PathBuf::from(format!("/disposable/repository-{index}")),
+                    format!("common-dir-identity-{index}"),
+                    "deadbeef".to_owned(),
+                )
+                .unwrap();
+        }
+
+        assert!(matches!(
+            registry.workstream_overviews(),
+            Err(StateError::NavigatorSnapshotTooLarge)
+        ));
     }
 
     #[test]

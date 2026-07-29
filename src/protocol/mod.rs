@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::domain::{HostId, LocationId, RuntimeId, WorkstreamId};
+use crate::domain::{
+    HostId, LocationId, RuntimeId, RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
+};
 
 pub const CURRENT_PROTOCOL_VERSION: u16 = 1;
 const MAX_ALIAS_BYTES: usize = 128;
@@ -105,8 +107,14 @@ pub struct SnapshotResponse {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SnapshotWorkstream {
     pub workstream_id: WorkstreamId,
+    pub location_id: LocationId,
     pub display_name: String,
     pub runtime_id: Option<RuntimeId>,
+    pub runtime_status: RuntimeStatus,
+    pub lifecycle: WorkstreamLifecycle,
+    pub result_ready: bool,
+    pub recovery_required: bool,
+    pub attention_revision: Option<i64>,
     pub revision: i64,
 }
 

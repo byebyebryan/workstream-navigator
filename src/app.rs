@@ -13,6 +13,8 @@ use thiserror::Error;
 
 use crate::{
     domain::{RuntimeId, WorkstreamId},
+    navigator::run_local_navigator,
+    presentation::Presentation,
     provider::codex::app_server::EphemeralAppServer,
     provider::codex::hooks::drain_and_parse,
     provider::codex::profile::ObserverProfile,
@@ -47,11 +49,13 @@ struct Cli {
     #[arg(long, global = true)]
     state_root: Option<PathBuf>,
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Open the local two-pane Workstream Navigator presentation.
+    Navigator,
     /// Install the owned observer profile and leave native hook trust pending.
     Setup {
         /// Install without opening the native review TUI. This test-only escape
@@ -79,19 +83,52 @@ enum Commands {
     Status { workstream_id: String },
     /// Rename the current managed Codex thread through its canonical name field.
     Rename { workstream_id: String, name: String },
+    /// Clear one observed result/recovery attention revision without sending provider input.
+    Acknowledge {
+        workstream_id: String,
+        attention_revision: i64,
+    },
+    /// Internal Ratatui process run inside an owned presentation pane.
+    #[command(name = "_navigator", hide = true)]
+    NavigatorPane {
+        #[arg(long)]
+        presentation_socket: PathBuf,
+        #[arg(long)]
+        presentation_session: String,
+    },
+    /// Internal blank provider-pane placeholder before an exact attachment is selected.
+    #[command(name = "_provider_wait", hide = true)]
+    ProviderWait,
     /// Internal passive Codex lifecycle hook entrypoint.
     #[command(name = "_hook", hide = true)]
     Hook,
 }
 
 fn execute(cli: Cli) -> Result<(), AppError> {
-    if matches!(cli.command, Commands::Hook) {
-        observe_hook(cli.state_root);
+    let Cli {
+        state_root,
+        command,
+    } = cli;
+    let command = command.unwrap_or(Commands::Navigator);
+    if matches!(&command, Commands::Hook) {
+        observe_hook(state_root);
         return Ok(());
     }
-    let root = StateRoot::create(cli.state_root.unwrap_or_else(default_state_root))?;
+    let root = StateRoot::create(state_root.unwrap_or_else(default_state_root))?;
+    let command = match command {
+        Commands::Navigator => return navigator(&root),
+        Commands::NavigatorPane {
+            presentation_socket,
+            presentation_session,
+        } => {
+            return run_local_navigator(&root, presentation_socket, presentation_session)
+                .map_err(AppError::Navigator);
+        }
+        Commands::ProviderWait => return provider_wait(),
+        command => command,
+    };
     let mut registry = HostRegistry::open(&root)?;
-    match cli.command {
+    match command {
         Commands::Setup { skip_review } => setup(&root, &mut registry, skip_review),
         Commands::TrustObserver => trust_observer(&mut registry),
         Commands::Doctor => doctor(&registry),
@@ -114,7 +151,53 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             workstream_id,
             name,
         } => rename(&mut registry, parse_workstream(&workstream_id)?, &name),
-        Commands::Hook => unreachable!("hook dispatch returns before state setup"),
+        Commands::Acknowledge {
+            workstream_id,
+            attention_revision,
+        } => acknowledge(
+            &mut registry,
+            parse_workstream(&workstream_id)?,
+            attention_revision,
+        ),
+        Commands::Navigator
+        | Commands::NavigatorPane { .. }
+        | Commands::ProviderWait
+        | Commands::Hook => {
+            unreachable!("special command dispatch returns before state setup")
+        }
+    }
+}
+
+fn navigator(root: &StateRoot) -> Result<(), AppError> {
+    let presentation = Presentation::fresh(root.base())?;
+    presentation.start()?;
+    let attached = presentation.attach();
+    let closed_by_navigator = attached.is_err() && !presentation.paths().directory.exists();
+    let cleanup = presentation.close();
+    if closed_by_navigator {
+        cleanup?;
+        return Ok(());
+    }
+    attached?;
+    cleanup?;
+    Ok(())
+}
+
+fn acknowledge(
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    attention_revision: i64,
+) -> Result<(), AppError> {
+    let revision = crate::domain::Revision::try_from(attention_revision)
+        .map_err(|_| AppError::InvalidAttentionRevision)?;
+    registry.acknowledge_result_attention(workstream_id, revision)?;
+    println!("acknowledged workstream {workstream_id}");
+    Ok(())
+}
+
+fn provider_wait() -> Result<(), AppError> {
+    loop {
+        std::thread::sleep(std::time::Duration::from_mins(1));
     }
 }
 
@@ -452,16 +535,25 @@ fn observe_hook(state_root: Option<PathBuf>) {
     {
         return;
     }
-    if matches!(
+    let metadata = if matches!(
         observation.event,
         crate::provider::codex::hooks::LifecycleEvent::SessionStart
-    ) && EphemeralAppServer::default()
-        .read_thread_for_hook(&observation.native_session_id)
-        .is_err()
+    ) {
+        match EphemeralAppServer::default().read_thread_for_hook(&observation.native_session_id) {
+            Ok(metadata) => Some(metadata),
+            Err(_) => return,
+        }
+    } else {
+        None
+    };
+    let session_id = observation.native_session_id.clone();
+    if registry
+        .apply_hook_observation(runtime_id, &generation, observation)
+        .is_ok()
+        && let Some(metadata) = metadata
     {
-        return;
+        let _ = registry.record_thread_metadata(runtime_id, &session_id, metadata.name.as_deref());
     }
-    let _ = registry.apply_hook_observation(runtime_id, &generation, observation);
 }
 
 fn rename(
@@ -520,7 +612,7 @@ fn park(
         RuntimePaths::for_runtime(root.base(), record.runtime_id),
     );
     runtime.park()?;
-    registry.mark_runtime_stopped(record.runtime_id, record.revision)?;
+    registry.park_runtime(record.runtime_id, record.revision)?;
     println!("parked workstream {workstream_id}");
     Ok(())
 }
@@ -605,6 +697,8 @@ fn git_value(checkout: &Path, arguments: &[&str]) -> Result<String, AppError> {
 enum AppError {
     #[error("native tmux attach failed")]
     AttachFailed,
+    #[error("attention revision is invalid")]
+    InvalidAttentionRevision,
     #[error("invalid workstream ID")]
     InvalidWorkstreamId(uuid::Error),
     #[error("I/O: {0}")]
@@ -634,6 +728,10 @@ enum AppError {
     #[error(transparent)]
     AppServer(#[from] crate::provider::codex::app_server::AppServerError),
     #[error(transparent)]
+    Navigator(#[from] crate::navigator::NavigatorError),
+    #[error(transparent)]
+    Presentation(#[from] crate::presentation::PresentationError),
+    #[error(transparent)]
     Runtime(#[from] crate::runtime::RuntimeError),
     #[error(transparent)]
     State(#[from] crate::state::StateError),
@@ -651,6 +749,7 @@ mod tests {
             start_source: "startup".to_owned(),
             last_settled_turn_id: Some("settled-turn".to_owned()),
             observed_thread_name: None,
+            name_state: crate::provider::codex::names::NameState::Unavailable,
             predecessor_native_session_id: None,
             predecessor_effective_name: None,
             revision: crate::domain::Revision::INITIAL,
@@ -670,7 +769,7 @@ mod tests {
     #[test]
     fn owned_profile_hook_entrypoint_is_parseable_but_hidden() {
         let parsed = Cli::try_parse_from(["wsnav", "_hook"]);
-        assert!(matches!(parsed.unwrap().command, Commands::Hook));
+        assert!(matches!(parsed.unwrap().command, Some(Commands::Hook)));
         assert!(Cli::try_parse_from(["wsnav", "hook"]).is_err());
     }
 }

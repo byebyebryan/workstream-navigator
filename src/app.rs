@@ -71,7 +71,7 @@ enum Commands {
     /// Rename the current managed Codex thread through its canonical name field.
     Rename { workstream_id: String, name: String },
     /// Internal passive Codex lifecycle hook entrypoint.
-    #[command(hide = true)]
+    #[command(name = "_hook", hide = true)]
     Hook,
 }
 
@@ -478,5 +478,12 @@ mod tests {
         let program = codex_launch_program(Path::new("/checkout"), None);
 
         assert!(!program.iter().any(|argument| argument == "resume"));
+    }
+
+    #[test]
+    fn owned_profile_hook_entrypoint_is_parseable_but_hidden() {
+        let parsed = Cli::try_parse_from(["wsnav", "_hook"]);
+        assert!(matches!(parsed.unwrap().command, Commands::Hook));
+        assert!(Cli::try_parse_from(["wsnav", "hook"]).is_err());
     }
 }

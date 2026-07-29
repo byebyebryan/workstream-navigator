@@ -1,0 +1,172 @@
+//! Contextual display fallbacks for the Codex-owned current thread name.
+
+/// Whether an exact metadata read observed a usable native thread name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NameState {
+    Named,
+    KnownEmpty,
+    Unavailable,
+}
+
+/// Context retained only for presentation while the current tip lacks a name.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NameContext<'a> {
+    Normal,
+    Starting,
+    Cutover {
+        prior_effective_name: Option<&'a str>,
+    },
+    Fork {
+        source_native_name: Option<&'a str>,
+        source_workstream_short_id: &'a str,
+    },
+}
+
+/// Derived display text and provenance; neither is a persisted user-authored label.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EffectiveName {
+    pub text: String,
+    pub source: EffectiveNameSource,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EffectiveNameSource {
+    Native,
+    CutoverFallback,
+    ForkFallback,
+    CachedStale,
+    Synthetic,
+}
+
+/// Resolves a current-tip display without writing to Codex or inventing a label.
+#[must_use]
+pub fn resolve_name(
+    state: NameState,
+    native_name: Option<&str>,
+    cached_name: Option<&str>,
+    context: NameContext<'_>,
+    workstream_short_id: &str,
+) -> EffectiveName {
+    if state == NameState::Named
+        && let Some(name) = native_name.filter(|name| !name.trim().is_empty())
+    {
+        return EffectiveName {
+            text: name.to_owned(),
+            source: EffectiveNameSource::Native,
+        };
+    }
+    if state == NameState::Unavailable
+        && let Some(name) = cached_name.filter(|name| !name.trim().is_empty())
+    {
+        return EffectiveName {
+            text: format!("{name} · stale"),
+            source: EffectiveNameSource::CachedStale,
+        };
+    }
+    match context {
+        NameContext::Starting => EffectiveName {
+            text: format!("starting · {workstream_short_id}"),
+            source: EffectiveNameSource::Synthetic,
+        },
+        NameContext::Cutover {
+            prior_effective_name: Some(prior),
+        } => EffectiveName {
+            text: format!("{prior} ↻ unnamed"),
+            source: EffectiveNameSource::CutoverFallback,
+        },
+        NameContext::Cutover {
+            prior_effective_name: None,
+        } => EffectiveName {
+            text: format!("untitled · {workstream_short_id} ↻"),
+            source: EffectiveNameSource::CutoverFallback,
+        },
+        NameContext::Fork {
+            source_native_name: Some(source),
+            ..
+        } => EffectiveName {
+            text: format!("{source} · fork · {workstream_short_id}"),
+            source: EffectiveNameSource::ForkFallback,
+        },
+        NameContext::Fork {
+            source_native_name: None,
+            source_workstream_short_id,
+        } => EffectiveName {
+            text: format!("fork of {source_workstream_short_id} · {workstream_short_id}"),
+            source: EffectiveNameSource::ForkFallback,
+        },
+        NameContext::Normal if state == NameState::Unavailable => EffectiveName {
+            text: format!("name unavailable · {workstream_short_id}"),
+            source: EffectiveNameSource::Synthetic,
+        },
+        NameContext::Normal => EffectiveName {
+            text: format!("untitled · {workstream_short_id}"),
+            source: EffectiveNameSource::Synthetic,
+        },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_name_always_wins() {
+        assert_eq!(
+            resolve_name(
+                NameState::Named,
+                Some("Native"),
+                None,
+                NameContext::Normal,
+                "a1"
+            ),
+            EffectiveName {
+                text: "Native".to_owned(),
+                source: EffectiveNameSource::Native
+            }
+        );
+    }
+
+    #[test]
+    fn blank_cutover_and_fork_use_context_not_a_shadow_label() {
+        assert_eq!(
+            resolve_name(
+                NameState::KnownEmpty,
+                None,
+                None,
+                NameContext::Cutover {
+                    prior_effective_name: Some("Source")
+                },
+                "a1"
+            )
+            .text,
+            "Source ↻ unnamed"
+        );
+        assert_eq!(
+            resolve_name(
+                NameState::KnownEmpty,
+                None,
+                None,
+                NameContext::Fork {
+                    source_native_name: None,
+                    source_workstream_short_id: "a1"
+                },
+                "b2"
+            )
+            .text,
+            "fork of a1 · b2"
+        );
+    }
+
+    #[test]
+    fn unavailable_is_not_mistaken_for_known_empty() {
+        let name = resolve_name(
+            NameState::Unavailable,
+            None,
+            Some("Cached"),
+            NameContext::Normal,
+            "a1",
+        );
+        assert_eq!(name.text, "Cached · stale");
+        assert_eq!(name.source, EffectiveNameSource::CachedStale);
+    }
+}

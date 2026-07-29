@@ -1,7 +1,7 @@
 //! One-shot, stdio-only Codex App Server metadata operations.
 
 use std::{
-    io::{Read, Write},
+    io::{BufRead, BufReader, Read, Write},
     process::{Command, Stdio},
     sync::mpsc,
     thread,
@@ -102,18 +102,16 @@ impl EphemeralAppServer {
         let initialize = json!({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "wsnav", "version": env!("CARGO_PKG_VERSION")}, "capabilities": {}}});
         let initialized = json!({"method": "initialized", "params": {}});
         let action = json!({"id": 2, "method": method, "params": params});
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = sender.send(read_action_result(stdout));
+        });
         for message in [initialize, initialized, action] {
             serde_json::to_writer(&mut stdin, &message).map_err(AppServerError::Encode)?;
             stdin.write_all(b"\n").map_err(AppServerError::Write)?;
         }
-        drop(stdin);
-
-        let (sender, receiver) = mpsc::sync_channel(1);
-        thread::spawn(move || {
-            let _ = sender.send(read_bounded(stdout));
-        });
-        let output = match receiver.recv_timeout(RESPONSE_TIMEOUT) {
-            Ok(result) => result?,
+        let action_result = match receiver.recv_timeout(RESPONSE_TIMEOUT) {
+            Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -121,6 +119,10 @@ impl EphemeralAppServer {
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => return Err(AppServerError::Closed),
         };
+        // Keep stdin open until the action result arrives. Current Codex can
+        // observe EOF before dispatching a queued request if the client closes
+        // it immediately after writing JSONL.
+        drop(stdin);
         let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
         while child.try_wait().map_err(AppServerError::Launch)?.is_none()
             && Instant::now() < deadline
@@ -131,42 +133,54 @@ impl EphemeralAppServer {
             let _ = child.kill();
             let _ = child.wait();
         }
-        response_for_action(&output)
+        action_result
     }
 }
 
-fn read_bounded(mut stdout: impl Read) -> Result<Vec<u8>, AppServerError> {
-    let mut output = Vec::new();
-    let mut chunk = [0_u8; 8192];
+fn read_action_result(stdout: impl Read) -> Result<Value, AppServerError> {
+    let mut reader = BufReader::new(stdout);
+    let mut line = Vec::with_capacity(4096);
+    let mut total = 0_usize;
     loop {
-        let count = stdout.read(&mut chunk).map_err(AppServerError::Read)?;
+        line.clear();
+        let count = reader
+            .read_until(b'\n', &mut line)
+            .map_err(AppServerError::Read)?;
         if count == 0 {
-            return Ok(output);
+            return Err(AppServerError::Closed);
         }
-        if output.len().saturating_add(count) > MAX_OUTPUT_BYTES {
+        total = total.saturating_add(count);
+        if total > MAX_OUTPUT_BYTES {
             return Err(AppServerError::OutputTooLarge);
         }
-        output.extend_from_slice(&chunk[..count]);
-    }
-}
-
-fn response_for_action(output: &[u8]) -> Result<Value, AppServerError> {
-    for line in output.split(|byte| *byte == b'\n') {
+        if line.last() == Some(&b'\n') {
+            line.pop();
+        }
+        if line.last() == Some(&b'\r') {
+            line.pop();
+        }
         if line.is_empty() {
             continue;
         }
-        let message: Value = serde_json::from_slice(line).map_err(AppServerError::InvalidJson)?;
-        if message.get("id") == Some(&json!(2)) {
-            if message.get("error").is_some() {
-                return Err(AppServerError::Rejected);
-            }
-            return message
-                .get("result")
-                .cloned()
-                .ok_or(AppServerError::InvalidResponse);
+        let message: Value = serde_json::from_slice(&line).map_err(AppServerError::InvalidJson)?;
+        if let Some(result) = action_result_from_message(&message) {
+            return result;
         }
     }
-    Err(AppServerError::InvalidResponse)
+}
+
+fn action_result_from_message(message: &Value) -> Option<Result<Value, AppServerError>> {
+    if message.get("id") != Some(&json!(2)) {
+        return None;
+    }
+    Some(if message.get("error").is_some() {
+        Err(AppServerError::Rejected)
+    } else {
+        message
+            .get("result")
+            .cloned()
+            .ok_or(AppServerError::InvalidResponse)
+    })
 }
 
 /// Bounded App Server failures; provider output and raw diagnostics are discarded.
@@ -203,20 +217,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_exact_action_result_is_accepted() {
+    fn only_the_exact_action_result_is_accepted_without_waiting_for_eof() {
         let output =
             b"{\"id\":1,\"result\":{}}\n{\"id\":2,\"result\":{\"thread\":{\"name\":\"name\"}}}\n";
         assert_eq!(
-            response_for_action(output).unwrap()["thread"]["name"],
+            read_action_result(&output[..]).unwrap()["thread"]["name"],
             "name"
         );
     }
 
     #[test]
-    fn missing_action_result_fails_closed() {
+    fn missing_action_result_fails_closed_after_stream_end() {
         assert!(matches!(
-            response_for_action(b"{\"id\":1,\"result\":{}}\n"),
-            Err(AppServerError::InvalidResponse)
+            read_action_result(&b"{\"id\":1,\"result\":{}}\n"[..]),
+            Err(AppServerError::Closed)
+        ));
+    }
+
+    #[test]
+    fn action_error_is_not_treated_as_a_successful_result() {
+        assert!(matches!(
+            read_action_result(&b"{\"id\":2,\"error\":{\"code\":-1}}\n"[..]),
+            Err(AppServerError::Rejected)
         ));
     }
 }

@@ -12,7 +12,8 @@ use clap::{Parser, Subcommand};
 use thiserror::Error;
 
 use crate::{
-    domain::WorkstreamId,
+    domain::{RuntimeId, WorkstreamId},
+    provider::codex::hooks::drain_and_parse,
     runtime::{LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, SystemTmux},
     state::{HostRegistry, StateRoot},
 };
@@ -55,9 +56,16 @@ enum Commands {
     Park { workstream_id: String },
     /// Show one local runtime's durable record and live private-tmux probe.
     Status { workstream_id: String },
+    /// Internal passive Codex lifecycle hook entrypoint.
+    #[command(hide = true)]
+    Hook,
 }
 
 fn execute(cli: Cli) -> Result<(), AppError> {
+    if matches!(cli.command, Commands::Hook) {
+        observe_hook(cli.state_root);
+        return Ok(());
+    }
     let root = StateRoot::create(cli.state_root.unwrap_or_else(default_state_root))?;
     let mut registry = HostRegistry::open(&root)?;
     match cli.command {
@@ -74,6 +82,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
         Commands::Status { workstream_id } => {
             status(&root, &registry, parse_workstream(&workstream_id)?)
         }
+        Commands::Hook => unreachable!("hook dispatch returns before state setup"),
     }
 }
 
@@ -109,7 +118,20 @@ fn start(
             "-C".into(),
             record.cwd.into_os_string(),
         ],
-        environment: BTreeMap::default(),
+        environment: BTreeMap::from([
+            (
+                "WSNAV_STATE_ROOT".into(),
+                root.base().as_os_str().to_owned(),
+            ),
+            (
+                "WSNAV_RUNTIME_ID".into(),
+                record.runtime_id.to_string().into(),
+            ),
+            (
+                "WSNAV_RUNTIME_GENERATION".into(),
+                record.tmux_generation.clone().into(),
+            ),
+        ]),
     };
     if let Err(error) = runtime.start(&launch) {
         let _ = registry.mark_runtime_stopped(record.runtime_id, record.revision);
@@ -117,6 +139,33 @@ fn start(
     }
     println!("started workstream {workstream_id}");
     Ok(())
+}
+
+fn observe_hook(state_root: Option<PathBuf>) {
+    let Some(state_root) =
+        state_root.or_else(|| env::var_os("WSNAV_STATE_ROOT").map(PathBuf::from))
+    else {
+        return;
+    };
+    let Ok(runtime_id) = env::var("WSNAV_RUNTIME_ID") else {
+        return;
+    };
+    let Ok(runtime_id) = RuntimeId::from_str(&runtime_id) else {
+        return;
+    };
+    let Ok(generation) = env::var("WSNAV_RUNTIME_GENERATION") else {
+        return;
+    };
+    let Ok(observation) = drain_and_parse(&mut std::io::stdin().lock()) else {
+        return;
+    };
+    let Ok(root) = StateRoot::create(state_root) else {
+        return;
+    };
+    let Ok(mut registry) = HostRegistry::open(&root) else {
+        return;
+    };
+    let _ = registry.apply_hook_observation(runtime_id, &generation, observation);
 }
 
 fn attach(

@@ -12,6 +12,7 @@ use crate::domain::{
     OperationId, OperationKind, OperationPhase, RandomIdGenerator, Revision, RuntimeId,
     RuntimeStatus, WorkstreamId,
 };
+use crate::provider::codex::hooks::{HookObservation, LifecycleEvent};
 
 const HOST_SCHEMA_VERSION: i64 = 1;
 const CLIENT_SCHEMA_VERSION: i64 = 1;
@@ -200,6 +201,15 @@ pub struct RuntimeRecord {
     pub tmux_session: String,
     pub cwd: PathBuf,
     pub status: RuntimeStatus,
+    pub revision: Revision,
+}
+
+/// The exact native Codex session currently bound to a managed runtime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProviderBinding {
+    pub runtime_id: RuntimeId,
+    pub native_session_id: String,
+    pub last_settled_turn_id: Option<String>,
     pub revision: Revision,
 }
 
@@ -467,6 +477,25 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)
     }
 
+    /// Reads the current exact native-session binding for one runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be queried or contains invalid
+    /// persisted binding data.
+    pub fn binding_for_runtime(
+        &self,
+        runtime_id: RuntimeId,
+    ) -> Result<Option<ProviderBinding>, StateError> {
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(StateError::Sqlite)?;
+        let binding = load_binding(&transaction, runtime_id)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(binding)
+    }
+
     /// Marks the reserved Runtime stopped after its exact private tmux server is parked.
     ///
     /// # Errors
@@ -489,6 +518,115 @@ impl HostRegistry {
             return Err(StateError::ConcurrentWrite);
         }
         Ok(())
+    }
+
+    /// Applies one already-authorized lifecycle observation to its exact runtime.
+    ///
+    /// Hooks supply evidence only: a new session can bind solely while the
+    /// runtime is `starting`; subsequent observations must match that exact
+    /// binding and generation. A settled result and its sticky attention state
+    /// commit in the same `SQLite` transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when runtime generation, cwd, binding, lifecycle, or
+    /// revision evidence is ambiguous or does not match a managed runtime.
+    pub fn apply_hook_observation(
+        &mut self,
+        runtime_id: RuntimeId,
+        generation: &str,
+        observation: HookObservation,
+    ) -> Result<(), StateError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let runtime = transaction
+            .query_row(
+                "SELECT workstream_id, tmux_generation, cwd, lifecycle, revision
+                 FROM runtimes WHERE runtime_id = ?1",
+                [runtime_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::UnknownRuntime(runtime_id))?;
+        let workstream_id = Uuid::parse_str(&runtime.0)
+            .map(WorkstreamId::from)
+            .map_err(StateError::InvalidPersistedUuid)?;
+        let revision = Revision::try_from(runtime.4)?;
+        if runtime.1 != generation || runtime.2 != observation.cwd {
+            return Err(StateError::HookEvidenceMismatch);
+        }
+        let existing = load_binding(&transaction, runtime_id)?;
+        match observation.event {
+            LifecycleEvent::SessionStart => {
+                if let Some(binding) = existing {
+                    if binding.native_session_id != observation.native_session_id {
+                        return Err(StateError::HookEvidenceMismatch);
+                    }
+                } else if runtime.3 != "starting" {
+                    return Err(StateError::HookEvidenceMismatch);
+                } else {
+                    transaction
+                        .execute(
+                            "INSERT INTO provider_bindings (
+                            binding_id, runtime_id, native_session_id, start_source,
+                            last_settled_turn_id, observed_thread_name, name_state,
+                            name_observed_at, predecessor_native_session_id,
+                            predecessor_effective_name, runtime_generation, revision
+                         ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, 'unavailable', NULL,
+                            NULL, NULL, ?5, 1)",
+                            params![
+                                Uuid::new_v4().to_string(),
+                                runtime_id.to_string(),
+                                observation.native_session_id,
+                                observation.source.unwrap_or_else(|| "startup".to_owned()),
+                                generation
+                            ],
+                        )
+                        .map_err(StateError::Sqlite)?;
+                }
+                update_runtime_lifecycle(&transaction, runtime_id, revision, "idle")?;
+            }
+            LifecycleEvent::UserPromptSubmit => {
+                require_matching_binding(existing.as_ref(), &observation.native_session_id)?;
+                update_runtime_lifecycle(&transaction, runtime_id, revision, "working")?;
+            }
+            LifecycleEvent::Stop => {
+                let turn_id = observation
+                    .turn_id
+                    .ok_or(StateError::HookEvidenceMismatch)?;
+                require_matching_binding(existing.as_ref(), &observation.native_session_id)?;
+                let changed = transaction.execute(
+                    "UPDATE provider_bindings SET last_settled_turn_id = ?1, revision = revision + 1
+                     WHERE runtime_id = ?2", params![turn_id, runtime_id.to_string()]
+                ).map_err(StateError::Sqlite)?;
+                if changed != 1 {
+                    return Err(StateError::ConcurrentWrite);
+                }
+                update_runtime_lifecycle(&transaction, runtime_id, revision, "attention")?;
+                mark_result_attention_in_transaction(
+                    &transaction,
+                    workstream_id,
+                    observation.native_session_id,
+                    turn_id,
+                )?;
+            }
+            LifecycleEvent::SessionEnd => {
+                require_matching_binding(existing.as_ref(), &observation.native_session_id)?;
+                update_runtime_lifecycle(&transaction, runtime_id, revision, "stopped")?;
+            }
+        }
+        transaction.commit().map_err(StateError::Sqlite)
     }
 
     /// Creates a durable operation or returns the operation for the request key.
@@ -909,6 +1047,104 @@ fn row_to_runtime(
     })
 }
 
+fn load_binding(
+    transaction: &rusqlite::Transaction<'_>,
+    runtime_id: RuntimeId,
+) -> Result<Option<ProviderBinding>, StateError> {
+    transaction
+        .query_row(
+            "SELECT native_session_id, last_settled_turn_id, revision
+             FROM provider_bindings WHERE runtime_id = ?1",
+            [runtime_id.to_string()],
+            |row| {
+                Ok(ProviderBinding {
+                    runtime_id,
+                    native_session_id: row.get(0)?,
+                    last_settled_turn_id: row.get(1)?,
+                    revision: Revision::try_from(row.get::<_, i64>(2)?)
+                        .map_err(to_from_sql_error)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(StateError::Sqlite)
+}
+
+fn require_matching_binding(
+    binding: Option<&ProviderBinding>,
+    session_id: &str,
+) -> Result<(), StateError> {
+    if binding.is_some_and(|binding| binding.native_session_id == session_id) {
+        Ok(())
+    } else {
+        Err(StateError::HookEvidenceMismatch)
+    }
+}
+
+fn update_runtime_lifecycle(
+    transaction: &rusqlite::Transaction<'_>,
+    runtime_id: RuntimeId,
+    expected_revision: Revision,
+    lifecycle: &'static str,
+) -> Result<(), StateError> {
+    let updated = transaction
+        .execute(
+            "UPDATE runtimes SET lifecycle = ?1, revision = revision + 1
+             WHERE runtime_id = ?2 AND revision = ?3",
+            params![lifecycle, runtime_id.to_string(), expected_revision.value()],
+        )
+        .map_err(StateError::Sqlite)?;
+    if updated == 1 {
+        Ok(())
+    } else {
+        Err(StateError::ConcurrentWrite)
+    }
+}
+
+fn mark_result_attention_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    workstream_id: WorkstreamId,
+    session_id: String,
+    turn_id: String,
+) -> Result<(), StateError> {
+    let current = load_attention_from_transaction(transaction, workstream_id)?;
+    let mut attention = current.unwrap_or_else(|| AttentionState::new(workstream_id));
+    let prior_revision = attention.revision;
+    attention.mark_result(session_id, turn_id)?;
+    let changed = transaction
+        .execute(
+            "INSERT INTO attention_states (
+            workstream_id, result_unseen_since_revision,
+            recovery_unseen_since_revision, latest_native_session_id,
+            latest_turn_id, revision
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(workstream_id) DO UPDATE SET
+            result_unseen_since_revision = excluded.result_unseen_since_revision,
+            recovery_unseen_since_revision = excluded.recovery_unseen_since_revision,
+            latest_native_session_id = excluded.latest_native_session_id,
+            latest_turn_id = excluded.latest_turn_id,
+            revision = excluded.revision
+         WHERE attention_states.revision = ?7",
+            params![
+                attention.workstream_id.to_string(),
+                attention.result_unseen_since_revision.map(Revision::value),
+                attention
+                    .recovery_unseen_since_revision
+                    .map(Revision::value),
+                attention.latest_native_session_id,
+                attention.latest_turn_id,
+                attention.revision.value(),
+                prior_revision.value(),
+            ],
+        )
+        .map_err(StateError::Sqlite)?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(StateError::ConcurrentWrite)
+    }
+}
+
 fn load_attention_from_connection(
     connection: &Connection,
     workstream_id: WorkstreamId,
@@ -1087,6 +1323,10 @@ pub enum StateError {
     UnknownOpenWorkstream(WorkstreamId),
     #[error("workstream {0} already has a live runtime")]
     RuntimeAlreadyLive(WorkstreamId),
+    #[error("hook evidence does not match the managed runtime")]
+    HookEvidenceMismatch,
+    #[error("unknown runtime {0}")]
+    UnknownRuntime(RuntimeId),
 }
 
 #[cfg(test)]
@@ -1300,5 +1540,96 @@ mod tests {
         assert_eq!(resumed.runtime_id, first.runtime_id);
         assert_ne!(resumed.tmux_generation, first.tmux_generation);
         assert_eq!(resumed.status, RuntimeStatus::Starting);
+    }
+
+    #[test]
+    fn matching_hook_lifecycle_binds_and_sets_sticky_result_attention_atomically() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        let start = HookObservation {
+            event: LifecycleEvent::SessionStart,
+            cwd: runtime.cwd.to_string_lossy().into_owned(),
+            native_session_id: "session-a".to_owned(),
+            turn_id: None,
+            source: Some("startup".to_owned()),
+        };
+        registry
+            .apply_hook_observation(runtime.runtime_id, &runtime.tmux_generation, start)
+            .unwrap();
+        let prompt = HookObservation {
+            event: LifecycleEvent::UserPromptSubmit,
+            cwd: runtime.cwd.to_string_lossy().into_owned(),
+            native_session_id: "session-a".to_owned(),
+            turn_id: Some("turn-a".to_owned()),
+            source: None,
+        };
+        registry
+            .apply_hook_observation(runtime.runtime_id, &runtime.tmux_generation, prompt)
+            .unwrap();
+        let stop = HookObservation {
+            event: LifecycleEvent::Stop,
+            cwd: runtime.cwd.to_string_lossy().into_owned(),
+            native_session_id: "session-a".to_owned(),
+            turn_id: Some("turn-a".to_owned()),
+            source: None,
+        };
+        registry
+            .apply_hook_observation(runtime.runtime_id, &runtime.tmux_generation, stop)
+            .unwrap();
+
+        assert_eq!(
+            registry
+                .binding_for_runtime(runtime.runtime_id)
+                .unwrap()
+                .unwrap()
+                .last_settled_turn_id
+                .as_deref(),
+            Some("turn-a")
+        );
+        assert_eq!(
+            registry
+                .attention(registered.workstream_id)
+                .unwrap()
+                .unwrap()
+                .latest_turn_id
+                .as_deref(),
+            Some("turn-a")
+        );
+    }
+
+    #[test]
+    fn stale_or_rebound_hook_cannot_replace_a_managed_session() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        let forged = HookObservation {
+            event: LifecycleEvent::SessionStart,
+            cwd: runtime.cwd.to_string_lossy().into_owned(),
+            native_session_id: "forged-session".to_owned(),
+            turn_id: None,
+            source: Some("startup".to_owned()),
+        };
+
+        assert!(matches!(
+            registry.apply_hook_observation(runtime.runtime_id, "stale", forged),
+            Err(StateError::HookEvidenceMismatch)
+        ));
+        assert_eq!(
+            registry.binding_for_runtime(runtime.runtime_id).unwrap(),
+            None
+        );
     }
 }

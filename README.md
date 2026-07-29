@@ -27,7 +27,7 @@ agent teams, transfer task context, or provide persistent project memory.
 ## Development
 
 Development follows the latest stable Rust toolchain. The complete local gate
-also requires Git, jq, Ruff 0.16.0, and ShellCheck.
+also requires Cargo Deny 0.20.2, Git, jq, Ruff 0.16.0, and ShellCheck.
 
 ```console
 scripts/check

@@ -11,14 +11,26 @@ for tool in "${required_tools[@]}"; do
 done
 
 if ((${#missing_tools[@]} > 0)); then
-    printf 'error: missing required check tools: %s\n' "${missing_tools[*]}" >&2
-    exit 1
+  printf 'error: missing required check tools: %s\n' "${missing_tools[*]}" >&2
+  exit 1
+fi
+
+cargo_deny_bin="$(command -v cargo-deny 2>/dev/null || true)"
+if [[ -z "${cargo_deny_bin}" ]]; then
+    cargo_home_dir="${CARGO_HOME:-$HOME/.cargo}"
+    if [[ -x "${cargo_home_dir}/bin/cargo-deny" ]]; then
+        cargo_deny_bin="${cargo_home_dir}/bin/cargo-deny"
+    else
+        printf 'error: missing required check tool: cargo-deny\n' >&2
+        exit 1
+    fi
 fi
 
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
 cargo package --locked --allow-dirty
+"${cargo_deny_bin}" check
 
 shopt -s nullglob
 shell_files=(scripts/check spikes/*.sh)

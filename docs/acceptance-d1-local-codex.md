@@ -15,6 +15,9 @@ The procedure intentionally uses the normal `CODEX_HOME`: the native trust
 decision and the one Codex test thread are Codex-owned state. Workstream
 Navigator does not delete either. The temporary Git repository, WSNav state
 root, private tmux runtime, and owned observer profile are removed at cleanup.
+Codex may append its native hook and project-trust records to that dedicated
+observer profile during review; WSNav accepts only that bounded native suffix
+and removes it only together with the exact dedicated profile.
 
 ## Procedure
 

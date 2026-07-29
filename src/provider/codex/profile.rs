@@ -76,10 +76,7 @@ impl ObserverProfile {
             if existing.canonical_path != path || existing.hook_executable != self.hook_executable {
                 return Err(ProfileError::OwnershipMismatch);
             }
-            let actual = hash_file(&path)?;
-            if actual != existing.content_hash || actual != expected_hash {
-                return Err(ProfileError::ModifiedPath(path));
-            }
+            self.verify_owned_document(&path, existing, &expected_hash)?;
             return Ok(existing.clone());
         }
         if existing.is_some() {
@@ -108,10 +105,40 @@ impl ObserverProfile {
         if !path.is_file() {
             return Err(ProfileError::MissingOwnedPath(path));
         }
-        if hash_file(&path)? != ownership.content_hash {
-            return Err(ProfileError::ModifiedPath(path));
-        }
+        self.verify_owned_document(&path, ownership, &hash(&self.rendered()))?;
         fs::remove_file(path).map_err(ProfileError::Io)
+    }
+
+    /// Verifies the byte-exact `WSNav` declaration and the narrow Codex-owned
+    /// trust suffix which native `/hooks` review appends to selected profiles.
+    fn verify_owned_document(
+        &self,
+        path: &Path,
+        ownership: &ProfileOwnership,
+        expected_hash: &str,
+    ) -> Result<(), ProfileError> {
+        if ownership.content_hash != expected_hash {
+            return Err(ProfileError::OwnershipMismatch);
+        }
+
+        let content = fs::read(path).map_err(ProfileError::Io)?;
+        let content = std::str::from_utf8(&content)
+            .map_err(|_| ProfileError::ModifiedPath(path.to_path_buf()))?;
+        let declared = self.rendered();
+        let Some(native_suffix) = content.strip_prefix(&declared) else {
+            return Err(ProfileError::ModifiedPath(path.to_path_buf()));
+        };
+        if native_suffix.is_empty() {
+            return Ok(());
+        }
+        let suffix = native_suffix
+            .parse::<toml::Table>()
+            .map_err(|_| ProfileError::ModifiedPath(path.to_path_buf()))?;
+        if accepts_native_trust_suffix(&suffix, path) {
+            Ok(())
+        } else {
+            Err(ProfileError::ModifiedPath(path.to_path_buf()))
+        }
     }
 }
 
@@ -129,10 +156,70 @@ fn hash(content: &str) -> String {
     format!("{:x}", Sha256::digest(content.as_bytes()))
 }
 
-fn hash_file(path: &Path) -> Result<String, ProfileError> {
-    fs::read(path)
-        .map(|content| format!("{:x}", Sha256::digest(content)))
-        .map_err(ProfileError::Io)
+/// Accept only the narrow native state Codex appends after a `/hooks` review.
+/// The generated hook declaration before this suffix must remain byte exact.
+fn accepts_native_trust_suffix(suffix: &toml::Table, profile_path: &Path) -> bool {
+    if suffix.is_empty() || suffix.keys().any(|key| key != "hooks" && key != "projects") {
+        return false;
+    }
+
+    let hooks_valid = suffix
+        .get("hooks")
+        .is_none_or(|value| accepts_hook_state(value, profile_path));
+    let projects_valid = suffix.get("projects").is_none_or(accepts_project_trust);
+    hooks_valid && projects_valid
+}
+
+fn accepts_hook_state(value: &toml::Value, profile_path: &Path) -> bool {
+    let Some(hooks) = value.as_table() else {
+        return false;
+    };
+    if hooks.len() != 1 {
+        return false;
+    }
+    let Some(state) = hooks.get("state").and_then(toml::Value::as_table) else {
+        return false;
+    };
+    if state.is_empty() {
+        return false;
+    }
+
+    let expected_prefix = format!("{}:", profile_path.display());
+    state.iter().all(|(key, record)| {
+        let Some(hook) = key.strip_prefix(&expected_prefix) else {
+            return false;
+        };
+        matches!(
+            hook,
+            "session_start:0:0" | "user_prompt_submit:0:0" | "stop:0:0" | "session_end:0:0"
+        ) && record.as_table().is_some_and(|table| {
+            table.len() == 1
+                && table
+                    .get("trusted_hash")
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(is_sha256)
+        })
+    })
+}
+
+fn accepts_project_trust(value: &toml::Value) -> bool {
+    let Some(projects) = value.as_table() else {
+        return false;
+    };
+    !projects.is_empty()
+        && projects.iter().all(|(project_path, record)| {
+            !project_path.is_empty()
+                && record.as_table().is_some_and(|table| {
+                    table.len() == 1
+                        && table.get("trust_level").and_then(toml::Value::as_str) == Some("trusted")
+                })
+        })
+}
+
+fn is_sha256(value: &str) -> bool {
+    value
+        .strip_prefix("sha256:")
+        .is_some_and(|hex| hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit()))
 }
 
 fn atomic_private_write(path: &Path, content: &[u8]) -> Result<(), ProfileError> {
@@ -243,5 +330,48 @@ mod tests {
         );
         manager.remove(&ownership).unwrap();
         assert!(!manager.path().exists());
+    }
+
+    #[test]
+    fn native_hook_trust_suffix_is_preserved_as_provider_owned_state() {
+        let temporary = tempfile::tempdir().unwrap();
+        let manager = manager(temporary.path());
+        let ownership = manager.install("owner".to_owned(), None).unwrap();
+        let profile_key = toml_string(&format!("{}:stop:0:0", manager.path().display()));
+        let project_key = toml_string(&temporary.path().join("project").display().to_string());
+        let native_suffix = format!(
+            "\n[hooks.state]\n\n[hooks.state.{profile_key}]\ntrusted_hash = \"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n\n[projects.{project_key}]\ntrust_level = \"trusted\"\n"
+        );
+        fs::write(
+            manager.path(),
+            format!("{}{native_suffix}", manager.rendered()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            manager
+                .install("different-owner".to_owned(), Some(&ownership))
+                .unwrap(),
+            ownership
+        );
+        manager.remove(&ownership).unwrap();
+        assert!(!manager.path().exists());
+    }
+
+    #[test]
+    fn non_native_suffix_remains_a_hard_ownership_failure() {
+        let temporary = tempfile::tempdir().unwrap();
+        let manager = manager(temporary.path());
+        let ownership = manager.install("owner".to_owned(), None).unwrap();
+        fs::write(
+            manager.path(),
+            format!("{}\n[model]\nname = \"foreign\"\n", manager.rendered()),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            manager.remove(&ownership),
+            Err(ProfileError::ModifiedPath(_))
+        ));
     }
 }

@@ -335,9 +335,9 @@ The profile is installed only by an explicit setup action. Its generated file
 starts with a human-readable managed marker, but write and removal authority
 comes from a private host record containing an owner ID, schema version,
 canonical profile path, absolute WSNav hook executable path, and exact
-generated-content hash. Creation and replacement use a mode-`0600` temporary
-file plus atomic rename. An existing unowned path, a missing ownership record,
-or content that differs from the recorded hash is never overwritten or
+generated-declaration hash. Creation and replacement use a mode-`0600`
+temporary file plus atomic rename. An existing unowned path, a missing
+ownership record, or a changed WSNav declaration is never overwritten or
 removed automatically.
 
 The hook definition is reviewed and trusted through Codex's native `/hooks`
@@ -351,6 +351,18 @@ installation before observer-dependent Workstream launch is enabled. Whether
 an unprompted review process leaves any native history residue is a validation
 gate and must be disclosed if it cannot be avoided.
 
+Native Codex hook review appends trust records to the selected profile itself:
+`[hooks.state]` records keyed to the exact generated hook entries and trusted
+`[projects]` entries. WSNav therefore verifies the generated declaration as a
+byte-exact prefix and accepts only that narrow, schema-checked native suffix:
+the four generated lifecycle hook keys, `sha256:` trusted hashes, and
+project records whose sole value is `trust_level = "trusted"`. A malformed
+record, an unknown event, a different hook path, another setting, or any
+change before the suffix is `modified` and fails closed. The native state is
+not independently edited; deleting an otherwise exact dedicated profile also
+removes its co-located native trust records, while all normal configuration
+and other Codex-owned state remain untouched.
+
 Existing user-configured Codex hooks remain the user's integrations. Workstream
 Navigator neither disables nor rewrites them, and cannot guarantee that an
 unrelated failing hook will preserve the native UI. `doctor` reports detected
@@ -360,9 +372,11 @@ mutating the user's configuration.
 Profile update or removal requires no live WSNav-managed Codex Runtime. An
 update that changes the hook definition returns the integration to
 `trust_pending` until native review succeeds again. Removal deletes only an
-exactly owned and unchanged profile plus its WSNav ownership record. It leaves
-base configuration, other profiles, user and project hooks, plugins, history,
-credentials, and Codex-owned trust state untouched.
+exactly owned profile whose WSNav declaration is unchanged and whose only
+suffix is the validated native trust state, plus its WSNav ownership record.
+It leaves base configuration, other profiles, user and project hooks,
+plugins, history, credentials, and all state outside the dedicated profile
+untouched.
 
 The observer consumes these native events:
 

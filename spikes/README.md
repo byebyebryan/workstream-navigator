@@ -132,3 +132,25 @@ The Python harness is non-installed spike machinery, not product code or a
 runtime dependency. Its result is sanitized and the temporary Codex home,
 repository, schemas, App Server processes, private tmux servers, and raw
 provider data are deleted before evidence is emitted.
+
+## codex-running-settled-fork.py
+
+This local study validates the V1 Fork Workstream boundary beside a running
+native source TUI.
+
+~~~console
+spikes/codex-running-settled-fork.py \
+  --result /tmp/wsnav-codex-running-settled-fork.json
+~~~
+
+The source completes one harmless turn, starts a second turn containing a
+long-running `sleep`, and remains untouched while the harness creates a clean
+worktree from a recorded base commit. The spike submits one exact
+`thread/fork(lastTurnId=...)` request, deliberately leaves its response unread,
+reconciles one persisted destination without retry, and resumes that
+destination in another native TUI.
+
+The destination runs a divergent harmless turn from the new worktree while the
+source command is still active. Raw identities, turns, prompts, responses,
+paths, PIDs, captures, and generated schemas are private and deleted. The
+Python harness is disposable evidence machinery, not a product dependency.

@@ -44,10 +44,10 @@ workstreams, status, and conservative worktree operations.
 The approved D0-D5 implementation sequence and checkpoint acceptance gates are
 tracked in the [V1 roadmap][].
 
-The final interactive acceptance procedure for the in-progress local Codex
-slice is [D1 local native-Codex acceptance][D1 acceptance]. It requires an
-operator's native Codex hook-trust decision and deliberately does not bypass
-that review.
+The accepted local Codex CLI slice and its sanitized native acceptance evidence
+are documented in [D1 local native-Codex acceptance][D1 acceptance]. The run
+required an operator's native Codex hook-trust decision and did not bypass that
+review.
 
 ## Decision studies
 

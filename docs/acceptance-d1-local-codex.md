@@ -1,6 +1,6 @@
 # D1 local native-Codex acceptance
 
-Status: operator-run gate; fresh final run pending
+Status: pass — 2026-07-29
 
 This is the final acceptance procedure for the D1 checkpoint. It exercises a
 real Codex TUI while preserving the user's ordinary tmux server and removing
@@ -94,6 +94,27 @@ and removes it only together with the exact dedicated profile.
   not commit prompts, responses, terminal capture, UUIDs, paths, PIDs,
   credentials, or raw hook/App Server payloads.
 
+## Final recorded result
+
+The final bounded native run passed with Codex CLI `0.145.0` and the
+`codex-d1-private-runtime-hooks-v1` contract fingerprint.
+
+- Native `/hooks` approval was explicit and no trust bypass was used.
+- The single native turn completed through a directly interactive private
+  provider pane. Its accepted lifecycle reached a bound session with durable,
+  visible unseen-result attention only after the provider pane/process/cwd and
+  process-birth/short-ancestry evidence agreed.
+- Status and ephemeral App Server rename ran outside the provider pane; the
+  user confirmed the preserved normal result and canonical thread title after
+  exact park/resume.
+- The exact dedicated observer profile, managed runtime, review runtime, and
+  disposable state/repository were removed. The ordinary tmux fingerprint was
+  unchanged before and after the run.
+- The sanitized [fixture](../spikes/fixtures/d1-local-codex-acceptance.json)
+  contains only booleans and a provider contract fingerprint. No identities,
+  prompt/result text, paths, PIDs, credentials, raw hook payloads, App Server
+  frames, or terminal capture were committed.
+
 ## 2026-07-29 preliminary live run
 
 The bounded live happy path completed: native trust review, a single harmless
@@ -110,7 +131,7 @@ implementation defects before final cleanup:
   necessarily dispatched the queued action; it now waits for the exact result
   before shutdown.
 
-That run is intentionally not the final D1 pass record: the follow-up hardens
-hook provenance against the live provider process and adds sanitized attention
-visibility. The final pass requires one fresh run of this procedure using that
-implementation, followed by the same complete cleanup.
+That run was intentionally not the final D1 pass record: the follow-up
+hardened hook provenance against the live provider process and added sanitized
+attention visibility. The final recorded result above is the fresh rerun using
+that implementation and complete cleanup.

@@ -1,0 +1,27 @@
+{
+  "study": "d1-local-native-codex",
+  "provider": {
+    "id": "codex",
+    "version": "0.145.0",
+    "contract_fingerprint": "codex-d1-private-runtime-hooks-v1"
+  },
+  "status": "pass",
+  "assertions": {
+    "native_hook_trust_confirmed": true,
+    "direct_native_provider_attachment": true,
+    "provider_process_corroborated_lifecycle": true,
+    "result_attention_visible": true,
+    "out_of_band_native_thread_rename": true,
+    "exact_native_resume": true,
+    "result_tip_preserved": true,
+    "ordinary_tmux_unchanged": true,
+    "exact_observer_removal": true,
+    "private_cleanup_complete": true
+  },
+  "privacy_audit": {
+    "identifiers_committed": false,
+    "prompt_or_result_content_committed": false,
+    "paths_or_pids_committed": false,
+    "credentials_or_raw_payloads_committed": false
+  }
+}

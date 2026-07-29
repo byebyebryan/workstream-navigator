@@ -2,7 +2,7 @@
 
 Date: 2026-07-29
 
-Status: D0-D1 complete; the next implementation checkpoint is D2
+Status: D0 complete; D1.5 reconciliation is active before D2
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -28,7 +28,8 @@ This document owns sequencing, exit gates, and progress.
 | Checkpoint | Outcome | Status |
 | --- | --- | --- |
 | D0 | Contract kernel and durable state | Complete |
-| D1 | Complete local Codex CLI vertical slice | Complete |
+| D1 | Local Codex CLI vertical slice | Reopened as D1.5 |
+| D1.5 | Reconcile native trust and same-workstream tip transitions | Active |
 | D2 | Minimal directly interactive navigator | Planned |
 | D3 | Local and SSH hosts through one protocol | Planned |
 | D4 | Independent and conversation-forked Workstreams | Planned |
@@ -120,6 +121,47 @@ Expected commit-sized slices:
 5. add local CLI orchestration for register/start/attach/status/rename/park/resume;
 6. add failure reconciliation and local acceptance evidence; and
 7. reconcile documentation with the accepted behavior.
+
+## D1.5 - Local Codex reconciliation
+
+The first D1 live acceptance proved the direct native happy path, but review
+identified implementation gaps against the design contract. Resolve them
+before building a presentation surface. This is a correction to D1, not a
+second provider or a navigator feature.
+
+Scope:
+
+- prove the installed Codex lifecycle contract for native same-TUI `/clear`
+  (and any emitted source value) in a disposable, profile-selected run before
+  permitting a changed binding;
+- make observer setup open an explicit, private native trust-review session in
+  an empty disposable directory, then verify the approved profile without
+  writing Codex trust state;
+- corroborate initial and permitted changed bindings through a bounded,
+  read-only `thread/read` App Server request before durable state changes;
+- accept only the live-proven, same-runtime native session transition and
+  preserve predecessor metadata, settled attention, and fail-closed behavior
+  for all other changed SessionStart events;
+- add the exact observer profile update contract or move it out of D1 with a
+  documented reason; and
+- correct the App Server lifecycle documentation and D1 local acceptance
+  procedure to describe the implementation actually required for native
+  trust, binding, cutover, and cleanup.
+
+Exit gate:
+
+- a disposable live run proves the event order and source needed for the
+  accepted native transition; unproven native actions remain rejected;
+- setup uses only an exact owned profile, a private tmux server, and a
+  disposable review cwd; native `/hooks` approval remains an explicit operator
+  action;
+- forged, stale, replayed, concurrent, unsupported-source, or
+  provider-nonexistent session claims cannot replace the current binding;
+- an accepted `/clear` changes only the current ConversationTip in the same
+  Runtime and Workstream, without restarting the TUI or clearing prior result
+  attention; and
+- automated checks plus a sanitized, bounded native reacceptance pass with no
+  WSNav-owned runtime/profile/review artifacts left behind.
 
 ## D2 - Minimal navigator
 

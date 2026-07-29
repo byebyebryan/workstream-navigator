@@ -157,6 +157,12 @@ fn start(
         integration.ownership.owner_id.clone(),
         Some(&integration.ownership),
     )?;
+    let prior_runtime = registry.runtime_for_workstream(workstream_id)?;
+    let prior_binding = prior_runtime
+        .as_ref()
+        .map(|runtime| registry.binding_for_runtime(runtime.runtime_id))
+        .transpose()?
+        .flatten();
     let record = registry.reserve_runtime(workstream_id)?;
     let paths = RuntimePaths::for_runtime(root.base(), record.runtime_id);
     let tmux = SystemTmux::default();
@@ -164,13 +170,7 @@ fn start(
     let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
     let launch = NativeLaunch {
         cwd: record.cwd.clone(),
-        program: vec![
-            "codex".into(),
-            "--profile".into(),
-            "wsnav-observer".into(),
-            "-C".into(),
-            record.cwd.into_os_string(),
-        ],
+        program: codex_launch_program(&record.cwd, prior_binding.as_ref()),
         environment: BTreeMap::from([
             (
                 "WSNAV_STATE_ROOT".into(),
@@ -192,6 +192,24 @@ fn start(
     }
     println!("started workstream {workstream_id}");
     Ok(())
+}
+
+fn codex_launch_program(
+    cwd: &Path,
+    binding: Option<&crate::state::ProviderBinding>,
+) -> Vec<std::ffi::OsString> {
+    let mut program = vec![
+        "codex".into(),
+        "--profile".into(),
+        "wsnav-observer".into(),
+        "-C".into(),
+        cwd.as_os_str().to_owned(),
+    ];
+    if let Some(binding) = binding {
+        program.push("resume".into());
+        program.push(binding.native_session_id.clone().into());
+    }
+    program
 }
 
 fn observer_profile() -> Result<ObserverProfile, AppError> {
@@ -371,4 +389,29 @@ enum AppError {
     Runtime(#[from] crate::runtime::RuntimeError),
     #[error(transparent)]
     State(#[from] crate::state::StateError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resuming_uses_the_exact_bound_native_session() {
+        let binding = crate::state::ProviderBinding {
+            runtime_id: RuntimeId::new(),
+            native_session_id: "exact-session".to_owned(),
+            last_settled_turn_id: Some("settled-turn".to_owned()),
+            revision: crate::domain::Revision::INITIAL,
+        };
+        let program = codex_launch_program(Path::new("/checkout"), Some(&binding));
+
+        assert!(program.ends_with(&["resume".into(), "exact-session".into()]));
+    }
+
+    #[test]
+    fn fresh_runtime_does_not_invent_a_session_id() {
+        let program = codex_launch_program(Path::new("/checkout"), None);
+
+        assert!(!program.iter().any(|argument| argument == "resume"));
+    }
 }

@@ -43,6 +43,9 @@ keeps the native Codex workflow canonical, uses dedicated tmux runtimes and SSH
 for attachment, and limits Workstream Navigator to hosts, project locations,
 workstreams, status, and conservative worktree operations.
 
+The approved D0-D5 implementation sequence and checkpoint acceptance gates are
+tracked in the [V1 roadmap][].
+
 ## Decision studies
 
 The isolated tmux/SSH transport, native Codex presentation, scoped observer
@@ -54,6 +57,7 @@ provider capability as a pre-implementation design blocker. See [Spike 0001][],
 
 [agent-switchboard-python-reference]: https://github.com/byebyebryan/agent-switchboard-python-reference
 [V1 design]: docs/design.md
+[V1 roadmap]: docs/roadmap.md
 [Spike 0001]: docs/spikes/0001-tmux-remote-transport.md
 [Spike 0002]: docs/spikes/0002-codex-native-tui.md
 [Spike 0004]: docs/spikes/0004-tmux-runtime-isolation.md

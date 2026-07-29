@@ -1001,6 +1001,10 @@ cannot become passing fixtures.
 
 ## Proposed delivery checkpoints
 
+The checkpoint sequence and current implementation status are maintained in the
+[V1 roadmap](roadmap.md). The summaries below define the architectural boundary
+of each checkpoint.
+
 ### D0 — Contract kernel
 
 - Domain types, IDs, statuses, invariants, and errors.

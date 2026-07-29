@@ -1,0 +1,222 @@
+//! One-shot, stdio-only Codex App Server metadata operations.
+
+use std::{
+    io::{Read, Write},
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
+    time::{Duration, Instant},
+};
+
+use serde_json::{Value, json};
+use thiserror::Error;
+
+const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// The only persisted fields extracted from an exact Codex thread summary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThreadMetadata {
+    pub name: Option<String>,
+}
+
+/// Runs one fresh stdio server action and terminates the server before return.
+#[derive(Clone, Debug)]
+pub struct EphemeralAppServer {
+    executable: String,
+}
+
+impl Default for EphemeralAppServer {
+    fn default() -> Self {
+        Self {
+            executable: "codex".to_owned(),
+        }
+    }
+}
+
+impl EphemeralAppServer {
+    /// Creates an adapter for a fixed Codex executable path.
+    #[must_use]
+    pub fn new(executable: impl Into<String>) -> Self {
+        Self {
+            executable: executable.into(),
+        }
+    }
+
+    /// Reads an exact thread without requesting its turns, items, or preview.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the short-lived server cannot complete the bounded
+    /// request or does not return a usable exact thread summary.
+    pub fn read_thread(&self, thread_id: &str) -> Result<ThreadMetadata, AppServerError> {
+        let result = self.request(
+            "thread/read",
+            &json!({"threadId": thread_id, "includeTurns": false}),
+        )?;
+        let thread = result
+            .get("thread")
+            .and_then(Value::as_object)
+            .ok_or(AppServerError::InvalidResponse)?;
+        let name = match thread.get("name") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(name)) if name.len() <= 512 && !name.contains(['\n', '\r']) => {
+                Some(name.clone())
+            }
+            _ => return Err(AppServerError::InvalidResponse),
+        };
+        Ok(ThreadMetadata { name })
+    }
+
+    /// Sets the canonical Codex-owned name of an exact managed thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the name is unsafe or the bounded one-shot request
+    /// is rejected by Codex.
+    pub fn set_thread_name(&self, thread_id: &str, name: &str) -> Result<(), AppServerError> {
+        if name.trim().is_empty() || name.len() > 512 || name.contains(['\n', '\r']) {
+            return Err(AppServerError::InvalidName);
+        }
+        let _ = self.request(
+            "thread/name/set",
+            &json!({"threadId": thread_id, "name": name}),
+        )?;
+        Ok(())
+    }
+
+    fn request(&self, method: &str, params: &Value) -> Result<Value, AppServerError> {
+        let mut child = Command::new(&self.executable)
+            .args(["app-server", "--listen", "stdio://"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(AppServerError::Launch)?;
+        let mut stdin = child.stdin.take().ok_or(AppServerError::PipesUnavailable)?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or(AppServerError::PipesUnavailable)?;
+        let initialize = json!({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "wsnav", "version": env!("CARGO_PKG_VERSION")}, "capabilities": {}}});
+        let initialized = json!({"method": "initialized", "params": {}});
+        let action = json!({"id": 2, "method": method, "params": params});
+        for message in [initialize, initialized, action] {
+            serde_json::to_writer(&mut stdin, &message).map_err(AppServerError::Encode)?;
+            stdin.write_all(b"\n").map_err(AppServerError::Write)?;
+        }
+        drop(stdin);
+
+        let (sender, receiver) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let _ = sender.send(read_bounded(stdout));
+        });
+        let output = match receiver.recv_timeout(RESPONSE_TIMEOUT) {
+            Ok(result) => result?,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(AppServerError::Timeout);
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(AppServerError::Closed),
+        };
+        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+        while child.try_wait().map_err(AppServerError::Launch)?.is_none()
+            && Instant::now() < deadline
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        if child.try_wait().map_err(AppServerError::Launch)?.is_none() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        response_for_action(&output)
+    }
+}
+
+fn read_bounded(mut stdout: impl Read) -> Result<Vec<u8>, AppServerError> {
+    let mut output = Vec::new();
+    let mut chunk = [0_u8; 8192];
+    loop {
+        let count = stdout.read(&mut chunk).map_err(AppServerError::Read)?;
+        if count == 0 {
+            return Ok(output);
+        }
+        if output.len().saturating_add(count) > MAX_OUTPUT_BYTES {
+            return Err(AppServerError::OutputTooLarge);
+        }
+        output.extend_from_slice(&chunk[..count]);
+    }
+}
+
+fn response_for_action(output: &[u8]) -> Result<Value, AppServerError> {
+    for line in output.split(|byte| *byte == b'\n') {
+        if line.is_empty() {
+            continue;
+        }
+        let message: Value = serde_json::from_slice(line).map_err(AppServerError::InvalidJson)?;
+        if message.get("id") == Some(&json!(2)) {
+            if message.get("error").is_some() {
+                return Err(AppServerError::Rejected);
+            }
+            return message
+                .get("result")
+                .cloned()
+                .ok_or(AppServerError::InvalidResponse);
+        }
+    }
+    Err(AppServerError::InvalidResponse)
+}
+
+/// Bounded App Server failures; provider output and raw diagnostics are discarded.
+#[derive(Debug, Error)]
+pub enum AppServerError {
+    #[error("Codex App Server closed unexpectedly")]
+    Closed,
+    #[error("could not encode App Server request")]
+    Encode(serde_json::Error),
+    #[error("App Server response was invalid JSON")]
+    InvalidJson(serde_json::Error),
+    #[error("App Server response did not contain an approved result")]
+    InvalidResponse,
+    #[error("thread name is empty or unsafe")]
+    InvalidName,
+    #[error("could not launch or inspect App Server")]
+    Launch(std::io::Error),
+    #[error("App Server response exceeded the output bound")]
+    OutputTooLarge,
+    #[error("App Server pipes were unavailable")]
+    PipesUnavailable,
+    #[error("App Server rejected the request")]
+    Rejected,
+    #[error("App Server response timed out")]
+    Timeout,
+    #[error("could not read App Server output")]
+    Read(std::io::Error),
+    #[error("could not write App Server input")]
+    Write(std::io::Error),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_the_exact_action_result_is_accepted() {
+        let output =
+            b"{\"id\":1,\"result\":{}}\n{\"id\":2,\"result\":{\"thread\":{\"name\":\"name\"}}}\n";
+        assert_eq!(
+            response_for_action(output).unwrap()["thread"]["name"],
+            "name"
+        );
+    }
+
+    #[test]
+    fn missing_action_result_fails_closed() {
+        assert!(matches!(
+            response_for_action(b"{\"id\":1,\"result\":{}}\n"),
+            Err(AppServerError::InvalidResponse)
+        ));
+    }
+}

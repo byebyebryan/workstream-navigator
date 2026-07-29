@@ -580,6 +580,34 @@ impl HostRegistry {
         Ok(binding)
     }
 
+    /// Caches an exact managed thread name after a successful canonical provider mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the binding is missing, changed, or cannot be
+    /// transactionally updated.
+    pub fn record_thread_name(
+        &mut self,
+        runtime_id: RuntimeId,
+        native_session_id: &str,
+        name: &str,
+    ) -> Result<(), StateError> {
+        validate_registry_text("thread name", name)?;
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE provider_bindings SET observed_thread_name = ?1, name_state = 'named',
+             revision = revision + 1 WHERE runtime_id = ?2 AND native_session_id = ?3",
+                params![name, runtime_id.to_string(), native_session_id],
+            )
+            .map_err(StateError::Sqlite)?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(StateError::HookEvidenceMismatch)
+        }
+    }
+
     /// Marks the reserved Runtime stopped after its exact private tmux server is parked.
     ///
     /// # Errors

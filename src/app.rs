@@ -13,6 +13,7 @@ use thiserror::Error;
 
 use crate::{
     domain::{RuntimeId, WorkstreamId},
+    provider::codex::app_server::EphemeralAppServer,
     provider::codex::hooks::drain_and_parse,
     provider::codex::profile::ObserverProfile,
     runtime::{LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, SystemTmux},
@@ -61,6 +62,8 @@ enum Commands {
     Park { workstream_id: String },
     /// Show one local runtime's durable record and live private-tmux probe.
     Status { workstream_id: String },
+    /// Rename the current managed Codex thread through its canonical name field.
+    Rename { workstream_id: String, name: String },
     /// Internal passive Codex lifecycle hook entrypoint.
     #[command(hide = true)]
     Hook,
@@ -89,6 +92,10 @@ fn execute(cli: Cli) -> Result<(), AppError> {
         Commands::Status { workstream_id } => {
             status(&root, &registry, parse_workstream(&workstream_id)?)
         }
+        Commands::Rename {
+            workstream_id,
+            name,
+        } => rename(&mut registry, parse_workstream(&workstream_id)?, &name),
         Commands::Hook => unreachable!("hook dispatch returns before state setup"),
     }
 }
@@ -223,6 +230,23 @@ fn observe_hook(state_root: Option<PathBuf>) {
     let _ = registry.apply_hook_observation(runtime_id, &generation, observation);
 }
 
+fn rename(
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    name: &str,
+) -> Result<(), AppError> {
+    let runtime = registry
+        .runtime_for_workstream(workstream_id)?
+        .ok_or(AppError::NoRuntime(workstream_id))?;
+    let binding = registry
+        .binding_for_runtime(runtime.runtime_id)?
+        .ok_or(AppError::NoBinding(workstream_id))?;
+    EphemeralAppServer::default().set_thread_name(&binding.native_session_id, name)?;
+    registry.record_thread_name(runtime.runtime_id, &binding.native_session_id, name)?;
+    println!("renamed workstream {workstream_id}");
+    Ok(())
+}
+
 fn attach(
     root: &StateRoot,
     registry: &HostRegistry,
@@ -329,6 +353,8 @@ enum AppError {
     NotGitCheckout,
     #[error("workstream {0} has no runtime")]
     NoRuntime(WorkstreamId),
+    #[error("workstream {0} has no exact native Codex binding")]
+    NoBinding(WorkstreamId),
     #[error("CODEX_HOME cannot be determined")]
     CodexHomeUnavailable,
     #[error("observer profile is not installed; run wsnav setup")]
@@ -339,6 +365,8 @@ enum AppError {
     ObserverNotReady,
     #[error(transparent)]
     Profile(#[from] crate::provider::codex::profile::ProfileError),
+    #[error(transparent)]
+    AppServer(#[from] crate::provider::codex::app_server::AppServerError),
     #[error(transparent)]
     Runtime(#[from] crate::runtime::RuntimeError),
     #[error(transparent)]

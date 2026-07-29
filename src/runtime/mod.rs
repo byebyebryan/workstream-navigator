@@ -171,6 +171,47 @@ impl ProcessProbe for LinuxProcessProbe {
     }
 }
 
+/// Confirms that this hook process is a direct child of the current provider,
+/// or one shell-wrapper away from it. A same-user shell can inherit launch
+/// environment values, but it cannot satisfy this short ancestry path unless
+/// it is the native provider's lifecycle-hook child.
+#[must_use]
+pub fn is_direct_provider_hook(provider_pid: u32, expected_birth: &str) -> bool {
+    let probe = LinuxProcessProbe;
+    if probe.process_birth(provider_pid).as_deref() != Some(expected_birth) {
+        return false;
+    }
+    let Some(parent) = process_parent(std::process::id()) else {
+        return false;
+    };
+    direct_provider_depth(parent, provider_pid, process_parent).is_some()
+}
+
+fn process_parent(pid: u32) -> Option<u32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let close_paren = stat.rfind(')')?;
+    stat.get(close_paren + 2..)?
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+fn direct_provider_depth(
+    first_parent: u32,
+    provider_pid: u32,
+    parent_of: impl Fn(u32) -> Option<u32>,
+) -> Option<usize> {
+    let mut cursor = first_parent;
+    for depth in 0..=1 {
+        if cursor == provider_pid {
+            return Some(depth);
+        }
+        cursor = parent_of(cursor)?;
+    }
+    None
+}
+
 /// Owns exactly one tmux server/session/window/pane for one runtime.
 pub struct PrivateRuntime<'a> {
     tmux: &'a dyn TmuxClient,
@@ -455,6 +496,7 @@ pub enum RuntimeError {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::{cell::RefCell, collections::VecDeque};
 
     use super::*;
@@ -492,6 +534,16 @@ mod tests {
         fn process_birth(&self, pid: u32) -> Option<String> {
             Some(format!("birth-{pid}"))
         }
+    }
+
+    #[test]
+    fn direct_provider_ancestry_allows_only_the_native_hook_shape() {
+        let parents = BTreeMap::from([(10_u32, 20_u32), (20, 30), (30, 40)]);
+        let parent_of = |pid| parents.get(&pid).copied();
+
+        assert_eq!(direct_provider_depth(20, 20, parent_of), Some(0));
+        assert_eq!(direct_provider_depth(10, 20, parent_of), Some(1));
+        assert_eq!(direct_provider_depth(10, 30, parent_of), None);
     }
 
     fn successful() -> TmuxResponse {

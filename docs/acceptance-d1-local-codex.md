@@ -1,6 +1,6 @@
 # D1 local native-Codex acceptance
 
-Status: operator-run gate; not yet recorded as passed
+Status: operator-run gate; fresh final run pending
 
 This is the final acceptance procedure for the D1 checkpoint. It exercises a
 real Codex TUI while preserving the user's ordinary tmux server and removing
@@ -65,6 +65,10 @@ and removes it only together with the exact dedicated profile.
    target/debug/wsnav --state-root "$acceptance_root/state" attach "$workstream_id"
    ```
 
+   Before park, `status` must report `private runtime: live`, `provider
+   binding: bound`, and `result attention: unseen`. It deliberately exposes no
+   session ID, process ID, cwd, hook payload, or terminal content.
+
 5. Park, remove only the exact owned profile, compare the ordinary tmux
    fingerprint, and remove the temporary filesystem artifacts.
 
@@ -89,3 +93,24 @@ and removes it only together with the exact dedicated profile.
 - The recorded finding contains only pass/fail assertions and timing; it does
   not commit prompts, responses, terminal capture, UUIDs, paths, PIDs,
   credentials, or raw hook/App Server payloads.
+
+## 2026-07-29 preliminary live run
+
+The bounded live happy path completed: native trust review, a single harmless
+native prompt and result, out-of-band name change, exact park/resume, native
+result preservation, exact profile removal, private-runtime cleanup, and an
+unchanged ordinary tmux fingerprint. The run revealed and corrected three
+implementation defects before final cleanup:
+
+- Codex appends its native hook/project trust records to the selected profile;
+  ownership validation now permits only that schema-checked suffix.
+- The generated hidden hook spelling did not match the CLI parser; the exact
+  private entrypoint is now parseable and covered by a regression test.
+- The short-lived App Server client closed stdin before the real server had
+  necessarily dispatched the queued action; it now waits for the exact result
+  before shutdown.
+
+That run is intentionally not the final D1 pass record: the follow-up hardens
+hook provenance against the live provider process and adds sanitized attention
+visibility. The final pass requires one fresh run of this procedure using that
+implementation, followed by the same complete cleanup.

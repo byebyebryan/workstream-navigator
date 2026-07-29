@@ -1,8 +1,9 @@
 # Workstream Navigator V1 Roadmap
 
-Date: 2026-07-28
+Date: 2026-07-29
 
-Status: approved implementation sequence; D0-D5 not started
+Status: D0 complete; D1 implementation in progress with disposable acceptance
+passing and a fresh live final run pending
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -27,8 +28,8 @@ This document owns sequencing, exit gates, and progress.
 
 | Checkpoint | Outcome | Status |
 | --- | --- | --- |
-| D0 | Contract kernel and durable state | Planned |
-| D1 | Complete local Codex CLI vertical slice | Planned |
+| D0 | Contract kernel and durable state | Complete |
+| D1 | Complete local Codex CLI vertical slice | In progress — final live rerun pending |
 | D2 | Minimal directly interactive navigator | Planned |
 | D3 | Local and SSH hosts through one protocol | Planned |
 | D4 | Independent and conversation-forked Workstreams | Planned |

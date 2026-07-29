@@ -201,6 +201,7 @@ pub struct RuntimeRecord {
     pub tmux_generation: String,
     pub tmux_session: String,
     pub cwd: PathBuf,
+    pub process_birth: Option<String>,
     pub status: RuntimeStatus,
     pub revision: Revision,
 }
@@ -510,7 +511,7 @@ impl HostRegistry {
             .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
         let current: Option<RuntimeRecord> = transaction
             .query_row(
-                "SELECT runtime_id, tmux_generation, tmux_session, cwd, lifecycle, revision
+                "SELECT runtime_id, tmux_generation, tmux_session, cwd, process_birth, lifecycle, revision
                  FROM runtimes WHERE workstream_id = ?1",
                 [workstream_id.to_string()],
                 |row| row_to_runtime(row, workstream_id),
@@ -529,6 +530,7 @@ impl HostRegistry {
                 tmux_generation: generation,
                 tmux_session: format!("wsnav-{}", current.runtime_id.short()),
                 cwd: PathBuf::from(checkout_path),
+                process_birth: None,
                 status: RuntimeStatus::Starting,
                 revision: current.revision.next(),
                 ..current
@@ -557,6 +559,7 @@ impl HostRegistry {
                 tmux_generation: generation,
                 tmux_session: format!("wsnav-{}", runtime_id.short()),
                 cwd: PathBuf::from(checkout_path),
+                process_birth: None,
                 status: RuntimeStatus::Starting,
                 revision: Revision::INITIAL,
             };
@@ -593,7 +596,7 @@ impl HostRegistry {
     ) -> Result<Option<RuntimeRecord>, StateError> {
         self.connection
             .query_row(
-                "SELECT runtime_id, tmux_generation, tmux_session, cwd, lifecycle, revision
+            "SELECT runtime_id, tmux_generation, tmux_session, cwd, process_birth, lifecycle, revision
                  FROM runtimes WHERE workstream_id = ?1",
                 [workstream_id.to_string()],
                 |row| row_to_runtime(row, workstream_id),
@@ -619,6 +622,66 @@ impl HostRegistry {
         let binding = load_binding(&transaction, runtime_id)?;
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(binding)
+    }
+
+    /// Persists the exact private-pane process birth only while the Runtime is
+    /// prepared for its initial native lifecycle binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime is stale, not starting, or the birth
+    /// token is invalid.
+    pub fn record_runtime_process_birth(
+        &mut self,
+        runtime_id: RuntimeId,
+        expected: Revision,
+        process_birth: &str,
+    ) -> Result<(), StateError> {
+        validate_registry_text("process birth", process_birth)?;
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE runtimes SET process_birth = ?1, revision = revision + 1
+                 WHERE runtime_id = ?2 AND lifecycle = 'starting' AND revision = ?3",
+                params![process_birth, runtime_id.to_string(), expected.value()],
+            )
+            .map_err(StateError::Sqlite)?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(StateError::ConcurrentWrite)
+        }
+    }
+
+    /// Returns the prepared provider process fingerprint for one exact runtime
+    /// generation. This is evidence for hook ancestry, never hook authority by
+    /// itself.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the runtime/generation is unknown or no process
+    /// fingerprint was recorded for the prepared launch.
+    pub fn expected_hook_process_birth(
+        &self,
+        runtime_id: RuntimeId,
+        generation: &str,
+    ) -> Result<String, StateError> {
+        let row: Option<(String, Option<String>)> = self
+            .connection
+            .query_row(
+                "SELECT tmux_generation, process_birth FROM runtimes WHERE runtime_id = ?1",
+                [runtime_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?;
+        let Some((recorded_generation, process_birth)) = row else {
+            return Err(StateError::UnknownRuntime(runtime_id));
+        };
+        if recorded_generation != generation {
+            return Err(StateError::HookEvidenceMismatch);
+        }
+        process_birth.ok_or(StateError::HookEvidenceMismatch)
     }
 
     /// Caches an exact managed thread name after a successful canonical provider mutation.
@@ -1185,8 +1248,9 @@ fn row_to_runtime(
     let generation: String = row.get(1)?;
     let session: String = row.get(2)?;
     let cwd: String = row.get(3)?;
-    let lifecycle: String = row.get(4)?;
-    let revision: i64 = row.get(5)?;
+    let process_birth: Option<String> = row.get(4)?;
+    let lifecycle: String = row.get(5)?;
+    let revision: i64 = row.get(6)?;
     Ok(RuntimeRecord {
         runtime_id: Uuid::parse_str(&runtime_id)
             .map(RuntimeId::from)
@@ -1195,6 +1259,7 @@ fn row_to_runtime(
         tmux_generation: generation,
         tmux_session: session,
         cwd: PathBuf::from(cwd),
+        process_birth,
         status: runtime_status_from_text(&lifecycle).map_err(to_from_sql_error)?,
         revision: Revision::try_from(revision).map_err(to_from_sql_error)?,
     })
@@ -1729,6 +1794,37 @@ mod tests {
         assert_eq!(resumed.runtime_id, first.runtime_id);
         assert_ne!(resumed.tmux_generation, first.tmux_generation);
         assert_eq!(resumed.status, RuntimeStatus::Starting);
+    }
+
+    #[test]
+    fn hook_process_birth_must_match_the_prepared_runtime_generation() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+
+        assert!(matches!(
+            registry.expected_hook_process_birth(runtime.runtime_id, &runtime.tmux_generation),
+            Err(StateError::HookEvidenceMismatch)
+        ));
+        registry
+            .record_runtime_process_birth(runtime.runtime_id, runtime.revision, "birth-1")
+            .unwrap();
+        assert_eq!(
+            registry
+                .expected_hook_process_birth(runtime.runtime_id, &runtime.tmux_generation)
+                .unwrap(),
+            "birth-1"
+        );
+        assert!(matches!(
+            registry.expected_hook_process_birth(runtime.runtime_id, "stale-generation"),
+            Err(StateError::HookEvidenceMismatch)
+        ));
     }
 
     #[test]

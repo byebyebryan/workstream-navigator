@@ -18,12 +18,14 @@ use crate::{
     provider::codex::profile::ObserverProfile,
     runtime::{
         LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
+        is_direct_provider_hook,
     },
     state::{HostRegistry, IntegrationLifecycle, StateRoot},
 };
 
 const ABOUT: &str =
     "A native-workflow terminal navigator for persistent coding workstreams across hosts.";
+const OBSERVER_AUTHORITY: &str = "wsnav-observer-v1";
 
 /// Runs one direct local CLI command.
 #[must_use]
@@ -245,11 +247,31 @@ fn start(
                 "WSNAV_RUNTIME_GENERATION".into(),
                 record.tmux_generation.clone().into(),
             ),
+            ("WSNAV_OBSERVER_AUTHORITY".into(), OBSERVER_AUTHORITY.into()),
         ]),
     };
     if let Err(error) = runtime.start(&launch) {
         let _ = registry.mark_runtime_stopped(record.runtime_id, record.revision);
         return Err(AppError::Runtime(error));
+    }
+    let process_birth = match runtime.probe()? {
+        RuntimeProbe::Live {
+            cwd,
+            process_birth: Some(process_birth),
+            ..
+        } if cwd == record.cwd => process_birth,
+        RuntimeProbe::Live { .. } | RuntimeProbe::Missing | RuntimeProbe::Unknown { .. } => {
+            let _ = runtime.park();
+            let _ = registry.mark_runtime_stopped(record.runtime_id, record.revision);
+            return Err(AppError::RuntimeProbeAmbiguous);
+        }
+    };
+    if let Err(error) =
+        registry.record_runtime_process_birth(record.runtime_id, record.revision, &process_birth)
+    {
+        let _ = runtime.park();
+        let _ = registry.mark_runtime_stopped(record.runtime_id, record.revision);
+        return Err(AppError::State(error));
     }
     println!("started workstream {workstream_id}");
     Ok(())
@@ -283,6 +305,11 @@ fn observer_profile() -> Result<ObserverProfile, AppError> {
 }
 
 fn observe_hook(state_root: Option<PathBuf>) {
+    // Drain before inspecting any authority environment. Codex can still be
+    // writing a large lifecycle payload when unmanaged hooks are rejected.
+    let Ok(observation) = drain_and_parse(&mut std::io::stdin().lock()) else {
+        return;
+    };
     let Some(state_root) =
         state_root.or_else(|| env::var_os("WSNAV_STATE_ROOT").map(PathBuf::from))
     else {
@@ -297,15 +324,40 @@ fn observe_hook(state_root: Option<PathBuf>) {
     let Ok(generation) = env::var("WSNAV_RUNTIME_GENERATION") else {
         return;
     };
-    let Ok(observation) = drain_and_parse(&mut std::io::stdin().lock()) else {
+    if env::var("WSNAV_OBSERVER_AUTHORITY").ok().as_deref() != Some(OBSERVER_AUTHORITY) {
         return;
-    };
+    }
     let Ok(root) = StateRoot::create(state_root) else {
         return;
     };
     let Ok(mut registry) = HostRegistry::open(&root) else {
         return;
     };
+    let Ok(expected_birth) = registry.expected_hook_process_birth(runtime_id, &generation) else {
+        return;
+    };
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(
+        &tmux,
+        &process_probe,
+        RuntimePaths::for_runtime(root.base(), runtime_id),
+    );
+    let Ok(RuntimeProbe::Live {
+        pane_pid,
+        cwd,
+        process_birth: Some(actual_birth),
+        ..
+    }) = runtime.probe()
+    else {
+        return;
+    };
+    if cwd.as_path() != Path::new(&observation.cwd)
+        || actual_birth != expected_birth
+        || !is_direct_provider_hook(pane_pid, &expected_birth)
+    {
+        return;
+    }
     let _ = registry.apply_hook_observation(runtime_id, &generation, observation);
 }
 
@@ -385,9 +437,35 @@ fn status(
         &process_probe,
         RuntimePaths::for_runtime(root.base(), record.runtime_id),
     );
-    println!("runtime: {}", record.runtime_id);
-    println!("status: {:?}", runtime.probe()?);
+    let probe = runtime.probe()?;
+    let binding = registry.binding_for_runtime(record.runtime_id)?.is_some();
+    let attention = registry.attention(workstream_id)?;
+    println!("lifecycle: {:?}", record.status);
+    println!("private runtime: {}", runtime_probe_label(&probe));
+    println!(
+        "provider binding: {}",
+        if binding { "bound" } else { "pending" }
+    );
+    println!(
+        "result attention: {}",
+        if attention
+            .and_then(|value| value.result_unseen_since_revision)
+            .is_some()
+        {
+            "unseen"
+        } else {
+            "none"
+        }
+    );
     Ok(())
+}
+
+const fn runtime_probe_label(probe: &RuntimeProbe) -> &'static str {
+    match probe {
+        RuntimeProbe::Live { .. } => "live",
+        RuntimeProbe::Missing => "missing",
+        RuntimeProbe::Unknown { .. } => "unknown",
+    }
 }
 
 fn parse_workstream(value: &str) -> Result<WorkstreamId, AppError> {

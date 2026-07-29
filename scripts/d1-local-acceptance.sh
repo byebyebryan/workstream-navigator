@@ -61,7 +61,11 @@ registration="$($wsnav_bin --state-root "$state_root" register "$repository")"
 workstream_id="${registration##* }"
 "$wsnav_bin" --state-root "$state_root" start "$workstream_id"
 sleep 1
-"$wsnav_bin" --state-root "$state_root" status "$workstream_id" | grep -F 'runtime:' >/dev/null
+status="$("$wsnav_bin" --state-root "$state_root" status "$workstream_id")"
+grep -F 'lifecycle: Attention' <<<"$status" >/dev/null
+grep -F 'private runtime: live' <<<"$status" >/dev/null
+grep -F 'provider binding: bound' <<<"$status" >/dev/null
+grep -F 'result attention: unseen' <<<"$status" >/dev/null
 "$wsnav_bin" --state-root "$state_root" park "$workstream_id"
 "$wsnav_bin" --state-root "$state_root" start "$workstream_id"
 sleep 1

@@ -2,7 +2,7 @@
 
 Date: 2026-07-29
 
-Status: D0 complete; D1.5 reconciliation is active before D2
+Status: D0, D1, and D1.5 complete; D2 is next
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -28,8 +28,8 @@ This document owns sequencing, exit gates, and progress.
 | Checkpoint | Outcome | Status |
 | --- | --- | --- |
 | D0 | Contract kernel and durable state | Complete |
-| D1 | Local Codex CLI vertical slice | Reopened as D1.5 |
-| D1.5 | Reconcile native trust and same-workstream tip transitions | Active |
+| D1 | Local Codex CLI vertical slice | Complete (reconciled by D1.5) |
+| D1.5 | Reconcile native trust and same-workstream tip transitions | Complete |
 | D2 | Minimal directly interactive navigator | Planned |
 | D3 | Local and SSH hosts through one protocol | Planned |
 | D4 | Independent and conversation-forked Workstreams | Planned |
@@ -163,6 +163,9 @@ Exit gate:
   attention; and
 - automated checks plus a sanitized, bounded native reacceptance pass with no
   WSNav-owned runtime/profile/review artifacts left behind.
+
+Recorded evidence: [D1 local native-Codex acceptance](acceptance-d1-local-codex.md)
+and its [D1.5 reconciliation fixture](../spikes/fixtures/d1.5-local-codex-reconciliation.json).
 
 ## D2 - Minimal navigator
 

@@ -1,10 +1,11 @@
 # D1 local native-Codex acceptance
 
-Status: pass — 2026-07-29
+Status: pass — D1 and D1.5 reconciled, 2026-07-29
 
-This is the final acceptance procedure for the D1 checkpoint. It exercises a
-real Codex TUI while preserving the user's ordinary tmux server and removing
-every Workstream Navigator-owned test artifact afterward.
+This is the final acceptance procedure for the D1 checkpoint and its D1.5
+reconciliation. It exercises a real Codex TUI while preserving the user's
+ordinary tmux server and removing every Workstream Navigator-owned test
+artifact afterward.
 
 ## Authority and retained state
 
@@ -103,9 +104,9 @@ and removes it only together with the exact dedicated profile.
   not commit prompts, responses, terminal capture, UUIDs, paths, PIDs,
   credentials, or raw hook/App Server payloads.
 
-## Final recorded result
+## Recorded results
 
-The final bounded native run passed with Codex CLI `0.145.0` and the
+The original bounded D1 run passed with Codex CLI `0.145.0` and the
 `codex-d1-private-runtime-hooks-v1` contract fingerprint.
 
 - Native `/hooks` approval was explicit and no trust bypass was used.
@@ -123,6 +124,25 @@ The final bounded native run passed with Codex CLI `0.145.0` and the
   contains only booleans and a provider contract fingerprint. No identities,
   prompt/result text, paths, PIDs, credentials, raw hook payloads, App Server
   frames, or terminal capture were committed.
+
+The fresh D1.5 reconciliation run also passed with Codex CLI `0.145.0` and
+the `codex-d1.5-clear-thread-read-trust-review-v1` fingerprint.
+
+- `setup` opened the profile-selected native trust review in an empty private
+  environment. Native approval was explicit; no trust bypass or direct trust
+  mutation was used.
+- The first managed binding and the native same-TUI `/clear` replacement were
+  each corroborated with a bounded read of the exact provider thread before
+  state changed. The destination's ordinary result produced visible sticky
+  attention.
+- The native TUI and its private Runtime remained in place across the cutover.
+  No `/new`, `/fork`, compact, or inferred plan transition was accepted as a
+  D1.5 binding replacement.
+- Cleanup parked the exact private Runtime, removed the exact observer profile,
+  removed the review and disposable test roots, and left the ordinary tmux
+  fingerprint unchanged.
+- The separate sanitized [D1.5 fixture](../spikes/fixtures/d1.5-local-codex-reconciliation.json)
+  contains only assertions and the behavioral fingerprint.
 
 ## 2026-07-29 preliminary live run
 

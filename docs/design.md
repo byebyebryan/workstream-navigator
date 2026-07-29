@@ -1011,9 +1011,11 @@ following are delivery validation rather than reasons to widen the product:
    clearly, disabled-hook policy is visible, malformed/racing/unavailable hook
    input remains fail-open to Codex, and exact update/removal preserves
    unrelated state.
-2. **Status transactions and native transitions:** accepted hooks update
-   binding, settled-turn, and sticky attention state atomically across native
-   `/new`, `/clear`, `/rename`, resume, missed events, and event races.
+2. **Status transactions and native transitions:** accepted startup/resume
+   hooks and the separately proven native `/clear` transition update binding,
+   settled-turn, and sticky attention atomically. Native `/new`, `/fork`, and
+   compact remain Codex-owned workflow until their distinct contracts are
+   proven; missed events and races fail closed.
 3. **Cold recovery:** loss of an exact private runtime followed by
    `codex -C <checkout> resume <session-id>` restores the same native history
    and creates one new runtime generation.

@@ -44,6 +44,11 @@ workstreams, status, and conservative worktree operations.
 The approved D0-D5 implementation sequence and checkpoint acceptance gates are
 tracked in the [V1 roadmap][].
 
+The final interactive acceptance procedure for the in-progress local Codex
+slice is [D1 local native-Codex acceptance][D1 acceptance]. It requires an
+operator's native Codex hook-trust decision and deliberately does not bypass
+that review.
+
 ## Decision studies
 
 The isolated tmux/SSH transport, native Codex presentation, scoped observer
@@ -56,6 +61,7 @@ provider capability as a pre-implementation design blocker. See [Spike 0001][],
 [agent-switchboard-python-reference]: https://github.com/byebyebryan/agent-switchboard-python-reference
 [V1 design]: docs/design.md
 [V1 roadmap]: docs/roadmap.md
+[D1 acceptance]: docs/acceptance-d1-local-codex.md
 [Spike 0001]: docs/spikes/0001-tmux-remote-transport.md
 [Spike 0002]: docs/spikes/0002-codex-native-tui.md
 [Spike 0004]: docs/spikes/0004-tmux-runtime-isolation.md

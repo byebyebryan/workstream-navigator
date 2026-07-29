@@ -446,6 +446,27 @@ impl HostRegistry {
         Ok(record)
     }
 
+    /// Reads the single persisted runtime record for a workstream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be queried or contains invalid
+    /// persisted runtime data.
+    pub fn runtime_for_workstream(
+        &self,
+        workstream_id: WorkstreamId,
+    ) -> Result<Option<RuntimeRecord>, StateError> {
+        self.connection
+            .query_row(
+                "SELECT runtime_id, tmux_generation, tmux_session, cwd, lifecycle, revision
+                 FROM runtimes WHERE workstream_id = ?1",
+                [workstream_id.to_string()],
+                |row| row_to_runtime(row, workstream_id),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)
+    }
+
     /// Marks the reserved Runtime stopped after its exact private tmux server is parked.
     ///
     /// # Errors

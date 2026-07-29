@@ -1,5 +1,6 @@
 use std::{
     fmt,
+    str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -45,6 +46,14 @@ macro_rules! opaque_id {
         impl From<Uuid> for $name {
             fn from(value: Uuid) -> Self {
                 Self(value)
+            }
+        }
+
+        impl FromStr for $name {
+            type Err = uuid::Error;
+
+            fn from_str(value: &str) -> Result<Self, Self::Err> {
+                Uuid::parse_str(value).map(Self)
             }
         }
     };

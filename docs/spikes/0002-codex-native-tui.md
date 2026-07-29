@@ -58,10 +58,11 @@ fully automated run; the assisted diagnostic is not evidence.
 
 This proves the native Codex presentation, input, persistence, reconnect, and
 result-tip-preservation contract for this installed CLI version. It does not
-prove actual mouse interaction inside Codex, image rendering, workstream
-discovery, thread lifecycle operations, or a navigator UI. Mouse support is
-configured by the harness, but an operator must still exercise it in a native
-provider session.
+independently exercise actual mouse interaction inside Codex, image rendering,
+workstream discovery, thread lifecycle operations, or a navigator UI. The
+terminal-substrate decision now combines this result with Spike 0005 and the
+historical [Python Phase 7F terminal trial][phase-7f]; no additional manual
+terminal spike is a pre-implementation gate.
 
 The transport-plus-provider gates are now sufficient to retain a dedicated
 tmux plus SSH design as Workstream Navigator's V1 persistence and remote
@@ -69,3 +70,4 @@ attachment substrate. They do not authorize a production implementation or a
 remote daemon.
 
 [fixture]: ../../spikes/fixtures/codex-native-tui.json
+[phase-7f]: https://github.com/byebyebryan/agent-switchboard-python-reference/blob/main/docs/phase-7f-acceptance.md

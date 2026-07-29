@@ -812,46 +812,53 @@ lowest-common-denominator behavior should shape the Codex implementation.
 
 ## Validation gates before production implementation
 
-The existing spikes validate transport, native presentation, and the shell-only
-per-Runtime tmux topology. The following contracts still need isolated proof:
+The existing spikes validate transport, native presentation, the shell-only
+per-Runtime tmux topology, and the automated local two-pane Codex presentation
+path. Terminal presentation is a settled design prerequisite: Spike 0005
+proves the selected retained-TMUX configuration, direct native attachment,
+keyboard submission, image attachment request, resize/focus, reconnect, and
+result-tip preservation. The frozen Python Phase 7F trial independently
+observed direct native-pane interaction, terminal color, and click-to-select
+mouse support in an equivalent private-tmux layout. That implementation is
+behavioral evidence only; it is not a Rust dependency or compatibility
+constraint.
 
-1. **Terminal acceptance:** real mouse interaction, truecolor/box drawing,
-   resizing, focus changes, reconnect through the final two-pane layout, and
-   the final native-Codex `TMUX` environment choice.
-2. **Runtime isolation and ephemeral metadata:** every managed TUI remains a
+The following contracts still need isolated proof:
+
+1. **Runtime isolation and ephemeral metadata:** every managed TUI remains a
    dedicated process-owned runtime with one private tmux server/session/window/
    pane; stdio helpers can read persisted metadata and exit without changing
    it, while persistent App Server transports and `codex --remote` are
    rejected.
-3. **Scoped Codex profile:** a managed profile can add passive hooks without
+2. **Scoped Codex profile:** a managed profile can add passive hooks without
    changing unmanaged Codex sessions, and install/remove/trust behavior is
    deterministic.
-4. **Hook robustness:** large payloads, malformed input, missing authority,
+3. **Hook robustness:** large payloads, malformed input, missing authority,
    stale generations, event races, and unavailable state never produce
    broken-pipe or provider-facing hook errors.
-5. **Hook authority and status transaction:** forged agent-shell events cannot
+4. **Hook authority and status transaction:** forged agent-shell events cannot
    rotate a ProviderBinding; legitimate `UserPromptSubmit`, `Stop`, result
    attention, native `/new`, `/clear`, `/rename`, and resume yield conservative
    navigator state without storing prompt or transcript content.
-6. **Thread-name lifecycle:** exact managed threads expose nullable names
+5. **Thread-name lifecycle:** exact managed threads expose nullable names
    through ephemeral `thread/read`; native and navigator rename converge,
    context-specific fallbacks distinguish new, cutover, fork, and unavailable
    states; native cutovers never overwrite a concurrent rename; remote
    filtering removes previews; and failed refresh does not disturb the TUI.
-7. **Cold recovery:** loss of an exact private runtime tmux server followed by
+6. **Cold recovery:** loss of an exact private runtime tmux server followed by
    `codex resume <session-id>` restores the same native history in the recorded
    checkout and creates one new runtime generation.
-8. **Running-source fork:** ephemeral App Server `thread/fork` with the exact
+7. **Running-source fork:** ephemeral App Server `thread/fork` with the exact
    accepted `lastTurnId` and destination `cwd` creates one persisted
    destination; native resume opens it while the source's active turn and
    dedicated process remain unchanged.
-9. **Worktree ownership:** independent and forked Workstreams resolve one exact
+8. **Worktree ownership:** independent and forked Workstreams resolve one exact
    default-base commit, create collision-free managed worktrees, and refuse
    unsafe retirement.
-10. **Multi-host protocol:** local and SSH adapters return the same semantic
+9. **Multi-host protocol:** local and SSH adapters return the same semantic
    results, reject version mismatch, survive disconnect, enforce one input
    attachment, and never mutate an ordinary tmux server.
-11. **Combined acceptance:** start local work, start remote work while it runs,
+10. **Combined acceptance:** start local work, start remote work while it runs,
    switch between both, fork one, observe background completion without focus
    theft, reconnect, resume after runtime loss, and preserve every provider
    result tip.
@@ -929,10 +936,7 @@ The first pass deliberately settles these potentially expansive questions:
 The remaining pre-implementation decisions are:
 
 1. Codex profile naming, ownership marker, trust review, and removal UX.
-2. The private tmux terminal configuration and final native-Codex `TMUX`
-   environment needed for correct Unicode, truecolor, extended keys, mouse,
-   images, and clipboard forwarding on supported hosts.
-3. Managed branch naming and the exact clean/merged retirement rule.
+2. Managed branch naming and the exact clean/merged retirement rule.
 
 These are bounded design questions. They do not reopen the product boundary,
 provider-native workflow decision, tmux/SSH substrate, or no-transcript rule.
@@ -942,6 +946,8 @@ provider-native workflow decision, tmux/SSH substrate, or no-transcript rule.
 - [Spike 0001: tmux remote-session transport](spikes/0001-tmux-remote-transport.md)
 - [Spike 0002: native Codex TUI over remote tmux](spikes/0002-codex-native-tui.md)
 - [Spike 0004: per-Workstream tmux runtime isolation](spikes/0004-tmux-runtime-isolation.md)
+- [Spike 0005: native Codex two-pane terminal presentation](spikes/0005-codex-terminal-presentation.md)
+- [Python Phase 7F terminal evidence](https://github.com/byebyebryan/agent-switchboard-python-reference/blob/main/docs/phase-7f-acceptance.md)
 - [Study 0003: Codex App Server runtime boundary](studies/0003-codex-app-server-runtime-boundary.md)
 - [Current Codex CLI commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
 - [Current Codex App Server](https://learn.chatgpt.com/docs/app-server)

@@ -1,0 +1,29 @@
+{
+  "study": "codex-terminal-presentation",
+  "provider": {
+    "id": "codex",
+    "version": "0.145.0",
+    "contract_fingerprint": "local-native-two-pane-retained-tmux-v2"
+  },
+  "status": "pass",
+  "reason": "native-two-pane-automation-proven",
+  "assertions": {
+    "isolated_codex_home": true,
+    "private_runtime_unit": true,
+    "presentation_two_panes": true,
+    "direct_native_attach": true,
+    "native_tmux_retained": true,
+    "keyboard_submit": true,
+    "image_attachment_requested": true,
+    "resize_propagates": true,
+    "focus_round_trip": true,
+    "tmux_256color_configured": true,
+    "truecolor_environment_configured": true,
+    "mouse_capability_configured": true,
+    "native_process_survives_presentation_reconnect": true,
+    "native_result_tip_preserved": true,
+    "ordinary_tmux_unchanged": true
+  },
+  "cleanup": "complete",
+  "elapsed_seconds": 15
+}

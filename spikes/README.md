@@ -15,8 +15,8 @@ dedicated local tmux socket -> SSH -> dedicated remote tmux socket
 It creates a disposable remote shell endpoint, proves fixed-message input,
 256-color capability, resize propagation, remote process survival after local
 detach, and reconnection to that same process. It enables tmux mouse support on
-the disposable servers only; actual provider mouse behavior remains a manual
-acceptance check.
+the disposable servers only; this script does not independently exercise
+provider mouse behavior.
 
 Run it only against a host you are authorized to access:
 
@@ -46,8 +46,9 @@ delete it after inspection. Normal runs retain no raw terminal content.
 
 `pass` without `--native-codex` applies only to the tmux/SSH transport study.
 The native Codex gate is `blocked` when no reachable authorized host has Codex.
-Actual provider mouse interaction remains a manual acceptance check even when
-the automated native gate passes.
+The terminal-substrate decision combines this remote evidence with local Spike
+0005 and the historical Python Phase 7F trial; there is no separate manual
+terminal spike gate.
 
 ## `tmux-runtime-isolation.sh`
 
@@ -63,3 +64,26 @@ spikes/tmux-runtime-isolation.sh --overhead-count 8 \
 
 The `TMUX`-scrubbed endpoint proves only namespace visibility for a shell. It
 does not establish that a native Codex TUI should run with `TMUX` removed.
+
+## codex-terminal-presentation.sh
+
+This local study provides current-version native Codex terminal evidence. It
+launches one real, isolated Codex TUI in the selected retained-TMUX runtime
+configuration and attaches it directly to a separate two-pane private
+presentation server.
+
+~~~console
+spikes/codex-terminal-presentation.sh \
+  --result /tmp/wsnav-codex-terminal-presentation.json
+~~~
+
+The temporary CODEX_HOME receives only a mode-0600 copy of auth.json; ordinary
+Codex configuration, hooks, sessions, skills, and logs are excluded. It submits
+one harmless image-attached prompt with read-only sandboxing. The result covers
+keyboard input, resize/focus, reconnect, result-tip preservation, and cleanup.
+It does not independently render-test mouse, pixels, images, or clipboard
+behavior; the combined terminal-substrate evidence is sufficient for the V1
+design.
+
+--debug-output writes before/after raw provider captures only at the explicit
+path with mode-0600; normal runs retain no raw terminal content.

@@ -48,7 +48,7 @@ workstreams, status, and conservative worktree operations.
 The isolated tmux/SSH transport and native Codex attach/detach/reconnect gates
 passed. The App Server runtime-boundary study supports the dedicated-TUI plus
 ephemeral-stdio split while leaving mutating contracts gated. See
-[Spike 0001][], [Spike 0002][], [Spike 0004][], [Study 0003][], and the
+[Spike 0001][], [Spike 0002][], [Spike 0004][], [Spike 0005][], [Study 0003][], and the
 sanitized [fixtures][].
 
 [agent-switchboard-python-reference]: https://github.com/byebyebryan/agent-switchboard-python-reference
@@ -56,5 +56,6 @@ sanitized [fixtures][].
 [Spike 0001]: docs/spikes/0001-tmux-remote-transport.md
 [Spike 0002]: docs/spikes/0002-codex-native-tui.md
 [Spike 0004]: docs/spikes/0004-tmux-runtime-isolation.md
+[Spike 0005]: docs/spikes/0005-codex-terminal-presentation.md
 [Study 0003]: docs/studies/0003-codex-app-server-runtime-boundary.md
 [fixtures]: spikes/fixtures/

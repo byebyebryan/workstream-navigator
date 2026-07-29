@@ -16,7 +16,9 @@ use crate::{
     provider::codex::app_server::EphemeralAppServer,
     provider::codex::hooks::drain_and_parse,
     provider::codex::profile::ObserverProfile,
-    runtime::{LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, SystemTmux},
+    runtime::{
+        LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
+    },
     state::{HostRegistry, IntegrationLifecycle, StateRoot},
 };
 
@@ -158,6 +160,28 @@ fn start(
         Some(&integration.ownership),
     )?;
     let prior_runtime = registry.runtime_for_workstream(workstream_id)?;
+    if let Some(prior_runtime) = &prior_runtime {
+        let tmux = SystemTmux::default();
+        let process_probe = LinuxProcessProbe;
+        let prior = PrivateRuntime::new(
+            &tmux,
+            &process_probe,
+            RuntimePaths::for_runtime(root.base(), prior_runtime.runtime_id),
+        );
+        match prior.probe()? {
+            RuntimeProbe::Live { .. } => {
+                println!("workstream {workstream_id} is already live");
+                return Ok(());
+            }
+            RuntimeProbe::Missing => {
+                if !matches!(prior_runtime.status, crate::domain::RuntimeStatus::Stopped) {
+                    registry
+                        .mark_runtime_stopped(prior_runtime.runtime_id, prior_runtime.revision)?;
+                }
+            }
+            RuntimeProbe::Unknown { .. } => return Err(AppError::RuntimeProbeAmbiguous),
+        }
+    }
     let prior_binding = prior_runtime
         .as_ref()
         .map(|runtime| registry.binding_for_runtime(runtime.runtime_id))
@@ -381,6 +405,8 @@ enum AppError {
         "observer profile trust is pending; complete native Codex /hooks review then run wsnav trust-observer"
     )]
     ObserverNotReady,
+    #[error("private runtime probe is ambiguous; refusing to create another Codex process")]
+    RuntimeProbeAmbiguous,
     #[error(transparent)]
     Profile(#[from] crate::provider::codex::profile::ProfileError),
     #[error(transparent)]

@@ -31,6 +31,8 @@
 - Prefer concrete Codex behavior over speculative multi-provider abstractions.
 - Use typed IDs, explicit state transitions, transactional revisions, bounded
   I/O, and deterministic test seams.
+- The first production-dependency commit must add and enforce its
+  license/advisory policy in CI.
 - Preserve unrelated user changes and commit coherent capabilities separately.
 
 ## Testing and validation

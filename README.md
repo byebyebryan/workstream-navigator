@@ -36,7 +36,7 @@ cargo run -- --help
 
 ## Design
 
-The proposed clean-slate V1 architecture is documented in [V1 design][]. It
+The approved clean-slate V1 architecture is documented in [V1 design][]. It
 keeps the native Codex workflow canonical, uses dedicated tmux runtimes and SSH
 for attachment, and limits Workstream Navigator to hosts, project locations,
 workstreams, status, and conservative worktree operations.

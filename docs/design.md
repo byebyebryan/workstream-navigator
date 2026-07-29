@@ -2,7 +2,7 @@
 
 Date: 2026-07-28
 
-Status: proposed reconciled V1; not an implementation or compatibility contract
+Status: approved V1 implementation baseline; no compatibility contract
 
 ## Product thesis
 
@@ -999,7 +999,7 @@ Passing fixtures contain only provider/version fingerprints, assertion
 booleans, event relationships, timings, and cleanup proof. Assisted diagnostics
 cannot become passing fixtures.
 
-## Proposed delivery checkpoints
+## V1 delivery checkpoints
 
 The checkpoint sequence and current implementation status are maintained in the
 [V1 roadmap](roadmap.md). The summaries below define the architectural boundary

@@ -48,9 +48,11 @@ Scope:
 - transactional compare-and-update primitives;
 - Start/Fork `CompoundOperation` phases, request deduplication, and ambiguous
   effect outcomes;
-- versioned host request/response and capability types; and
+- versioned host request/response and capability types;
 - deterministic clocks, ID sources, process probes, and failure injection at
-  test boundaries.
+  test boundaries; and
+- The first commit that introduces production dependencies also adds their
+  license/advisory policy and CI gate.
 
 Exit gate:
 
@@ -60,7 +62,9 @@ Exit gate:
 - Start/Fork phase tests cover pre-effect, confirmed effect, lost response,
   ambiguous effect, retry, and recovery-required outcomes;
 - protocol frames reject unknown incompatible versions and bounded-field
-  violations; and
+  violations;
+- introduced production dependencies are covered by the license/advisory gate;
+  and
 - the full format, lint, test, package-content, and `git diff --check` gates
   pass.
 

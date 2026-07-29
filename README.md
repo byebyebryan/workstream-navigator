@@ -45,11 +45,12 @@ workstreams, status, and conservative worktree operations.
 
 ## Decision studies
 
-The isolated tmux/SSH transport and native Codex attach/detach/reconnect gates
-passed. The App Server runtime-boundary study supports the dedicated-TUI plus
-ephemeral-stdio split while leaving mutating contracts gated. See
-[Spike 0001][], [Spike 0002][], [Spike 0004][], [Spike 0005][], [Study 0003][], and the
-sanitized [fixtures][].
+The isolated tmux/SSH transport, native Codex presentation, scoped observer
+profile, ephemeral naming, and running-source settled-fork gates passed. The
+results support the dedicated-TUI plus short-lived-stdio split and leave no
+provider capability as a pre-implementation design blocker. See [Spike 0001][],
+[Spike 0002][], [Spike 0004][], [Spike 0005][], [Spike 0006][], [Spike 0007][],
+[Spike 0008][], [Study 0003][], and the sanitized [fixtures][].
 
 [agent-switchboard-python-reference]: https://github.com/byebyebryan/agent-switchboard-python-reference
 [V1 design]: docs/design.md
@@ -57,5 +58,8 @@ sanitized [fixtures][].
 [Spike 0002]: docs/spikes/0002-codex-native-tui.md
 [Spike 0004]: docs/spikes/0004-tmux-runtime-isolation.md
 [Spike 0005]: docs/spikes/0005-codex-terminal-presentation.md
+[Spike 0006]: docs/spikes/0006-codex-observer-profile.md
+[Spike 0007]: docs/spikes/0007-codex-app-server-naming.md
+[Spike 0008]: docs/spikes/0008-codex-running-settled-fork.md
 [Study 0003]: docs/studies/0003-codex-app-server-runtime-boundary.md
 [fixtures]: spikes/fixtures/

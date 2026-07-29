@@ -301,10 +301,10 @@ Production sessions use the user's normal Codex home, authentication,
 configuration, plugins, skills, models, permissions, and native history.
 Temporary Codex homes remain test-only.
 
-Every live Workstream runs one dedicated native `codex` or
-`codex resume <thread-id>` process in its own host tmux session. The TUI owns
-that process's runtime for its entire lifetime. Workstream Navigator never
-launches a managed TUI with `codex --remote`.
+Every live Workstream runs one dedicated native `codex -C <checkout>` or
+`codex -C <checkout> resume <thread-id>` process in its own host tmux session.
+The TUI owns that process's runtime for its entire lifetime. Workstream
+Navigator never launches a managed TUI with `codex --remote`.
 
 Workstream Navigator also never starts a persistent App Server listener. A
 Unix, WebSocket, or other shared listener plus one or more `codex --remote`
@@ -421,8 +421,9 @@ Workstream Navigator protocol to SSH stdout.
 V1 allowlists only:
 
 - `thread/read` with `includeTurns: false` for exact managed thread IDs;
-- `thread/list` with `sourceKinds: ["cli"]` and `useStateDbOnly: true` only for
-  bounded recovery and `doctor` operations;
+- `thread/list` with `sourceKinds: ["cli"]` for ordinary bounded `doctor`
+  checks, or every documented source kind only while reconciling one unresolved
+  WSNav-owned Fork operation; both use `useStateDbOnly: true`;
 - `thread/name/set` for an explicit Rename action or a provisional fork name
   set before its destination TUI starts; and
 - `thread/fork` with an exact accepted `lastTurnId` and destination `cwd` for
@@ -431,7 +432,9 @@ V1 allowlists only:
 V1 does not call App Server turn start, steer, interrupt, item injection,
 runtime configuration, shell, approval, or provider-input methods. App Server
 runtime `status` is scoped to that short-lived process and is never treated as
-the status of a separately running native TUI.
+the status of a separately running native TUI. Codex 0.145.0 can expose a
+persisted partial turn as interrupted while the native TUI's command is still
+running; this is expected evidence that helper status is non-authoritative.
 
 `thread/read` and setting an already-requested name are safely repeatable.
 `thread/fork` is not assumed idempotent: if the helper exits after Codex may
@@ -441,11 +444,15 @@ not retry and risk a duplicate destination while the effect remains ambiguous.
 
 Only an unresolved CompoundOperation with `kind=fork` may use `thread/list` for
 this reconciliation. Its recorded evidence includes the exact source session,
-accepted last-turn ID, destination cwd, and effect timing. Recovery accepts
-only one matching destination; zero or multiple candidates remain
-`recovery_required` and are never guessed or automatically adopted. `doctor`
-may report the same bounded evidence but cannot turn broad discovery into
-ownership.
+accepted last-turn ID, requested destination cwd, and effect timing. Installed
+Codex 0.145.0 did not persist the requested fork cwd before native resume and
+did not place the fork in the CLI-only source-kind query. Recovery therefore
+queries all documented source kinds and matches exact source lineage, settled
+prefix, and effect time; requested cwd remains operation intent, not candidate
+proof. Recovery accepts only one matching destination; zero or multiple
+candidates remain `recovery_required` and are never guessed or automatically
+adopted. `doctor` may report the same bounded evidence but cannot turn broad
+discovery into ownership.
 
 The host extracts only approved fields from responses. It never returns or
 persists `preview`, turns, items, transcript paths, or the raw response.
@@ -454,9 +461,9 @@ persists `preview`, turns, items, transcript paths, or the raw response.
 Codex's native CLI and ephemeral App Server divide the action boundary:
 
 - fresh work uses `codex`;
-- recovery uses `codex resume <session-id>`;
+- recovery uses `codex -C <checkout> resume <session-id>`;
 - a Workstream fork uses App Server `thread/fork`, then starts the resulting
-  thread through `codex resume <destination-id>`; and
+  thread through `codex -C <destination-checkout> resume <destination-id>`;
 - chat naming uses native `/rename` or App Server `thread/name/set`, both
   changing the same Codex-owned field.
 
@@ -727,7 +734,7 @@ chooses Resume:
 
 ```text
 host creates a fresh dedicated tmux session in the recorded checkout
--> launches native codex resume with the exact session ID
+-> launches native codex -C <recorded-checkout> resume with the exact session ID
 -> SessionStart(source=resume) confirms the binding
 -> navigator attaches the provider pane
 ```
@@ -762,9 +769,9 @@ source Codex turn may still be running
 -> host validates the source binding and last settled provider boundary
 -> host resolves the ProjectLocation default base to an exact commit
 -> durable Fork operation creates an independent managed worktree
--> ephemeral App Server forks source through exact lastTurnId with destination cwd
+-> ephemeral App Server forks source through exact lastTurnId and requests destination cwd
 -> if source has a native name, host sets a bounded provisional fork name
--> host launches native codex resume for the returned destination thread ID
+-> host launches native codex -C <destination-worktree> resume for the returned destination thread ID
 -> destination SessionStart confirms the new native session
 -> source runtime continues unchanged
 -> navigator may focus destination; source completion only raises attention
@@ -948,47 +955,42 @@ mouse support in an equivalent private-tmux layout. That implementation is
 behavioral evidence only; it is not a Rust dependency or compatibility
 constraint.
 
-The following contracts still need isolated proof:
+Spikes 0006-0008 now settle the remaining provider-facing prerequisites:
 
-1. **Runtime isolation and ephemeral metadata:** every managed TUI remains a
-   dedicated process-owned runtime with one private tmux server/session/window/
-   pane; stdio helpers can read persisted metadata and exit without changing
-   it, while persistent App Server transports and `codex --remote` are
-   rejected.
-2. **Scoped Codex profile:** `wsnav-observer` layers over the same normal user
-   configuration and below trusted project and CLI layers; it changes no
-   provider behavior beyond managed-session observers; ordinary Codex launches
-   remain unchanged; foreign or modified profile collisions are refused;
-   native trust is confirmed from a disposable cwd without bypass; another
-   selected named profile is rejected clearly; disabled-hook policy is visible;
-   and exact update/removal leaves unrelated Codex state untouched.
-3. **Hook robustness:** large payloads, malformed input, missing authority,
-   stale generations, event races, and unavailable state never produce
-   broken-pipe or provider-facing hook errors.
-4. **Hook authority and status transaction:** forged agent-shell events cannot
-   rotate a ProviderBinding; legitimate `UserPromptSubmit`, `Stop`, result
-   attention, native `/new`, `/clear`, `/rename`, and resume yield conservative
-   navigator state without storing prompt or transcript content.
-5. **Thread-name lifecycle:** exact managed threads expose nullable names
-   through ephemeral `thread/read`; native and navigator rename converge,
-   context-specific fallbacks distinguish new, cutover, fork, and unavailable
-   states; native cutovers never overwrite a concurrent rename; remote
-   filtering removes previews; and failed refresh does not disturb the TUI.
-6. **Cold recovery:** loss of an exact private runtime tmux server followed by
-   `codex resume <session-id>` restores the same native history in the recorded
-   checkout and creates one new runtime generation.
-7. **Running-source fork:** ephemeral App Server `thread/fork` with the exact
-   accepted `lastTurnId` and destination `cwd` creates one persisted
-   destination; native resume opens it while the source's active turn and
-   dedicated process remain unchanged.
-8. **Worktree ownership:** independent and forked Workstreams resolve one exact
-   default-base commit and create collision-free managed worktrees without
-   exposing any removal action.
-9. **Multi-host protocol:** local and SSH adapters return the same semantic
+- the selected observer profile layers over a disabled base, uses native trust,
+  leaves ordinary launches unobserved, drains large unmanaged input, and rejects
+  missing, stale, or forged authority;
+- one-shot stdio helpers can read and rename an exact managed thread without
+  disturbing its native TUI, while shared App Server transports and
+  `codex --remote` are excluded;
+- native and App Server rename converge on `thread.name`, missing/unavailable
+  fallback resolution is complete, and the installed rename contract has no
+  compare-and-set field; and
+- a running native source can be forked exactly through its last settled turn,
+  recovered after an unread response without retry, and resumed in an
+  independent default-base worktree while both native Workstreams diverge.
+
+No provider capability remains as a pre-implementation design blocker. The
+following are delivery validation rather than reasons to widen the product:
+
+1. **Integration lifecycle:** another selected named profile is rejected
+   clearly, disabled-hook policy is visible, malformed/racing/unavailable hook
+   input remains fail-open to Codex, and exact update/removal preserves
+   unrelated state.
+2. **Status transactions and native transitions:** accepted hooks update
+   binding, settled-turn, and sticky attention state atomically across native
+   `/new`, `/clear`, `/rename`, resume, missed events, and event races.
+3. **Cold recovery:** loss of an exact private runtime followed by
+   `codex -C <checkout> resume <session-id>` restores the same native history
+   and creates one new runtime generation.
+4. **Worktree ownership:** independent and forked Workstreams create
+   collision-free managed worktrees from one exact default-base commit and
+   expose no removal action.
+5. **Multi-host protocol:** local and SSH adapters return the same semantic
    results through bounded polling, reject version or host-generation mismatch,
    survive disconnect, tolerate multiple tmux attachments, and never mutate an
    ordinary tmux server.
-10. **Combined acceptance:** start local work, start remote work while it runs,
+6. **Combined acceptance:** start local work, start remote work while it runs,
    switch between both, fork one, observe background completion without focus
    theft, reconnect, resume after runtime loss, and preserve every provider
    result tip.
@@ -1086,6 +1088,9 @@ result-tip preservation, or the no-transcript boundary.
 - [Spike 0002: native Codex TUI over remote tmux](spikes/0002-codex-native-tui.md)
 - [Spike 0004: per-Workstream tmux runtime isolation](spikes/0004-tmux-runtime-isolation.md)
 - [Spike 0005: native Codex two-pane terminal presentation](spikes/0005-codex-terminal-presentation.md)
+- [Spike 0006: scoped Codex observer profile](spikes/0006-codex-observer-profile.md)
+- [Spike 0007: ephemeral Codex metadata and naming](spikes/0007-codex-app-server-naming.md)
+- [Spike 0008: running-source settled-prefix fork](spikes/0008-codex-running-settled-fork.md)
 - [Python Phase 7F terminal evidence](https://github.com/byebyebryan/agent-switchboard-python-reference/blob/main/docs/phase-7f-acceptance.md)
 - [Study 0003: Codex App Server runtime boundary](studies/0003-codex-app-server-runtime-boundary.md)
 - [Current Codex CLI commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli)

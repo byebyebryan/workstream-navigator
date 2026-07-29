@@ -2,7 +2,7 @@
 
 Date: 2026-07-28
 
-Status: design evidence; mutating contracts still require isolated spikes
+Status: validated by isolated live Spikes 0007 and 0008
 
 ## Question
 
@@ -136,21 +136,27 @@ record exact source thread and accepted last settled turn
 -> ephemeral thread/fork(source, lastTurnId, destination cwd)
 -> optionally set a bounded provisional destination name
 -> close the helper
--> start native codex resume <destination-id> in dedicated tmux
+-> start native codex -C <destination-worktree> resume <destination-id> in dedicated tmux
 ```
 
-This remains a validation target. A live isolated spike must prove that the
-destination contains exactly the settled prefix, the source's active turn and
-TUI process remain unchanged, the destination survives helper exit, and native
-resume opens it in the destination worktree.
+Spike 0008 proved the destination contains exactly the settled prefix, the
+source's active turn and TUI process remain unchanged, the destination survives
+helper exit, and native resume executes commands in the destination worktree.
+
+One installed behavior narrows the request contract: Codex 0.145.0 did not
+persist the requested fork cwd before native resume. Workstream Navigator still
+passes `cwd`, but native `-C` is authoritative for destination execution and
+pre-resume recovery cannot require a matching stored cwd.
 
 The generated schema does not expose an idempotency key for `thread/fork`.
 Losing the response after Codex persisted a destination is therefore an
-ambiguous external effect. Workstream Navigator must query recorded lineage,
-cwd, and bounded operation evidence to identify exactly one destination. It
-must not retry while absence is unproven or more than one candidate exists.
-This bounded `thread/list` use is available only while reconciling an unresolved
-durable Fork operation; it is not a normal discovery or onboarding path.
+ambiguous external effect. Spike 0008 left a successful response unread,
+submitted no retry, and recovered one destination from exact source lineage,
+settled boundary, and operation timing. The fork was absent from a CLI-only
+source-kind query, so this one unresolved operation queries all documented
+source kinds before applying those exact filters. Zero or multiple candidates
+remain `recovery_required`. This bounded `thread/list` use is not a normal
+discovery or onboarding path.
 
 ## Workstream Navigator adapter contract
 
@@ -181,27 +187,26 @@ thread/fork       explicit Workstream fork only
 App Server turn, input, interrupt, shell, approval, item-injection, and runtime
 configuration methods are outside V1.
 
-## Remaining gates
+## Validation result
 
-- Prove short-lived reads do not change native TUI process, screen, input, or
-  runtime behavior.
-- Prove concurrent read and name-set operations are safe while the native TUI
-  is active.
-- Prove native `/rename` becomes visible to a later short-lived reader.
-- Prove new, cutover, fork, stale-cache, and ultimate fallback resolution.
-- Prove a native cutover cannot overwrite a concurrent `/rename` or naming
-  skill result.
-- Prove exact settled-tip fork and native resume as described above.
-- Prove lost-response fork reconciliation without duplicate destinations.
-- Refuse or diagnose persistent App Server endpoints and managed
-  `codex --remote` processes.
+Spike 0007 proved short-lived read and name-set stability beside a native TUI,
+native `/rename` visibility, response filtering, the full fallback matrix, the
+absence of compare-and-set, and rejection of persistent App Server and managed
+`codex --remote` topologies.
+
+Spike 0008 proved the exact settled-prefix fork beside a running source,
+single-submission lost-response reconciliation, native destination resume,
+default-base worktree execution, and source/destination divergence. It also
+confirmed that App Server's persisted view of the active source turn is not
+live status authority.
 
 ## Privacy and cleanup
 
-The study committed no thread UUID, prompt, preview, transcript, path, PID,
+The studies committed no thread UUID, prompt, preview, transcript, path, PID,
 credential, environment, or raw App Server response. Generated schema
-directories and short-lived App Server processes were removed. No Codex thread
-was renamed or forked, and no live TUI or repository was modified.
+directories, disposable threads/worktrees, short-lived App Server processes,
+and private tmux servers were removed. No ordinary Codex thread, repository,
+TUI, or tmux server was modified.
 
 ## Sources
 

@@ -107,7 +107,7 @@ not mean that one workstream migrates between them.
 | `ProjectLocation` | One registered Git repository and worktree root on one host | That host's Workstream Navigator registry |
 | `Workstream` | One independent checkout, runtime lane, and current provider-session binding | That host's Workstream Navigator registry |
 | `Checkout` | An external checkout or a Workstream Navigator-created Git worktree | Git plus the host registry's ownership record |
-| `Runtime` | One provider process in one dedicated host tmux session | tmux and live process evidence |
+| `Runtime` | One provider process in one private tmux server, session, window, and pane | tmux and live process evidence |
 | `ProviderSession` | A Codex chat/session referenced by its native identifier | Codex |
 | `ConversationTip` | The current native thread plus its latest accepted settled turn | Workstream Navigator binding plus Codex identities |
 | `ThreadName` | The current tip's user-facing name, changed through native `/rename` or App Server `thread/name/set` | Codex |
@@ -137,8 +137,8 @@ local terminal
     │   └── wsnav TUI
     └── provider pane
         └── wsnav attach helper
-            ├── local host: wsnav host helper -> dedicated host tmux
-            └── SSH host: ssh -tt -> remote wsnav helper -> dedicated host tmux
+            ├── local host: wsnav host helper -> exact runtime tmux server
+            └── SSH host: ssh -tt -> remote wsnav helper -> exact runtime tmux
                                                        └── native Codex TUI
 
 wsnav TUI
@@ -149,7 +149,8 @@ wsnav TUI
 
 each managed host
 ├── private SQLite state
-├── dedicated tmux server and one session per live workstream runtime
+├── one private tmux server per live workstream runtime
+│   └── exactly one session, window, and provider pane
 ├── short-lived wsnav action/snapshot/watch commands
 ├── per-operation Codex App Server stdio helpers
 └── Codex observer hooks active only in wsnav-started sessions
@@ -191,13 +192,42 @@ Every managed host owns:
 
 - one private state root;
 - one stable host identity;
-- one dedicated tmux socket and server generation;
-- zero or more provider runtime sessions;
+- zero or more runtime-private tmux sockets and server generations, one for
+  each live Runtime;
 - the workstream, checkout, operation, binding, and attention records for work
   physically running on that host.
 
 tmux owns live process persistence. SQLite owns metadata and recoverable
 operation state. Codex owns session history.
+
+Each live Runtime is a bounded tmux unit:
+
+```text
+Runtime -> one private socket and server -> one session -> one window -> one pane
+```
+
+No private runtime server contains a sibling Workstream. Parking, stopping, or
+retiring a Runtime removes its server rather than leaving an empty session.
+The registry, not tmux's own session list, is the cross-Workstream catalog.
+This contains server failure, terminal sizing, attachment, and `tmux ls`
+visibility to one Workstream at a time.
+
+### tmux namespace boundary
+
+Workstream Navigator never creates a session on the user's default tmux
+socket. An ordinary `tmux ls` therefore contains no Workstream Navigator
+sessions. A naming prefix is useful only when an operator deliberately inspects
+a private socket; it is not an isolation mechanism or a fallback for sharing
+the default server.
+
+A Workstream is not a tmux window. Window-per-Workstream would couple
+attachments through session-level current-window selection and size policy.
+Independent private servers keep an explicit provider attachment and tmux
+failure scoped to one Workstream.
+
+The private runtime socket belongs under the host's private state/run root at a
+short, bounded path. The host registry records it; no socket-discovery scan of
+the default tmux directory is permitted.
 
 There is no remote daemon in V1. Remote requests launch short-lived
 `wsnav _remote` commands through SSH. A connected navigator may keep one
@@ -691,7 +721,7 @@ while using the same host/runtime contracts.
 | Local presentation exits | Remote or local host runtime continues; reopen the navigator and attach |
 | SSH connection drops | Provider remains behind host tmux; show `unreachable`, then reconnect |
 | Remote host is offline | Preserve last known metadata; never claim the runtime stopped |
-| Dedicated host tmux server is gone | Mark runtime `recovery_required`; exact native resume may create a new runtime generation |
+| Exact private runtime tmux server is gone | Mark that Runtime `recovery_required`; exact native resume may create a new runtime generation |
 | Codex process exits normally | Keep Workstream and provider binding; offer exact native resume |
 | Observer hook is absent or missed | Show `unknown`; retain live attach; block exact fork/recovery if session identity is unknown |
 | Hook identity cannot be corroborated | Do not rotate the ProviderBinding; show `unknown` or `recovery required` |
@@ -714,7 +744,13 @@ gap.
 
 - State roots are user-private; directories use mode `0700` and files use
   `0600`.
-- tmux sockets are private and never reuse the user's ordinary socket.
+- Every live Runtime owns a private tmux socket and server with exactly one
+  session, window, and pane; these sockets never reuse the user's ordinary
+  socket.
+- Management commands use `env -u TMUX tmux -S <absolute-runtime-socket>` and
+  never bare `tmux` or `tmux -L`. A native provider retains the private `TMUX`
+  environment by default, so a bare `tmux ls` inside it sees at most that one
+  Runtime; removing `TMUX` remains a terminal-acceptance experiment.
 - SSH relies on the user's existing host authentication and `known_hosts`;
   Workstream Navigator opens no listener.
 - Managed Codex TUIs never use `codex --remote`, and Workstream Navigator never
@@ -776,15 +812,17 @@ lowest-common-denominator behavior should shape the Codex implementation.
 
 ## Validation gates before production implementation
 
-The existing spikes validate transport and native presentation only. The
-following contracts still need isolated proof:
+The existing spikes validate transport, native presentation, and the shell-only
+per-Runtime tmux topology. The following contracts still need isolated proof:
 
 1. **Terminal acceptance:** real mouse interaction, truecolor/box drawing,
-   resizing, focus changes, and reconnect through the final two-pane layout.
+   resizing, focus changes, reconnect through the final two-pane layout, and
+   the final native-Codex `TMUX` environment choice.
 2. **Runtime isolation and ephemeral metadata:** every managed TUI remains a
-   dedicated process-owned runtime; stdio helpers can read persisted metadata
-   and exit without changing it, while persistent App Server transports and
-   `codex --remote` are rejected.
+   dedicated process-owned runtime with one private tmux server/session/window/
+   pane; stdio helpers can read persisted metadata and exit without changing
+   it, while persistent App Server transports and `codex --remote` are
+   rejected.
 3. **Scoped Codex profile:** a managed profile can add passive hooks without
    changing unmanaged Codex sessions, and install/remove/trust behavior is
    deterministic.
@@ -800,7 +838,7 @@ following contracts still need isolated proof:
    context-specific fallbacks distinguish new, cutover, fork, and unavailable
    states; native cutovers never overwrite a concurrent rename; remote
    filtering removes previews; and failed refresh does not disturb the TUI.
-7. **Cold recovery:** loss of the dedicated tmux server followed by
+7. **Cold recovery:** loss of an exact private runtime tmux server followed by
    `codex resume <session-id>` restores the same native history in the recorded
    checkout and creates one new runtime generation.
 8. **Running-source fork:** ephemeral App Server `thread/fork` with the exact
@@ -833,7 +871,7 @@ cannot become passing fixtures.
 
 ### D1 — Local Codex runtime
 
-- Dedicated host tmux server and runtime sessions.
+- One private tmux server, session, window, and pane per live local Runtime.
 - Ephemeral App Server client for exact thread-name reads and writes.
 - Scoped Codex profile and observer hook.
 - Local project location, external initial checkout, start, attach, status,
@@ -886,13 +924,14 @@ The first pass deliberately settles these potentially expansive questions:
   shadow Workstream label, with context-specific computed fallbacks ending in
   the stable Workstream short ID; and
 - live TUIs use dedicated process-owned runtimes while App Server access is
-  short-lived stdio only.
+  short-lived stdio only; each Runtime has its own bounded private tmux server.
 
 The remaining pre-implementation decisions are:
 
 1. Codex profile naming, ownership marker, trust review, and removal UX.
-2. The private tmux terminal configuration needed for correct Unicode,
-   truecolor, extended keys, and mouse forwarding on supported hosts.
+2. The private tmux terminal configuration and final native-Codex `TMUX`
+   environment needed for correct Unicode, truecolor, extended keys, mouse,
+   images, and clipboard forwarding on supported hosts.
 3. Managed branch naming and the exact clean/merged retirement rule.
 
 These are bounded design questions. They do not reopen the product boundary,
@@ -902,6 +941,7 @@ provider-native workflow decision, tmux/SSH substrate, or no-transcript rule.
 
 - [Spike 0001: tmux remote-session transport](spikes/0001-tmux-remote-transport.md)
 - [Spike 0002: native Codex TUI over remote tmux](spikes/0002-codex-native-tui.md)
+- [Spike 0004: per-Workstream tmux runtime isolation](spikes/0004-tmux-runtime-isolation.md)
 - [Study 0003: Codex App Server runtime boundary](studies/0003-codex-app-server-runtime-boundary.md)
 - [Current Codex CLI commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
 - [Current Codex App Server](https://learn.chatgpt.com/docs/app-server)

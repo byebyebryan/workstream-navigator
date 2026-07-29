@@ -48,3 +48,18 @@ delete it after inspection. Normal runs retain no raw terminal content.
 The native Codex gate is `blocked` when no reachable authorized host has Codex.
 Actual provider mouse interaction remains a manual acceptance check even when
 the automated native gate passes.
+
+## `tmux-runtime-isolation.sh`
+
+This local study evaluates the selected host-runtime topology: one private
+tmux server, socket, session, window, and pane per live Workstream. It starts
+only fixed shell endpoints, proves sibling isolation and ordinary-tmux
+noninterference, and measures a bounded idle-server cohort.
+
+```console
+spikes/tmux-runtime-isolation.sh --overhead-count 8 \
+  --result /tmp/wsnav-runtime-isolation.json
+```
+
+The `TMUX`-scrubbed endpoint proves only namespace visibility for a shell. It
+does not establish that a native Codex TUI should run with `TMUX` removed.

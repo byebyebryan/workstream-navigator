@@ -13,6 +13,7 @@ use crate::domain::{
     RuntimeStatus, WorkstreamId,
 };
 use crate::provider::codex::hooks::{HookObservation, LifecycleEvent};
+use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 
 const HOST_SCHEMA_VERSION: i64 = 1;
 const CLIENT_SCHEMA_VERSION: i64 = 1;
@@ -213,6 +214,22 @@ pub struct ProviderBinding {
     pub revision: Revision,
 }
 
+/// Persisted ownership and native-trust state for the only managed Codex profile.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IntegrationLifecycle {
+    TrustPending,
+    Ready,
+    Modified,
+    Disabled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CodexIntegration {
+    pub ownership: ProfileOwnership,
+    pub lifecycle: IntegrationLifecycle,
+    pub revision: Revision,
+}
+
 impl HostRegistry {
     /// Opens the host registry, applying only known development migrations.
     ///
@@ -284,6 +301,73 @@ impl HostRegistry {
         self.connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(StateError::Sqlite)
+    }
+
+    /// Reads the single `wsnav-observer` ownership record, if it exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the record cannot be queried or contains invalid
+    /// persisted state.
+    pub fn codex_integration(&self) -> Result<Option<CodexIntegration>, StateError> {
+        self.connection
+            .query_row(
+                "SELECT canonical_profile_path, owner_id, hook_executable_path,
+                    generated_content_hash, lifecycle, revision
+                 FROM codex_integrations WHERE profile_name = ?1",
+                [OBSERVER_PROFILE_NAME],
+                row_to_integration,
+            )
+            .optional()
+            .map_err(StateError::Sqlite)
+    }
+
+    /// Stores an exactly-owned observer profile after an explicit setup action.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a different ownership record already exists or the
+    /// private transaction cannot be committed.
+    pub fn record_codex_integration(
+        &mut self,
+        ownership: ProfileOwnership,
+        lifecycle: IntegrationLifecycle,
+    ) -> Result<CodexIntegration, StateError> {
+        let existing = self.codex_integration()?;
+        if let Some(existing) = &existing
+            && existing.ownership != ownership
+        {
+            return Err(StateError::IntegrationOwnershipMismatch);
+        }
+        let revision = existing
+            .as_ref()
+            .map_or(Revision::INITIAL, |record| record.revision.next());
+        self.connection
+            .execute(
+                "INSERT INTO codex_integrations (
+                integration_id, profile_name, canonical_profile_path, owner_id,
+                profile_schema_version, hook_executable_path, generated_content_hash,
+                lifecycle, revision
+             ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8)
+             ON CONFLICT(profile_name) DO UPDATE SET
+                lifecycle = excluded.lifecycle, revision = excluded.revision",
+                params![
+                    Uuid::new_v4().to_string(),
+                    OBSERVER_PROFILE_NAME,
+                    ownership.canonical_path.to_string_lossy(),
+                    ownership.owner_id,
+                    ownership.hook_executable.to_string_lossy(),
+                    ownership.content_hash,
+                    integration_lifecycle_text(lifecycle),
+                    revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        Ok(CodexIntegration {
+            ownership,
+            lifecycle,
+            revision,
+        })
     }
 
     /// Registers one existing local checkout as an external initial workstream.
@@ -1047,6 +1131,21 @@ fn row_to_runtime(
     })
 }
 
+fn row_to_integration(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodexIntegration> {
+    let lifecycle: String = row.get(4)?;
+    let revision: i64 = row.get(5)?;
+    Ok(CodexIntegration {
+        ownership: ProfileOwnership {
+            canonical_path: PathBuf::from(row.get::<_, String>(0)?),
+            owner_id: row.get(1)?,
+            hook_executable: PathBuf::from(row.get::<_, String>(2)?),
+            content_hash: row.get(3)?,
+        },
+        lifecycle: integration_lifecycle_from_text(&lifecycle).map_err(to_from_sql_error)?,
+        revision: Revision::try_from(revision).map_err(to_from_sql_error)?,
+    })
+}
+
 fn load_binding(
     transaction: &rusqlite::Transaction<'_>,
     runtime_id: RuntimeId,
@@ -1257,6 +1356,25 @@ fn runtime_status_from_text(value: &str) -> Result<RuntimeStatus, StateError> {
     }
 }
 
+const fn integration_lifecycle_text(lifecycle: IntegrationLifecycle) -> &'static str {
+    match lifecycle {
+        IntegrationLifecycle::TrustPending => "trust_pending",
+        IntegrationLifecycle::Ready => "ready",
+        IntegrationLifecycle::Modified => "modified",
+        IntegrationLifecycle::Disabled => "disabled",
+    }
+}
+
+fn integration_lifecycle_from_text(value: &str) -> Result<IntegrationLifecycle, StateError> {
+    match value {
+        "trust_pending" => Ok(IntegrationLifecycle::TrustPending),
+        "ready" => Ok(IntegrationLifecycle::Ready),
+        "modified" => Ok(IntegrationLifecycle::Modified),
+        "disabled" => Ok(IntegrationLifecycle::Disabled),
+        _ => Err(StateError::InvalidPersistedValue(value.to_owned())),
+    }
+}
+
 fn validate_registry_text(name: &'static str, value: &str) -> Result<(), StateError> {
     if value.is_empty() || value.len() > 4096 || value.contains('\0') || value.contains('\n') {
         return Err(StateError::InvalidRegistryField(name));
@@ -1327,6 +1445,8 @@ pub enum StateError {
     HookEvidenceMismatch,
     #[error("unknown runtime {0}")]
     UnknownRuntime(RuntimeId),
+    #[error("Codex observer ownership does not match the recorded profile")]
+    IntegrationOwnershipMismatch,
 }
 
 #[cfg(test)]
@@ -1631,5 +1751,26 @@ mod tests {
             registry.binding_for_runtime(runtime.runtime_id).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn observer_ownership_is_stable_and_lifecycle_is_explicit() {
+        let (_temporary, mut registry) = registry();
+        let ownership = ProfileOwnership {
+            canonical_path: PathBuf::from("/private/codex/wsnav-observer.config.toml"),
+            owner_id: "owner".to_owned(),
+            hook_executable: PathBuf::from("/private/bin/wsnav"),
+            content_hash: "hash".to_owned(),
+        };
+        let pending = registry
+            .record_codex_integration(ownership.clone(), IntegrationLifecycle::TrustPending)
+            .unwrap();
+        let ready = registry
+            .record_codex_integration(ownership, IntegrationLifecycle::Ready)
+            .unwrap();
+
+        assert_eq!(pending.lifecycle, IntegrationLifecycle::TrustPending);
+        assert_eq!(ready.lifecycle, IntegrationLifecycle::Ready);
+        assert!(ready.revision > pending.revision);
     }
 }

@@ -14,8 +14,9 @@ use thiserror::Error;
 use crate::{
     domain::{RuntimeId, WorkstreamId},
     provider::codex::hooks::drain_and_parse,
+    provider::codex::profile::ObserverProfile,
     runtime::{LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, SystemTmux},
-    state::{HostRegistry, StateRoot},
+    state::{HostRegistry, IntegrationLifecycle, StateRoot},
 };
 
 const ABOUT: &str =
@@ -46,6 +47,10 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Commands {
+    /// Install the owned observer profile and leave native hook trust pending.
+    Setup,
+    /// Confirm native hook trust after reviewing it in Codex's `/hooks` UI.
+    TrustObserver,
     /// Register one existing Git checkout as the initial external workstream.
     Register { checkout: PathBuf },
     /// Start native Codex in a private tmux server for one registered workstream.
@@ -69,6 +74,8 @@ fn execute(cli: Cli) -> Result<(), AppError> {
     let root = StateRoot::create(cli.state_root.unwrap_or_else(default_state_root))?;
     let mut registry = HostRegistry::open(&root)?;
     match cli.command {
+        Commands::Setup => setup(&mut registry),
+        Commands::TrustObserver => trust_observer(&mut registry),
         Commands::Register { checkout } => register(&mut registry, &checkout),
         Commands::Start { workstream_id } => {
             start(&root, &mut registry, parse_workstream(&workstream_id)?)
@@ -99,11 +106,50 @@ fn register(registry: &mut HostRegistry, checkout: &Path) -> Result<(), AppError
     Ok(())
 }
 
+fn setup(registry: &mut HostRegistry) -> Result<(), AppError> {
+    let manager = observer_profile()?;
+    let existing = registry.codex_integration()?;
+    let ownership = manager.install(
+        uuid::Uuid::new_v4().to_string(),
+        existing.as_ref().map(|integration| &integration.ownership),
+    )?;
+    registry.record_codex_integration(ownership, IntegrationLifecycle::TrustPending)?;
+    println!(
+        "observer profile installed; review and trust it in Codex /hooks, then run wsnav trust-observer"
+    );
+    Ok(())
+}
+
+fn trust_observer(registry: &mut HostRegistry) -> Result<(), AppError> {
+    let integration = registry
+        .codex_integration()?
+        .ok_or(AppError::ObserverNotInstalled)?;
+    let manager = observer_profile()?;
+    let ownership = manager.install(
+        integration.ownership.owner_id.clone(),
+        Some(&integration.ownership),
+    )?;
+    registry.record_codex_integration(ownership, IntegrationLifecycle::Ready)?;
+    println!("observer profile marked ready");
+    Ok(())
+}
+
 fn start(
     root: &StateRoot,
     registry: &mut HostRegistry,
     workstream_id: WorkstreamId,
 ) -> Result<(), AppError> {
+    let integration = registry
+        .codex_integration()?
+        .ok_or(AppError::ObserverNotInstalled)?;
+    if integration.lifecycle != IntegrationLifecycle::Ready {
+        return Err(AppError::ObserverNotReady);
+    }
+    let manager = observer_profile()?;
+    manager.install(
+        integration.ownership.owner_id.clone(),
+        Some(&integration.ownership),
+    )?;
     let record = registry.reserve_runtime(workstream_id)?;
     let paths = RuntimePaths::for_runtime(root.base(), record.runtime_id);
     let tmux = SystemTmux::default();
@@ -139,6 +185,15 @@ fn start(
     }
     println!("started workstream {workstream_id}");
     Ok(())
+}
+
+fn observer_profile() -> Result<ObserverProfile, AppError> {
+    let codex_home = env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+        .ok_or(AppError::CodexHomeUnavailable)?;
+    let executable = env::current_exe().map_err(AppError::Io)?;
+    Ok(ObserverProfile::new(codex_home, executable))
 }
 
 fn observe_hook(state_root: Option<PathBuf>) {
@@ -274,6 +329,16 @@ enum AppError {
     NotGitCheckout,
     #[error("workstream {0} has no runtime")]
     NoRuntime(WorkstreamId),
+    #[error("CODEX_HOME cannot be determined")]
+    CodexHomeUnavailable,
+    #[error("observer profile is not installed; run wsnav setup")]
+    ObserverNotInstalled,
+    #[error(
+        "observer profile trust is pending; complete native Codex /hooks review then run wsnav trust-observer"
+    )]
+    ObserverNotReady,
+    #[error(transparent)]
+    Profile(#[from] crate::provider::codex::profile::ProfileError),
     #[error(transparent)]
     Runtime(#[from] crate::runtime::RuntimeError),
     #[error(transparent)]

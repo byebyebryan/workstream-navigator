@@ -1,0 +1,33 @@
+{
+  "study": "codex-app-server-naming",
+  "provider": {
+    "id": "codex",
+    "version": "0.145.0",
+    "contract_fingerprint": "sha256:4242b14096f29619f86c3d27a832d853ceaa55cbf60bd4ae3fafda446b1e8a5c"
+  },
+  "status": "pass",
+  "reason": "ephemeral-metadata-and-naming-boundary-proven",
+  "assertions": {
+    "ephemeral_stdio_only": true,
+    "persistent_endpoints_rejected": true,
+    "managed_remote_runtime_rejected": true,
+    "exact_cli_thread_identified": true,
+    "summary_read_does_not_disturb_tui": true,
+    "native_rename_visible_to_ephemeral_reader": true,
+    "app_server_rename_persisted": true,
+    "name_set_does_not_disturb_tui": true,
+    "native_runtime_facts_stable": true,
+    "helpers_exit_after_each_operation": true,
+    "response_fields_filtered": true,
+    "name_state_classified": true,
+    "name_set_has_no_compare_and_set": true,
+    "fallback_matrix_complete": true,
+    "fallback_evaluation_does_not_write_provider_name": true,
+    "disposable_repository_unchanged": true,
+    "temporary_root_deleted": true,
+    "ordinary_tmux_unchanged": true,
+    "preexisting_agent_processes_unchanged": true
+  },
+  "cleanup": "complete",
+  "elapsed_seconds": 17
+}

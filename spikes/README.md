@@ -111,3 +111,24 @@ ordinary tmux server is unchanged, and all private state is removed. It emits
 sanitized relationship assertions only; UUIDs, prompts, transcripts, paths,
 PIDs, credentials, raw hook payloads, and raw terminal captures are not
 retained.
+
+## codex-app-server-naming.py
+
+This local study validates the short-lived Codex App Server metadata boundary
+beside a separately running native TUI.
+
+~~~console
+spikes/codex-app-server-naming.py \
+  --result /tmp/wsnav-codex-app-server-naming.json
+~~~
+
+The spike creates one disposable native Codex thread, then starts a fresh
+`codex app-server --listen stdio://` process for each bounded metadata
+operation. It proves exact summary reads, native `/rename` visibility,
+App-Server rename persistence, native-process and screen stability, response
+field filtering, and the complete V1 display-name fallback matrix.
+
+The Python harness is non-installed spike machinery, not product code or a
+runtime dependency. Its result is sanitized and the temporary Codex home,
+repository, schemas, App Server processes, private tmux servers, and raw
+provider data are deleted before evidence is emitted.

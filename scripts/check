@@ -33,7 +33,7 @@ cargo package --locked --allow-dirty
 "${cargo_deny_bin}" check
 
 shopt -s nullglob
-shell_files=(scripts/check spikes/*.sh)
+shell_files=(scripts/check scripts/d1-local-acceptance.sh spikes/*.sh)
 python_files=(spikes/*.py)
 fixture_files=(spikes/fixtures/*.json)
 

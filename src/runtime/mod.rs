@@ -329,6 +329,12 @@ impl<'a> PrivateRuntime<'a> {
             arguments: vec![OsString::from("kill-server")],
         })?;
         if response.success || is_missing_server(&response.stderr) {
+            if self.paths.directory.exists() {
+                fs::remove_dir_all(&self.paths.directory).map_err(|source| RuntimeError::Io {
+                    path: self.paths.directory.clone(),
+                    source,
+                })?;
+            }
             return Ok(());
         }
         Err(RuntimeError::TmuxRejected(trim_diagnostic(

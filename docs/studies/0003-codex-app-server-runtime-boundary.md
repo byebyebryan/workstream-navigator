@@ -149,6 +149,8 @@ Losing the response after Codex persisted a destination is therefore an
 ambiguous external effect. Workstream Navigator must query recorded lineage,
 cwd, and bounded operation evidence to identify exactly one destination. It
 must not retry while absence is unproven or more than one candidate exists.
+This bounded `thread/list` use is available only while reconciling an unresolved
+durable Fork operation; it is not a normal discovery or onboarding path.
 
 ## Workstream Navigator adapter contract
 

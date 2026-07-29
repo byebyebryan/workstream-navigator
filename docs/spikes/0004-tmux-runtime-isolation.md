@@ -57,17 +57,14 @@ shared host server with many Workstream sessions and not many Workstreams as
 windows of one session. The local presentation remains a separate disposable
 private server with its navigator and attachment panes.
 
-This result does not prove that removing `TMUX` is safe for a native Codex TUI.
-That remains part of terminal acceptance: color, mouse, images, clipboard,
-resize, hooks, and result preservation must be checked before using that
-environment change in production. It is not necessary for the selected
-topology: a native TUI that retains `TMUX` sees at most its own bounded private
-session.
-
-The existing [native Codex transport spike][spike-0002] remains the evidence
-that an actual Codex TUI survives private-tmux detach and reconnect. Its
-provider behavior should be repeated only when a final terminal configuration
-is selected.
+Removing `TMUX` is unnecessary for the selected topology: a native TUI that
+retains it sees at most its own bounded private session. The subsequent
+[terminal-presentation spike][spike-0005] accepted retained `TMUX` as the V1
+configuration and proved native color, mouse configuration, image attachment,
+resize, focus, reconnect, and result-tip preservation. The earlier
+[native Codex transport spike][spike-0002] independently established that an
+actual Codex TUI survives private-tmux detach and reconnect.
 
 [fixture]: ../../spikes/fixtures/tmux-runtime-isolation.json
 [spike-0002]: 0002-codex-native-tui.md
+[spike-0005]: 0005-codex-terminal-presentation.md

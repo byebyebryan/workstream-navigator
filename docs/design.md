@@ -2,7 +2,7 @@
 
 Date: 2026-07-28
 
-Status: proposed first pass; not an implementation or compatibility contract
+Status: proposed reconciled V1; not an implementation or compatibility contract
 
 ## Product thesis
 
@@ -65,12 +65,14 @@ its completed visible result.
   managed worktrees for additional workstreams.
 - Activity and durable result attention for Workstream Navigator-started Codex
   sessions.
+- Explicit setup, native trust review, status, and exact removal of one
+  observer-only Codex profile on each managed host.
 - Reconnection after local UI or SSH loss.
 - Recovery after the host tmux runtime disappears, using the provider's native
   session identity.
 - Direct CLI equivalents for the TUI's important actions.
-- One input owner per provider runtime, with explicit takeover rather than
-  shared or ambiguous terminal input.
+- Multiple same-user attachment points to one provider runtime, using tmux's
+  native shared-screen behavior without a separate input-lease system.
 
 ### Explicitly outside V1
 
@@ -83,6 +85,11 @@ its completed visible result.
   `/clear`, `/fork`, `/rename`, Plan mode, history, settings, permissions, or
   model selection. Navigator Rename is a thin call to the same Codex-owned name
   field, not a separate naming system.
+- Composing the WSNav observer with another user-selected Codex `--profile`.
+  V1 managed launches preserve the normal base and trusted project
+  configuration layers but reserve the one selected profile slot.
+- A catch-all global WSNav hook or plugin observer that runs for ordinary Codex
+  sessions.
 - Transcript storage, transcript rendering, history search, or project memory.
 - A custom PTY server, terminal emulator, browser UI, desktop UI, or mobile UI.
 - A public network service or always-running remote daemon.
@@ -111,8 +118,7 @@ not mean that one workstream migrates between them.
 | `ProviderSession` | A Codex chat/session referenced by its native identifier | Codex |
 | `ConversationTip` | The current native thread plus its latest accepted settled turn | Workstream Navigator binding plus Codex identities |
 | `ThreadName` | The current tip's user-facing name, changed through native `/rename` or App Server `thread/name/set` | Codex |
-| `Attention` | A durable indication that background work completed or needs recovery | Workstream Navigator |
-| `AttachmentLease` | The single client currently allowed to send terminal input to a runtime | That host's Workstream Navigator registry plus live tmux evidence |
+| `AttentionState` | One durable, sticky indication per Workstream that a result or recovery state remains unseen | Workstream Navigator |
 
 V1 deliberately has no `Task` record. Tasks remain what the user asks Codex to
 do inside a provider session. A workstream may carry many successive tasks and
@@ -151,7 +157,7 @@ each managed host
 ├── private SQLite state
 ├── one private tmux server per live workstream runtime
 │   └── exactly one session, window, and provider pane
-├── short-lived wsnav action/snapshot/watch commands
+├── short-lived wsnav action and snapshot commands
 ├── per-operation Codex App Server stdio helpers
 └── Codex observer hooks active only in wsnav-started sessions
 ```
@@ -179,12 +185,12 @@ clients may look at different workstreams without racing over a global
 `current` record. Durable state records activity and attention, never an
 authoritative focused pane.
 
-A provider Runtime has at most one input-enabled attachment. The host grants a
-short-lived AttachmentLease to the attachment helper and corroborates it with
-the live dedicated tmux client. A second navigator may inspect metadata but
-cannot attach for input unless the first attachment is gone or the user
-explicitly takes over. A takeover detaches the previous presentation client; it
-does not send provider input or stop the provider process.
+A provider Runtime may have more than one same-user tmux attachment, including
+another Workstream Navigator client or a deliberate direct attachment to its
+private socket. tmux mirrors the same screen and terminal state across those
+clients. Workstream Navigator does not add leases, heartbeats, takeover, or
+input fencing. Simultaneous typing can interleave and is explicitly a
+user-coordination concern in V1.
 
 ### Host runtime layer
 
@@ -194,11 +200,11 @@ Every managed host owns:
 - one stable host identity;
 - zero or more runtime-private tmux sockets and server generations, one for
   each live Runtime;
-- the workstream, checkout, operation, binding, and attention records for work
-  physically running on that host.
+- the workstream, checkout, Start/Fork recovery, binding, and attention records
+  for work physically running on that host.
 
 tmux owns live process persistence. SQLite owns metadata and recoverable
-operation state. Codex owns session history.
+Start/Fork state. Codex owns session history.
 
 Each live Runtime is a bounded tmux unit:
 
@@ -206,8 +212,8 @@ Each live Runtime is a bounded tmux unit:
 Runtime -> one private socket and server -> one session -> one window -> one pane
 ```
 
-No private runtime server contains a sibling Workstream. Parking, stopping, or
-retiring a Runtime removes its server rather than leaving an empty session.
+No private runtime server contains a sibling Workstream. Parking or stopping a
+Runtime removes its server rather than leaving an empty session.
 The registry, not tmux's own session list, is the cross-Workstream catalog.
 This contains server failure, terminal sizing, attachment, and `tmux ls`
 visibility to one Workstream at a time.
@@ -229,14 +235,30 @@ The private runtime socket belongs under the host's private state/run root at a
 short, bounded path. The host registry records it; no socket-discovery scan of
 the default tmux directory is permitted.
 
-There is no remote daemon in V1. Remote requests launch short-lived
-`wsnav _remote` commands through SSH. A connected navigator may keep one
-read-only `watch` command open per host; that process exits with the client and
-does not own provider runtimes or mutation authority.
+There is no remote daemon in V1. Control requests launch short-lived
+`wsnav _remote` commands through SSH. The one intentional long-lived path is an
+interactive `ssh -tt` attachment to a provider Runtime; it carries the native
+terminal and no management watch stream. A connected navigator refreshes hosts
+through bounded snapshots: focused or recently active hosts may be polled more
+frequently, while background and repeatedly unreachable hosts back off. Action
+responses update local state immediately; the next snapshot reconciles it.
 
-All mutation commands use host-local SQLite transactions, optimistic revisions,
-and idempotency keys. Concurrent hooks and clients may race, but only one
-transaction can commit a particular record revision.
+All mutation commands use host-local SQLite transactions and optimistic
+revisions. Start and Fork additionally use durable request keys and recovery
+phases because they cross non-transactional Git, tmux, process, or provider
+boundaries. Concurrent hooks and clients may race, but only one transaction can
+commit a particular record revision.
+
+Focus, attach, snapshot, and refresh are not durable operations. Rename is a
+repeatable provider setting. Park and Resume reconcile through the authoritative
+Runtime record plus live tmux/process probes. Only Start and Fork use the
+CompoundOperation journal.
+
+Resume transactionally reserves one new Runtime generation before launching
+tmux or Codex. The launcher must match that exact prepared record, and another
+Resume is refused while the generation is `starting` or live. If the response
+is lost, a snapshot reconciles the prepared record with the exact private tmux
+socket and process evidence instead of starting a second Runtime.
 
 ### Host transport
 
@@ -244,9 +266,8 @@ Local and SSH hosts implement one internal interface:
 
 ```text
 hello() -> protocol, host identity, versions, capabilities
-snapshot() -> projects, workstreams, runtime probes, attention
-watch(revision) -> bounded state changes
-apply(operation, expected revisions) -> deterministic outcome
+snapshot() -> locations, workstreams, runtime probes, attention
+apply(action, expected revisions) -> deterministic outcome
 attach(runtime_id) -> native terminal attachment
 ```
 
@@ -260,6 +281,19 @@ state. An incompatible host is visible but unavailable for actions. V1 requires
 the user to install `wsnav` on each host and register a fixed executable path.
 It diagnoses missing or incompatible binaries but does not copy, bootstrap, or
 update remote executables.
+
+The handshake returns a stable host ID and registry generation. If either
+changes unexpectedly for an existing client registration, the client preserves
+its cached view but disables mutation. V1 does not merge catalogs, adopt
+unknown runtimes, or reconcile divergent host registries. The user explicitly
+resets that client registration and registers the current host state again.
+The registry generation changes only when the registry is replaced or
+explicitly reset; ordinary record mutations use their own revisions.
+
+Polling introduces bounded display staleness, not state loss: observer hooks
+commit status and AttentionState on the host before any client sees them. The
+next snapshot exposes the durable state, while manual refresh and mutation
+responses provide immediate paths when the user is actively interacting.
 
 ### Codex adapter
 
@@ -278,20 +312,57 @@ clients changes the runtime into a client/shared-server topology. That
 contradicts the Workstream isolation boundary even if the provider surface
 still looks native.
 
-Workstream Navigator adds one narrowly scoped Codex profile for sessions that
-it launches. The profile layers on top of normal user configuration and adds
-observation-only lifecycle hooks. It is activated explicitly on managed
-launches and is inactive for ordinary Codex sessions.
+Workstream Navigator installs one narrowly scoped profile named
+`wsnav-observer` at `$CODEX_HOME/wsnav-observer.config.toml`. Managed native
+launches add `--profile wsnav-observer`; ordinary Codex launches do not. This
+uses the user's existing `CODEX_HOME`, not an isolated or copied home.
 
-The profile and hook definition must be owned, versioned, collision-checked,
-reviewable, and removable. Workstream Navigator never overwrites a profile it
-does not own and never installs a catch-all global hook.
+Codex loads the normal system and user configuration, overlays the selected
+profile, then applies trusted project configuration and explicit CLI
+overrides. The WSNav profile contains only the hook feature setting and the
+four observation-only lifecycle hook definitions below. It never selects or
+changes a model, provider, reasoning effort, permissions, sandbox, approval
+policy, MCP server, skill, plugin, memory, UI preference, or native history
+setting.
+
+V1 does not compose two named Codex profiles. If a user later needs another
+selected profile for managed launches, WSNav reports that capability as
+unsupported rather than copying, parsing, or synthesizing the user's profile.
+Session-scoped hook injection or explicit profile composition may be studied
+later. This does not affect ordinary Codex use of any profile.
+
+The profile is installed only by an explicit setup action. Its generated file
+starts with a human-readable managed marker, but write and removal authority
+comes from a private host record containing an owner ID, schema version,
+canonical profile path, absolute WSNav hook executable path, and exact
+generated-content hash. Creation and replacement use a mode-`0600` temporary
+file plus atomic rename. An existing unowned path, a missing ownership record,
+or content that differs from the recorded hash is never overwritten or
+removed automatically.
+
+The hook definition is reviewed and trusted through Codex's native `/hooks`
+UI. WSNav never writes Codex's trust database and never passes
+`--dangerously-bypass-hook-trust`. Setup opens a native profile-selected trust
+review process with a prepared setup-probe authority in an empty disposable
+cwd. It keeps the real `CODEX_HOME` so native trust persists, but it does not
+load a project configuration or project hooks. After the user trusts the
+definition and exits, a successful passive lifecycle event confirms the
+installation before observer-dependent Workstream launch is enabled. Whether
+an unprompted review process leaves any native history residue is a validation
+gate and must be disclosed if it cannot be avoided.
 
 Existing user-configured Codex hooks remain the user's integrations. Workstream
 Navigator neither disables nor rewrites them, and cannot guarantee that an
 unrelated failing hook will preserve the native UI. `doctor` reports detected
 overlap or failures when Codex exposes enough information, without silently
 mutating the user's configuration.
+
+Profile update or removal requires no live WSNav-managed Codex Runtime. An
+update that changes the hook definition returns the integration to
+`trust_pending` until native review succeeds again. Removal deletes only an
+exactly owned and unchanged profile plus its WSNav ownership record. It leaves
+base configuration, other profiles, user and project hooks, plugins, history,
+credentials, and Codex-owned trust state untouched.
 
 The observer consumes these native events:
 
@@ -315,7 +386,7 @@ The hook is deliberately passive:
 
 Hook evidence can update status and bind an observed native session inside an
 already managed runtime. It cannot authorize workstream creation, fork,
-retirement, provider input, Git mutation, or focus.
+parking, provider input, Git mutation, or focus.
 
 A ProviderBinding is stronger than an untrusted hook claim. Initial and changed
 bindings are accepted only when the event agrees with a pending launch or
@@ -367,6 +438,14 @@ the status of a separately running native TUI.
 have created a destination but before returning its ID, Workstream Navigator
 must reconcile exact provider lineage and recorded operation evidence. It must
 not retry and risk a duplicate destination while the effect remains ambiguous.
+
+Only an unresolved CompoundOperation with `kind=fork` may use `thread/list` for
+this reconciliation. Its recorded evidence includes the exact source session,
+accepted last-turn ID, destination cwd, and effect timing. Recovery accepts
+only one matching destination; zero or multiple candidates remain
+`recovery_required` and are never guessed or automatically adopted. `doctor`
+may report the same bounded evidence but cannot turn broad discovery into
+ownership.
 
 The host extracts only approved fields from responses. It never returns or
 persists `preview`, turns, items, transcript paths, or the raw response.
@@ -467,7 +546,7 @@ The local client catalog contains only:
 
 The client catalog is not authority for a remote runtime, worktree, provider
 binding, or mutation. Losing it does not stop remote work. Reconstructing a
-catalog from host registries may be added later.
+cross-host Project grouping is a manual re-registration action in V1.
 
 Project identity is explicit, not inferred from a repository URL, directory
 name, branch, or Git remote. Registering another host location against the same
@@ -475,6 +554,11 @@ client-generated Project ID groups it in the navigator. Repository identity is
 still recorded at each location to prevent accidental cross-repository
 operations. If the client catalog is lost, host-local Workstreams remain
 usable, but the cross-host grouping must be registered again in V1.
+
+Projects are client-local presentation groups. A host does not store a Project
+ID and two clients may group the same ProjectLocations differently without
+changing host state. Host actions address opaque Location and Workstream IDs,
+not a replicated project catalog.
 
 ### Host registry
 
@@ -484,8 +568,12 @@ The host registry contains:
 HostIdentity
   host_id, registry_generation, schema_version
 
+CodexIntegration
+  profile_name, canonical_profile_path, owner_id, profile_schema_version,
+  hook_executable_path, generated_content_hash, lifecycle, revision
+
 ProjectLocation
-  location_id, project_id, repository_identity, repository_path,
+  location_id, repository_identity, repository_path,
   default_base_ref, managed_worktree_root, revision
 
 Workstream
@@ -504,18 +592,16 @@ ProviderBinding
   binding_id, runtime_id, native_session_id, start_source,
   last_settled_turn_id?, observed_thread_name?, name_state,
   name_observed_at?,
-  previous_binding_id?, runtime_generation, revision
+  predecessor_native_session_id?, predecessor_effective_name?,
+  runtime_generation, revision
 
-Attention
-  attention_id, workstream_id, native_session_id, turn_id,
-  kind, observed_revision, acknowledged_at?
+AttentionState
+  workstream_id, result_unseen_since_revision?,
+  recovery_unseen_since_revision?, latest_native_session_id?,
+  latest_turn_id?, revision
 
-AttachmentLease
-  lease_id, runtime_id, client_id, tmux_client_fingerprint,
-  acquired_at, heartbeat_at, revision
-
-Operation
-  operation_id, idempotency_key, kind, phase, expected_revisions,
+CompoundOperation
+  operation_id, request_key, kind=start|fork, phase, expected_revisions,
   effect_watermark, outcome
 ```
 
@@ -528,10 +614,12 @@ payload, terminal capture, credential, or environment dump is persisted.
 
 - One open Workstream owns exactly one Checkout.
 - One managed Checkout has exactly one open Workstream owner.
-- One Workstream has at most one input-enabled Runtime.
-- One Runtime has at most one live input-enabled AttachmentLease.
-- One Runtime has one current ProviderBinding and may retain prior binding IDs
-  for exact lineage and recovery.
+- One host has at most one owned `wsnav-observer` CodexIntegration.
+- One Workstream has at most one live Runtime.
+- One Runtime has one current ProviderBinding.
+- The binding may retain only the immediately replaced native session ID and
+  effective name needed for cutover display and bounded recovery. V1 stores no
+  browsable or recursively linked binding history.
 - The current ProviderBinding plus its accepted `last_settled_turn_id` is the
   Workstream's ConversationTip.
 - `observed_thread_name` is a cache of Codex-owned metadata, not a second
@@ -542,19 +630,35 @@ payload, terminal capture, credential, or environment dump is persisted.
   user-authored name.
 - Many native Codex sessions may appear sequentially inside one Workstream as
   the user uses native `/new`, `/clear`, or `/fork`.
-- Attention never changes presentation focus.
+- One sticky AttentionState exists per Workstream; it never changes
+  presentation focus.
 - Runtime status and Workstream lifecycle are separate.
 
-Every accepted settled turn creates durable Attention independent of focus.
-The presentation may render the currently attached Workstream less urgently,
-but it never uses focus to decide whether completion was persisted. Attention
-is cleared only by an explicit acknowledge action, so a UI crash or focus race
-cannot lose a completed result.
+Every accepted settled turn marks the Workstream's AttentionState as unseen
+independent of focus, updates its latest exact identifiers, and leaves
+`result_unseen_since_revision` unchanged if an earlier result was already
+unseen. Recovery evidence similarly makes its unseen flag sticky and dominates
+ordinary result presentation. Acknowledge uses the exact observed AttentionState
+revision and clears only that kind of notification, so a concurrent newer event
+cannot be lost. Acknowledging recovery attention does not clear the Workstream's
+`recovery_required` lifecycle; only successful recovery does. The row is not an
+event history: provider results remain canonical in Codex.
+
+Suggested CodexIntegration lifecycle values:
+
+```text
+trust_pending | ready | modified | disabled
+```
+
+No record means not installed. `modified` means the generated profile no longer
+matches the owned hash. `disabled` means Codex policy or a higher-precedence
+configuration prevents the profile hooks from running. Neither state is
+silently repaired.
 
 Suggested Workstream lifecycle values:
 
 ```text
-open | parked | recovery_required | retiring | retired
+open | parked | recovery_required
 ```
 
 Suggested observed Runtime status values:
@@ -576,7 +680,8 @@ Workstream Navigator root.
 
 Before creating an independent or forked Workstream, the host resolves
 `default_base_ref` to one exact locally available commit. It does not fetch.
-The operation records that commit before creating the branch or worktree.
+The Start or Fork operation records that commit before creating the branch or
+worktree.
 
 Conversation and filesystem lineage are deliberately separate:
 
@@ -590,12 +695,19 @@ untracked files, ignored files, build output, processes, or credentials. The
 navigator must make that distinction visible.
 
 Workstream Navigator never stashes or force-removes. Managed worktree removal
-requires exact ownership, matching repository identity, no active runtime, a
-clean checkout, and a separately approved retirement rule. External checkouts
-are never removed.
+is outside V1: parking a Workstream stops its Runtime but preserves its checkout,
+branch, provider binding, and registry record. Workstream Navigator does not
+delete external or managed checkouts, remove branches, or decide whether work
+was merged.
 
-The precise branch naming and merged-state retirement rule remain design gates
-before worktree implementation.
+`doctor` may report preserved managed worktrees and their recorded ownership.
+Any cleanup uses ordinary user-directed Git tooling outside Workstream
+Navigator.
+
+Managed branches use an implementation-owned collision-resistant namespace
+derived from the opaque Workstream ID. Users are not asked to name branches in
+the ordinary path. Exact spelling is an implementation detail covered by
+creation and collision tests, not a user-facing naming authority.
 
 ## Core workflows
 
@@ -625,7 +737,7 @@ host creates a fresh dedicated tmux session in the recorded checkout
 ```text
 user selects ProjectLocation and Start Workstream
 -> host resolves the exact default-base commit
--> operation reserves Workstream, Checkout, and Runtime IDs
+-> durable Start operation reserves Workstream, Checkout, and Runtime IDs
 -> host creates the managed branch and worktree
 -> host launches a blank native Codex TUI in dedicated tmux
 -> SessionStart confirms the native session
@@ -649,7 +761,7 @@ source Codex turn may still be running
 -> user explicitly selects Fork Workstream
 -> host validates the source binding and last settled provider boundary
 -> host resolves the ProjectLocation default base to an exact commit
--> operation creates an independent managed worktree
+-> durable Fork operation creates an independent managed worktree
 -> ephemeral App Server forks source through exact lastTurnId with destination cwd
 -> if source has a native name, host sets a bounded provisional fork name
 -> host launches native codex resume for the returned destination thread ID
@@ -729,16 +841,19 @@ while using the same host/runtime contracts.
 | Exact name read returns empty | Record `known_empty` and compute the context-specific fallback |
 | Name refresh is unavailable | Keep the dedicated TUI untouched and retain the cached native name with stale or unreachable provenance |
 | Ephemeral App Server mutation is ambiguous | Reconcile exact persisted effects; never retry a non-idempotent fork unless absence is proven, otherwise require recovery |
-| A second client requests attachment | Refuse shared input; offer explicit takeover after revalidating the existing lease and tmux client |
+| Another client or direct tmux client attaches | Show the same tmux-managed screen; do not create a lease or detach either client; simultaneous input may interleave |
 | Navigator crashes during focus switch | Focus is ephemeral; no durable runtime or Workstream mutation is implied |
-| Client disconnects during compound action | Reopen the idempotent Operation and reconcile recorded external effects |
+| Client disconnects during Start or Fork | Reopen the exact CompoundOperation and reconcile recorded external effects |
 | Git worktree creation is partial | Record `recovery_required`; never guess ownership or delete uncertain paths |
-| Managed checkout is dirty | Block removal; never stash, reset, or force-remove |
+| Managed checkout is dirty | Preserve it; V1 has no worktree or branch removal action |
 | Host protocol versions differ | Reject mutation and show an actionable compatibility diagnostic |
+| Registered host ID or registry generation changes unexpectedly | Preserve the cached view, reject mutation, and require explicit client-side reset and registration |
+| `wsnav-observer` is absent, foreign, modified, disabled, or awaiting trust | Preserve existing Runtime attachment; block new observer-dependent launch and report the exact setup or native `/hooks` action |
+| Profile update or removal is requested while a managed Runtime is live | Refuse the integration change until all WSNav-managed Codex Runtimes on that host are parked or stopped |
 
-Result completion and attention creation must commit in one host transaction.
-This directly avoids the Python prototype's split result/attention persistence
-gap.
+Result completion and the sticky AttentionState update must commit in one host
+transaction. This directly avoids the Python prototype's split
+result/attention persistence gap.
 
 ## Security and privacy
 
@@ -749,12 +864,20 @@ gap.
   socket.
 - Management commands use `env -u TMUX tmux -S <absolute-runtime-socket>` and
   never bare `tmux` or `tmux -L`. A native provider retains the private `TMUX`
-  environment by default, so a bare `tmux ls` inside it sees at most that one
-  Runtime; removing `TMUX` remains a terminal-acceptance experiment.
+  environment by design, so a bare `tmux ls` inside it sees at most that one
+  Runtime. Spike 0005 accepted this terminal configuration.
+- Private tmux sockets are a namespace and accidental-discovery boundary, not
+  a same-user security boundary. Workstream Navigator does not prevent a user
+  who knows the socket path from attaching or stopping the Runtime.
 - SSH relies on the user's existing host authentication and `known_hosts`;
   Workstream Navigator opens no listener.
 - Managed Codex TUIs never use `codex --remote`, and Workstream Navigator never
   starts a persistent Codex App Server transport.
+- Managed Codex TUIs use the normal user `CODEX_HOME` plus the exactly owned
+  `wsnav-observer` profile. The generated profile is mode `0600`, adds only
+  passive lifecycle hooks, and is selected only for WSNav launches.
+- Hook trust is a native Codex user decision. WSNav neither edits the trust
+  store nor bypasses trust review.
 - Ephemeral App Server helpers use private stdio, a distinct process group,
   bounded request and shutdown deadlines, and forced cleanup when graceful
   shutdown fails.
@@ -775,8 +898,9 @@ gap.
   known binding.
 - Every Runtime carries a generation and process-birth fingerprint so stale
   hooks and attachments cannot silently bind to a replacement process.
-- Every destructive Git action revalidates exact recorded ownership immediately
-  before the effect.
+- V1 exposes no destructive Git action. Managed worktree and branch creation
+  revalidate repository identity, exact base commit, destination ownership, and
+  collision freedom before the effect.
 
 ## Proposed Rust structure
 
@@ -785,7 +909,7 @@ src/
 ├── main.rs               CLI entrypoint
 ├── app.rs                top-level command orchestration
 ├── domain/               pure IDs, entities, statuses, invariants
-├── state/                SQLite schema, transactions, revisions, operations
+├── state/                SQLite schema, revisions, and Start/Fork recovery
 ├── protocol/             versioned host request/response frames
 ├── host/
 │   ├── local.rs          direct host adapter
@@ -797,13 +921,14 @@ src/
 │   ├── mod.rs            capability-driven provider interface
 │   └── codex/
 │       ├── runtime.rs    dedicated native launch and resume
+│       ├── profile.rs    observer profile ownership and native trust setup
 │       ├── app_server.rs ephemeral stdio metadata/name/fork client
 │       └── hooks.rs      passive lifecycle event handling
 ├── git/
 │   ├── repository.rs     repository identity and base resolution
-│   └── worktree.rs       create, verify, and guarded retirement
+│   └── worktree.rs       create and verify managed worktrees
 ├── tui/                  minimal navigator state, rendering, input, mouse
-└── internal/             hidden remote, hook, and watch entrypoints
+└── internal/             hidden remote, hook, and snapshot entrypoints
 ```
 
 The provider interface should remain small and capability-based. V1 has one
@@ -830,9 +955,13 @@ The following contracts still need isolated proof:
    pane; stdio helpers can read persisted metadata and exit without changing
    it, while persistent App Server transports and `codex --remote` are
    rejected.
-2. **Scoped Codex profile:** a managed profile can add passive hooks without
-   changing unmanaged Codex sessions, and install/remove/trust behavior is
-   deterministic.
+2. **Scoped Codex profile:** `wsnav-observer` layers over the same normal user
+   configuration and below trusted project and CLI layers; it changes no
+   provider behavior beyond managed-session observers; ordinary Codex launches
+   remain unchanged; foreign or modified profile collisions are refused;
+   native trust is confirmed from a disposable cwd without bypass; another
+   selected named profile is rejected clearly; disabled-hook policy is visible;
+   and exact update/removal leaves unrelated Codex state untouched.
 3. **Hook robustness:** large payloads, malformed input, missing authority,
    stale generations, event races, and unavailable state never produce
    broken-pipe or provider-facing hook errors.
@@ -853,11 +982,12 @@ The following contracts still need isolated proof:
    destination; native resume opens it while the source's active turn and
    dedicated process remain unchanged.
 8. **Worktree ownership:** independent and forked Workstreams resolve one exact
-   default-base commit, create collision-free managed worktrees, and refuse
-   unsafe retirement.
+   default-base commit and create collision-free managed worktrees without
+   exposing any removal action.
 9. **Multi-host protocol:** local and SSH adapters return the same semantic
-   results, reject version mismatch, survive disconnect, enforce one input
-   attachment, and never mutate an ordinary tmux server.
+   results through bounded polling, reject version or host-generation mismatch,
+   survive disconnect, tolerate multiple tmux attachments, and never mutate an
+   ordinary tmux server.
 10. **Combined acceptance:** start local work, start remote work while it runs,
    switch between both, fork one, observe background completion without focus
    theft, reconnect, resume after runtime loss, and preserve every provider
@@ -873,14 +1003,17 @@ cannot become passing fixtures.
 
 - Domain types, IDs, statuses, invariants, and errors.
 - Fresh SQLite state with migrations only from V1 development schemas.
-- Operation idempotency and failure-injection tests.
+- Start/Fork phase recovery, request deduplication, and failure-injection tests.
 - Versioned host protocol types.
 
 ### D1 — Local Codex runtime
 
 - One private tmux server, session, window, and pane per live local Runtime.
 - Ephemeral App Server client for exact thread-name reads and writes.
-- Scoped Codex profile and observer hook.
+- Explicit `wsnav-observer` setup, ownership, native trust review, doctor, and
+  exact removal contracts.
+- Scoped observer hook plus normal user and trusted-project configuration
+  preservation.
 - Local project location, external initial checkout, start, attach, status,
   tip naming, attention, park, and exact resume.
 - No TUI requirement yet; CLI acceptance first.
@@ -890,11 +1023,12 @@ cannot become passing fixtures.
 - Dedicated local presentation tmux session.
 - Ratatui navigator pane plus directly interactive provider pane.
 - Keyboard/mouse selection, focus, switching, and attention.
-- Terminal acceptance gate.
+- Product-level terminal regression tests against the already selected
+  retained-TMUX substrate.
 
 ### D3 — SSH hosts
 
-- Host registration, handshake, snapshot/watch/apply/attach.
+- Host registration, handshake, snapshot polling, apply, and attach.
 - Remote start, attach, reconnect, status, and cold resume.
 - Strict protocol and capability diagnostics.
 
@@ -904,11 +1038,10 @@ cannot become passing fixtures.
 - Independent Workstream action.
 - Exact-turn App Server conversation fork into a separately based worktree,
   followed by native TUI resume.
-- Guarded retirement policy.
 
 ### D5 — Recovery and V1 acceptance
 
-- Crash/failure reconciliation for every compound action.
+- Crash/failure reconciliation for Start and Fork.
 - Install, doctor, uninstall, and residue checks.
 - Combined local/remote workflow acceptance.
 - UX polish after behavior is complete.
@@ -917,29 +1050,35 @@ Each checkpoint should be reviewable, committed, and accepted separately. No
 checkpoint should install hooks, adopt existing sessions, or mutate ordinary
 tmux/provider state during automated tests.
 
-## Decisions still requiring review
+## Settled V1 design decisions
 
-The first pass deliberately settles these potentially expansive questions:
+The reconciled design settles these potentially expansive questions:
 
-- project grouping uses explicit opaque IDs and registration, not repository
-  heuristics;
+- project grouping is client-local and uses explicit opaque Location mappings,
+  not repository heuristics or a replicated host-side Project ID;
 - remote hosts require a preinstalled compatible binary at a registered path;
-  V1 has no deployment system; and
-- simultaneous provider input is unsupported; one live AttachmentLease or an
-  explicit takeover is required;
+  V1 has no deployment system;
+- multiple same-user tmux attachments are allowed without an input lease;
+  simultaneous typing is a user-coordination concern;
+- host or registry-generation disagreement fails closed and requires explicit
+  reset and re-registration rather than adoption, merge, or reconciliation;
+- status propagation uses bounded adaptive snapshot polling rather than a
+  long-lived watch transport;
+- durable compound-operation recovery is limited to Start and Fork;
+- V1 parks Workstreams but never removes their worktrees or branches;
+- managed Codex launches select the exactly owned `wsnav-observer` profile over
+  the normal user configuration while ordinary launches remain untouched;
+  composing another selected profile is deferred;
 - Workstream display names come from the current Codex tip thread rather than a
   shadow Workstream label, with context-specific computed fallbacks ending in
   the stable Workstream short ID; and
 - live TUIs use dedicated process-owned runtimes while App Server access is
   short-lived stdio only; each Runtime has its own bounded private tmux server.
 
-The remaining pre-implementation decisions are:
-
-1. Codex profile naming, ownership marker, trust review, and removal UX.
-2. Managed branch naming and the exact clean/merged retirement rule.
-
-These are bounded design questions. They do not reopen the product boundary,
-provider-native workflow decision, tmux/SSH substrate, or no-transcript rule.
+No product-boundary decision remains open before implementation. The validation
+gates may still falsify an assumed provider capability and force a narrower
+workflow, but they do not authorize silently weakening isolation, trust,
+result-tip preservation, or the no-transcript boundary.
 
 ## Evidence basis
 
@@ -950,6 +1089,7 @@ provider-native workflow decision, tmux/SSH substrate, or no-transcript rule.
 - [Python Phase 7F terminal evidence](https://github.com/byebyebryan/agent-switchboard-python-reference/blob/main/docs/phase-7f-acceptance.md)
 - [Study 0003: Codex App Server runtime boundary](studies/0003-codex-app-server-runtime-boundary.md)
 - [Current Codex CLI commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
+- [Current Codex configuration profiles](https://learn.chatgpt.com/docs/config-file/config-advanced#profiles)
 - [Current Codex App Server](https://learn.chatgpt.com/docs/app-server)
 - [Current Codex lifecycle hooks](https://learn.chatgpt.com/docs/hooks)
 - [DMS Agent Picker](https://github.com/byebyebryan/dms-agent-picker)

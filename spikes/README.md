@@ -87,3 +87,27 @@ design.
 
 --debug-output writes before/after raw provider captures only at the explicit
 path with mode-0600; normal runs retain no raw terminal content.
+
+## codex-observer-profile.sh
+
+This local study validates the proposed dedicated Codex observer profile and
+passive lifecycle-hook authority boundary.
+
+~~~console
+spikes/codex-observer-profile.sh \
+  --result /tmp/wsnav-codex-observer-profile.json
+~~~
+
+The harness uses a temporary CODEX_HOME with a synthetic base configuration
+that disables hooks and a separately selected wsnav-observer profile that
+enables only four spike-owned hooks. It drives Codex's native hook-trust prompt,
+then proves SessionStart, UserPromptSubmit, Stop, and SessionEnd ordering in a
+fresh native TUI. Unmanaged, forged-process, and stale-generation invocations
+are rejected only after stdin is fully drained.
+
+The test also proves that an ordinary launch without the profile produces no
+observer events, profile install/remove ownership checks fail closed, the
+ordinary tmux server is unchanged, and all private state is removed. It emits
+sanitized relationship assertions only; UUIDs, prompts, transcripts, paths,
+PIDs, credentials, raw hook payloads, and raw terminal captures are not
+retained.

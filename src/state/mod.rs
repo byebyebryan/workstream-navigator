@@ -8,8 +8,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::domain::{
-    AttentionState, CompoundOperation, DomainError, HostId, IdGenerator, OperationId,
-    OperationKind, OperationPhase, RandomIdGenerator, Revision, WorkstreamId,
+    AttentionState, CheckoutId, CompoundOperation, DomainError, HostId, IdGenerator, LocationId,
+    OperationId, OperationKind, OperationPhase, RandomIdGenerator, Revision, RuntimeId,
+    RuntimeStatus, WorkstreamId,
 };
 
 const HOST_SCHEMA_VERSION: i64 = 1;
@@ -156,6 +157,12 @@ impl StateRoot {
         self.base.join("host.sqlite")
     }
 
+    /// Returns the private state-root directory used for runtime path derivation.
+    #[must_use]
+    pub fn base(&self) -> &Path {
+        &self.base
+    }
+
     #[must_use]
     pub fn client_database_path(&self) -> PathBuf {
         self.base.join("client.sqlite")
@@ -171,6 +178,29 @@ pub struct HostRegistry {
 pub struct HostIdentity {
     pub host_id: HostId,
     pub registry_generation: String,
+}
+
+/// One V1 external checkout and its initial workstream registration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalWorkstream {
+    pub location_id: LocationId,
+    pub checkout_id: CheckoutId,
+    pub workstream_id: WorkstreamId,
+    pub checkout_path: PathBuf,
+    pub repository_identity: String,
+    pub default_base_ref: String,
+}
+
+/// The persisted record that makes one native tmux process recoverable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeRecord {
+    pub runtime_id: RuntimeId,
+    pub workstream_id: WorkstreamId,
+    pub tmux_generation: String,
+    pub tmux_session: String,
+    pub cwd: PathBuf,
+    pub status: RuntimeStatus,
+    pub revision: Revision,
 }
 
 impl HostRegistry {
@@ -244,6 +274,200 @@ impl HostRegistry {
         self.connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(StateError::Sqlite)
+    }
+
+    /// Registers one existing local checkout as an external initial workstream.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an input field is unsafe, the checkout path already
+    /// exists in registry state, or the transaction cannot be committed.
+    pub fn register_external_workstream(
+        &mut self,
+        checkout_path: PathBuf,
+        repository_identity: String,
+        default_base_ref: String,
+    ) -> Result<ExternalWorkstream, StateError> {
+        validate_registry_text("repository identity", &repository_identity)?;
+        validate_registry_text("default base ref", &default_base_ref)?;
+        let registration = ExternalWorkstream {
+            location_id: LocationId::new(),
+            checkout_id: CheckoutId::new(),
+            workstream_id: WorkstreamId::new(),
+            checkout_path,
+            repository_identity,
+            default_base_ref,
+        };
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let path = registration.checkout_path.to_string_lossy();
+        transaction
+            .execute(
+                "INSERT INTO project_locations (
+                    location_id, repository_identity, repository_path, default_base_ref,
+                    managed_worktree_root, revision
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+                params![
+                    registration.location_id.to_string(),
+                    registration.repository_identity,
+                    path,
+                    registration.default_base_ref,
+                    "",
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        transaction
+            .execute(
+                "INSERT INTO checkouts (
+                    checkout_id, path, ownership, branch, creation_commit,
+                    repository_identity, revision
+                 ) VALUES (?1, ?2, 'external', NULL, NULL, ?3, 1)",
+                params![
+                    registration.checkout_id.to_string(),
+                    registration.checkout_path.to_string_lossy(),
+                    registration.repository_identity,
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        transaction
+            .execute(
+                "INSERT INTO workstreams (
+                    workstream_id, location_id, origin, source_workstream_id,
+                    checkout_id, lifecycle, revision
+                 ) VALUES (?1, ?2, 'external', NULL, ?3, 'open', 1)",
+                params![
+                    registration.workstream_id.to_string(),
+                    registration.location_id.to_string(),
+                    registration.checkout_id.to_string(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(registration)
+    }
+
+    /// Reserves the single Runtime record for an open workstream before launch.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the workstream is unknown, not open, already live,
+    /// or durable state cannot be changed.
+    pub fn reserve_runtime(
+        &mut self,
+        workstream_id: WorkstreamId,
+    ) -> Result<RuntimeRecord, StateError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let checkout_path: String = transaction
+            .query_row(
+                "SELECT checkouts.path FROM workstreams
+                 JOIN checkouts ON checkouts.checkout_id = workstreams.checkout_id
+                 WHERE workstreams.workstream_id = ?1 AND workstreams.lifecycle = 'open'",
+                [workstream_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
+        let current: Option<RuntimeRecord> = transaction
+            .query_row(
+                "SELECT runtime_id, tmux_generation, tmux_session, cwd, lifecycle, revision
+                 FROM runtimes WHERE workstream_id = ?1",
+                [workstream_id.to_string()],
+                |row| row_to_runtime(row, workstream_id),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?;
+        let generation = Uuid::new_v4().to_string();
+        let record = if let Some(current) = current {
+            if !matches!(
+                current.status,
+                RuntimeStatus::Stopped | RuntimeStatus::Unknown
+            ) {
+                return Err(StateError::RuntimeAlreadyLive(workstream_id));
+            }
+            let next = RuntimeRecord {
+                tmux_generation: generation,
+                tmux_session: format!("wsnav-{}", current.runtime_id.short()),
+                cwd: PathBuf::from(checkout_path),
+                status: RuntimeStatus::Starting,
+                revision: current.revision.next(),
+                ..current
+            };
+            transaction
+                .execute(
+                    "UPDATE runtimes SET tmux_generation = ?1, tmux_session = ?2, cwd = ?3,
+                     process_birth = NULL, lifecycle = 'starting', revision = ?4
+                     WHERE runtime_id = ?5 AND revision = ?6",
+                    params![
+                        next.tmux_generation,
+                        next.tmux_session,
+                        next.cwd.to_string_lossy(),
+                        next.revision.value(),
+                        next.runtime_id.to_string(),
+                        current.revision.value()
+                    ],
+                )
+                .map_err(StateError::Sqlite)?;
+            next
+        } else {
+            let runtime_id = RuntimeId::new();
+            let record = RuntimeRecord {
+                runtime_id,
+                workstream_id,
+                tmux_generation: generation,
+                tmux_session: format!("wsnav-{}", runtime_id.short()),
+                cwd: PathBuf::from(checkout_path),
+                status: RuntimeStatus::Starting,
+                revision: Revision::INITIAL,
+            };
+            transaction
+                .execute(
+                    "INSERT INTO runtimes (
+                    runtime_id, workstream_id, provider, tmux_generation, tmux_session,
+                    cwd, process_birth, lifecycle, revision
+                 ) VALUES (?1, ?2, 'codex', ?3, ?4, ?5, NULL, 'starting', 1)",
+                    params![
+                        record.runtime_id.to_string(),
+                        workstream_id.to_string(),
+                        record.tmux_generation,
+                        record.tmux_session,
+                        record.cwd.to_string_lossy()
+                    ],
+                )
+                .map_err(StateError::Sqlite)?;
+            record
+        };
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(record)
+    }
+
+    /// Marks the reserved Runtime stopped after its exact private tmux server is parked.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown runtime, stale state, or failed transaction.
+    pub fn mark_runtime_stopped(
+        &mut self,
+        runtime_id: RuntimeId,
+        expected: Revision,
+    ) -> Result<(), StateError> {
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE runtimes SET lifecycle = 'stopped', revision = revision + 1
+             WHERE runtime_id = ?1 AND revision = ?2",
+                params![runtime_id.to_string(), expected.value()],
+            )
+            .map_err(StateError::Sqlite)?;
+        if changed != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        Ok(())
     }
 
     /// Creates a durable operation or returns the operation for the request key.
@@ -641,6 +865,29 @@ fn row_to_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompoundOperati
     })
 }
 
+fn row_to_runtime(
+    row: &rusqlite::Row<'_>,
+    workstream_id: WorkstreamId,
+) -> rusqlite::Result<RuntimeRecord> {
+    let runtime_id: String = row.get(0)?;
+    let generation: String = row.get(1)?;
+    let session: String = row.get(2)?;
+    let cwd: String = row.get(3)?;
+    let lifecycle: String = row.get(4)?;
+    let revision: i64 = row.get(5)?;
+    Ok(RuntimeRecord {
+        runtime_id: Uuid::parse_str(&runtime_id)
+            .map(RuntimeId::from)
+            .map_err(to_from_sql_error)?,
+        workstream_id,
+        tmux_generation: generation,
+        tmux_session: session,
+        cwd: PathBuf::from(cwd),
+        status: runtime_status_from_text(&lifecycle).map_err(to_from_sql_error)?,
+        revision: Revision::try_from(revision).map_err(to_from_sql_error)?,
+    })
+}
+
 fn load_attention_from_connection(
     connection: &Connection,
     workstream_id: WorkstreamId,
@@ -740,6 +987,26 @@ fn operation_phase_from_text(value: &str) -> Result<OperationPhase, StateError> 
     }
 }
 
+fn runtime_status_from_text(value: &str) -> Result<RuntimeStatus, StateError> {
+    match value {
+        "starting" => Ok(RuntimeStatus::Starting),
+        "idle" => Ok(RuntimeStatus::Idle),
+        "working" => Ok(RuntimeStatus::Working),
+        "attention" => Ok(RuntimeStatus::Attention),
+        "stopped" => Ok(RuntimeStatus::Stopped),
+        "unknown" => Ok(RuntimeStatus::Unknown),
+        "unreachable" => Ok(RuntimeStatus::Unreachable),
+        _ => Err(StateError::InvalidPersistedValue(value.to_owned())),
+    }
+}
+
+fn validate_registry_text(name: &'static str, value: &str) -> Result<(), StateError> {
+    if value.is_empty() || value.len() > 4096 || value.contains('\0') || value.contains('\n') {
+        return Err(StateError::InvalidRegistryField(name));
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn set_private_directory_permissions(path: &Path) -> Result<(), StateError> {
     use std::os::unix::fs::PermissionsExt;
@@ -778,6 +1045,8 @@ pub enum StateError {
     ConcurrentWrite,
     #[error("invalid persisted value: {0}")]
     InvalidPersistedValue(String),
+    #[error("invalid registry field {0}")]
+    InvalidRegistryField(&'static str),
     #[error("invalid persisted UUID: {0}")]
     InvalidPersistedUuid(uuid::Error),
     #[error("I/O at {path}: {source}")]
@@ -793,6 +1062,10 @@ pub enum StateError {
     UnsupportedSchemaVersion(i64),
     #[error("unknown operation {0}")]
     UnknownOperation(OperationId),
+    #[error("workstream {0} is unknown or not open")]
+    UnknownOpenWorkstream(WorkstreamId),
+    #[error("workstream {0} already has a live runtime")]
+    RuntimeAlreadyLive(WorkstreamId),
 }
 
 #[cfg(test)]
@@ -979,5 +1252,32 @@ mod tests {
 
         assert!(inserted);
         assert_eq!(operation.id, OperationId::from(Uuid::from_u128(1)));
+    }
+
+    #[test]
+    fn external_workstream_reserves_one_runtime_until_it_is_stopped() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let first = registry.reserve_runtime(registered.workstream_id).unwrap();
+
+        assert_eq!(first.status, RuntimeStatus::Starting);
+        assert!(matches!(
+            registry.reserve_runtime(registered.workstream_id),
+            Err(StateError::RuntimeAlreadyLive(id)) if id == registered.workstream_id
+        ));
+        registry
+            .mark_runtime_stopped(first.runtime_id, first.revision)
+            .unwrap();
+        let resumed = registry.reserve_runtime(registered.workstream_id).unwrap();
+
+        assert_eq!(resumed.runtime_id, first.runtime_id);
+        assert_ne!(resumed.tmux_generation, first.tmux_generation);
+        assert_eq!(resumed.status, RuntimeStatus::Starting);
     }
 }

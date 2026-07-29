@@ -2,7 +2,6 @@
 name = "wsnav"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
 description = "A native-workflow terminal navigator for persistent coding workstreams across hosts."
 repository = "https://github.com/byebyebryan/workstream-navigator"
 license = "MIT"

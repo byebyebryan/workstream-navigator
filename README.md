@@ -26,13 +26,11 @@ agent teams, transfer task context, or provide persistent project memory.
 
 ## Development
 
-The bootstrap intentionally has no third-party dependencies. Architecture and
-runtime choices will follow a fresh design and validation pass.
+Development follows the latest stable Rust toolchain. The complete local gate
+also requires Git, jq, Ruff 0.16.0, and ShellCheck.
 
 ```console
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
+scripts/check
 cargo run -- --help
 ```
 

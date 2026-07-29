@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+required_tools=(bash cargo git jq ruff shellcheck)
+missing_tools=()
+
+for tool in "${required_tools[@]}"; do
+    if ! command -v "${tool}" >/dev/null 2>&1; then
+        missing_tools+=("${tool}")
+    fi
+done
+
+if ((${#missing_tools[@]} > 0)); then
+    printf 'error: missing required check tools: %s\n' "${missing_tools[*]}" >&2
+    exit 1
+fi
+
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo test --locked --all-targets --all-features
+cargo package --locked --allow-dirty
+
+shopt -s nullglob
+shell_files=(scripts/check spikes/*.sh)
+python_files=(spikes/*.py)
+fixture_files=(spikes/fixtures/*.json)
+
+for shell_file in "${shell_files[@]}"; do
+    bash -n "${shell_file}"
+done
+shellcheck "${shell_files[@]}"
+
+if ((${#python_files[@]} > 0)); then
+    ruff check "${python_files[@]}"
+    ruff format --check "${python_files[@]}"
+fi
+
+for fixture_file in "${fixture_files[@]}"; do
+    jq empty "${fixture_file}"
+done
+
+git diff --check
+git diff --cached --check

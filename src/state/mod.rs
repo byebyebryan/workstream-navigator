@@ -370,6 +370,47 @@ impl HostRegistry {
         })
     }
 
+    /// Returns whether any managed runtime is not durably stopped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when runtime state cannot be queried.
+    pub fn has_live_runtime(&self) -> Result<bool, StateError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtimes WHERE lifecycle != 'stopped')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(StateError::Sqlite)
+    }
+
+    /// Removes the observer ownership row after the exact profile file is removed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an absent/mismatched record or a failed state mutation.
+    pub fn remove_codex_integration(
+        &mut self,
+        ownership: &ProfileOwnership,
+    ) -> Result<(), StateError> {
+        let current = self
+            .codex_integration()?
+            .ok_or(StateError::IntegrationOwnershipMismatch)?;
+        if current.ownership != *ownership {
+            return Err(StateError::IntegrationOwnershipMismatch);
+        }
+        let deleted = self.connection.execute(
+            "DELETE FROM codex_integrations WHERE profile_name = ?1 AND generated_content_hash = ?2",
+            params![OBSERVER_PROFILE_NAME, ownership.content_hash],
+        ).map_err(StateError::Sqlite)?;
+        if deleted == 1 {
+            Ok(())
+        } else {
+            Err(StateError::ConcurrentWrite)
+        }
+    }
+
     /// Registers one existing local checkout as an external initial workstream.
     ///
     /// # Errors

@@ -54,6 +54,10 @@ enum Commands {
     Setup,
     /// Confirm native hook trust after reviewing it in Codex's `/hooks` UI.
     TrustObserver,
+    /// Inspect the exact observer ownership and trust lifecycle without changing it.
+    Doctor,
+    /// Remove only the exact unchanged owned observer profile after all runtimes stop.
+    RemoveObserver,
     /// Register one existing Git checkout as the initial external workstream.
     Register { checkout: PathBuf },
     /// Start native Codex in a private tmux server for one registered workstream.
@@ -81,6 +85,8 @@ fn execute(cli: Cli) -> Result<(), AppError> {
     match cli.command {
         Commands::Setup => setup(&mut registry),
         Commands::TrustObserver => trust_observer(&mut registry),
+        Commands::Doctor => doctor(&registry),
+        Commands::RemoveObserver => remove_observer(&mut registry),
         Commands::Register { checkout } => register(&mut registry, &checkout),
         Commands::Start { workstream_id } => {
             start(&root, &mut registry, parse_workstream(&workstream_id)?)
@@ -122,10 +128,41 @@ fn setup(registry: &mut HostRegistry) -> Result<(), AppError> {
         uuid::Uuid::new_v4().to_string(),
         existing.as_ref().map(|integration| &integration.ownership),
     )?;
-    registry.record_codex_integration(ownership, IntegrationLifecycle::TrustPending)?;
+    let lifecycle = existing.map_or(IntegrationLifecycle::TrustPending, |integration| {
+        integration.lifecycle
+    });
+    registry.record_codex_integration(ownership, lifecycle)?;
     println!(
         "observer profile installed; review and trust it in Codex /hooks, then run wsnav trust-observer"
     );
+    Ok(())
+}
+
+fn doctor(registry: &HostRegistry) -> Result<(), AppError> {
+    let integration = registry.codex_integration()?;
+    let Some(integration) = integration else {
+        println!("observer: not installed");
+        return Ok(());
+    };
+    let manager = observer_profile()?;
+    manager.install(
+        integration.ownership.owner_id.clone(),
+        Some(&integration.ownership),
+    )?;
+    println!("observer: {:?}", integration.lifecycle);
+    Ok(())
+}
+
+fn remove_observer(registry: &mut HostRegistry) -> Result<(), AppError> {
+    if registry.has_live_runtime()? {
+        return Err(AppError::LiveRuntimePreventsRemoval);
+    }
+    let integration = registry
+        .codex_integration()?
+        .ok_or(AppError::ObserverNotInstalled)?;
+    observer_profile()?.remove(&integration.ownership)?;
+    registry.remove_codex_integration(&integration.ownership)?;
+    println!("observer profile removed");
     Ok(())
 }
 
@@ -405,6 +442,8 @@ enum AppError {
         "observer profile trust is pending; complete native Codex /hooks review then run wsnav trust-observer"
     )]
     ObserverNotReady,
+    #[error("observer profile removal is refused while a managed runtime is live")]
+    LiveRuntimePreventsRemoval,
     #[error("private runtime probe is ambiguous; refusing to create another Codex process")]
     RuntimeProbeAmbiguous,
     #[error(transparent)]

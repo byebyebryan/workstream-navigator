@@ -1,0 +1,29 @@
+{
+  "study": "tmux-remote-transport",
+  "provider": {
+    "id": "none",
+    "version": "not-applicable",
+    "contract_fingerprint": "tmux-ssh-transport-v1"
+  },
+  "status": "pass",
+  "reason": "transport-contract-proven",
+  "assertions": {
+    "dedicated_sockets": true,
+    "distinct_host": true,
+    "remote_persistence": true,
+    "reconnect": true,
+    "input_round_trip": true,
+    "resize_propagates": true,
+    "color_256": true,
+    "mouse_capability_configured": true,
+    "ordinary_tmux_unchanged": true,
+    "native_provider_isolated": false,
+    "native_workspace_trust_confirmed": false,
+    "native_prompt_round_trip": false,
+    "native_process_persistence": false,
+    "native_result_tip_preserved": false
+  },
+  "native_codex_status": "blocked",
+  "cleanup": "complete",
+  "elapsed_seconds": 7
+}

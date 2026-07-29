@@ -36,4 +36,23 @@ cargo test --all-targets --all-features
 cargo run -- --help
 ```
 
+## Design
+
+The proposed clean-slate V1 architecture is documented in [V1 design][]. It
+keeps the native Codex workflow canonical, uses dedicated tmux runtimes and SSH
+for attachment, and limits Workstream Navigator to hosts, project locations,
+workstreams, status, and conservative worktree operations.
+
+## Decision studies
+
+The isolated tmux/SSH transport and native Codex attach/detach/reconnect gates
+passed. The App Server runtime-boundary study supports the dedicated-TUI plus
+ephemeral-stdio split while leaving mutating contracts gated. See
+[Spike 0001][], [Spike 0002][], [Study 0003][], and the sanitized [fixtures][].
+
 [agent-switchboard-python-reference]: https://github.com/byebyebryan/agent-switchboard-python-reference
+[V1 design]: docs/design.md
+[Spike 0001]: docs/spikes/0001-tmux-remote-transport.md
+[Spike 0002]: docs/spikes/0002-codex-native-tui.md
+[Study 0003]: docs/studies/0003-codex-app-server-runtime-boundary.md
+[fixtures]: spikes/fixtures/

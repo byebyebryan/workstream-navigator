@@ -1,0 +1,29 @@
+{
+  "study": "tmux-remote-transport",
+  "provider": {
+    "id": "codex",
+    "version": "0.145.0",
+    "contract_fingerprint": "interactive-tui-remote-tmux-v1"
+  },
+  "status": "pass",
+  "reason": "native-codex-contract-proven",
+  "assertions": {
+    "dedicated_sockets": true,
+    "distinct_host": true,
+    "remote_persistence": true,
+    "reconnect": true,
+    "input_round_trip": true,
+    "resize_propagates": true,
+    "color_256": true,
+    "mouse_capability_configured": true,
+    "ordinary_tmux_unchanged": true,
+    "native_provider_isolated": true,
+    "native_workspace_trust_confirmed": true,
+    "native_prompt_round_trip": true,
+    "native_process_persistence": true,
+    "native_result_tip_preserved": true
+  },
+  "native_codex_status": "pass",
+  "cleanup": "complete",
+  "elapsed_seconds": 19
+}

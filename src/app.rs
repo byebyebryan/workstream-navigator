@@ -2,7 +2,7 @@
 
 use std::{
     collections::BTreeMap,
-    env,
+    env, fs,
     path::{Path, PathBuf},
     process::{Command, ExitCode},
     str::FromStr,
@@ -53,11 +53,18 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Commands {
     /// Install the owned observer profile and leave native hook trust pending.
-    Setup,
+    Setup {
+        /// Install without opening the native review TUI. This test-only escape
+        /// hatch never marks the observer ready.
+        #[arg(long, hide = true)]
+        skip_review: bool,
+    },
     /// Confirm native hook trust after reviewing it in Codex's `/hooks` UI.
     TrustObserver,
     /// Inspect the exact observer ownership and trust lifecycle without changing it.
     Doctor,
+    /// Replace an exact owned observer declaration and require fresh native trust.
+    UpdateObserver,
     /// Remove only the exact unchanged owned observer profile after all runtimes stop.
     RemoveObserver,
     /// Register one existing Git checkout as the initial external workstream.
@@ -85,9 +92,10 @@ fn execute(cli: Cli) -> Result<(), AppError> {
     let root = StateRoot::create(cli.state_root.unwrap_or_else(default_state_root))?;
     let mut registry = HostRegistry::open(&root)?;
     match cli.command {
-        Commands::Setup => setup(&mut registry),
+        Commands::Setup { skip_review } => setup(&root, &mut registry, skip_review),
         Commands::TrustObserver => trust_observer(&mut registry),
         Commands::Doctor => doctor(&registry),
+        Commands::UpdateObserver => update_observer(&mut registry),
         Commands::RemoveObserver => remove_observer(&mut registry),
         Commands::Register { checkout } => register(&mut registry, &checkout),
         Commands::Start { workstream_id } => {
@@ -123,20 +131,58 @@ fn register(registry: &mut HostRegistry, checkout: &Path) -> Result<(), AppError
     Ok(())
 }
 
-fn setup(registry: &mut HostRegistry) -> Result<(), AppError> {
+fn setup(root: &StateRoot, registry: &mut HostRegistry, skip_review: bool) -> Result<(), AppError> {
     let manager = observer_profile()?;
     let existing = registry.codex_integration()?;
     let ownership = manager.install(
         uuid::Uuid::new_v4().to_string(),
         existing.as_ref().map(|integration| &integration.ownership),
     )?;
-    let lifecycle = existing.map_or(IntegrationLifecycle::TrustPending, |integration| {
-        integration.lifecycle
-    });
-    registry.record_codex_integration(ownership, lifecycle)?;
+    let lifecycle = existing
+        .as_ref()
+        .map_or(IntegrationLifecycle::TrustPending, |integration| {
+            integration.lifecycle
+        });
+    registry.record_codex_integration(ownership.clone(), lifecycle)?;
+    if lifecycle == IntegrationLifecycle::Ready && manager.verify_native_trust(&ownership).is_ok() {
+        println!("observer profile is already ready");
+        return Ok(());
+    }
+    if lifecycle == IntegrationLifecycle::Ready {
+        registry.record_codex_integration(ownership, IntegrationLifecycle::TrustPending)?;
+    }
+    if skip_review {
+        println!("observer profile installed; native hook trust remains pending");
+        return Ok(());
+    }
+    println!(
+        "review the exact observer hook in Codex's native /hooks UI, then exit Codex without submitting a prompt"
+    );
+    native_trust_review(root)?;
     println!(
         "observer profile installed; review and trust it in Codex /hooks, then run wsnav trust-observer"
     );
+    Ok(())
+}
+
+fn update_observer(registry: &mut HostRegistry) -> Result<(), AppError> {
+    if registry.has_live_runtime()? {
+        return Err(AppError::LiveRuntimePreventsUpdate);
+    }
+    let integration = registry
+        .codex_integration()?
+        .ok_or(AppError::ObserverNotInstalled)?;
+    let ownership = observer_profile()?.update(&integration.ownership)?;
+    if ownership == integration.ownership {
+        println!("observer profile is already current");
+        return Ok(());
+    }
+    registry.replace_codex_integration(
+        &integration.ownership,
+        ownership,
+        IntegrationLifecycle::TrustPending,
+    )?;
+    println!("observer profile updated; complete native hook review again with wsnav setup");
     Ok(())
 }
 
@@ -151,6 +197,12 @@ fn doctor(registry: &HostRegistry) -> Result<(), AppError> {
         integration.ownership.owner_id.clone(),
         Some(&integration.ownership),
     )?;
+    if integration.lifecycle == IntegrationLifecycle::Ready
+        && manager.verify_native_trust(&integration.ownership).is_err()
+    {
+        println!("observer: trust pending");
+        return Ok(());
+    }
     println!("observer: {:?}", integration.lifecycle);
     Ok(())
 }
@@ -173,12 +225,53 @@ fn trust_observer(registry: &mut HostRegistry) -> Result<(), AppError> {
         .codex_integration()?
         .ok_or(AppError::ObserverNotInstalled)?;
     let manager = observer_profile()?;
+    manager.verify_native_trust(&integration.ownership)?;
     let ownership = manager.install(
         integration.ownership.owner_id.clone(),
         Some(&integration.ownership),
     )?;
     registry.record_codex_integration(ownership, IntegrationLifecycle::Ready)?;
     println!("observer profile marked ready");
+    Ok(())
+}
+
+fn native_trust_review(root: &StateRoot) -> Result<(), AppError> {
+    let review_root = root.base().join("review");
+    fs::create_dir_all(&review_root).map_err(AppError::Io)?;
+    let review_cwd = review_root.join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir(&review_cwd).map_err(AppError::Io)?;
+
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(
+        &tmux,
+        &process_probe,
+        RuntimePaths::for_runtime(root.base(), RuntimeId::new()),
+    );
+    let launch = NativeLaunch {
+        cwd: review_cwd.clone(),
+        program: vec![
+            "codex".into(),
+            "--profile".into(),
+            "wsnav-observer".into(),
+            "-C".into(),
+            review_cwd.clone().into_os_string(),
+        ],
+        environment: BTreeMap::new(),
+    };
+    if let Err(error) = runtime.start(&launch) {
+        let _ = runtime.park();
+        let _ = fs::remove_dir_all(&review_cwd);
+        let _ = fs::remove_dir(&review_root);
+        return Err(AppError::Runtime(error));
+    }
+    let attach = runtime.attach_command().status().map_err(AppError::Io);
+    let park = runtime.park();
+    let remove = fs::remove_dir_all(&review_cwd).map_err(AppError::Io);
+    let _ = fs::remove_dir(&review_root);
+    attach?;
+    park?;
+    remove?;
     Ok(())
 }
 
@@ -198,6 +291,7 @@ fn start(
         integration.ownership.owner_id.clone(),
         Some(&integration.ownership),
     )?;
+    manager.verify_native_trust(&integration.ownership)?;
     let prior_runtime = registry.runtime_for_workstream(workstream_id)?;
     if let Some(prior_runtime) = &prior_runtime {
         let tmux = SystemTmux::default();
@@ -355,6 +449,15 @@ fn observe_hook(state_root: Option<PathBuf>) {
     if cwd.as_path() != Path::new(&observation.cwd)
         || actual_birth != expected_birth
         || !is_direct_provider_hook(pane_pid, &expected_birth)
+    {
+        return;
+    }
+    if matches!(
+        observation.event,
+        crate::provider::codex::hooks::LifecycleEvent::SessionStart
+    ) && EphemeralAppServer::default()
+        .read_thread_for_hook(&observation.native_session_id)
+        .is_err()
     {
         return;
     }
@@ -522,6 +625,8 @@ enum AppError {
     ObserverNotReady,
     #[error("observer profile removal is refused while a managed runtime is live")]
     LiveRuntimePreventsRemoval,
+    #[error("observer profile update is refused while a managed runtime is live")]
+    LiveRuntimePreventsUpdate,
     #[error("private runtime probe is ambiguous; refusing to create another Codex process")]
     RuntimeProbeAmbiguous,
     #[error(transparent)]
@@ -543,7 +648,11 @@ mod tests {
         let binding = crate::state::ProviderBinding {
             runtime_id: RuntimeId::new(),
             native_session_id: "exact-session".to_owned(),
+            start_source: "startup".to_owned(),
             last_settled_turn_id: Some("settled-turn".to_owned()),
+            observed_thread_name: None,
+            predecessor_native_session_id: None,
+            predecessor_effective_name: None,
             revision: crate::domain::Revision::INITIAL,
         };
         let program = codex_launch_program(Path::new("/checkout"), Some(&binding));

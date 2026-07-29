@@ -343,13 +343,18 @@ removed automatically.
 The hook definition is reviewed and trusted through Codex's native `/hooks`
 UI. WSNav never writes Codex's trust database and never passes
 `--dangerously-bypass-hook-trust`. Setup opens a native profile-selected trust
-review process with a prepared setup-probe authority in an empty disposable
-cwd. It keeps the real `CODEX_HOME` so native trust persists, but it does not
-load a project configuration or project hooks. After the user trusts the
-definition and exits, a successful passive lifecycle event confirms the
-installation before observer-dependent Workstream launch is enabled. Whether
-an unprompted review process leaves any native history residue is a validation
-gate and must be disclosed if it cannot be avoided.
+review process in one private WSNav tmux server and an empty disposable cwd.
+It keeps the real `CODEX_HOME` so native trust persists, but it does not load a
+project configuration or project hooks. The review process is not a managed
+Runtime and deliberately has no observer authority: an invoked hook drains and
+does nothing. The operator trusts the exact generated command in `/hooks` and
+exits without submitting a prompt. `wsnav trust-observer` then requires the
+complete native trust record before enabling managed launch. A blank current
+Codex landing screen emits no `SessionStart`, so no stronger passive activation
+signal is fabricated. The first managed `SessionStart` must instead pass the
+normal provider-side corroboration gate. Whether an unprompted review process
+leaves any native history residue is a validation gate and must be disclosed if
+it cannot be avoided.
 
 Native Codex hook review appends trust records to the selected profile itself:
 `[hooks.state]` records keyed to the exact generated hook entries and trusted
@@ -370,11 +375,13 @@ overlap or failures when Codex exposes enough information, without silently
 mutating the user's configuration.
 
 Profile update or removal requires no live WSNav-managed Codex Runtime. An
-update that changes the hook definition returns the integration to
-`trust_pending` until native review succeeds again. Removal deletes only an
-exactly owned profile whose WSNav declaration is unchanged and whose only
-suffix is the validated native trust state, plus its WSNav ownership record.
-It leaves base configuration, other profiles, user and project hooks,
+explicit `wsnav update-observer` first validates the old exact declaration,
+atomically replaces it, and discards its co-located native trust suffix. A
+declaration-changing update returns the integration to `trust_pending` until
+native review succeeds again; an exact no-op preserves trust. Removal deletes
+only an exactly owned profile whose WSNav declaration is unchanged and whose
+only suffix is the validated native trust state, plus its WSNav ownership
+record. It leaves base configuration, other profiles, user and project hooks,
 plugins, history, credentials, and all state outside the dedicated profile
 untouched.
 
@@ -402,14 +409,21 @@ Hook evidence can update status and bind an observed native session inside an
 already managed runtime. It cannot authorize workstream creation, fork,
 parking, provider input, Git mutation, or focus.
 
-A ProviderBinding is stronger than an untrusted hook claim. Initial and changed
-bindings are accepted only when the event agrees with a pending launch or
-native transition, the recorded runtime generation, pane, cwd, process birth
-and ancestry, and provider-side session existence. Events that cannot be
-corroborated may make status `unknown`, but cannot replace a known binding.
-Whether the installed Codex hook contract can provide this distinction is a
-falsification gate. If it cannot distinguish a legitimate transition from an
-agent-shell invocation, V1 must require an explicit native resume/fork
+A ProviderBinding is stronger than an untrusted hook claim. A `SessionStart`
+first agrees with a pending launch or the one accepted native transition, then
+must agree with the recorded runtime generation, pane, cwd, process birth and
+ancestry. Before it changes durable binding state, WSNav performs one bounded,
+read-only `thread/read(includeTurns=false)` over a new App Server stdio
+connection and requires the returned `thread.id` to equal the hooked ID. Events
+that cannot be corroborated may leave status `unknown`, but cannot replace a
+known binding. The installed Codex 0.145.0 contract proved exactly one changed
+binding rule: a distinct `SessionStart(source=clear)` in the same live TUI may
+replace an `idle` or `attention` tip. Its predecessor ID/name metadata and
+sticky result attention remain; all other changed, racing, replayed, working,
+or unknown-source claims fail closed. Native `/new`, `/fork`, and `compact`
+remain provider workflow, but their changed-binding visibility is deferred
+until separately validated. If legitimate transitions cannot be distinguished
+from an agent-shell invocation, V1 must require explicit native resume/fork
 selection and observe the resulting launch; it must not weaken the authority
 rule.
 
@@ -423,8 +437,9 @@ wsnav host action
 -> spawn codex app-server --listen stdio://
 -> initialize one private stdin/stdout connection
 -> issue one or more bounded requests
--> close stdin and wait
--> terminate, then kill, on bounded shutdown failure
+-> wait for the exact action result
+-> close stdin and wait briefly for exit
+-> kill and reap on bounded shutdown failure
 ```
 
 No TUI connects to this process. It does not host interactive work, listen on a
@@ -434,7 +449,8 @@ Workstream Navigator protocol to SSH stdout.
 
 V1 allowlists only:
 
-- `thread/read` with `includeTurns: false` for exact managed thread IDs;
+- `thread/read` with `includeTurns: false` for exact managed thread IDs and
+  `SessionStart` binding corroboration;
 - `thread/list` with `sourceKinds: ["cli"]` for ordinary bounded `doctor`
   checks, or every documented source kind only while reconciling one unresolved
   WSNav-owned Fork operation; both use `useStateDbOnly: true`;
@@ -649,8 +665,10 @@ payload, terminal capture, credential, or environment dump is persisted.
   never becomes evidence that the provider name is empty.
 - `EffectiveNameSource` is derived presentation state and is not persisted as a
   user-authored name.
-- Many native Codex sessions may appear sequentially inside one Workstream as
-  the user uses native `/new`, `/clear`, or `/fork`.
+- Codex may create native conversations sequentially inside one Workstream as
+  the user uses native `/new`, `/clear`, or `/fork`. D1.5 observes only the
+  separately proven `/clear` binding replacement; the other native actions
+  remain canonical Codex workflow without an inferred WSNav transition.
 - One sticky AttentionState exists per Workstream; it never changes
   presentation focus.
 - Runtime status and Workstream lifecycle are separate.
@@ -808,9 +826,11 @@ Inside the provider pane, the user continues to use Codex:
 
 Workstream Navigator observes a new session binding when possible. It does not
 infer that a native chat transition created a new task or Workstream. A
-verified same-Workstream cutover displays the prior effective name
-provisionally when the new thread is unnamed, but does not write that fallback
-into Codex.
+verified D1.5 same-Workstream `/clear` cutover displays the prior effective
+name provisionally when the new thread is unnamed, but does not write that
+fallback into Codex. Other native transitions remain visible in Codex history
+but do not replace the WSNav binding until their event contracts are separately
+validated.
 
 ## Navigator experience
 

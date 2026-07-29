@@ -27,7 +27,7 @@ if [[ "${1:-}" == "app-server" ]]; then
     while IFS= read -r line; do
         case "$line" in
             *'"id":1'*) printf '%s\n' '{"id":1,"result":{}}' ;;
-            *'"id":2'*'thread/read'*) printf '%s\n' '{"id":2,"result":{"thread":{"name":""}}}' ;;
+            *'"id":2'*'thread/read'*) printf '%s\n' '{"id":2,"result":{"thread":{"id":"fake-session","name":""}}}' ;;
             *'"id":2'*'thread/name/set'*) printf '%s\n' '{"id":2,"result":{}}' ;;
         esac
     done
@@ -55,7 +55,12 @@ git -C "$repository" commit -qm initial
 export CODEX_HOME="$codex_home"
 export PATH="$fake_bin:$workspace_root/target/debug:$PATH"
 
-"$wsnav_bin" --state-root "$state_root" setup
+"$wsnav_bin" --state-root "$state_root" setup --skip-review
+profile_path="$codex_home/wsnav-observer.config.toml"
+for hook in session_start user_prompt_submit stop session_end; do
+    printf '\n[hooks.state."%s:%s:0:0"]\ntrusted_hash = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"\n' \
+        "$profile_path" "$hook" >>"$profile_path"
+done
 "$wsnav_bin" --state-root "$state_root" trust-observer
 registration="$($wsnav_bin --state-root "$state_root" register "$repository")"
 workstream_id="${registration##* }"

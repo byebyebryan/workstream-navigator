@@ -18,6 +18,7 @@
     "stop_observed": true,
     "session_end_observed": true,
     "lifecycle_order_confirmed": true,
+    "clear_rebind_observed": true,
     "ordinary_launch_unobserved": true,
     "trusted_profile_reused": true,
     "large_unmanaged_payload_drained": true,

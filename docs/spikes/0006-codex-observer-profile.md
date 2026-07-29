@@ -23,8 +23,11 @@ The harness creates a mode-0700 temporary root containing:
 The first profile-selected native TUI presents Codex's hook review gate. The
 harness selects native `Trust all and continue`, exits without submitting a
 prompt, and starts a second profile-selected TUI. The second process submits one
-fixed harmless turn, then the harness replays forged, stale-generation, missing
-authority, and 300 KB unmanaged inputs against the spike handler.
+fixed harmless turn, invokes native `/clear`, and submits one further harmless
+destination turn only if Codex lazily creates the cleared session. It records
+only that the new session differs from its predecessor and the whitelisted
+`SessionStart` source, then replays forged, stale-generation, missing-authority,
+and 300 KB unmanaged inputs against the spike handler.
 
 The handler drains stdin before every parse or authority decision. It records
 only event kind, accepted/rejected relationships, rejection reason, and
@@ -49,6 +52,8 @@ sanitized [fixture][fixture].
   the thread;
 - accepted event order was SessionStart, UserPromptSubmit, then Stop, followed
   by SessionEnd on normal exit;
+- native `/clear` in the same live TUI emitted `SessionStart(source=clear)` for
+  a distinct native session; the test retained no session IDs;
 - provider ancestry, authority, generation, and cwd all agreed for live events;
 - forged-process, stale-generation, and missing-authority invocations were
   rejected;
@@ -69,6 +74,11 @@ SessionStart is not proof that a blank TUI process exists: current Codex creates
 the native thread on first prompt, and only then emits the initial lifecycle
 events. Workstream Navigator must therefore keep a freshly launched row in
 `starting` until the binding event arrives.
+
+The same contract provides one narrow tip-replacement rule: an already-bound
+idle or attention Runtime may accept a distinct `SessionStart(source=clear)`.
+It does not validate changed bindings for `/new`, native `/fork`, or compact;
+those remain native operations until their own evidence study passes.
 
 This spike uses Linux `/proc` ancestry as spike-only evidence; the production
 host adapter still needs a platform-appropriate process-birth and ancestry

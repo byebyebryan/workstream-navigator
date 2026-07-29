@@ -29,6 +29,7 @@ seen_log=""
 provider_pid_file=""
 expected_cwd_file=""
 expected_generation_file=""
+observed_session_file=""
 runtime_server_started=false
 presentation_server_started=false
 cleanup_complete=true
@@ -47,6 +48,7 @@ user_prompt_submit_observed=false
 stop_observed=false
 session_end_observed=false
 lifecycle_order_confirmed=false
+clear_rebind_observed=false
 ordinary_launch_unobserved=false
 trusted_profile_reused=false
 large_unmanaged_payload_drained=false
@@ -229,6 +231,25 @@ wait_for_event() {
     return 1
 }
 
+wait_for_clear_rebind() {
+    local attempts=$((timeout_seconds * 5))
+    local attempt
+
+    for ((attempt = 0; attempt < attempts; attempt += 1)); do
+        if [[ -f "$event_log" ]] &&
+            jq -e 'select(
+                .event == "SessionStart"
+                and .accepted == true
+                and .source == "clear"
+                and .session_changed == true
+            )' "$event_log" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.2
+    done
+    return 1
+}
+
 accepted_event_count() {
     if [[ ! -s "$event_log" ]]; then
         printf '0\n'
@@ -274,6 +295,15 @@ payload_cwd="$(jq -r '.cwd // ""' "$payload_file" 2>/dev/null || true)"
 session_id="$(jq -r '.session_id // ""' "$payload_file" 2>/dev/null || true)"
 turn_id="$(jq -r '.turn_id // ""' "$payload_file" 2>/dev/null || true)"
 source="$(jq -r '.source // .reason // ""' "$payload_file" 2>/dev/null || true)"
+source_kind="other"
+case "$source" in
+    startup|resume|clear|compact)
+        source_kind="$source"
+        ;;
+    "")
+        source_kind="absent"
+        ;;
+esac
 
 authority_ok=false
 generation_ok=false
@@ -281,6 +311,7 @@ cwd_ok=false
 ancestry_ok=false
 allowed_event=false
 accepted=false
+session_changed=false
 reason="missing-authority"
 provider_depth=-1
 
@@ -333,6 +364,13 @@ else
         reason="replay"
     else
         printf '%s\n' "$event_key" >>"${WSNAV_SEEN_LOG:?}"
+        if [[ "$event" == "SessionStart" ]]; then
+            if [[ -s "${WSNAV_OBSERVED_SESSION_FILE:?}" ]] &&
+                [[ "$(<"${WSNAV_OBSERVED_SESSION_FILE:?}")" != "$session_id" ]]; then
+                session_changed=true
+            fi
+            printf '%s\n' "$session_id" >"${WSNAV_OBSERVED_SESSION_FILE:?}"
+        fi
         accepted=true
         reason="accepted"
     fi
@@ -340,8 +378,10 @@ fi
 
 jq -nc \
     --arg event "$event" \
+    --arg source "$source_kind" \
     --arg reason "$reason" \
     --argjson accepted "$accepted" \
+    --argjson session_changed "$session_changed" \
     --argjson authority_ok "$authority_ok" \
     --argjson generation_ok "$generation_ok" \
     --argjson cwd_ok "$cwd_ok" \
@@ -350,7 +390,9 @@ jq -nc \
     --argjson provider_depth "$provider_depth" \
     '{
         event: $event,
+        source: $source,
         accepted: $accepted,
+        session_changed: $session_changed,
         reason: $reason,
         authority_ok: $authority_ok,
         generation_ok: $generation_ok,
@@ -452,8 +494,8 @@ start_runtime() {
     : >"$provider_pid_file"
     if [[ "$with_profile" == true ]]; then
         printf -v runtime_command \
-            'printf "%%s\n" "$$" > %q; exec env CODEX_HOME=%q COLORTERM=truecolor WSNAV_SPIKE_ROOT=%q WSNAV_SPIKE_AUTHORITY=observer-authority WSNAV_SPIKE_GENERATION=gen-live WSNAV_EXPECTED_GENERATION_FILE=%q WSNAV_EXPECTED_CWD_FILE=%q WSNAV_PROVIDER_PID_FILE=%q WSNAV_EVENT_LOG=%q WSNAV_SEEN_LOG=%q codex --profile %q -s read-only -a never -C %q' \
-            "$provider_pid_file" "$codex_home" "$spike_root" "$expected_generation_file" "$expected_cwd_file" "$provider_pid_file" "$event_log" "$seen_log" "$PROFILE_NAME" "$workspace"
+            'printf "%%s\n" "$$" > %q; exec env CODEX_HOME=%q COLORTERM=truecolor WSNAV_SPIKE_ROOT=%q WSNAV_SPIKE_AUTHORITY=observer-authority WSNAV_SPIKE_GENERATION=gen-live WSNAV_EXPECTED_GENERATION_FILE=%q WSNAV_EXPECTED_CWD_FILE=%q WSNAV_PROVIDER_PID_FILE=%q WSNAV_EVENT_LOG=%q WSNAV_SEEN_LOG=%q WSNAV_OBSERVED_SESSION_FILE=%q codex --profile %q -s read-only -a never -C %q' \
+            "$provider_pid_file" "$codex_home" "$spike_root" "$expected_generation_file" "$expected_cwd_file" "$provider_pid_file" "$event_log" "$seen_log" "$observed_session_file" "$PROFILE_NAME" "$workspace"
     else
         printf -v runtime_command \
             'printf "%%s\n" "$$" > %q; exec env CODEX_HOME=%q COLORTERM=truecolor codex -s read-only -a never -C %q' \
@@ -517,6 +559,7 @@ write_result() {
     "stop_observed": $stop_observed,
     "session_end_observed": $session_end_observed,
     "lifecycle_order_confirmed": $lifecycle_order_confirmed,
+    "clear_rebind_observed": $clear_rebind_observed,
     "ordinary_launch_unobserved": $ordinary_launch_unobserved,
     "trusted_profile_reused": $trusted_profile_reused,
     "large_unmanaged_payload_drained": $large_unmanaged_payload_drained,
@@ -591,6 +634,7 @@ seen_log="$spike_root/seen"
 provider_pid_file="$spike_root/provider.pid"
 expected_cwd_file="$spike_root/expected-cwd"
 expected_generation_file="$spike_root/expected-generation"
+observed_session_file="$spike_root/observed-session"
 mkdir -m 700 "$codex_home" "$workspace"
 install -m 600 "$HOME/.codex/auth.json" "$codex_home/auth.json"
 git -C "$workspace" init -q
@@ -598,7 +642,8 @@ printf '%s\n' "$workspace" >"$expected_cwd_file"
 printf '%s\n' "gen-live" >"$expected_generation_file"
 : >"$event_log"
 : >"$seen_log"
-chmod 600 "$event_log" "$seen_log" "$expected_cwd_file" "$expected_generation_file"
+: >"$observed_session_file"
+chmod 600 "$event_log" "$seen_log" "$expected_cwd_file" "$expected_generation_file" "$observed_session_file"
 write_tmux_config
 write_hook_handler
 write_base_config
@@ -690,6 +735,26 @@ if jq -se '
 else
     finish falsified managed-lifecycle-order-invalid 1
 fi
+
+# Codex owns the /clear action. This probe establishes whether it creates a
+# distinct native session in the existing TUI and which SessionStart source
+# describes it. It records only a boolean relationship, never either ID.
+send_literal "/clear"
+sleep 0.2
+send_key C-m
+if ! wait_for_clear_rebind; then
+    # Current Codex creates a conversation lazily. If /clear only resets the
+    # landing screen, make one harmless native turn to cause its destination
+    # thread to exist without sending management input through WSNav.
+    send_literal "$RESULT_PROMPT"
+    sleep 0.2
+    send_key C-m
+    wait_for_text "$RESULT_MARKER" ||
+        finish falsified clear-destination-turn-did-not-complete 1
+    wait_for_clear_rebind ||
+        finish falsified native-clear-did-not-produce-a-distinct-clear-session 1
+fi
+clear_rebind_observed=true
 
 # Full authority values from a non-provider process must still be rejected.
 printf '%s\n' '{"hook_event_name":"Stop","session_id":"forged","turn_id":"forged","cwd":"'"$workspace"'"}' |

@@ -2,7 +2,7 @@
 
 use std::{
     io::{BufRead, BufReader, Read, Write},
-    process::{Command, Stdio},
+    process::{Child, Command, Stdio},
     sync::mpsc,
     thread,
     time::{Duration, Instant},
@@ -13,6 +13,7 @@ use thiserror::Error;
 
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
+const HOOK_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The only persisted fields extracted from an exact Codex thread summary.
@@ -51,22 +52,31 @@ impl EphemeralAppServer {
     /// Returns an error if the short-lived server cannot complete the bounded
     /// request or does not return a usable exact thread summary.
     pub fn read_thread(&self, thread_id: &str) -> Result<ThreadMetadata, AppServerError> {
-        let result = self.request(
+        self.read_thread_with_timeout(thread_id, RESPONSE_TIMEOUT)
+    }
+
+    /// Reads an exact thread within the shorter budget available to a passive
+    /// lifecycle hook. A timeout means no observation is committed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the provider-side thread cannot be corroborated
+    /// before the hook's bounded execution deadline.
+    pub fn read_thread_for_hook(&self, thread_id: &str) -> Result<ThreadMetadata, AppServerError> {
+        self.read_thread_with_timeout(thread_id, HOOK_RESPONSE_TIMEOUT)
+    }
+
+    fn read_thread_with_timeout(
+        &self,
+        thread_id: &str,
+        response_timeout: Duration,
+    ) -> Result<ThreadMetadata, AppServerError> {
+        let result = self.request_with_timeout(
             "thread/read",
             &json!({"threadId": thread_id, "includeTurns": false}),
+            response_timeout,
         )?;
-        let thread = result
-            .get("thread")
-            .and_then(Value::as_object)
-            .ok_or(AppServerError::InvalidResponse)?;
-        let name = match thread.get("name") {
-            None | Some(Value::Null) => None,
-            Some(Value::String(name)) if name.len() <= 512 && !name.contains(['\n', '\r']) => {
-                Some(name.clone())
-            }
-            _ => return Err(AppServerError::InvalidResponse),
-        };
-        Ok(ThreadMetadata { name })
+        thread_metadata_from_result(&result, thread_id)
     }
 
     /// Sets the canonical Codex-owned name of an exact managed thread.
@@ -79,14 +89,20 @@ impl EphemeralAppServer {
         if name.trim().is_empty() || name.len() > 512 || name.contains(['\n', '\r']) {
             return Err(AppServerError::InvalidName);
         }
-        let _ = self.request(
+        let _ = self.request_with_timeout(
             "thread/name/set",
             &json!({"threadId": thread_id, "name": name}),
+            RESPONSE_TIMEOUT,
         )?;
         Ok(())
     }
 
-    fn request(&self, method: &str, params: &Value) -> Result<Value, AppServerError> {
+    fn request_with_timeout(
+        &self,
+        method: &str,
+        params: &Value,
+        response_timeout: Duration,
+    ) -> Result<Value, AppServerError> {
         let mut child = Command::new(&self.executable)
             .args(["app-server", "--listen", "stdio://"])
             .stdin(Stdio::piped())
@@ -107,17 +123,25 @@ impl EphemeralAppServer {
             let _ = sender.send(read_action_result(stdout));
         });
         for message in [initialize, initialized, action] {
-            serde_json::to_writer(&mut stdin, &message).map_err(AppServerError::Encode)?;
-            stdin.write_all(b"\n").map_err(AppServerError::Write)?;
+            if let Err(error) = serde_json::to_writer(&mut stdin, &message) {
+                kill_and_reap(&mut child);
+                return Err(AppServerError::Encode(error));
+            }
+            if let Err(error) = stdin.write_all(b"\n") {
+                kill_and_reap(&mut child);
+                return Err(AppServerError::Write(error));
+            }
         }
-        let action_result = match receiver.recv_timeout(RESPONSE_TIMEOUT) {
+        let action_result = match receiver.recv_timeout(response_timeout) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_and_reap(&mut child);
                 return Err(AppServerError::Timeout);
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => return Err(AppServerError::Closed),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                kill_and_reap(&mut child);
+                return Err(AppServerError::Closed);
+            }
         };
         // Keep stdin open until the action result arrives. Current Codex can
         // observe EOF before dispatching a queued request if the client closes
@@ -130,11 +154,36 @@ impl EphemeralAppServer {
             thread::sleep(Duration::from_millis(10));
         }
         if child.try_wait().map_err(AppServerError::Launch)?.is_none() {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_and_reap(&mut child);
         }
         action_result
     }
+}
+
+fn kill_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn thread_metadata_from_result(
+    result: &Value,
+    thread_id: &str,
+) -> Result<ThreadMetadata, AppServerError> {
+    let thread = result
+        .get("thread")
+        .and_then(Value::as_object)
+        .ok_or(AppServerError::InvalidResponse)?;
+    if thread.get("id").and_then(Value::as_str) != Some(thread_id) {
+        return Err(AppServerError::ThreadIdentityMismatch);
+    }
+    let name = match thread.get("name") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(name)) if name.len() <= 512 && !name.contains(['\n', '\r']) => {
+            Some(name.clone())
+        }
+        _ => return Err(AppServerError::InvalidResponse),
+    };
+    Ok(ThreadMetadata { name })
 }
 
 fn read_action_result(stdout: impl Read) -> Result<Value, AppServerError> {
@@ -196,6 +245,8 @@ pub enum AppServerError {
     InvalidResponse,
     #[error("thread name is empty or unsafe")]
     InvalidName,
+    #[error("App Server did not corroborate the requested exact thread")]
+    ThreadIdentityMismatch,
     #[error("could not launch or inspect App Server")]
     Launch(std::io::Error),
     #[error("App Server response exceeded the output bound")]
@@ -240,5 +291,32 @@ mod tests {
             read_action_result(&b"{\"id\":2,\"error\":{\"code\":-1}}\n"[..]),
             Err(AppServerError::Rejected)
         ));
+    }
+
+    #[test]
+    fn exact_thread_read_rejects_a_mismatched_provider_identity() {
+        let result = json!({"thread": {"id": "different", "name": null}});
+        assert!(matches!(
+            thread_metadata_from_result(&result, "expected"),
+            Err(AppServerError::ThreadIdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn exact_thread_read_keeps_only_the_bounded_name_field() {
+        let result = json!({
+            "thread": {
+                "id": "expected",
+                "name": "Native name",
+                "preview": "discarded",
+                "cwd": "/discarded"
+            }
+        });
+        assert_eq!(
+            thread_metadata_from_result(&result, "expected").unwrap(),
+            ThreadMetadata {
+                name: Some("Native name".to_owned())
+            }
+        );
     }
 }

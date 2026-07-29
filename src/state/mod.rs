@@ -211,7 +211,11 @@ pub struct RuntimeRecord {
 pub struct ProviderBinding {
     pub runtime_id: RuntimeId,
     pub native_session_id: String,
+    pub start_source: String,
     pub last_settled_turn_id: Option<String>,
+    pub observed_thread_name: Option<String>,
+    pub predecessor_native_session_id: Option<String>,
+    pub predecessor_effective_name: Option<String>,
     pub revision: Revision,
 }
 
@@ -366,6 +370,58 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?;
         Ok(CodexIntegration {
             ownership,
+            lifecycle,
+            revision,
+        })
+    }
+
+    /// Replaces an already verified observer declaration after an explicit
+    /// update. This is the sole state path that may change the recorded hook
+    /// executable or declaration hash; the replacement returns to native trust
+    /// pending before any managed Runtime can start.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the expected old ownership is absent or stale, or
+    /// the replacement cannot commit atomically.
+    pub fn replace_codex_integration(
+        &mut self,
+        expected: &ProfileOwnership,
+        replacement: ProfileOwnership,
+        lifecycle: IntegrationLifecycle,
+    ) -> Result<CodexIntegration, StateError> {
+        let current = self
+            .codex_integration()?
+            .ok_or(StateError::IntegrationOwnershipMismatch)?;
+        if current.ownership != *expected {
+            return Err(StateError::IntegrationOwnershipMismatch);
+        }
+        let revision = current.revision.next();
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE codex_integrations SET canonical_profile_path = ?1, owner_id = ?2,
+                hook_executable_path = ?3, generated_content_hash = ?4, lifecycle = ?5,
+                revision = ?6
+             WHERE profile_name = ?7 AND generated_content_hash = ?8 AND revision = ?9",
+                params![
+                    replacement.canonical_path.to_string_lossy(),
+                    replacement.owner_id,
+                    replacement.hook_executable.to_string_lossy(),
+                    replacement.content_hash,
+                    integration_lifecycle_text(lifecycle),
+                    revision.value(),
+                    OBSERVER_PROFILE_NAME,
+                    expected.content_hash,
+                    current.revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if changed != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        Ok(CodexIntegration {
+            ownership: replacement,
             lifecycle,
             revision,
         })
@@ -738,10 +794,11 @@ impl HostRegistry {
 
     /// Applies one already-authorized lifecycle observation to its exact runtime.
     ///
-    /// Hooks supply evidence only: a new session can bind solely while the
-    /// runtime is `starting`; subsequent observations must match that exact
-    /// binding and generation. A settled result and its sticky attention state
-    /// commit in the same `SQLite` transaction.
+    /// Hooks supply evidence only: an initial session can bind solely while the
+    /// runtime is `starting`. The one proven native same-TUI replacement is a
+    /// distinct `SessionStart(source=clear)` after an idle or attention state;
+    /// all other replacement claims fail closed. A settled result and its
+    /// sticky attention state commit in the same `SQLite` transaction.
     ///
     /// # Errors
     ///
@@ -784,35 +841,18 @@ impl HostRegistry {
         }
         let existing = load_binding(&transaction, runtime_id)?;
         match observation.event {
-            LifecycleEvent::SessionStart => {
-                if let Some(binding) = existing {
-                    if binding.native_session_id != observation.native_session_id {
-                        return Err(StateError::HookEvidenceMismatch);
-                    }
-                } else if runtime.3 != "starting" {
-                    return Err(StateError::HookEvidenceMismatch);
-                } else {
-                    transaction
-                        .execute(
-                            "INSERT INTO provider_bindings (
-                            binding_id, runtime_id, native_session_id, start_source,
-                            last_settled_turn_id, observed_thread_name, name_state,
-                            name_observed_at, predecessor_native_session_id,
-                            predecessor_effective_name, runtime_generation, revision
-                         ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, 'unavailable', NULL,
-                            NULL, NULL, ?5, 1)",
-                            params![
-                                Uuid::new_v4().to_string(),
-                                runtime_id.to_string(),
-                                observation.native_session_id,
-                                observation.source.unwrap_or_else(|| "startup".to_owned()),
-                                generation
-                            ],
-                        )
-                        .map_err(StateError::Sqlite)?;
-                }
-                update_runtime_lifecycle(&transaction, runtime_id, revision, "idle")?;
-            }
+            LifecycleEvent::SessionStart => apply_session_start(
+                &transaction,
+                &SessionStartContext {
+                    runtime_id,
+                    runtime_status: &runtime.3,
+                    runtime_revision: revision,
+                    generation,
+                },
+                existing,
+                &observation.native_session_id,
+                observation.source.as_deref(),
+            )?,
             LifecycleEvent::UserPromptSubmit => {
                 require_matching_binding(existing.as_ref(), &observation.native_session_id)?;
                 update_runtime_lifecycle(&transaction, runtime_id, revision, "working")?;
@@ -1286,21 +1326,129 @@ fn load_binding(
 ) -> Result<Option<ProviderBinding>, StateError> {
     transaction
         .query_row(
-            "SELECT native_session_id, last_settled_turn_id, revision
+            "SELECT native_session_id, start_source, last_settled_turn_id,
+                    observed_thread_name, predecessor_native_session_id,
+                    predecessor_effective_name, revision
              FROM provider_bindings WHERE runtime_id = ?1",
             [runtime_id.to_string()],
             |row| {
                 Ok(ProviderBinding {
                     runtime_id,
                     native_session_id: row.get(0)?,
-                    last_settled_turn_id: row.get(1)?,
-                    revision: Revision::try_from(row.get::<_, i64>(2)?)
+                    start_source: row.get(1)?,
+                    last_settled_turn_id: row.get(2)?,
+                    observed_thread_name: row.get(3)?,
+                    predecessor_native_session_id: row.get(4)?,
+                    predecessor_effective_name: row.get(5)?,
+                    revision: Revision::try_from(row.get::<_, i64>(6)?)
                         .map_err(to_from_sql_error)?,
                 })
             },
         )
         .optional()
         .map_err(StateError::Sqlite)
+}
+
+struct SessionStartContext<'a> {
+    runtime_id: RuntimeId,
+    runtime_status: &'a str,
+    runtime_revision: Revision,
+    generation: &'a str,
+}
+
+fn apply_session_start(
+    transaction: &rusqlite::Transaction<'_>,
+    context: &SessionStartContext<'_>,
+    existing: Option<ProviderBinding>,
+    session_id: &str,
+    source: Option<&str>,
+) -> Result<(), StateError> {
+    let Some(binding) = existing else {
+        return insert_initial_binding(transaction, context, session_id, source);
+    };
+    if binding.native_session_id == session_id {
+        // A persisted binding appears at `starting` only when an exact parked
+        // session is resumed in a fresh private tmux generation. Repeated live
+        // SessionStart evidence must not mark a working turn idle.
+        if context.runtime_status != "starting" {
+            return Err(StateError::HookEvidenceMismatch);
+        }
+        return update_runtime_lifecycle(
+            transaction,
+            context.runtime_id,
+            context.runtime_revision,
+            "idle",
+        );
+    }
+    if source != Some("clear") || !matches!(context.runtime_status, "idle" | "attention") {
+        return Err(StateError::HookEvidenceMismatch);
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE provider_bindings SET
+                native_session_id = ?1,
+                start_source = 'clear',
+                last_settled_turn_id = NULL,
+                observed_thread_name = NULL,
+                name_state = 'unavailable',
+                name_observed_at = NULL,
+                predecessor_native_session_id = ?2,
+                predecessor_effective_name = ?3,
+                revision = revision + 1
+             WHERE runtime_id = ?4 AND native_session_id = ?2 AND revision = ?5",
+            params![
+                session_id,
+                binding.native_session_id,
+                binding.observed_thread_name,
+                context.runtime_id.to_string(),
+                binding.revision.value(),
+            ],
+        )
+        .map_err(StateError::Sqlite)?;
+    if changed != 1 {
+        return Err(StateError::ConcurrentWrite);
+    }
+    update_runtime_lifecycle(
+        transaction,
+        context.runtime_id,
+        context.runtime_revision,
+        "idle",
+    )
+}
+
+fn insert_initial_binding(
+    transaction: &rusqlite::Transaction<'_>,
+    context: &SessionStartContext<'_>,
+    session_id: &str,
+    source: Option<&str>,
+) -> Result<(), StateError> {
+    if context.runtime_status != "starting" || !matches!(source, Some("startup" | "resume")) {
+        return Err(StateError::HookEvidenceMismatch);
+    }
+    transaction
+        .execute(
+            "INSERT INTO provider_bindings (
+                binding_id, runtime_id, native_session_id, start_source,
+                last_settled_turn_id, observed_thread_name, name_state,
+                name_observed_at, predecessor_native_session_id,
+                predecessor_effective_name, runtime_generation, revision
+             ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, 'unavailable', NULL,
+                NULL, NULL, ?5, 1)",
+            params![
+                Uuid::new_v4().to_string(),
+                context.runtime_id.to_string(),
+                session_id,
+                source.unwrap_or("startup"),
+                context.generation,
+            ],
+        )
+        .map_err(StateError::Sqlite)?;
+    update_runtime_lifecycle(
+        transaction,
+        context.runtime_id,
+        context.runtime_revision,
+        "idle",
+    )
 }
 
 fn require_matching_binding(
@@ -1890,6 +2038,166 @@ mod tests {
     }
 
     #[test]
+    fn proven_idle_clear_rotates_only_the_current_conversation_tip() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        let cwd = runtime.cwd.to_string_lossy().into_owned();
+        for observation in [
+            HookObservation {
+                event: LifecycleEvent::SessionStart,
+                cwd: cwd.clone(),
+                native_session_id: "session-a".to_owned(),
+                turn_id: None,
+                source: Some("startup".to_owned()),
+            },
+            HookObservation {
+                event: LifecycleEvent::UserPromptSubmit,
+                cwd: cwd.clone(),
+                native_session_id: "session-a".to_owned(),
+                turn_id: Some("turn-a".to_owned()),
+                source: None,
+            },
+            HookObservation {
+                event: LifecycleEvent::Stop,
+                cwd: cwd.clone(),
+                native_session_id: "session-a".to_owned(),
+                turn_id: Some("turn-a".to_owned()),
+                source: None,
+            },
+        ] {
+            registry
+                .apply_hook_observation(runtime.runtime_id, &runtime.tmux_generation, observation)
+                .unwrap();
+        }
+
+        registry
+            .apply_hook_observation(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                HookObservation {
+                    event: LifecycleEvent::SessionStart,
+                    cwd,
+                    native_session_id: "session-b".to_owned(),
+                    turn_id: None,
+                    source: Some("clear".to_owned()),
+                },
+            )
+            .unwrap();
+
+        let binding = registry
+            .binding_for_runtime(runtime.runtime_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.native_session_id, "session-b");
+        assert_eq!(binding.start_source, "clear");
+        assert_eq!(binding.last_settled_turn_id, None);
+        assert_eq!(
+            binding.predecessor_native_session_id.as_deref(),
+            Some("session-a")
+        );
+        assert_eq!(
+            registry
+                .runtime_for_workstream(registered.workstream_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            RuntimeStatus::Idle
+        );
+        assert_eq!(
+            registry
+                .attention(registered.workstream_id)
+                .unwrap()
+                .unwrap()
+                .latest_native_session_id
+                .as_deref(),
+            Some("session-a")
+        );
+    }
+
+    #[test]
+    fn changed_session_start_rejects_unproven_sources_and_working_turns() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        let cwd = runtime.cwd.to_string_lossy().into_owned();
+        registry
+            .apply_hook_observation(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                HookObservation {
+                    event: LifecycleEvent::SessionStart,
+                    cwd: cwd.clone(),
+                    native_session_id: "session-a".to_owned(),
+                    turn_id: None,
+                    source: Some("startup".to_owned()),
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            registry.apply_hook_observation(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                HookObservation {
+                    event: LifecycleEvent::SessionStart,
+                    cwd: cwd.clone(),
+                    native_session_id: "session-b".to_owned(),
+                    turn_id: None,
+                    source: Some("startup".to_owned()),
+                },
+            ),
+            Err(StateError::HookEvidenceMismatch)
+        ));
+        registry
+            .apply_hook_observation(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                HookObservation {
+                    event: LifecycleEvent::UserPromptSubmit,
+                    cwd: cwd.clone(),
+                    native_session_id: "session-a".to_owned(),
+                    turn_id: Some("turn-a".to_owned()),
+                    source: None,
+                },
+            )
+            .unwrap();
+        assert!(matches!(
+            registry.apply_hook_observation(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                HookObservation {
+                    event: LifecycleEvent::SessionStart,
+                    cwd,
+                    native_session_id: "session-b".to_owned(),
+                    turn_id: None,
+                    source: Some("clear".to_owned()),
+                },
+            ),
+            Err(StateError::HookEvidenceMismatch)
+        ));
+        assert_eq!(
+            registry
+                .binding_for_runtime(runtime.runtime_id)
+                .unwrap()
+                .unwrap()
+                .native_session_id,
+            "session-a"
+        );
+    }
+
+    #[test]
     fn stale_or_rebound_hook_cannot_replace_a_managed_session() {
         let (_temporary, mut registry) = registry();
         let registered = registry
@@ -1937,5 +2245,44 @@ mod tests {
         assert_eq!(pending.lifecycle, IntegrationLifecycle::TrustPending);
         assert_eq!(ready.lifecycle, IntegrationLifecycle::Ready);
         assert!(ready.revision > pending.revision);
+    }
+
+    #[test]
+    fn explicit_profile_update_rotates_exact_ownership_back_to_trust_pending() {
+        let (_temporary, mut registry) = registry();
+        let original = ProfileOwnership {
+            canonical_path: PathBuf::from("/private/codex/wsnav-observer.config.toml"),
+            owner_id: "owner".to_owned(),
+            hook_executable: PathBuf::from("/private/bin/wsnav-old"),
+            content_hash: "old-hash".to_owned(),
+        };
+        let ready = registry
+            .record_codex_integration(original.clone(), IntegrationLifecycle::Ready)
+            .unwrap();
+        let replacement = ProfileOwnership {
+            hook_executable: PathBuf::from("/private/bin/wsnav-new"),
+            content_hash: "new-hash".to_owned(),
+            ..original.clone()
+        };
+
+        let updated = registry
+            .replace_codex_integration(
+                &original,
+                replacement.clone(),
+                IntegrationLifecycle::TrustPending,
+            )
+            .unwrap();
+
+        assert_eq!(updated.ownership, replacement);
+        assert_eq!(updated.lifecycle, IntegrationLifecycle::TrustPending);
+        assert!(updated.revision > ready.revision);
+        assert!(matches!(
+            registry.replace_codex_integration(
+                &original,
+                replacement,
+                IntegrationLifecycle::TrustPending,
+            ),
+            Err(StateError::IntegrationOwnershipMismatch)
+        ));
     }
 }

@@ -86,7 +86,8 @@ Scope:
 - atomic ProviderBinding, status, settled-turn, and sticky-attention updates;
 - per-operation App Server stdio reads and canonical thread rename;
 - contextual tip-name fallbacks without a shadow Workstream label;
-- local snapshots and CLI equivalents for all implemented actions; and
+- direct CLI equivalents for D1 actions; bounded local snapshot projection is
+  owned by D2's navigator surface; and
 - cold Runtime reconciliation sufficient to resume one known native session.
 
 Exit gate:

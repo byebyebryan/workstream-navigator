@@ -33,13 +33,14 @@ and removes it only together with the exact dedicated profile.
    ordinary_tmux_before="$(env -u TMUX tmux list-sessions -F '#{session_name}:#{session_created}:#{session_windows}' -O name 2>/dev/null || true)"
    ```
 
-2. Install the profile into the normal `CODEX_HOME`, then review and trust the
-   exact `wsnav _hook` command in Codex's native `/hooks` UI. Do not submit a
-   prompt during that review.
+2. Install the profile into the normal `CODEX_HOME`. `setup` opens one native,
+   profile-selected review TUI in a private WSNav tmux server and an empty
+   disposable cwd. Review and trust the exact `wsnav _hook` command in Codex's
+   native `/hooks` UI, then exit without submitting a prompt. It neither uses
+   the default tmux server nor writes Codex's trust state itself.
 
    ```console
    target/debug/wsnav --state-root "$acceptance_root/state" setup
-   codex --profile wsnav-observer -C "$acceptance_root/repository"
    target/debug/wsnav --state-root "$acceptance_root/state" trust-observer
    ```
 
@@ -55,19 +56,27 @@ and removes it only together with the exact dedicated profile.
    ```
 
 4. In a separate terminal, prove status/rename do not type into or redraw the
-   provider pane, then park and exact-resume the thread.
+   provider pane. In the directly attached Codex pane, invoke native `/clear`,
+   then submit one harmless destination prompt and wait for its normal result.
+   This is the only D1.5 native same-Workstream cutover acceptance: the TUI and
+   private Runtime must remain in place while the bound ConversationTip changes.
+   Then park and exact-resume the current thread.
 
    ```console
    target/debug/wsnav --state-root "$acceptance_root/state" status "$workstream_id"
    target/debug/wsnav --state-root "$acceptance_root/state" rename "$workstream_id" "D1 acceptance"
+   # In the attached native Codex TUI: /clear, then one harmless prompt.
+   target/debug/wsnav --state-root "$acceptance_root/state" status "$workstream_id"
    target/debug/wsnav --state-root "$acceptance_root/state" park "$workstream_id"
    target/debug/wsnav --state-root "$acceptance_root/state" start "$workstream_id"
    target/debug/wsnav --state-root "$acceptance_root/state" attach "$workstream_id"
    ```
 
    Before park, `status` must report `private runtime: live`, `provider
-   binding: bound`, and `result attention: unseen`. It deliberately exposes no
-   session ID, process ID, cwd, hook payload, or terminal content.
+   binding: bound`, and `result attention: unseen`. The pre-clear attention
+   remains sticky even though the current tip is now the cleared destination.
+   Status deliberately exposes no session ID, process ID, cwd, hook payload,
+   or terminal content.
 
 5. Park, remove only the exact owned profile, compare the ordinary tmux
    fingerprint, and remove the temporary filesystem artifacts.

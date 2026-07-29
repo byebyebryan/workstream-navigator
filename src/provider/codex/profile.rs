@@ -76,7 +76,7 @@ impl ObserverProfile {
             if existing.canonical_path != path || existing.hook_executable != self.hook_executable {
                 return Err(ProfileError::OwnershipMismatch);
             }
-            self.verify_owned_document(&path, existing, &expected_hash)?;
+            self.verify_owned_document(existing, &expected_hash)?;
             return Ok(existing.clone());
         }
         if existing.is_some() {
@@ -105,39 +105,97 @@ impl ObserverProfile {
         if !path.is_file() {
             return Err(ProfileError::MissingOwnedPath(path));
         }
-        self.verify_owned_document(&path, ownership, &hash(&self.rendered()))?;
+        self.verify_owned_document(ownership, &hash(&self.rendered()))?;
         fs::remove_file(path).map_err(ProfileError::Io)
+    }
+
+    /// Verifies that Codex's native `/hooks` review trusted every generated
+    /// lifecycle hook. A syntactically exact but unreviewed profile remains
+    /// `trust_pending` and cannot enable managed launches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if profile ownership changed or native trust is absent
+    /// or incomplete.
+    pub fn verify_native_trust(&self, ownership: &ProfileOwnership) -> Result<(), ProfileError> {
+        let suffix = self.owned_native_suffix(ownership, &hash(&self.rendered()))?;
+        if suffix.is_some_and(|suffix| has_complete_hook_trust(&suffix, &self.path())) {
+            Ok(())
+        } else {
+            Err(ProfileError::NativeTrustPending)
+        }
+    }
+
+    /// Replaces an exact owned declaration with this executable's declaration.
+    /// Codex's co-located trust records are deliberately discarded because they
+    /// hash the old declaration. The returned ownership must be recorded as
+    /// `trust_pending` until native review completes again.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error rather than replacing a foreign, missing, or modified
+    /// profile. A no-op update retains the existing native trust state.
+    pub fn update(&self, existing: &ProfileOwnership) -> Result<ProfileOwnership, ProfileError> {
+        let path = self.path();
+        if existing.canonical_path != path {
+            return Err(ProfileError::OwnershipMismatch);
+        }
+        let rendered = self.rendered();
+        let content_hash = hash(&rendered);
+        if existing.hook_executable == self.hook_executable && existing.content_hash == content_hash
+        {
+            self.verify_owned_document(existing, &content_hash)?;
+            return Ok(existing.clone());
+        }
+
+        let previous = Self::new(self.codex_home.clone(), existing.hook_executable.clone());
+        previous.verify_owned_document(existing, &hash(&previous.rendered()))?;
+        atomic_private_write(&path, rendered.as_bytes())?;
+        Ok(ProfileOwnership {
+            canonical_path: path,
+            owner_id: existing.owner_id.clone(),
+            hook_executable: self.hook_executable.clone(),
+            content_hash,
+        })
     }
 
     /// Verifies the byte-exact `WSNav` declaration and the narrow Codex-owned
     /// trust suffix which native `/hooks` review appends to selected profiles.
     fn verify_owned_document(
         &self,
-        path: &Path,
         ownership: &ProfileOwnership,
         expected_hash: &str,
     ) -> Result<(), ProfileError> {
-        if ownership.content_hash != expected_hash {
+        self.owned_native_suffix(ownership, expected_hash)
+            .map(|_| ())
+    }
+
+    fn owned_native_suffix(
+        &self,
+        ownership: &ProfileOwnership,
+        expected_hash: &str,
+    ) -> Result<Option<toml::Table>, ProfileError> {
+        let path = self.path();
+        if ownership.canonical_path != path || ownership.content_hash != expected_hash {
             return Err(ProfileError::OwnershipMismatch);
         }
-
-        let content = fs::read(path).map_err(ProfileError::Io)?;
-        let content = std::str::from_utf8(&content)
-            .map_err(|_| ProfileError::ModifiedPath(path.to_path_buf()))?;
+        let content = fs::read(&path).map_err(ProfileError::Io)?;
+        let content =
+            std::str::from_utf8(&content).map_err(|_| ProfileError::ModifiedPath(path.clone()))?;
         let declared = self.rendered();
         let Some(native_suffix) = content.strip_prefix(&declared) else {
-            return Err(ProfileError::ModifiedPath(path.to_path_buf()));
+            return Err(ProfileError::ModifiedPath(path));
         };
         if native_suffix.is_empty() {
-            return Ok(());
+            return Ok(None);
         }
         let suffix = native_suffix
             .parse::<toml::Table>()
-            .map_err(|_| ProfileError::ModifiedPath(path.to_path_buf()))?;
-        if accepts_native_trust_suffix(&suffix, path) {
-            Ok(())
+            .map_err(|_| ProfileError::ModifiedPath(self.path()))?;
+        if accepts_native_trust_suffix(&suffix, &self.path()) {
+            Ok(Some(suffix))
         } else {
-            Err(ProfileError::ModifiedPath(path.to_path_buf()))
+            Err(ProfileError::ModifiedPath(self.path()))
         }
     }
 }
@@ -200,6 +258,33 @@ fn accepts_hook_state(value: &toml::Value, profile_path: &Path) -> bool {
                     .is_some_and(is_sha256)
         })
     })
+}
+
+fn has_complete_hook_trust(suffix: &toml::Table, profile_path: &Path) -> bool {
+    let Some(state) = suffix
+        .get("hooks")
+        .and_then(toml::Value::as_table)
+        .and_then(|hooks| hooks.get("state"))
+        .and_then(toml::Value::as_table)
+    else {
+        return false;
+    };
+    let prefix = format!("{}:", profile_path.display());
+    let expected = [
+        "session_start:0:0",
+        "user_prompt_submit:0:0",
+        "stop:0:0",
+        "session_end:0:0",
+    ];
+    state.len() == expected.len()
+        && expected.iter().all(|entry| {
+            state
+                .get(&format!("{prefix}{entry}"))
+                .and_then(toml::Value::as_table)
+                .and_then(|record| record.get("trusted_hash"))
+                .and_then(toml::Value::as_str)
+                .is_some_and(is_sha256)
+        })
 }
 
 fn accepts_project_trust(value: &toml::Value) -> bool {
@@ -272,14 +357,31 @@ pub enum ProfileError {
     ModifiedPath(PathBuf),
     #[error("observer profile ownership does not match this manager")]
     OwnershipMismatch,
+    #[error("native observer-hook trust is incomplete or absent")]
+    NativeTrustPending,
 }
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
 
     fn manager(root: &Path) -> ObserverProfile {
         ObserverProfile::new(root.join("codex-home"), root.join("bin/wsnav"))
+    }
+
+    fn complete_native_hook_suffix(manager: &ObserverProfile) -> String {
+        let mut suffix = String::from("\n[hooks.state]\n");
+        for hook in ["session_start", "user_prompt_submit", "stop", "session_end"] {
+            let key = toml_string(&format!("{}:{hook}:0:0", manager.path().display()));
+            write!(
+                suffix,
+                "\n[hooks.state.{key}]\ntrusted_hash = \"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n"
+            )
+            .expect("writing to a string cannot fail");
+        }
+        suffix
     }
 
     #[test]
@@ -356,6 +458,61 @@ mod tests {
         );
         manager.remove(&ownership).unwrap();
         assert!(!manager.path().exists());
+    }
+
+    #[test]
+    fn native_trust_requires_every_generated_lifecycle_hook() {
+        let temporary = tempfile::tempdir().unwrap();
+        let manager = manager(temporary.path());
+        let ownership = manager.install("owner".to_owned(), None).unwrap();
+        assert!(matches!(
+            manager.verify_native_trust(&ownership),
+            Err(ProfileError::NativeTrustPending)
+        ));
+        fs::write(
+            manager.path(),
+            format!(
+                "{}{}",
+                manager.rendered(),
+                complete_native_hook_suffix(&manager)
+            ),
+        )
+        .unwrap();
+
+        manager.verify_native_trust(&ownership).unwrap();
+    }
+
+    #[test]
+    fn declaration_update_discards_old_native_trust_and_requires_review_again() {
+        let temporary = tempfile::tempdir().unwrap();
+        let original = manager(temporary.path());
+        let ownership = original.install("owner".to_owned(), None).unwrap();
+        fs::write(
+            original.path(),
+            format!(
+                "{}{}",
+                original.rendered(),
+                complete_native_hook_suffix(&original)
+            ),
+        )
+        .unwrap();
+        original.verify_native_trust(&ownership).unwrap();
+
+        let updated_manager = ObserverProfile::new(
+            temporary.path().join("codex-home"),
+            temporary.path().join("bin/wsnav-next"),
+        );
+        let updated = updated_manager.update(&ownership).unwrap();
+
+        assert_ne!(updated, ownership);
+        assert_eq!(
+            fs::read_to_string(updated_manager.path()).unwrap(),
+            updated_manager.rendered()
+        );
+        assert!(matches!(
+            updated_manager.verify_native_trust(&updated),
+            Err(ProfileError::NativeTrustPending)
+        ));
     }
 
     #[test]

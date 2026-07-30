@@ -27,6 +27,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_SSH_TARGET_BYTES: usize = 255;
 const MAX_REMOTE_EXECUTABLE_BYTES: usize = 1024;
 
+/// The conventional per-user installation used by the ordinary remote-host
+/// registration flow. It is a fixed literal, expanded only by the remote
+/// login shell; callers cannot supply arbitrary shell syntax through it.
+pub const STANDARD_REMOTE_EXECUTABLE: &str = "~/.local/bin/wsnav";
+
 /// A validated SSH destination supplied during explicit host registration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SshDestination(String);
@@ -58,24 +63,25 @@ impl SshDestination {
     }
 }
 
-/// A validated absolute remote executable path supplied during registration.
+/// A validated remote executable path used by a fixed SSH command.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RemoteExecutable(String);
 
 impl RemoteExecutable {
-    /// Parses a fixed absolute executable path suitable for a remote SSH
-    /// command. Relative paths and shell expansion are intentionally refused.
+    /// Parses either the fixed standard user-local executable or an explicit
+    /// absolute path. Arbitrary relative paths and shell expansion are refused.
     ///
     /// # Errors
     ///
     /// Returns an error for empty, non-absolute, oversized, or unsafe paths.
     pub fn parse(value: &str) -> Result<Self, TransportError> {
-        if !value.starts_with('/')
-            || value.len() > MAX_REMOTE_EXECUTABLE_BYTES
-            || !value
+        let standard_user_local = value == STANDARD_REMOTE_EXECUTABLE;
+        let safe_absolute_path = value.starts_with('/')
+            && value.len() <= MAX_REMOTE_EXECUTABLE_BYTES
+            && value
                 .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte))
-        {
+                .all(|byte| byte.is_ascii_alphanumeric() || b"/._-".contains(&byte));
+        if !standard_user_local && !safe_absolute_path {
             return Err(TransportError::UnsafeRemoteExecutable);
         }
         Ok(Self(value.to_owned()))
@@ -547,7 +553,8 @@ mod tests {
     #[test]
     fn unsafe_remote_values_cannot_reach_the_ssh_command() {
         assert!(SshDestination::parse("snap; whoami").is_err());
-        assert!(RemoteExecutable::parse("~/.local/bin/wsnav").is_err());
+        assert!(RemoteExecutable::parse(STANDARD_REMOTE_EXECUTABLE).is_ok());
+        assert!(RemoteExecutable::parse("~/bin/wsnav").is_err());
         assert!(RemoteExecutable::parse("/tmp/wsnav $(id)").is_err());
     }
 

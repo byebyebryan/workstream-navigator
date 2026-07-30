@@ -63,12 +63,19 @@ plane acceptance][D3 acceptance].
 
 ## SSH hosts
 
-Install the same `wsnav` build yourself on the remote host at a fixed absolute
-path, then register its existing SSH destination locally:
+Install the same `wsnav` build yourself on the remote host at
+`~/.local/bin/wsnav`, then register its existing SSH destination locally:
 
 ```console
-wsnav host register-ssh snap snap /absolute/path/to/wsnav
+wsnav register-remote snap
 wsnav
+```
+
+For a nonstandard SSH destination or executable path, keep the same short
+command and supply only the difference:
+
+```console
+wsnav register-remote build --destination agent@build.example --executable /opt/wsnav/bin/wsnav
 ```
 
 The navigator polls the registered host with bounded one-shot control calls

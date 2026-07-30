@@ -28,7 +28,8 @@ use crate::{
         StateRoot,
     },
     transport::{
-        HostClient, RemoteExecutable, SshDestination, SshEndpoint, SystemCommandRunner, attach_ssh,
+        HostClient, RemoteExecutable, STANDARD_REMOTE_EXECUTABLE, SshDestination, SshEndpoint,
+        SystemCommandRunner, attach_ssh,
     },
 };
 
@@ -95,6 +96,17 @@ enum Commands {
         workstream_id: String,
         attention_revision: i64,
     },
+    /// Register one SSH host using the standard remote wsnav installation.
+    RegisterRemote {
+        /// Navigator host label and, by default, the SSH destination.
+        host: String,
+        /// Override the SSH destination while retaining the host label.
+        #[arg(long)]
+        destination: Option<String>,
+        /// Override the standard remote executable with an absolute path.
+        #[arg(long)]
+        executable: Option<PathBuf>,
+    },
     /// Register and inspect explicit SSH host control-plane endpoints.
     Host {
         #[command(subcommand)]
@@ -124,15 +136,6 @@ enum Commands {
 
 #[derive(Debug, Subcommand)]
 enum HostCommands {
-    /// Register one fixed SSH target after a bounded protocol handshake.
-    RegisterSsh {
-        /// Stable local alias used by the navigator.
-        alias: String,
-        /// SSH host alias or address from the user's SSH configuration.
-        destination: String,
-        /// Absolute path to the already-installed remote wsnav executable.
-        executable: PathBuf,
-    },
     /// List explicitly registered SSH hosts without contacting them.
     List,
     /// Fetch one validated bounded snapshot from a registered SSH host.
@@ -198,6 +201,11 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 RuntimeId::from_str(&runtime_id).map_err(AppError::InvalidRuntimeId)?;
             return crate::remote::attach(&root, runtime_id).map_err(AppError::Remote);
         }
+        Commands::RegisterRemote {
+            host,
+            destination,
+            executable,
+        } => return register_remote(&root, &host, destination.as_deref(), executable.as_deref()),
         Commands::Host { command } => return host_command(&root, command),
         command => command,
     };
@@ -239,6 +247,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
         | Commands::Hook
         | Commands::Remote
         | Commands::RemoteAttach { .. }
+        | Commands::RegisterRemote { .. }
         | Commands::Host { .. } => {
             unreachable!("special command dispatch returns before state setup")
         }
@@ -271,11 +280,6 @@ fn navigator(root: &StateRoot) -> Result<(), AppError> {
 fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError> {
     let mut catalog = ClientCatalog::open(root)?;
     match command {
-        HostCommands::RegisterSsh {
-            alias,
-            destination,
-            executable,
-        } => register_ssh_host(&mut catalog, &alias, &destination, &executable),
         HostCommands::List => list_ssh_hosts(&catalog),
         HostCommands::Snapshot { alias } => snapshot_ssh_host(&catalog, &alias),
         HostCommands::Start {
@@ -305,6 +309,35 @@ fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError>
     }
 }
 
+fn register_remote(
+    root: &StateRoot,
+    host: &str,
+    destination: Option<&str>,
+    executable: Option<&Path>,
+) -> Result<(), AppError> {
+    let mut catalog = ClientCatalog::open(root)?;
+    if destination.is_none()
+        && executable.is_none()
+        && let Some(existing) = catalog.host(host)?
+    {
+        let ClientHostTransport::Ssh {
+            destination: existing_destination,
+        } = existing.transport
+        else {
+            return Err(AppError::HostIsNotSsh);
+        };
+        return register_ssh_host(
+            &mut catalog,
+            host,
+            &existing_destination,
+            &existing.executable_path,
+        );
+    }
+    let destination = destination.unwrap_or(host);
+    let executable = executable.unwrap_or_else(|| Path::new(STANDARD_REMOTE_EXECUTABLE));
+    register_ssh_host(&mut catalog, host, destination, executable)
+}
+
 fn register_ssh_host(
     catalog: &mut ClientCatalog,
     alias: &str,
@@ -325,7 +358,7 @@ fn register_ssh_host(
         endpoint.destination.as_str(),
         hello.capabilities,
     )?;
-    println!("registered SSH host {alias}");
+    println!("registered remote host {alias}");
     Ok(())
 }
 
@@ -1006,6 +1039,20 @@ mod tests {
 
         assert!(help.contains("setup"));
         assert!(!help.contains("trust-observer"));
+    }
+
+    #[test]
+    fn simple_remote_registration_needs_only_the_host_token() {
+        let parsed = Cli::try_parse_from(["wsnav", "register-remote", "snap"]).unwrap();
+
+        assert!(matches!(
+            parsed.command,
+            Some(Commands::RegisterRemote {
+                host,
+                destination: None,
+                executable: None,
+            }) if host == "snap"
+        ));
     }
 
     #[test]

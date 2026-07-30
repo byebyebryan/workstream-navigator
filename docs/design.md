@@ -278,9 +278,11 @@ fragments are never interpolated into an SSH command string.
 
 The remote binary validates protocol compatibility before reading or mutating
 state. An incompatible host is visible but unavailable for actions. V1 requires
-the user to install `wsnav` on each host and register a fixed executable path.
-It diagnoses missing or incompatible binaries but does not copy, bootstrap, or
-update remote executables.
+the user to install `wsnav` on each host; `wsnav register-remote <host>` uses
+the fixed standard remote path `~/.local/bin/wsnav`, while an explicit absolute
+override remains available for a nonstandard installation. It diagnoses missing
+or incompatible binaries but does not copy, bootstrap, or update remote
+executables.
 
 The handshake returns a stable host ID and registry generation. If either
 changes unexpectedly for an existing client registration, the client preserves

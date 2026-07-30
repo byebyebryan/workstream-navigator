@@ -22,7 +22,11 @@ use crate::{
         LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
         is_direct_provider_hook,
     },
-    state::{HostRegistry, IntegrationLifecycle, StateRoot},
+    state::{
+        ClientCatalog, ClientHostTransport, HostIdentity, HostRegistry, IntegrationLifecycle,
+        StateRoot,
+    },
+    transport::{HostClient, RemoteExecutable, SshDestination, SshEndpoint, SystemCommandRunner},
 };
 
 const ABOUT: &str =
@@ -90,6 +94,11 @@ enum Commands {
         workstream_id: String,
         attention_revision: i64,
     },
+    /// Register and inspect explicit SSH host control-plane endpoints.
+    Host {
+        #[command(subcommand)]
+        command: HostCommands,
+    },
     /// Internal Ratatui process run inside an owned presentation pane.
     #[command(name = "_navigator", hide = true)]
     NavigatorPane {
@@ -110,6 +119,25 @@ enum Commands {
     /// Internal native-terminal-only attachment endpoint used through ssh -tt.
     #[command(name = "_attach", hide = true)]
     RemoteAttach { runtime_id: String },
+}
+
+#[derive(Debug, Subcommand)]
+enum HostCommands {
+    /// Register one fixed SSH target after a bounded protocol handshake.
+    RegisterSsh {
+        /// Stable local alias used by the navigator.
+        alias: String,
+        /// SSH host alias or address from the user's SSH configuration.
+        destination: String,
+        /// Absolute path to the already-installed remote wsnav executable.
+        executable: PathBuf,
+    },
+    /// List explicitly registered SSH hosts without contacting them.
+    List,
+    /// Fetch one validated bounded snapshot from a registered SSH host.
+    Snapshot { alias: String },
+    /// Forget one SSH registration after identity/generation/capability drift.
+    Reset { alias: String },
 }
 
 fn execute(cli: Cli) -> Result<(), AppError> {
@@ -146,6 +174,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 RuntimeId::from_str(&runtime_id).map_err(AppError::InvalidRuntimeId)?;
             return crate::remote::attach(&root, runtime_id).map_err(AppError::Remote);
         }
+        Commands::Host { command } => return host_command(&root, command),
         command => command,
     };
     let mut registry = HostRegistry::open(&root)?;
@@ -185,7 +214,8 @@ fn execute(cli: Cli) -> Result<(), AppError> {
         | Commands::ProviderWait
         | Commands::Hook
         | Commands::Remote
-        | Commands::RemoteAttach { .. } => {
+        | Commands::RemoteAttach { .. }
+        | Commands::Host { .. } => {
             unreachable!("special command dispatch returns before state setup")
         }
     }
@@ -211,6 +241,89 @@ fn navigator(root: &StateRoot) -> Result<(), AppError> {
             cleanup?;
             Err(AppError::Presentation(error))
         }
+    }
+}
+
+fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError> {
+    let mut catalog = ClientCatalog::open(root)?;
+    match command {
+        HostCommands::RegisterSsh {
+            alias,
+            destination,
+            executable,
+        } => {
+            let endpoint = ssh_endpoint(&destination, &executable)?;
+            let client = HostClient::new(SystemCommandRunner);
+            let hello = client.hello_ssh(&endpoint, "wsnav")?;
+            let identity = HostIdentity {
+                host_id: hello.host_id,
+                registry_generation: hello.registry_generation,
+            };
+            catalog.register_ssh_host(
+                &alias,
+                &identity,
+                &executable,
+                endpoint.destination.as_str(),
+                hello.capabilities,
+            )?;
+            println!("registered SSH host {alias}");
+            Ok(())
+        }
+        HostCommands::List => {
+            for host in catalog.ssh_hosts()? {
+                let ClientHostTransport::Ssh { destination } = host.transport else {
+                    continue;
+                };
+                println!("{} {}", host.alias, destination);
+            }
+            Ok(())
+        }
+        HostCommands::Snapshot { alias } => {
+            let host = catalog.host(&alias)?.ok_or(AppError::UnknownHostAlias)?;
+            let ClientHostTransport::Ssh { destination } = host.transport else {
+                return Err(AppError::HostIsNotSsh);
+            };
+            let endpoint = ssh_endpoint(&destination, &host.executable_path)?;
+            let client = HostClient::new(SystemCommandRunner);
+            let hello = client.hello_ssh(&endpoint, "wsnav")?;
+            catalog.verify_hello(&alias, &hello)?;
+            let snapshot = client.snapshot_ssh(&endpoint)?;
+            println!("host: {alias}");
+            for workstream in snapshot.workstreams {
+                println!(
+                    "{} {} {}",
+                    workstream.workstream_id.short(),
+                    runtime_status_label(workstream.runtime_status),
+                    workstream.display_name
+                );
+            }
+            Ok(())
+        }
+        HostCommands::Reset { alias } => {
+            catalog.reset_ssh_host(&alias)?;
+            println!("reset SSH host {alias}");
+            Ok(())
+        }
+    }
+}
+
+fn ssh_endpoint(destination: &str, executable: &Path) -> Result<SshEndpoint, AppError> {
+    let destination = SshDestination::parse(destination)?;
+    let executable = executable
+        .to_str()
+        .ok_or(AppError::RemoteExecutableNotUtf8)
+        .and_then(|value| RemoteExecutable::parse(value).map_err(AppError::Transport))?;
+    Ok(SshEndpoint::new(destination, executable))
+}
+
+const fn runtime_status_label(status: crate::domain::RuntimeStatus) -> &'static str {
+    match status {
+        crate::domain::RuntimeStatus::Starting => "starting",
+        crate::domain::RuntimeStatus::Idle | crate::domain::RuntimeStatus::Attention => "idle",
+        crate::domain::RuntimeStatus::Working => "working",
+        crate::domain::RuntimeStatus::Stopped => "parked",
+        crate::domain::RuntimeStatus::Unknown => "unknown",
+        crate::domain::RuntimeStatus::Unreachable => "unreachable",
     }
 }
 
@@ -757,6 +870,12 @@ enum AppError {
     InvalidWorkstreamId(uuid::Error),
     #[error("invalid runtime ID")]
     InvalidRuntimeId(uuid::Error),
+    #[error("host alias is not registered")]
+    UnknownHostAlias,
+    #[error("host alias is not an SSH host")]
+    HostIsNotSsh,
+    #[error("remote executable path is not valid UTF-8")]
+    RemoteExecutableNotUtf8,
     #[error("I/O: {0}")]
     Io(std::io::Error),
     #[error("not a usable Git checkout")]
@@ -795,6 +914,8 @@ enum AppError {
     Runtime(#[from] crate::runtime::RuntimeError),
     #[error(transparent)]
     Remote(#[from] crate::remote::RemoteError),
+    #[error(transparent)]
+    Transport(#[from] crate::transport::TransportError),
     #[error(transparent)]
     State(#[from] crate::state::StateError),
 }

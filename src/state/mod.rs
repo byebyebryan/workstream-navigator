@@ -12,12 +12,13 @@ use crate::domain::{
     OperationId, OperationKind, OperationPhase, ProjectId, RandomIdGenerator, Revision, RuntimeId,
     RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
+use crate::protocol::{Capabilities, HelloResponse};
 use crate::provider::codex::hooks::{HookObservation, LifecycleEvent};
 use crate::provider::codex::names::NameState;
 use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 
 const HOST_SCHEMA_VERSION: i64 = 2;
-const CLIENT_SCHEMA_VERSION: i64 = 1;
+const CLIENT_SCHEMA_VERSION: i64 = 2;
 const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
 
@@ -116,7 +117,11 @@ const CLIENT_SCHEMA_SQL: &str = "
     CREATE TABLE hosts (
         host_alias TEXT PRIMARY KEY,
         host_id TEXT NOT NULL UNIQUE,
+        registry_generation TEXT NOT NULL,
         executable_path TEXT NOT NULL,
+        transport TEXT NOT NULL CHECK (transport IN ('local', 'ssh')),
+        ssh_destination TEXT,
+        capabilities_json TEXT NOT NULL,
         revision INTEGER NOT NULL CHECK (revision > 0)
     );
     CREATE TABLE projects (
@@ -192,6 +197,27 @@ pub struct HostIdentity {
 pub struct ClientProjectLocation {
     pub project_id: ProjectId,
     pub display_name: String,
+}
+
+/// The transport chosen through an explicit client-side host registration.
+/// The host registry remains authoritative for every provider Runtime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClientHostTransport {
+    Local,
+    Ssh { destination: String },
+}
+
+/// The fixed client-side trust record for one local or SSH host. A changed
+/// host ID, registry generation, or capabilities is never silently adopted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ClientHost {
+    pub alias: String,
+    pub host_id: HostId,
+    pub registry_generation: String,
+    pub executable_path: PathBuf,
+    pub transport: ClientHostTransport,
+    pub capabilities: Capabilities,
+    pub revision: Revision,
 }
 
 /// One V1 external checkout and its initial workstream registration.
@@ -1398,23 +1424,7 @@ impl ClientCatalog {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
-        transaction
-            .execute(
-                "INSERT OR IGNORE INTO hosts (host_alias, host_id, executable_path, revision)
-                 VALUES ('local', ?1, ?2, 1)",
-                params![host.host_id.to_string(), executable_path.to_string_lossy()],
-            )
-            .map_err(StateError::Sqlite)?;
-        let stored_host_id: String = transaction
-            .query_row(
-                "SELECT host_id FROM hosts WHERE host_alias = 'local'",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(StateError::Sqlite)?;
-        if stored_host_id != host.host_id.to_string() {
-            return Err(StateError::ClientHostIdentityMismatch);
-        }
+        ensure_local_client_host(&transaction, host, executable_path)?;
         let existing: Option<(String, String)> = transaction
             .query_row(
                 "SELECT projects.project_id, projects.display_name
@@ -1459,6 +1469,183 @@ impl ClientCatalog {
         };
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(project)
+    }
+
+    /// Records one explicit SSH host registration after a successful bounded
+    /// protocol handshake. A changed identity, generation, executable, or
+    /// capability fingerprint is rejected until the user explicitly resets
+    /// the registration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unsafe client record, a conflicting existing
+    /// registration, or a failed atomic catalog update.
+    pub fn register_ssh_host(
+        &mut self,
+        alias: &str,
+        identity: &HostIdentity,
+        executable_path: &Path,
+        destination: &str,
+        capabilities: Capabilities,
+    ) -> Result<ClientHost, StateError> {
+        validate_client_host_alias(alias)?;
+        if alias == "local" {
+            return Err(StateError::ClientHostRegistrationMismatch);
+        }
+        validate_client_host_text("remote executable", &executable_path.to_string_lossy())?;
+        validate_client_host_text("SSH destination", destination)?;
+        validate_client_host_text("registry generation", &identity.registry_generation)?;
+        let capabilities_json = serialize_capabilities(&capabilities)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let existing = load_client_host_by_alias(&transaction, alias)?;
+        let host = ClientHost {
+            alias: alias.to_owned(),
+            host_id: identity.host_id,
+            registry_generation: identity.registry_generation.clone(),
+            executable_path: executable_path.to_path_buf(),
+            transport: ClientHostTransport::Ssh {
+                destination: destination.to_owned(),
+            },
+            capabilities,
+            revision: Revision::INITIAL,
+        };
+        if let Some(existing) = existing {
+            validate_unchanged_ssh_registration(&existing, &host)?;
+            transaction.commit().map_err(StateError::Sqlite)?;
+            return Ok(existing);
+        }
+        let duplicate_alias: Option<String> = transaction
+            .query_row(
+                "SELECT host_alias FROM hosts WHERE host_id = ?1",
+                [host.host_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?;
+        if duplicate_alias.is_some() {
+            return Err(StateError::ClientHostAlreadyRegistered);
+        }
+        transaction
+            .execute(
+                "INSERT INTO hosts (
+                    host_alias, host_id, registry_generation, executable_path,
+                    transport, ssh_destination, capabilities_json, revision
+                 ) VALUES (?1, ?2, ?3, ?4, 'ssh', ?5, ?6, 1)",
+                params![
+                    host.alias,
+                    host.host_id.to_string(),
+                    host.registry_generation,
+                    host.executable_path.to_string_lossy(),
+                    destination,
+                    capabilities_json,
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(host)
+    }
+
+    /// Returns the exact client-side registration for one host alias.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog cannot be queried or contains an
+    /// invalid persisted host record.
+    pub fn host(&self, alias: &str) -> Result<Option<ClientHost>, StateError> {
+        self.connection
+            .query_row(
+                "SELECT host_alias, host_id, registry_generation, executable_path,
+                        transport, ssh_destination, capabilities_json, revision
+                 FROM hosts WHERE host_alias = ?1",
+                [alias],
+                row_to_client_host,
+            )
+            .optional()
+            .map_err(StateError::Sqlite)
+    }
+
+    /// Returns every explicitly registered SSH host in deterministic alias
+    /// order. Local host bookkeeping is deliberately excluded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog cannot be queried or contains an
+    /// invalid persisted host record.
+    pub fn ssh_hosts(&self) -> Result<Vec<ClientHost>, StateError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT host_alias, host_id, registry_generation, executable_path,
+                        transport, ssh_destination, capabilities_json, revision
+                 FROM hosts WHERE transport = 'ssh' ORDER BY host_alias",
+            )
+            .map_err(StateError::Sqlite)?;
+        statement
+            .query_map([], row_to_client_host)
+            .map_err(StateError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::Sqlite)
+    }
+
+    /// Verifies fresh `hello` evidence against the user's fixed registration.
+    /// A mismatch does not update the catalog and callers must disable remote
+    /// mutation until the operator resets and re-registers the host.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the host is unknown or its identity, generation,
+    /// or capabilities differ from the recorded registration.
+    pub fn verify_hello(
+        &self,
+        alias: &str,
+        hello: &HelloResponse,
+    ) -> Result<ClientHost, StateError> {
+        let host = self.host(alias)?.ok_or(StateError::UnknownClientHost)?;
+        if host.host_id != hello.host_id {
+            return Err(StateError::ClientHostIdentityMismatch);
+        }
+        if host.registry_generation != hello.registry_generation {
+            return Err(StateError::ClientHostGenerationMismatch);
+        }
+        if host.capabilities != hello.capabilities {
+            return Err(StateError::ClientHostCapabilitiesMismatch);
+        }
+        Ok(host)
+    }
+
+    /// Removes one explicit SSH host registration and its client-side project
+    /// associations. It never contacts the host or mutates the host registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for the protected local record, an unknown alias, or a
+    /// failed atomic catalog update.
+    pub fn reset_ssh_host(&mut self, alias: &str) -> Result<(), StateError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let host =
+            load_client_host_by_alias(&transaction, alias)?.ok_or(StateError::UnknownClientHost)?;
+        if !matches!(host.transport, ClientHostTransport::Ssh { .. }) {
+            return Err(StateError::ClientHostResetRefused);
+        }
+        transaction
+            .execute(
+                "DELETE FROM project_locations WHERE host_id = ?1",
+                [host.host_id.to_string()],
+            )
+            .map_err(StateError::Sqlite)?;
+        let deleted = transaction
+            .execute("DELETE FROM hosts WHERE host_alias = ?1", [alias])
+            .map_err(StateError::Sqlite)?;
+        if deleted != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        transaction.commit().map_err(StateError::Sqlite)
     }
 
     /// Looks up the client-local Project label for one exact local host
@@ -1571,14 +1758,23 @@ fn migrate_client_schema(connection: &mut Connection) -> Result<(), StateError> 
     if current > CLIENT_SCHEMA_VERSION {
         return Err(StateError::UnsupportedSchemaVersion(current));
     }
-    if current == CLIENT_SCHEMA_VERSION {
-        return Ok(());
-    }
-
     let transaction = connection.transaction().map_err(StateError::Sqlite)?;
-    transaction
-        .execute_batch(CLIENT_SCHEMA_SQL)
-        .map_err(StateError::Sqlite)?;
+    match current {
+        0 => transaction
+            .execute_batch(CLIENT_SCHEMA_SQL)
+            .map_err(StateError::Sqlite)?,
+        1 => transaction
+            .execute_batch(
+                "ALTER TABLE hosts ADD COLUMN registry_generation TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE hosts ADD COLUMN transport TEXT NOT NULL DEFAULT 'local';
+                 ALTER TABLE hosts ADD COLUMN ssh_destination TEXT;
+                 ALTER TABLE hosts ADD COLUMN capabilities_json TEXT NOT NULL
+                    DEFAULT '{\"codex\":false,\"git\":false,\"tmux\":false}';",
+            )
+            .map_err(StateError::Sqlite)?,
+        CLIENT_SCHEMA_VERSION => return Ok(()),
+        _ => return Err(StateError::UnsupportedSchemaVersion(current)),
+    }
     transaction
         .execute(
             &format!("PRAGMA user_version = {CLIENT_SCHEMA_VERSION}"),
@@ -1586,6 +1782,140 @@ fn migrate_client_schema(connection: &mut Connection) -> Result<(), StateError> 
         )
         .map_err(StateError::Sqlite)?;
     transaction.commit().map_err(StateError::Sqlite)
+}
+
+fn ensure_local_client_host(
+    transaction: &rusqlite::Transaction<'_>,
+    identity: &HostIdentity,
+    executable_path: &Path,
+) -> Result<(), StateError> {
+    let existing = load_client_host_by_alias(transaction, "local")?;
+    let Some(existing) = existing else {
+        transaction
+            .execute(
+                "INSERT INTO hosts (
+                    host_alias, host_id, registry_generation, executable_path,
+                    transport, ssh_destination, capabilities_json, revision
+                 ) VALUES ('local', ?1, ?2, ?3, 'local', NULL, ?4, 1)",
+                params![
+                    identity.host_id.to_string(),
+                    identity.registry_generation,
+                    executable_path.to_string_lossy(),
+                    serialize_capabilities(&Capabilities::default())?,
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        return Ok(());
+    };
+    if existing.host_id != identity.host_id {
+        return Err(StateError::ClientHostIdentityMismatch);
+    }
+    if !matches!(existing.transport, ClientHostTransport::Local) {
+        return Err(StateError::ClientHostRegistrationMismatch);
+    }
+    if !existing.registry_generation.is_empty()
+        && existing.registry_generation != identity.registry_generation
+    {
+        return Err(StateError::ClientHostGenerationMismatch);
+    }
+    let changed = transaction
+        .execute(
+            "UPDATE hosts SET registry_generation = ?1, executable_path = ?2,
+                 revision = revision + 1
+             WHERE host_alias = 'local' AND host_id = ?3 AND revision = ?4",
+            params![
+                identity.registry_generation,
+                executable_path.to_string_lossy(),
+                identity.host_id.to_string(),
+                existing.revision.value(),
+            ],
+        )
+        .map_err(StateError::Sqlite)?;
+    if changed != 1 {
+        return Err(StateError::ConcurrentWrite);
+    }
+    Ok(())
+}
+
+fn load_client_host_by_alias(
+    connection: &rusqlite::Transaction<'_>,
+    alias: &str,
+) -> Result<Option<ClientHost>, StateError> {
+    connection
+        .query_row(
+            "SELECT host_alias, host_id, registry_generation, executable_path,
+                    transport, ssh_destination, capabilities_json, revision
+             FROM hosts WHERE host_alias = ?1",
+            [alias],
+            row_to_client_host,
+        )
+        .optional()
+        .map_err(StateError::Sqlite)
+}
+
+fn row_to_client_host(row: &rusqlite::Row<'_>) -> rusqlite::Result<ClientHost> {
+    let alias: String = row.get(0)?;
+    let host_id: String = row.get(1)?;
+    let registry_generation: String = row.get(2)?;
+    let executable_path: String = row.get(3)?;
+    let transport: String = row.get(4)?;
+    let destination: Option<String> = row.get(5)?;
+    let capabilities_json: String = row.get(6)?;
+    let revision: i64 = row.get(7)?;
+    let host_id = Uuid::parse_str(&host_id)
+        .map(HostId::from)
+        .map_err(to_from_sql_error)?;
+    let capabilities = serde_json::from_str(&capabilities_json)
+        .map_err(|_| to_from_sql_error(StateError::InvalidPersistedCapabilities))?;
+    let transport = match transport.as_str() {
+        "local" => ClientHostTransport::Local,
+        "ssh" => ClientHostTransport::Ssh {
+            destination: destination.ok_or_else(|| {
+                to_from_sql_error(StateError::InvalidPersistedValue(
+                    "missing SSH destination".to_owned(),
+                ))
+            })?,
+        },
+        _ => {
+            return Err(to_from_sql_error(StateError::InvalidPersistedValue(
+                transport,
+            )));
+        }
+    };
+    Ok(ClientHost {
+        alias,
+        host_id,
+        registry_generation,
+        executable_path: PathBuf::from(executable_path),
+        transport,
+        capabilities,
+        revision: Revision::try_from(revision).map_err(to_from_sql_error)?,
+    })
+}
+
+fn validate_unchanged_ssh_registration(
+    existing: &ClientHost,
+    candidate: &ClientHost,
+) -> Result<(), StateError> {
+    if existing.host_id != candidate.host_id {
+        return Err(StateError::ClientHostIdentityMismatch);
+    }
+    if existing.registry_generation != candidate.registry_generation {
+        return Err(StateError::ClientHostGenerationMismatch);
+    }
+    if existing.capabilities != candidate.capabilities {
+        return Err(StateError::ClientHostCapabilitiesMismatch);
+    }
+    if existing.executable_path != candidate.executable_path
+        || existing.transport != candidate.transport
+    {
+        return Err(StateError::ClientHostRegistrationMismatch);
+    }
+    Ok(())
+}
+
+fn serialize_capabilities(capabilities: &Capabilities) -> Result<String, StateError> {
+    serde_json::to_string(capabilities).map_err(StateError::ClientCapabilitiesEncoding)
 }
 
 fn load_operation_by_request_key(
@@ -2131,6 +2461,25 @@ fn validate_project_display_name(value: &str) -> Result<(), StateError> {
     Ok(())
 }
 
+fn validate_client_host_alias(value: &str) -> Result<(), StateError> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    {
+        return Err(StateError::InvalidClientHostAlias);
+    }
+    Ok(())
+}
+
+fn validate_client_host_text(name: &'static str, value: &str) -> Result<(), StateError> {
+    if value.is_empty() || value.len() > 1024 || value.contains(['\0', '\n', '\r']) {
+        return Err(StateError::InvalidClientHostField(name));
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn set_private_directory_permissions(path: &Path) -> Result<(), StateError> {
     use std::os::unix::fs::PermissionsExt;
@@ -2202,6 +2551,26 @@ pub enum StateError {
     IntegrationOwnershipMismatch,
     #[error("local client catalog host identity does not match the host registry")]
     ClientHostIdentityMismatch,
+    #[error("registered host generation no longer matches; reset and register the host again")]
+    ClientHostGenerationMismatch,
+    #[error("registered host capabilities no longer match; reset and register the host again")]
+    ClientHostCapabilitiesMismatch,
+    #[error("client host registration does not match the fixed recorded transport")]
+    ClientHostRegistrationMismatch,
+    #[error("this host identity is already registered under another alias")]
+    ClientHostAlreadyRegistered,
+    #[error("client host alias is invalid")]
+    InvalidClientHostAlias,
+    #[error("client host field {0} is invalid")]
+    InvalidClientHostField(&'static str),
+    #[error("persisted client host capabilities are invalid")]
+    InvalidPersistedCapabilities,
+    #[error("could not encode client host capabilities")]
+    ClientCapabilitiesEncoding(serde_json::Error),
+    #[error("client host is unknown")]
+    UnknownClientHost,
+    #[error("the local client host registration cannot be reset")]
+    ClientHostResetRefused,
 }
 
 #[cfg(test)]
@@ -2362,6 +2731,140 @@ mod tests {
             .unwrap();
 
         assert_eq!(loaded, recorded);
+    }
+
+    #[test]
+    fn client_catalog_migrates_legacy_local_host_records() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let connection = Connection::open(root.client_database_path()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE hosts (
+                    host_alias TEXT PRIMARY KEY,
+                    host_id TEXT NOT NULL UNIQUE,
+                    executable_path TEXT NOT NULL,
+                    revision INTEGER NOT NULL CHECK (revision > 0)
+                 );
+                 INSERT INTO hosts VALUES ('local', '00000000-0000-0000-0000-000000000001', '/bin/wsnav', 1);
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let catalog = ClientCatalog::open(&root).unwrap();
+        let migrated = catalog.host("local").unwrap().unwrap();
+
+        assert_eq!(catalog.schema_version().unwrap(), CLIENT_SCHEMA_VERSION);
+        assert_eq!(migrated.registry_generation, "");
+        assert!(matches!(migrated.transport, ClientHostTransport::Local));
+        assert_eq!(migrated.capabilities, Capabilities::default());
+    }
+
+    #[test]
+    fn registered_ssh_host_refuses_identity_generation_and_capability_drift() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let mut catalog = ClientCatalog::open(&root).unwrap();
+        let identity = HostIdentity {
+            host_id: HostId::new(),
+            registry_generation: "generation-a".to_owned(),
+        };
+        let capabilities = Capabilities {
+            codex: true,
+            git: true,
+            tmux: true,
+        };
+        let registered = catalog
+            .register_ssh_host(
+                "snap",
+                &identity,
+                Path::new("/home/bryan/.local/bin/wsnav"),
+                "snap",
+                capabilities.clone(),
+            )
+            .unwrap();
+
+        assert!(matches!(
+            registered.transport,
+            ClientHostTransport::Ssh { ref destination } if destination == "snap"
+        ));
+        assert_eq!(catalog.ssh_hosts().unwrap(), vec![registered.clone()]);
+        assert_eq!(
+            catalog
+                .verify_hello(
+                    "snap",
+                    &HelloResponse {
+                        host_id: identity.host_id,
+                        registry_generation: identity.registry_generation.clone(),
+                        wsnav_version: "0.1.0".to_owned(),
+                        capabilities: capabilities.clone(),
+                    }
+                )
+                .unwrap(),
+            registered
+        );
+        assert!(matches!(
+            catalog.verify_hello(
+                "snap",
+                &HelloResponse {
+                    host_id: HostId::new(),
+                    registry_generation: identity.registry_generation.clone(),
+                    wsnav_version: "0.1.0".to_owned(),
+                    capabilities: capabilities.clone(),
+                }
+            ),
+            Err(StateError::ClientHostIdentityMismatch)
+        ));
+        assert!(matches!(
+            catalog.verify_hello(
+                "snap",
+                &HelloResponse {
+                    host_id: identity.host_id,
+                    registry_generation: "generation-b".to_owned(),
+                    wsnav_version: "0.1.0".to_owned(),
+                    capabilities: capabilities.clone(),
+                }
+            ),
+            Err(StateError::ClientHostGenerationMismatch)
+        ));
+        assert!(matches!(
+            catalog.verify_hello(
+                "snap",
+                &HelloResponse {
+                    host_id: identity.host_id,
+                    registry_generation: identity.registry_generation,
+                    wsnav_version: "0.1.0".to_owned(),
+                    capabilities: Capabilities::default(),
+                }
+            ),
+            Err(StateError::ClientHostCapabilitiesMismatch)
+        ));
+    }
+
+    #[test]
+    fn explicit_ssh_reset_removes_only_client_registration_and_associations() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let mut catalog = ClientCatalog::open(&root).unwrap();
+        let identity = HostIdentity {
+            host_id: HostId::new(),
+            registry_generation: "generation".to_owned(),
+        };
+        catalog
+            .register_ssh_host(
+                "snap",
+                &identity,
+                Path::new("/home/bryan/.local/bin/wsnav"),
+                "snap",
+                Capabilities::default(),
+            )
+            .unwrap();
+
+        catalog.reset_ssh_host("snap").unwrap();
+
+        assert!(catalog.host("snap").unwrap().is_none());
+        assert!(catalog.ssh_hosts().unwrap().is_empty());
     }
 
     #[test]

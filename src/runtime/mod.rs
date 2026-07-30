@@ -308,26 +308,36 @@ impl<'a> PrivateRuntime<'a> {
             return Ok(RuntimeProbe::Missing);
         }
 
-        let pane = self.tmux.invoke(&TmuxInvocation {
-            socket: self.paths.socket.clone(),
-            config: None,
-            arguments: vec![
-                OsString::from("display-message"),
-                OsString::from("-p"),
-                OsString::from("-t"),
-                OsString::from(format!("{}:0.0", self.paths.session_name)),
-                OsString::from("#{pane_id}\t#{pane_pid}\t#{pane_current_path}"),
-            ],
-        })?;
-        if !pane.success {
-            return Ok(RuntimeProbe::Unknown {
-                diagnostic: trim_diagnostic(&pane.stderr),
-            });
-        }
-        let Some((pane_reference, process_id_text, cwd)) = parse_pane_facts(&pane.stdout) else {
-            return Ok(RuntimeProbe::Unknown {
-                diagnostic: "private tmux pane facts were malformed".to_owned(),
-            });
+        let pane_target = OsString::from(format!("{}:0.0", self.paths.session_name));
+        let pane_reference = match read_pane_field(
+            self.tmux,
+            &self.paths.socket,
+            &pane_target,
+            "#{pane_id}",
+            "pane ID",
+        )? {
+            Ok(value) => value,
+            Err(diagnostic) => return Ok(RuntimeProbe::Unknown { diagnostic }),
+        };
+        let process_id_text = match read_pane_field(
+            self.tmux,
+            &self.paths.socket,
+            &pane_target,
+            "#{pane_pid}",
+            "pane PID",
+        )? {
+            Ok(value) => value,
+            Err(diagnostic) => return Ok(RuntimeProbe::Unknown { diagnostic }),
+        };
+        let cwd = match read_pane_field(
+            self.tmux,
+            &self.paths.socket,
+            &pane_target,
+            "#{pane_current_path}",
+            "pane current path",
+        )? {
+            Ok(value) => value,
+            Err(diagnostic) => return Ok(RuntimeProbe::Unknown { diagnostic }),
         };
         let Ok(process_id) = process_id_text.parse::<u32>() else {
             return Ok(RuntimeProbe::Unknown {
@@ -439,20 +449,44 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<(), RuntimeError> {
     Ok(())
 }
 
-fn parse_pane_facts(output: &str) -> Option<(String, &str, &str)> {
+/// Reads one tmux pane fact without relying on a separator in tmux format output.
+///
+/// tmux 3.7b normalizes literal tab separators in format output, so a combined
+/// record cannot be parsed reliably across supported hosts. Separate bounded
+/// queries also let the caller reject ambiguous line-based output fail-closed.
+fn read_pane_field(
+    tmux: &dyn TmuxClient,
+    socket: &Path,
+    pane_target: &OsString,
+    format: &str,
+    label: &str,
+) -> Result<Result<String, String>, RuntimeError> {
+    let response = tmux.invoke(&TmuxInvocation {
+        socket: socket.to_path_buf(),
+        config: None,
+        arguments: vec![
+            OsString::from("display-message"),
+            OsString::from("-p"),
+            OsString::from("-t"),
+            pane_target.clone(),
+            OsString::from(format),
+        ],
+    })?;
+    if !response.success {
+        return Ok(Err(trim_diagnostic(&response.stderr)));
+    }
+    let Some(value) = parse_single_pane_fact(&response.stdout) else {
+        return Ok(Err(format!("private tmux {label} was malformed")));
+    };
+    Ok(Ok(value.to_owned()))
+}
+
+fn parse_single_pane_fact(output: &str) -> Option<&str> {
     let output = output.trim_end_matches(['\r', '\n']);
-    let mut values = output.split('\t');
-    let pane_reference = values.next()?.to_owned();
-    let process_id_text = values.next()?;
-    let cwd = values.next()?;
-    if pane_reference.is_empty()
-        || process_id_text.is_empty()
-        || cwd.is_empty()
-        || values.next().is_some()
-    {
+    if output.is_empty() || output.contains(['\r', '\n']) {
         return None;
     }
-    Some((pane_reference, process_id_text, cwd))
+    Some(output)
 }
 
 fn trim_diagnostic(diagnostic: &str) -> String {
@@ -595,7 +629,17 @@ mod tests {
             successful(),
             TmuxResponse {
                 success: true,
-                stdout: "%1\tbad-pid\t/tmp\n".to_owned(),
+                stdout: "%1\n".to_owned(),
+                stderr: String::new(),
+            },
+            TmuxResponse {
+                success: true,
+                stdout: "bad-pid\n".to_owned(),
+                stderr: String::new(),
+            },
+            TmuxResponse {
+                success: true,
+                stdout: "/tmp\n".to_owned(),
                 stderr: String::new(),
             },
         ]);
@@ -606,6 +650,50 @@ mod tests {
             runtime.probe().unwrap(),
             RuntimeProbe::Unknown { .. }
         ));
+    }
+
+    #[test]
+    fn probe_uses_separator_free_single_field_queries() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let tmux = FakeTmux::with_responses([
+            successful(),
+            TmuxResponse {
+                success: true,
+                stdout: "%1\n".to_owned(),
+                stderr: String::new(),
+            },
+            TmuxResponse {
+                success: true,
+                stdout: "42\n".to_owned(),
+                stderr: String::new(),
+            },
+            TmuxResponse {
+                success: true,
+                stdout: "/tmp\n".to_owned(),
+                stderr: String::new(),
+            },
+        ]);
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+
+        assert!(matches!(
+            runtime.probe().unwrap(),
+            RuntimeProbe::Live {
+                pane_id,
+                pane_pid: 42,
+                cwd,
+                process_birth: Some(_),
+            } if pane_id == "%1" && cwd == Path::new("/tmp")
+        ));
+
+        let calls = tmux.calls.borrow();
+        assert_eq!(calls.len(), 4);
+        assert!(calls[1..].iter().all(|call| {
+            call.arguments
+                .last()
+                .is_some_and(|format| !format.to_string_lossy().contains('\t'))
+        }));
     }
 
     #[test]

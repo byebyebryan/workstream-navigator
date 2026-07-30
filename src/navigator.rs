@@ -509,6 +509,7 @@ fn combined_snapshot(
 pub struct NavigatorView {
     snapshot: LocalNavigatorSnapshot,
     selected: usize,
+    attached: Option<(String, WorkstreamId)>,
     message: Option<String>,
     spinner_frame: usize,
 }
@@ -519,6 +520,7 @@ impl NavigatorView {
         Self {
             snapshot,
             selected: 0,
+            attached: None,
             message: None,
             spinner_frame: 0,
         }
@@ -539,6 +541,7 @@ impl NavigatorView {
                 self.selected
                     .min(self.snapshot.workstreams.len().saturating_sub(1))
             });
+        self.clear_inactive_attachment();
     }
 
     #[must_use]
@@ -568,6 +571,41 @@ impl NavigatorView {
     pub fn select_row(&mut self, row: usize) {
         if row < self.snapshot.workstreams.len() {
             self.selected = row;
+        }
+    }
+
+    fn is_attached_to(&self, workstream: &NavigatorWorkstream) -> bool {
+        self.attached
+            .as_ref()
+            .is_some_and(|(host_alias, workstream_id)| {
+                host_alias == workstream.host.alias() && *workstream_id == workstream.workstream_id
+            })
+    }
+
+    fn mark_attached(&mut self, workstream: &NavigatorWorkstream) {
+        self.attached = Some((workstream.host.alias().to_owned(), workstream.workstream_id));
+    }
+
+    fn clear_attached(&mut self, workstream: &NavigatorWorkstream) {
+        if self.is_attached_to(workstream) {
+            self.attached = None;
+        }
+    }
+
+    fn clear_inactive_attachment(&mut self) {
+        let Some((host_alias, workstream_id)) = &self.attached else {
+            return;
+        };
+        let still_live = self.snapshot.workstreams.iter().any(|workstream| {
+            workstream.host.alias() == host_alias
+                && workstream.workstream_id == *workstream_id
+                && !matches!(
+                    workstream.runtime_status,
+                    NavigatorRuntimeStatus::Parked | NavigatorRuntimeStatus::Unknown
+                )
+        });
+        if !still_live {
+            self.attached = None;
         }
     }
 
@@ -800,13 +838,8 @@ pub fn run_local_navigator(
                     MouseEventKind::ScrollUp => view.select_previous(),
                     MouseEventKind::Down(MouseButton::Left) => {
                         if let Some(row) = view.row_from_y(mouse.row) {
-                            // A mouse click is only navigator selection. In
-                            // particular, it must not cold-resume a parked
-                            // Workstream or respawn an already attached pane.
-                            // tmux can therefore transfer focus to this pane
-                            // with one click; Enter remains the explicit
-                            // start/resume/attach action.
                             view.select_row(row);
+                            activate_selected(root, &presentation, &mut remote, &mut view);
                         }
                     }
                     _ => {}
@@ -848,6 +881,17 @@ fn activate_selected(
         view.set_message("remote host is unavailable; cached state is not actionable");
         return;
     }
+    if view.is_attached_to(&selected)
+        && !matches!(
+            selected.runtime_status,
+            NavigatorRuntimeStatus::Parked | NavigatorRuntimeStatus::Unknown
+        )
+    {
+        if let Err(error) = presentation.focus_provider() {
+            view.set_message(action_message(&error));
+        }
+        return;
+    }
     if matches!(
         selected.runtime_status,
         NavigatorRuntimeStatus::Parked | NavigatorRuntimeStatus::Unknown
@@ -867,6 +911,7 @@ fn activate_selected(
         view.set_message(action_message(&error));
         return;
     }
+    view.mark_attached(&selected);
     if let Err(error) = presentation.focus_provider() {
         view.set_message(action_message(&error));
     } else {
@@ -898,6 +943,7 @@ fn park_selected(root: &StateRoot, remote: &mut RemoteMonitor, view: &mut Naviga
     };
     match run_action(root, "park", &selected, None) {
         Ok(()) => {
+            view.clear_attached(&selected);
             remote.request_soon(selected.host.alias());
             refresh_view(root, remote, view);
             view.set_message("Workstream parked; provider history is preserved");
@@ -1014,6 +1060,35 @@ mod tests {
         assert_eq!(view.selected().map(|row| row.workstream_id), Some(second));
         view.select_next();
         assert_eq!(view.selected().map(|row| row.workstream_id), Some(first));
+    }
+
+    #[test]
+    fn attachment_marker_is_exact_and_clears_after_park() {
+        let first = WorkstreamId::new();
+        let second = WorkstreamId::new();
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![
+                row(first, NavigatorRuntimeStatus::Idle),
+                row(second, NavigatorRuntimeStatus::Idle),
+            ],
+            unreachable_hosts: Vec::new(),
+        });
+        let first_row = view.selected().unwrap().clone();
+        let second_row = view.snapshot.workstreams[1].clone();
+
+        view.mark_attached(&first_row);
+        assert!(view.is_attached_to(&first_row));
+        assert!(!view.is_attached_to(&second_row));
+
+        view.replace_snapshot(LocalNavigatorSnapshot {
+            workstreams: vec![
+                row(first, NavigatorRuntimeStatus::Parked),
+                row(second, NavigatorRuntimeStatus::Idle),
+            ],
+            unreachable_hosts: Vec::new(),
+        });
+
+        assert!(!view.is_attached_to(view.selected().unwrap()));
     }
 
     #[test]

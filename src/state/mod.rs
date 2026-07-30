@@ -16,7 +16,7 @@ use crate::provider::codex::hooks::{HookObservation, LifecycleEvent};
 use crate::provider::codex::names::NameState;
 use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 
-const HOST_SCHEMA_VERSION: i64 = 1;
+const HOST_SCHEMA_VERSION: i64 = 2;
 const CLIENT_SCHEMA_VERSION: i64 = 1;
 const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
@@ -63,6 +63,7 @@ const HOST_SCHEMA_SQL: &str = "
         source_workstream_id TEXT REFERENCES workstreams(workstream_id),
         checkout_id TEXT NOT NULL UNIQUE REFERENCES checkouts(checkout_id),
         lifecycle TEXT NOT NULL,
+        last_activity_sequence INTEGER NOT NULL CHECK (last_activity_sequence >= 0),
         revision INTEGER NOT NULL CHECK (revision > 0)
     );
     CREATE TABLE runtimes (
@@ -240,6 +241,7 @@ pub struct WorkstreamOverview {
     pub location_id: LocationId,
     pub checkout_path: PathBuf,
     pub lifecycle: WorkstreamLifecycle,
+    pub last_activity_sequence: i64,
     pub revision: Revision,
     pub runtime: Option<RuntimeRecord>,
     pub binding: Option<ProviderBinding>,
@@ -521,6 +523,7 @@ impl HostRegistry {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
+        let activity_sequence = next_activity_sequence(&transaction)?;
         let path = registration.checkout_path.to_string_lossy();
         transaction
             .execute(
@@ -554,12 +557,13 @@ impl HostRegistry {
             .execute(
                 "INSERT INTO workstreams (
                     workstream_id, location_id, origin, source_workstream_id,
-                    checkout_id, lifecycle, revision
-                 ) VALUES (?1, ?2, 'external', NULL, ?3, 'open', 1)",
+                    checkout_id, lifecycle, last_activity_sequence, revision
+                 ) VALUES (?1, ?2, 'external', NULL, ?3, 'open', ?4, 1)",
                 params![
                     registration.workstream_id.to_string(),
                     registration.location_id.to_string(),
                     registration.checkout_id.to_string(),
+                    activity_sequence,
                 ],
             )
             .map_err(StateError::Sqlite)?;
@@ -666,6 +670,8 @@ impl HostRegistry {
         };
         if workstream_lifecycle == "parked" {
             reopen_parked_workstream(&transaction, workstream_id)?;
+        } else {
+            touch_workstream(&transaction, &workstream_id.to_string())?;
         }
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(record)
@@ -706,10 +712,12 @@ impl HostRegistry {
                 .connection
                 .prepare(
                     "SELECT workstreams.workstream_id, workstreams.location_id,
-                            checkouts.path, workstreams.lifecycle, workstreams.revision
+                            checkouts.path, workstreams.lifecycle,
+                            workstreams.last_activity_sequence, workstreams.revision
                      FROM workstreams
                      JOIN checkouts ON checkouts.checkout_id = workstreams.checkout_id
-                     ORDER BY checkouts.path, workstreams.workstream_id
+                     ORDER BY workstreams.last_activity_sequence DESC,
+                              checkouts.path, workstreams.workstream_id
                      LIMIT ?1",
                 )
                 .map_err(StateError::Sqlite)?;
@@ -721,6 +729,7 @@ impl HostRegistry {
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
                     ))
                 })
                 .map_err(StateError::Sqlite)?
@@ -735,7 +744,14 @@ impl HostRegistry {
         bases
             .into_iter()
             .map(
-                |(workstream_id, location_id, checkout_path, lifecycle, revision)| {
+                |(
+                    workstream_id,
+                    location_id,
+                    checkout_path,
+                    lifecycle,
+                    activity_sequence,
+                    revision,
+                )| {
                     let workstream_id = Uuid::parse_str(&workstream_id)
                         .map(WorkstreamId::from)
                         .map_err(StateError::InvalidPersistedUuid)?;
@@ -756,6 +772,7 @@ impl HostRegistry {
                         location_id,
                         checkout_path: PathBuf::from(checkout_path),
                         lifecycle,
+                        last_activity_sequence: activity_sequence,
                         revision,
                         runtime,
                         binding,
@@ -953,13 +970,15 @@ impl HostRegistry {
                 params![runtime_id.to_string(), expected.value()],
             )
             .map_err(StateError::Sqlite)?;
+        let activity_sequence = next_activity_sequence(&transaction)?;
         let workstream_changed = transaction
             .execute(
                 "UPDATE workstreams SET lifecycle = CASE
                     WHEN lifecycle = 'open' THEN 'parked' ELSE lifecycle END,
+                    last_activity_sequence = ?1,
                     revision = revision + 1
-                 WHERE workstream_id = ?1",
-                [workstream_id],
+                 WHERE workstream_id = ?2",
+                params![activity_sequence, workstream_id],
             )
             .map_err(StateError::Sqlite)?;
         if runtime_changed != 1 || workstream_changed != 1 {
@@ -1058,6 +1077,7 @@ impl HostRegistry {
                 update_runtime_lifecycle(&transaction, runtime_id, revision, "stopped")?;
             }
         }
+        touch_workstream(&transaction, &runtime.0)?;
         transaction.commit().map_err(StateError::Sqlite)
     }
 
@@ -1486,16 +1506,29 @@ fn migrate_host_schema(connection: &mut Connection) -> Result<(), StateError> {
     if current > HOST_SCHEMA_VERSION {
         return Err(StateError::UnsupportedSchemaVersion(current));
     }
-    if current == HOST_SCHEMA_VERSION {
-        return Ok(());
-    }
-
     let transaction = connection.transaction().map_err(StateError::Sqlite)?;
-    transaction
-        .execute_batch(HOST_SCHEMA_SQL)
-        .map_err(StateError::Sqlite)?;
+    match current {
+        0 => transaction
+            .execute_batch(HOST_SCHEMA_SQL)
+            .map_err(StateError::Sqlite)?,
+        1 => transaction
+            .execute_batch(
+                "ALTER TABLE workstreams
+                 ADD COLUMN last_activity_sequence INTEGER NOT NULL DEFAULT 0
+                 CHECK (last_activity_sequence >= 0);",
+            )
+            .map_err(StateError::Sqlite)?,
+        HOST_SCHEMA_VERSION => return Ok(()),
+        _ => return Err(StateError::UnsupportedSchemaVersion(current)),
+    }
     transaction
         .execute(&format!("PRAGMA user_version = {HOST_SCHEMA_VERSION}"), [])
+        .map_err(StateError::Sqlite)?;
+    transaction
+        .execute(
+            "UPDATE host_identity SET schema_version = ?1 WHERE singleton = 1",
+            [HOST_SCHEMA_VERSION],
+        )
         .map_err(StateError::Sqlite)?;
     transaction.commit().map_err(StateError::Sqlite)
 }
@@ -1781,15 +1814,52 @@ fn update_runtime_lifecycle(
     }
 }
 
+/// Returns the next durable activity order for a Workstream update.
+///
+/// This sequence is intentionally logical rather than wall-clock time: it is
+/// enough to render deterministic newest-first navigation without storing a
+/// timestamp or depending on clock injection at this boundary.
+fn next_activity_sequence(transaction: &rusqlite::Transaction<'_>) -> Result<i64, StateError> {
+    transaction
+        .query_row(
+            "SELECT COALESCE(MAX(last_activity_sequence), 0) + 1 FROM workstreams",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)
+}
+
+/// Records meaningful runtime or provider lifecycle activity for ordering.
+fn touch_workstream(
+    transaction: &rusqlite::Transaction<'_>,
+    workstream_id: &str,
+) -> Result<(), StateError> {
+    let activity_sequence = next_activity_sequence(transaction)?;
+    let changed = transaction
+        .execute(
+            "UPDATE workstreams SET last_activity_sequence = ?1, revision = revision + 1
+             WHERE workstream_id = ?2",
+            params![activity_sequence, workstream_id],
+        )
+        .map_err(StateError::Sqlite)?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(StateError::ConcurrentWrite)
+    }
+}
+
 fn reopen_parked_workstream(
     transaction: &rusqlite::Transaction<'_>,
     workstream_id: WorkstreamId,
 ) -> Result<(), StateError> {
+    let activity_sequence = next_activity_sequence(transaction)?;
     let changed = transaction
         .execute(
-            "UPDATE workstreams SET lifecycle = 'open', revision = revision + 1
-             WHERE workstream_id = ?1 AND lifecycle = 'parked'",
-            [workstream_id.to_string()],
+            "UPDATE workstreams SET lifecycle = 'open', last_activity_sequence = ?1,
+             revision = revision + 1
+             WHERE workstream_id = ?2 AND lifecycle = 'parked'",
+            params![activity_sequence, workstream_id.to_string()],
         )
         .map_err(StateError::Sqlite)?;
     if changed == 1 {
@@ -2274,6 +2344,57 @@ mod tests {
     }
 
     #[test]
+    fn v1_host_schema_migrates_activity_ordering_metadata() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE host_identity (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    host_id TEXT NOT NULL UNIQUE,
+                    registry_generation TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL
+                 );
+                 INSERT INTO host_identity VALUES (1, 'host', 'generation', 1);
+                 CREATE TABLE workstreams (
+                    workstream_id TEXT PRIMARY KEY,
+                    location_id TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    source_workstream_id TEXT,
+                    checkout_id TEXT NOT NULL UNIQUE,
+                    lifecycle TEXT NOT NULL,
+                    revision INTEGER NOT NULL CHECK (revision > 0)
+                 );
+                 PRAGMA user_version = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let registry = HostRegistry::open(&root).unwrap();
+        assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        let activity_column: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('workstreams')
+                 WHERE name = 'last_activity_sequence'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let recorded_version: i64 = connection
+            .query_row(
+                "SELECT schema_version FROM host_identity WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(activity_column, 1);
+        assert_eq!(recorded_version, HOST_SCHEMA_VERSION);
+    }
+
+    #[test]
     fn deterministic_operation_identity_is_persisted_on_first_request() {
         let (_temporary, mut registry) = registry();
         let ids = SequenceIds::default();
@@ -2389,6 +2510,65 @@ mod tests {
                 .map(|binding| binding.name_state),
             Some(NameState::Named)
         );
+    }
+
+    #[test]
+    fn navigator_overview_orders_latest_observed_activity_first() {
+        let (_temporary, mut registry) = registry();
+        let first = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/first"),
+                "first-repository".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let second = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/second"),
+                "second-repository".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(first.workstream_id).unwrap();
+        let cwd = runtime.cwd.to_string_lossy().into_owned();
+        for observation in [
+            HookObservation {
+                event: LifecycleEvent::SessionStart,
+                cwd: cwd.clone(),
+                native_session_id: "session-a".to_owned(),
+                turn_id: None,
+                source: Some("startup".to_owned()),
+            },
+            HookObservation {
+                event: LifecycleEvent::UserPromptSubmit,
+                cwd: cwd.clone(),
+                native_session_id: "session-a".to_owned(),
+                turn_id: Some("turn-a".to_owned()),
+                source: None,
+            },
+            HookObservation {
+                event: LifecycleEvent::Stop,
+                cwd,
+                native_session_id: "session-a".to_owned(),
+                turn_id: Some("turn-a".to_owned()),
+                source: None,
+            },
+        ] {
+            registry
+                .apply_hook_observation(runtime.runtime_id, &runtime.tmux_generation, observation)
+                .unwrap();
+        }
+
+        let overview = registry.workstream_overviews().unwrap();
+
+        assert_eq!(
+            overview
+                .iter()
+                .map(|entry| entry.workstream_id)
+                .collect::<Vec<_>>(),
+            vec![first.workstream_id, second.workstream_id]
+        );
+        assert!(overview[0].last_activity_sequence > overview[1].last_activity_sequence);
     }
 
     #[test]

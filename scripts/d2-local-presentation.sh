@@ -12,6 +12,7 @@ set -euo pipefail
 binary_path="${1:-target/debug/wsnav}"
 test_root=""
 driver_socket=""
+reconnect_socket=""
 ordinary_before=""
 ordinary_after=""
 
@@ -26,6 +27,9 @@ ordinary_tmux_fingerprint() {
 cleanup() {
     if [[ -n "$driver_socket" ]]; then
         env -u TMUX tmux -S "$driver_socket" kill-server >/dev/null 2>&1 || true
+    fi
+    if [[ -n "$reconnect_socket" ]]; then
+        env -u TMUX tmux -S "$reconnect_socket" kill-server >/dev/null 2>&1 || true
     fi
     if [[ -n "$test_root" ]]; then
         rm -rf -- "$test_root"
@@ -78,7 +82,9 @@ for _ in $(seq 1 100); do
 done
 [[ "$rendered" == true ]] || die "navigator did not render the registered Workstream"
 
-env -u TMUX tmux -S "$driver_socket" send-keys -t wsnav-d2-driver:0 q
+client_tty="$(env -u TMUX tmux -S "$presentation_socket" list-clients -F '#{client_tty}')"
+[[ -n "$client_tty" ]] || die "navigator was not attached to its private presentation"
+env -u TMUX tmux -S "$presentation_socket" detach-client -t "$client_tty"
 
 for _ in $(seq 1 100); do
     if ! env -u TMUX tmux -S "$driver_socket" has-session -t wsnav-d2-driver >/dev/null 2>&1; then
@@ -87,6 +93,33 @@ for _ in $(seq 1 100); do
     sleep 0.05
 done
 if env -u TMUX tmux -S "$driver_socket" has-session -t wsnav-d2-driver >/dev/null 2>&1; then
+    die "navigator did not return cleanly after presentation detach"
+fi
+env -u TMUX tmux -S "$presentation_socket" has-session >/dev/null 2>&1 \
+    || die "presentation did not remain available after detach"
+
+reconnect_socket="$test_root/reconnect.sock"
+env -u TMUX tmux -S "$reconnect_socket" new-session -d -s wsnav-d2-reconnect -x 160 -y 44 \
+    "$binary_path" --state-root "$test_root/state"
+rendered=false
+for _ in $(seq 1 100); do
+    if env -u TMUX tmux -S "$reconnect_socket" capture-pane -p -t wsnav-d2-reconnect:0 | grep -q 'alpha-project'; then
+        rendered=true
+        break
+    fi
+    sleep 0.05
+done
+[[ "$rendered" == true ]] || die "navigator did not reconnect to the detached presentation"
+
+env -u TMUX tmux -S "$reconnect_socket" send-keys -t wsnav-d2-reconnect:0 q
+
+for _ in $(seq 1 100); do
+    if ! env -u TMUX tmux -S "$reconnect_socket" has-session -t wsnav-d2-reconnect >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.05
+done
+if env -u TMUX tmux -S "$reconnect_socket" has-session -t wsnav-d2-reconnect >/dev/null 2>&1; then
     die "navigator did not exit after its explicit quit action"
 fi
 

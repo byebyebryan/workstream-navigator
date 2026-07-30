@@ -60,11 +60,10 @@ impl PresentationPaths {
             .parent()
             .ok_or_else(|| PresentationError::InvalidControlPath(socket.clone()))?;
         let presentation_root = state_root.join(PRESENTATION_DIRECTORY);
-        if !parent.starts_with(&presentation_root)
+        let expected_session = presentation_session_name(parent);
+        if parent.parent() != Some(presentation_root.as_path())
             || socket.file_name().is_none_or(|name| name != "tmux.sock")
-            || !session_name.starts_with(PRESENTATION_PREFIX)
-            || session_name.len() > 96
-            || session_name.contains(['\n', '\r', '\0'])
+            || expected_session.as_deref() != Some(&session_name)
         {
             return Err(PresentationError::InvalidControlPath(socket));
         }
@@ -97,6 +96,24 @@ impl Presentation {
             executable: std::env::current_exe().map_err(PresentationError::Io)?,
             state_root: state_root.to_path_buf(),
         })
+    }
+
+    /// Reuses the one live owned presentation, or creates a fresh owner when
+    /// no presentation is live. A detached presentation is intentionally kept
+    /// so a later `wsnav` invocation can reconnect without disturbing any
+    /// provider Runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when an owned presentation is ambiguous, malformed, or
+    /// cannot be queried through its exact private tmux socket.
+    pub fn open_or_create(state_root: &Path) -> Result<(Self, bool), PresentationError> {
+        let live = Self::discover_live(state_root)?;
+        match live.as_slice() {
+            [] => Ok((Self::fresh(state_root)?, true)),
+            [presentation] => Ok((presentation.clone(), false)),
+            _ => Err(PresentationError::AmbiguousPresentations),
+        }
     }
 
     /// Reopens the exact owned presentation described by a hidden child
@@ -254,6 +271,60 @@ impl Presentation {
         Ok(())
     }
 
+    fn discover_live(state_root: &Path) -> Result<Vec<Self>, PresentationError> {
+        let presentation_root = state_root.join(PRESENTATION_DIRECTORY);
+        if !presentation_root.exists() {
+            return Ok(Vec::new());
+        }
+        let entries = fs::read_dir(&presentation_root).map_err(PresentationError::Io)?;
+        let mut live = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(PresentationError::Io)?;
+            if !entry.file_type().map_err(PresentationError::Io)?.is_dir() {
+                return Err(PresentationError::InvalidControlPath(entry.path()));
+            }
+            let directory = entry.path();
+            let session_name = presentation_session_name(&directory)
+                .ok_or_else(|| PresentationError::InvalidControlPath(directory.clone()))?;
+            let presentation =
+                Self::from_control(state_root, directory.join("tmux.sock"), session_name)?;
+            if presentation.is_live()? {
+                live.push(presentation);
+            } else {
+                presentation.close()?;
+            }
+        }
+        Ok(live)
+    }
+
+    fn is_live(&self) -> Result<bool, PresentationError> {
+        let output = Command::new("tmux")
+            .env_remove("TMUX")
+            .arg("-S")
+            .arg(&self.paths.socket)
+            .args(["has-session", "-t", &self.paths.session_name])
+            .output()
+            .map_err(PresentationError::Io)?;
+        if output.stdout.len() > MAX_TMUX_OUTPUT_BYTES
+            || output.stderr.len() > MAX_TMUX_OUTPUT_BYTES
+        {
+            return Err(PresentationError::OutputTooLarge);
+        }
+        if output.status.success() {
+            return Ok(true);
+        }
+        let diagnostic = String::from_utf8_lossy(&output.stderr);
+        if !self.paths.socket.exists()
+            || diagnostic.contains("no server running")
+            || diagnostic.contains("No such file")
+        {
+            return Ok(false);
+        }
+        Err(PresentationError::TmuxRejected(sanitize_diagnostic(
+            &diagnostic,
+        )))
+    }
+
     fn navigator_command(&self) -> Vec<OsString> {
         vec![
             self.executable.clone().into_os_string(),
@@ -310,15 +381,34 @@ impl Presentation {
         if output.status.success() {
             Ok(())
         } else {
-            Err(PresentationError::TmuxRejected(
-                String::from_utf8_lossy(&output.stderr)
-                    .chars()
-                    .filter(|character| !character.is_control() || *character == ' ')
-                    .take(256)
-                    .collect(),
-            ))
+            Err(PresentationError::TmuxRejected(sanitize_diagnostic(
+                &String::from_utf8_lossy(&output.stderr),
+            )))
         }
     }
+}
+
+fn presentation_session_name(directory: &Path) -> Option<String> {
+    let identifier = directory
+        .file_name()?
+        .to_str()?
+        .strip_prefix("presentation-")?;
+    if identifier.len() != 12
+        || !identifier
+            .chars()
+            .all(|character| character.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(format!("{PRESENTATION_PREFIX}{identifier}"))
+}
+
+fn sanitize_diagnostic(diagnostic: &str) -> String {
+    diagnostic
+        .chars()
+        .filter(|character| !character.is_control() || *character == ' ')
+        .take(256)
+        .collect()
 }
 
 fn create_paths(paths: &PresentationPaths) -> Result<(), PresentationError> {
@@ -354,6 +444,8 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<(), PresentationError> {
 /// diagnostics.
 #[derive(Debug, Error)]
 pub enum PresentationError {
+    #[error("multiple private navigator presentations are live; close one before reconnecting")]
+    AmbiguousPresentations,
     #[error("invalid private presentation control path {0}")]
     InvalidControlPath(PathBuf),
     #[error("I/O: {0}")]
@@ -394,6 +486,20 @@ mod tests {
                 temporary.path(),
                 PathBuf::from("/tmp/tmux-default"),
                 "wsnav-presentation-example".to_owned(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn control_path_requires_the_exact_owned_session_name() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        assert!(
+            PresentationPaths::from_control(
+                temporary.path(),
+                paths.socket,
+                "wsnav-presentation-other".to_owned(),
             )
             .is_err()
         );

@@ -169,18 +169,26 @@ fn execute(cli: Cli) -> Result<(), AppError> {
 }
 
 fn navigator(root: &StateRoot) -> Result<(), AppError> {
-    let presentation = Presentation::fresh(root.base())?;
-    presentation.start()?;
-    let attached = presentation.attach();
-    let closed_by_navigator = attached.is_err() && !presentation.paths().directory.exists();
-    let cleanup = presentation.close();
-    if closed_by_navigator {
-        cleanup?;
-        return Ok(());
+    let (presentation, fresh) = Presentation::open_or_create(root.base())?;
+    if fresh {
+        presentation.start()?;
     }
-    attached?;
-    cleanup?;
-    Ok(())
+    match presentation.attach() {
+        // A normal tmux detach leaves the private presentation available for a
+        // later bare `wsnav` reconnect. It never affects a provider Runtime.
+        Ok(()) => Ok(()),
+        // `q` in the navigator stops the owned presentation itself. Its parent
+        // sees a failed attach because the socket vanished, which is a normal
+        // clean exit rather than an attachment failure.
+        Err(_) if !presentation.paths().directory.exists() => {
+            presentation.close().map_err(Into::into)
+        }
+        Err(error) => {
+            let cleanup = presentation.close();
+            cleanup?;
+            Err(AppError::Presentation(error))
+        }
+    }
 }
 
 fn acknowledge(

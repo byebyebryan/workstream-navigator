@@ -322,7 +322,8 @@ impl NavigatorView {
             .snapshot
             .workstreams
             .iter()
-            .map(row_item)
+            .enumerate()
+            .map(|(index, row)| row_item(row, index == self.selected))
             .collect::<Vec<_>>();
         let mut state = ListState::default();
         state.select((!items.is_empty()).then_some(self.selected));
@@ -353,14 +354,15 @@ impl NavigatorView {
 
     #[must_use]
     pub fn row_from_y(&self, y: u16) -> Option<usize> {
-        // List content starts immediately after the one-line top border.
+        // List content starts immediately after the one-line top border. Each
+        // Workstream intentionally has a project line and a native-thread line.
         y.checked_sub(1)
-            .map(usize::from)
+            .map(|offset| usize::from(offset / 2))
             .filter(|row| *row < self.snapshot.workstreams.len())
     }
 }
 
-fn row_item(row: &NavigatorWorkstream) -> ListItem<'static> {
+fn row_item(row: &NavigatorWorkstream, selected: bool) -> ListItem<'static> {
     let attention = if row.recovery_required {
         " ! "
     } else if row.result_ready {
@@ -376,18 +378,34 @@ fn row_item(row: &NavigatorWorkstream) -> ListItem<'static> {
         NavigatorRuntimeStatus::Parked => Style::default().fg(Color::DarkGray),
         _ => Style::default().fg(Color::Cyan),
     };
-    ListItem::new(Line::from(vec![
-        Span::styled(attention, style),
-        Span::styled(
-            format!("{} · ", row.project_label),
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::raw(row.display_name.clone()),
-        Span::styled(
-            format!("  {}", row.runtime_status.label()),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]))
+    let project_style = if selected {
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    };
+    let thread_style = if selected {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default()
+    };
+    ListItem::new(vec![
+        Line::from(vec![
+            Span::raw("   "),
+            Span::styled(row.project_label.clone(), project_style),
+        ]),
+        Line::from(vec![
+            Span::styled(attention, style),
+            Span::styled(row.display_name.clone(), thread_style),
+            Span::styled(
+                format!("  {}", row.runtime_status.label()),
+                Style::default().fg(Color::DarkGray),
+            ),
+        ]),
+    ])
 }
 
 /// Local navigator projection failures.
@@ -635,13 +653,19 @@ mod tests {
     }
 
     #[test]
-    fn row_mapping_rejects_borders_and_outside_rows() {
+    fn row_mapping_covers_both_lines_of_each_workstream() {
         let view = NavigatorView::new(LocalNavigatorSnapshot {
-            workstreams: vec![row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)],
+            workstreams: vec![
+                row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle),
+                row(WorkstreamId::new(), NavigatorRuntimeStatus::Parked),
+            ],
         });
         assert_eq!(view.row_from_y(0), None);
         assert_eq!(view.row_from_y(1), Some(0));
-        assert_eq!(view.row_from_y(2), None);
+        assert_eq!(view.row_from_y(2), Some(0));
+        assert_eq!(view.row_from_y(3), Some(1));
+        assert_eq!(view.row_from_y(4), Some(1));
+        assert_eq!(view.row_from_y(5), None);
     }
 
     #[test]
@@ -676,6 +700,14 @@ mod tests {
         assert!(rendered.contains("native thread"));
         assert!(rendered.contains('•'));
         assert!(!rendered.contains("prompt"));
+        let project_cell = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "p")
+            .unwrap();
+        assert_eq!(project_cell.fg, Color::White);
     }
 
     fn row(

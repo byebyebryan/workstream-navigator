@@ -79,8 +79,9 @@ Scope:
 - local ProjectLocation registration and one external initial Checkout;
 - exactly one private tmux server, session, window, and pane per live Runtime;
 - native Codex start, direct attach, park, and exact resume;
-- explicit `wsnav-observer` profile setup, native trust review, ownership,
-  doctor, update, and exact removal;
+- explicit host-only `wsnav-observer` profile setup, native trust review with
+  automatic post-review verification, ownership, doctor, update, and exact
+  removal;
 - passive lifecycle-hook ingestion with full stdin draining and authority
   validation;
 - atomic ProviderBinding, status, settled-turn, and sticky-attention updates;

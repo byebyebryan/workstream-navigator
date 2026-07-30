@@ -348,13 +348,17 @@ It keeps the real `CODEX_HOME` so native trust persists, but it does not load a
 project configuration or project hooks. The review process is not a managed
 Runtime and deliberately has no observer authority: an invoked hook drains and
 does nothing. The operator trusts the exact generated command in `/hooks` and
-exits without submitting a prompt. `wsnav trust-observer` then requires the
-complete native trust record before enabling managed launch. A blank current
-Codex landing screen emits no `SessionStart`, so no stronger passive activation
-signal is fabricated. The first managed `SessionStart` must instead pass the
-normal provider-side corroboration gate. Whether an unprompted review process
-leaves any native history residue is a validation gate and must be disclosed if
-it cannot be avoided.
+exits without submitting a prompt. On exit, `wsnav setup` verifies the complete
+native trust record and records the observer ready automatically. If review was
+declined, cancelled, or incomplete, it remains `trust_pending`, setup fails
+closed with a retry instruction, and no managed launch is enabled. Setup is
+host-only: it neither inspects the current cwd nor creates a ProjectLocation,
+Checkout, or Workstream. A blank current Codex landing screen emits no
+`SessionStart`, so no stronger passive activation signal is fabricated. The
+first managed `SessionStart` must instead pass the normal provider-side
+corroboration gate. Whether an unprompted review process leaves any native
+history residue is a validation gate and must be disclosed if it cannot be
+avoided.
 
 Native Codex hook review appends trust records to the selected profile itself:
 `[hooks.state]` records keyed to the exact generated hook entries and trusted

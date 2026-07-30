@@ -56,14 +56,16 @@ struct Cli {
 enum Commands {
     /// Open the local two-pane Workstream Navigator presentation.
     Navigator,
-    /// Install the owned observer profile and leave native hook trust pending.
+    /// Install the owned observer profile and complete native hook review.
     Setup {
         /// Install without opening the native review TUI. This test-only escape
         /// hatch never marks the observer ready.
         #[arg(long, hide = true)]
         skip_review: bool,
     },
-    /// Confirm native hook trust after reviewing it in Codex's `/hooks` UI.
+    /// Verify an already-completed native hook review. Normal setup performs
+    /// this automatically after the review TUI exits.
+    #[command(hide = true)]
     TrustObserver,
     /// Inspect the exact observer ownership and trust lifecycle without changing it.
     Doctor,
@@ -240,20 +242,26 @@ fn setup(root: &StateRoot, registry: &mut HostRegistry, skip_review: bool) -> Re
         return Ok(());
     }
     if lifecycle == IntegrationLifecycle::Ready {
-        registry.record_codex_integration(ownership, IntegrationLifecycle::TrustPending)?;
+        registry.record_codex_integration(ownership.clone(), IntegrationLifecycle::TrustPending)?;
     }
     if skip_review {
         println!("observer profile installed; native hook trust remains pending");
+        return Ok(());
+    }
+    if finalize_native_trust(registry, &manager, &ownership)? {
+        println!("observer profile is ready");
         return Ok(());
     }
     println!(
         "review the exact observer hook in Codex's native /hooks UI, then exit Codex without submitting a prompt"
     );
     native_trust_review(root)?;
-    println!(
-        "observer profile installed; review and trust it in Codex /hooks, then run wsnav trust-observer"
-    );
-    Ok(())
+    if finalize_native_trust(registry, &manager, &ownership)? {
+        println!("observer profile is ready");
+        Ok(())
+    } else {
+        Err(AppError::NativeTrustReviewIncomplete)
+    }
 }
 
 fn update_observer(registry: &mut HostRegistry) -> Result<(), AppError> {
@@ -316,14 +324,31 @@ fn trust_observer(registry: &mut HostRegistry) -> Result<(), AppError> {
         .codex_integration()?
         .ok_or(AppError::ObserverNotInstalled)?;
     let manager = observer_profile()?;
-    manager.verify_native_trust(&integration.ownership)?;
-    let ownership = manager.install(
-        integration.ownership.owner_id.clone(),
-        Some(&integration.ownership),
-    )?;
-    registry.record_codex_integration(ownership, IntegrationLifecycle::Ready)?;
-    println!("observer profile marked ready");
-    Ok(())
+    if finalize_native_trust(registry, &manager, &integration.ownership)? {
+        println!("observer profile marked ready");
+        Ok(())
+    } else {
+        Err(AppError::NativeTrustReviewIncomplete)
+    }
+}
+
+/// Verifies Codex's own completed native review before recording this observer
+/// as usable. `false` means the exact owned profile is still untrusted; other
+/// profile errors fail closed instead of starting or marking an observer ready.
+fn finalize_native_trust(
+    registry: &mut HostRegistry,
+    manager: &ObserverProfile,
+    ownership: &crate::provider::codex::profile::ProfileOwnership,
+) -> Result<bool, AppError> {
+    match manager.verify_native_trust(ownership) {
+        Ok(()) => {
+            let ownership = manager.install(ownership.owner_id.clone(), Some(ownership))?;
+            registry.record_codex_integration(ownership, IntegrationLifecycle::Ready)?;
+            Ok(true)
+        }
+        Err(crate::provider::codex::profile::ProfileError::NativeTrustPending) => Ok(false),
+        Err(error) => Err(AppError::Profile(error)),
+    }
 }
 
 fn native_trust_review(root: &StateRoot) -> Result<(), AppError> {
@@ -722,9 +747,13 @@ enum AppError {
     #[error("observer profile is not installed; run wsnav setup")]
     ObserverNotInstalled,
     #[error(
-        "observer profile trust is pending; complete native Codex /hooks review then run wsnav trust-observer"
+        "observer profile trust is pending; run wsnav setup and complete native Codex /hooks review"
     )]
     ObserverNotReady,
+    #[error(
+        "native hook trust remains pending; rerun wsnav setup and approve the exact observer hooks in Codex"
+    )]
+    NativeTrustReviewIncomplete,
     #[error("observer profile removal is refused while a managed runtime is live")]
     LiveRuntimePreventsRemoval,
     #[error("observer profile update is refused while a managed runtime is live")]
@@ -747,6 +776,10 @@ enum AppError {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
+    use clap::CommandFactory as _;
+
     use super::*;
 
     #[test]
@@ -779,5 +812,60 @@ mod tests {
         let parsed = Cli::try_parse_from(["wsnav", "_hook"]);
         assert!(matches!(parsed.unwrap().command, Some(Commands::Hook)));
         assert!(Cli::try_parse_from(["wsnav", "hook"]).is_err());
+    }
+
+    #[test]
+    fn manual_trust_reconciliation_is_not_part_of_the_normal_cli() {
+        let help = Cli::command().render_help().to_string();
+
+        assert!(help.contains("setup"));
+        assert!(!help.contains("trust-observer"));
+    }
+
+    #[test]
+    fn native_trust_is_recorded_only_after_codex_completes_the_exact_review() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let manager = ObserverProfile::new(
+            temporary.path().join("codex-home"),
+            temporary.path().join("bin/wsnav"),
+        );
+        let ownership = manager.install("owner".to_owned(), None).unwrap();
+        registry
+            .record_codex_integration(ownership.clone(), IntegrationLifecycle::TrustPending)
+            .unwrap();
+
+        assert!(!finalize_native_trust(&mut registry, &manager, &ownership).unwrap());
+
+        std::fs::write(
+            manager.path(),
+            format!(
+                "{}{}",
+                manager.rendered(),
+                complete_native_trust_suffix(&manager)
+            ),
+        )
+        .unwrap();
+
+        assert!(finalize_native_trust(&mut registry, &manager, &ownership).unwrap());
+        assert_eq!(
+            registry.codex_integration().unwrap().unwrap().lifecycle,
+            IntegrationLifecycle::Ready
+        );
+    }
+
+    fn complete_native_trust_suffix(manager: &ObserverProfile) -> String {
+        let mut suffix = String::from("\n[hooks.state]\n");
+        for hook in ["session_start", "user_prompt_submit", "stop", "session_end"] {
+            let key =
+                serde_json::to_string(&format!("{}:{hook}:0:0", manager.path().display())).unwrap();
+            writeln!(
+                suffix,
+                "\n[hooks.state.{key}]\ntrusted_hash = \"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\""
+            )
+            .unwrap();
+        }
+        suffix
     }
 }

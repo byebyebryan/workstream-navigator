@@ -13,7 +13,9 @@ native hook-trust review.
    the ordinary tmux fingerprint.
 2. Run `wsnav setup` against the disposable state root. The operator reviews
    and trusts only the four exact `wsnav _hook` lifecycle entries in Codex's
-   native UI, then runs `wsnav trust-observer`.
+   native UI; on exit, setup verifies the native records and marks the observer
+   ready. The original recorded D2 run predated this guided completion and
+   invoked the now-hidden reconciliation command separately.
 3. Register the disposable checkout and open bare `wsnav` from a terminal the
    operator controls. The navigator must render a bounded Workstream row.
 4. Select the row through the navigator, which starts or attaches the exact

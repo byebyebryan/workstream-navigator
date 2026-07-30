@@ -37,13 +37,16 @@ and removes it only together with the exact dedicated profile.
 2. Install the profile into the normal `CODEX_HOME`. `setup` opens one native,
    profile-selected review TUI in a private WSNav tmux server and an empty
    disposable cwd. Review and trust the exact `wsnav _hook` command in Codex's
-   native `/hooks` UI, then exit without submitting a prompt. It neither uses
-   the default tmux server nor writes Codex's trust state itself.
+   native `/hooks` UI, then exit without submitting a prompt. On exit, setup
+   verifies and records the exact native trust state automatically. It neither
+   uses the default tmux server nor writes Codex's trust state itself.
 
    ```console
    target/debug/wsnav --state-root "$acceptance_root/state" setup
-   target/debug/wsnav --state-root "$acceptance_root/state" trust-observer
    ```
+
+   The recorded D1 run predated guided setup completion and invoked the
+   now-hidden reconciliation command separately after the same native review.
 
 3. Register and start the external checkout. Attach to the private runtime,
    submit one harmless prompt, and wait for its normal result. Do not use a

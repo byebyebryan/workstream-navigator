@@ -7,13 +7,14 @@
 use std::{
     collections::BTreeMap,
     env,
+    ffi::OsString,
     path::{Path, PathBuf},
 };
 
 use thiserror::Error;
 
 use crate::{
-    domain::{Revision, WorkstreamId},
+    domain::{Revision, RuntimeId, WorkstreamId},
     provider::codex::profile::{ObserverProfile, ProfileError},
     runtime::{
         LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
@@ -90,21 +91,11 @@ pub fn start(
     let launch = NativeLaunch {
         cwd: record.cwd.clone(),
         program: codex_launch_program(&record.cwd, prior_binding.as_ref()),
-        environment: BTreeMap::from([
-            (
-                "WSNAV_STATE_ROOT".into(),
-                root.base().as_os_str().to_owned(),
-            ),
-            (
-                "WSNAV_RUNTIME_ID".into(),
-                record.runtime_id.to_string().into(),
-            ),
-            (
-                "WSNAV_RUNTIME_GENERATION".into(),
-                record.tmux_generation.clone().into(),
-            ),
-            ("WSNAV_OBSERVER_AUTHORITY".into(), OBSERVER_AUTHORITY.into()),
-        ]),
+        environment: managed_codex_environment(
+            root.base(),
+            &record.runtime_id,
+            &record.tmux_generation,
+        ),
     };
     if let Err(error) = runtime.start(&launch) {
         let _ = registry.mark_runtime_stopped(record.runtime_id, record.revision);
@@ -180,6 +171,31 @@ pub fn codex_launch_program(
     program
 }
 
+/// Builds the environment owned by a managed Codex Runtime.
+///
+/// Remote starts use one-shot non-interactive SSH commands. Those commands can
+/// have a POSIX locale even when the terminal that later attaches is UTF-8.
+/// Set the locale only for the owned Codex process (and its hook children), so
+/// its terminal renderer has a stable UTF-8 contract without changing the
+/// user's shell or an unmanaged provider session.
+fn managed_codex_environment(
+    state_root: &Path,
+    runtime_id: &RuntimeId,
+    runtime_generation: &str,
+) -> BTreeMap<OsString, OsString> {
+    const UTF8_LOCALE: &str = "C.UTF-8";
+
+    BTreeMap::from([
+        ("LANG".into(), UTF8_LOCALE.into()),
+        ("LC_CTYPE".into(), UTF8_LOCALE.into()),
+        ("LC_ALL".into(), UTF8_LOCALE.into()),
+        ("WSNAV_STATE_ROOT".into(), state_root.as_os_str().to_owned()),
+        ("WSNAV_RUNTIME_ID".into(), runtime_id.to_string().into()),
+        ("WSNAV_RUNTIME_GENERATION".into(), runtime_generation.into()),
+        ("WSNAV_OBSERVER_AUTHORITY".into(), OBSERVER_AUTHORITY.into()),
+    ])
+}
+
 fn ensure_workstream_revision(
     registry: &HostRegistry,
     workstream_id: WorkstreamId,
@@ -242,4 +258,26 @@ pub enum ActionError {
     Runtime(#[from] crate::runtime::RuntimeError),
     #[error(transparent)]
     State(#[from] StateError),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn managed_codex_environment_has_an_explicit_utf8_locale() {
+        let environment =
+            managed_codex_environment(Path::new("/state"), &RuntimeId::new(), "runtime-generation");
+
+        for key in ["LANG", "LC_CTYPE", "LC_ALL"] {
+            assert_eq!(
+                environment.get(&OsString::from(key)),
+                Some(&OsString::from("C.UTF-8"))
+            );
+        }
+        assert_eq!(
+            environment.get(&OsString::from("WSNAV_STATE_ROOT")),
+            Some(&OsString::from("/state"))
+        );
+    }
 }

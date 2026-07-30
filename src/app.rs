@@ -104,6 +104,12 @@ enum Commands {
     /// Internal passive Codex lifecycle hook entrypoint.
     #[command(name = "_hook", hide = true)]
     Hook,
+    /// Internal one-shot local/SSH host control-protocol endpoint.
+    #[command(name = "_remote", hide = true)]
+    Remote,
+    /// Internal native-terminal-only attachment endpoint used through ssh -tt.
+    #[command(name = "_attach", hide = true)]
+    RemoteAttach { runtime_id: String },
 }
 
 fn execute(cli: Cli) -> Result<(), AppError> {
@@ -116,6 +122,14 @@ fn execute(cli: Cli) -> Result<(), AppError> {
         observe_hook(state_root);
         return Ok(());
     }
+    if matches!(&command, Commands::Remote) {
+        return crate::remote::serve(
+            state_root,
+            &mut std::io::stdin().lock(),
+            &mut std::io::stdout().lock(),
+        )
+        .map_err(AppError::Remote);
+    }
     let root = StateRoot::create(state_root.unwrap_or_else(default_state_root))?;
     let command = match command {
         Commands::Navigator => return navigator(&root),
@@ -127,6 +141,11 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 .map_err(AppError::Navigator);
         }
         Commands::ProviderWait => return provider_wait(),
+        Commands::RemoteAttach { runtime_id } => {
+            let runtime_id =
+                RuntimeId::from_str(&runtime_id).map_err(AppError::InvalidRuntimeId)?;
+            return crate::remote::attach(&root, runtime_id).map_err(AppError::Remote);
+        }
         command => command,
     };
     let mut registry = HostRegistry::open(&root)?;
@@ -164,7 +183,9 @@ fn execute(cli: Cli) -> Result<(), AppError> {
         Commands::Navigator
         | Commands::NavigatorPane { .. }
         | Commands::ProviderWait
-        | Commands::Hook => {
+        | Commands::Hook
+        | Commands::Remote
+        | Commands::RemoteAttach { .. } => {
             unreachable!("special command dispatch returns before state setup")
         }
     }
@@ -734,6 +755,8 @@ enum AppError {
     InvalidAttentionRevision,
     #[error("invalid workstream ID")]
     InvalidWorkstreamId(uuid::Error),
+    #[error("invalid runtime ID")]
+    InvalidRuntimeId(uuid::Error),
     #[error("I/O: {0}")]
     Io(std::io::Error),
     #[error("not a usable Git checkout")]
@@ -770,6 +793,8 @@ enum AppError {
     Presentation(#[from] crate::presentation::PresentationError),
     #[error(transparent)]
     Runtime(#[from] crate::runtime::RuntimeError),
+    #[error(transparent)]
+    Remote(#[from] crate::remote::RemoteError),
     #[error(transparent)]
     State(#[from] crate::state::StateError),
 }

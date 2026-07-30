@@ -698,6 +698,37 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)
     }
 
+    /// Reads one exact persisted Runtime by its opaque identity.
+    ///
+    /// This is used only to validate an explicit native terminal attachment.
+    /// It does not expose checkout paths or tmux details to a remote caller.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be queried or contains an
+    /// invalid persisted Runtime record.
+    pub fn runtime_by_id(
+        &self,
+        runtime_id: RuntimeId,
+    ) -> Result<Option<RuntimeRecord>, StateError> {
+        self.connection
+            .query_row(
+                "SELECT workstream_id, tmux_generation, tmux_session, cwd, process_birth,
+                        lifecycle, revision
+                 FROM runtimes WHERE runtime_id = ?1",
+                [runtime_id.to_string()],
+                |row| {
+                    let workstream_id: String = row.get(0)?;
+                    let workstream_id = Uuid::parse_str(&workstream_id)
+                        .map(WorkstreamId::from)
+                        .map_err(to_from_sql_error)?;
+                    row_to_runtime_with_id(row, runtime_id, workstream_id)
+                },
+            )
+            .optional()
+            .map_err(StateError::Sqlite)
+    }
+
     /// Returns the bounded state needed by one local navigator snapshot.
     /// Provider content, terminal captures, and hook payloads are not queried
     /// or returned.
@@ -1625,6 +1656,29 @@ fn row_to_runtime(
         runtime_id: Uuid::parse_str(&runtime_id)
             .map(RuntimeId::from)
             .map_err(to_from_sql_error)?,
+        workstream_id,
+        tmux_generation: generation,
+        tmux_session: session,
+        cwd: PathBuf::from(cwd),
+        process_birth,
+        status: runtime_status_from_text(&lifecycle).map_err(to_from_sql_error)?,
+        revision: Revision::try_from(revision).map_err(to_from_sql_error)?,
+    })
+}
+
+fn row_to_runtime_with_id(
+    row: &rusqlite::Row<'_>,
+    runtime_id: RuntimeId,
+    workstream_id: WorkstreamId,
+) -> rusqlite::Result<RuntimeRecord> {
+    let generation: String = row.get(1)?;
+    let session: String = row.get(2)?;
+    let cwd: String = row.get(3)?;
+    let process_birth: Option<String> = row.get(4)?;
+    let lifecycle: String = row.get(5)?;
+    let revision: i64 = row.get(6)?;
+    Ok(RuntimeRecord {
+        runtime_id,
         workstream_id,
         tmux_generation: generation,
         tmux_session: session,

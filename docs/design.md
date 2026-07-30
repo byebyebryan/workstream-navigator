@@ -544,10 +544,11 @@ An exact thread ID, not any displayed text, remains identity and action
 authority. Names and computed fallbacks need not be unique.
 
 Navigator rows show the readable host alias, project, current tip name, and a
-relative age from the last known lifecycle activity. Activity sequence remains
-the deterministic ordering key within each host; the optional wall-clock value
-is display-only. A migrated record without truthful timing visibly reports
-`activity unknown` until its next real lifecycle event.
+relative age from the last observed native conversation activity. Activity
+sequence remains the deterministic ordering key within each host; the optional
+wall-clock value is display-only and survives start, resume, and park. A
+migrated Workstream or one with no observed turn visibly reports `activity
+unknown` until its first prompt submission or settled result.
 
 Native `/rename` and navigator Rename both update the current Codex thread
 name. The navigator action calls `thread/name/set`; a later bounded metadata

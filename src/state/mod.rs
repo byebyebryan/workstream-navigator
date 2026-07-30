@@ -292,8 +292,8 @@ pub struct WorkstreamOverview {
     pub checkout_path: PathBuf,
     pub lifecycle: WorkstreamLifecycle,
     pub last_activity_sequence: i64,
-    /// Wall-clock time of the most recent known lifecycle activity. `None`
-    /// means the record predates this display metadata and no time is inferred.
+    /// Wall-clock time of the most recent observed native conversation activity.
+    /// `None` means no turn has been observed and no time is inferred.
     pub last_activity_at_millis: Option<i64>,
     pub revision: Revision,
     pub runtime: Option<RuntimeRecord>,
@@ -564,7 +564,6 @@ impl HostRegistry {
     ) -> Result<ExternalWorkstream, StateError> {
         validate_registry_text("repository identity", &repository_identity)?;
         validate_registry_text("default base ref", &default_base_ref)?;
-        let activity_at_millis = SystemClock.now_millis()?;
         let registration = ExternalWorkstream {
             location_id: LocationId::new(),
             checkout_id: CheckoutId::new(),
@@ -619,7 +618,7 @@ impl HostRegistry {
                     registration.location_id.to_string(),
                     registration.checkout_id.to_string(),
                     activity_sequence,
-                    activity_at_millis,
+                    0_i64,
                 ],
             )
             .map_err(StateError::Sqlite)?;
@@ -637,7 +636,6 @@ impl HostRegistry {
         &mut self,
         workstream_id: WorkstreamId,
     ) -> Result<RuntimeRecord, StateError> {
-        let activity_at_millis = SystemClock.now_millis()?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -726,9 +724,9 @@ impl HostRegistry {
             record
         };
         if workstream_lifecycle == "parked" {
-            reopen_parked_workstream(&transaction, workstream_id, activity_at_millis)?;
+            reopen_parked_workstream(&transaction, workstream_id)?;
         } else {
-            touch_workstream(&transaction, &workstream_id.to_string(), activity_at_millis)?;
+            touch_workstream(&transaction, &workstream_id.to_string(), None)?;
         }
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(record)
@@ -1043,7 +1041,6 @@ impl HostRegistry {
         runtime_id: RuntimeId,
         expected: Revision,
     ) -> Result<(), StateError> {
-        let activity_at_millis = SystemClock.now_millis()?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1069,10 +1066,10 @@ impl HostRegistry {
             .execute(
                 "UPDATE workstreams SET lifecycle = CASE
                     WHEN lifecycle = 'open' THEN 'parked' ELSE lifecycle END,
-                    last_activity_sequence = ?1, last_activity_at_millis = ?2,
+                    last_activity_sequence = ?1,
                     revision = revision + 1
-                 WHERE workstream_id = ?3",
-                params![activity_sequence, activity_at_millis, workstream_id],
+                 WHERE workstream_id = ?2",
+                params![activity_sequence, workstream_id],
             )
             .map_err(StateError::Sqlite)?;
         if runtime_changed != 1 || workstream_changed != 1 {
@@ -1099,7 +1096,12 @@ impl HostRegistry {
         generation: &str,
         observation: HookObservation,
     ) -> Result<(), StateError> {
-        let activity_at_millis = SystemClock.now_millis()?;
+        let activity_at_millis = match observation.event {
+            LifecycleEvent::UserPromptSubmit | LifecycleEvent::Stop => {
+                Some(SystemClock.now_millis()?)
+            }
+            LifecycleEvent::SessionStart | LifecycleEvent::SessionEnd => None,
+        };
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -2261,13 +2263,14 @@ fn next_activity_sequence(transaction: &rusqlite::Transaction<'_>) -> Result<i64
 fn touch_workstream(
     transaction: &rusqlite::Transaction<'_>,
     workstream_id: &str,
-    activity_at_millis: i64,
+    activity_at_millis: Option<i64>,
 ) -> Result<(), StateError> {
     let activity_sequence = next_activity_sequence(transaction)?;
     let changed = transaction
         .execute(
             "UPDATE workstreams SET last_activity_sequence = ?1,
-             last_activity_at_millis = ?2, revision = revision + 1
+             last_activity_at_millis = COALESCE(?2, last_activity_at_millis),
+             revision = revision + 1
              WHERE workstream_id = ?3",
             params![activity_sequence, activity_at_millis, workstream_id],
         )
@@ -2282,20 +2285,14 @@ fn touch_workstream(
 fn reopen_parked_workstream(
     transaction: &rusqlite::Transaction<'_>,
     workstream_id: WorkstreamId,
-    activity_at_millis: i64,
 ) -> Result<(), StateError> {
     let activity_sequence = next_activity_sequence(transaction)?;
     let changed = transaction
         .execute(
             "UPDATE workstreams SET lifecycle = 'open', last_activity_sequence = ?1,
-             last_activity_at_millis = ?2,
              revision = revision + 1
-             WHERE workstream_id = ?3 AND lifecycle = 'parked'",
-            params![
-                activity_sequence,
-                activity_at_millis,
-                workstream_id.to_string()
-            ],
+             WHERE workstream_id = ?2 AND lifecycle = 'parked'",
+            params![activity_sequence, workstream_id.to_string()],
         )
         .map_err(StateError::Sqlite)?;
     if changed == 1 {
@@ -3127,6 +3124,71 @@ mod tests {
     }
 
     #[test]
+    fn conversation_activity_time_survives_park_and_resume() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        let cwd = runtime.cwd.to_string_lossy().into_owned();
+
+        assert_eq!(
+            registry.workstream_overviews().unwrap()[0].last_activity_at_millis,
+            None
+        );
+        registry
+            .apply_hook_observation(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                HookObservation {
+                    event: LifecycleEvent::SessionStart,
+                    cwd: cwd.clone(),
+                    native_session_id: "session-a".to_owned(),
+                    turn_id: None,
+                    source: Some("startup".to_owned()),
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            registry.workstream_overviews().unwrap()[0].last_activity_at_millis,
+            None
+        );
+        registry
+            .apply_hook_observation(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                HookObservation {
+                    event: LifecycleEvent::UserPromptSubmit,
+                    cwd: cwd.clone(),
+                    native_session_id: "session-a".to_owned(),
+                    turn_id: Some("turn-a".to_owned()),
+                    source: None,
+                },
+            )
+            .unwrap();
+        let activity_at_millis = registry.workstream_overviews().unwrap()[0]
+            .last_activity_at_millis
+            .unwrap();
+        let live = registry
+            .runtime_for_workstream(registered.workstream_id)
+            .unwrap()
+            .unwrap();
+        registry
+            .park_runtime(live.runtime_id, live.revision)
+            .unwrap();
+        registry.reserve_runtime(registered.workstream_id).unwrap();
+
+        assert_eq!(
+            registry.workstream_overviews().unwrap()[0].last_activity_at_millis,
+            Some(activity_at_millis)
+        );
+    }
+
+    #[test]
     fn navigator_overview_joins_only_bounded_workstream_metadata() {
         let (_temporary, mut registry) = registry();
         let registered = registry
@@ -3232,7 +3294,7 @@ mod tests {
         );
         assert!(overview[0].last_activity_sequence > overview[1].last_activity_sequence);
         assert!(overview[0].last_activity_at_millis.is_some());
-        assert!(overview[1].last_activity_at_millis.is_some());
+        assert_eq!(overview[1].last_activity_at_millis, None);
     }
 
     #[test]

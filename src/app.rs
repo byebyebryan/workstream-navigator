@@ -12,6 +12,7 @@ use clap::{Parser, Subcommand};
 use thiserror::Error;
 
 use crate::{
+    actions::{self, OBSERVER_AUTHORITY},
     domain::{RuntimeId, WorkstreamId},
     navigator::run_local_navigator,
     presentation::Presentation,
@@ -26,13 +27,13 @@ use crate::{
         ClientCatalog, ClientHostTransport, HostIdentity, HostRegistry, IntegrationLifecycle,
         StateRoot,
     },
-    transport::{HostClient, RemoteExecutable, SshDestination, SshEndpoint, SystemCommandRunner},
+    transport::{
+        HostClient, RemoteExecutable, SshDestination, SshEndpoint, SystemCommandRunner, attach_ssh,
+    },
 };
 
 const ABOUT: &str =
     "A native-workflow terminal navigator for persistent coding workstreams across hosts.";
-const OBSERVER_AUTHORITY: &str = "wsnav-observer-v1";
-
 /// Runs one direct local CLI command.
 #[must_use]
 pub fn run() -> ExitCode {
@@ -136,6 +137,29 @@ enum HostCommands {
     List,
     /// Fetch one validated bounded snapshot from a registered SSH host.
     Snapshot { alias: String },
+    /// Start or cold-resume one remote Workstream at an observed revision.
+    Start {
+        alias: String,
+        workstream_id: String,
+        revision: i64,
+    },
+    /// Park one remote Workstream at an observed revision.
+    Park {
+        alias: String,
+        workstream_id: String,
+        revision: i64,
+    },
+    /// Clear one remote result-attention revision without provider input.
+    Acknowledge {
+        alias: String,
+        workstream_id: String,
+        attention_revision: i64,
+    },
+    /// Attach the current terminal directly to a remote native Runtime.
+    Attach {
+        alias: String,
+        workstream_id: String,
+    },
     /// Forget one SSH registration after identity/generation/capability drift.
     Reset { alias: String },
 }
@@ -251,60 +275,181 @@ fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError>
             alias,
             destination,
             executable,
-        } => {
-            let endpoint = ssh_endpoint(&destination, &executable)?;
-            let client = HostClient::new(SystemCommandRunner);
-            let hello = client.hello_ssh(&endpoint, "wsnav")?;
-            let identity = HostIdentity {
-                host_id: hello.host_id,
-                registry_generation: hello.registry_generation,
-            };
-            catalog.register_ssh_host(
-                &alias,
-                &identity,
-                &executable,
-                endpoint.destination.as_str(),
-                hello.capabilities,
-            )?;
-            println!("registered SSH host {alias}");
-            Ok(())
-        }
-        HostCommands::List => {
-            for host in catalog.ssh_hosts()? {
-                let ClientHostTransport::Ssh { destination } = host.transport else {
-                    continue;
-                };
-                println!("{} {}", host.alias, destination);
-            }
-            Ok(())
-        }
-        HostCommands::Snapshot { alias } => {
-            let host = catalog.host(&alias)?.ok_or(AppError::UnknownHostAlias)?;
-            let ClientHostTransport::Ssh { destination } = host.transport else {
-                return Err(AppError::HostIsNotSsh);
-            };
-            let endpoint = ssh_endpoint(&destination, &host.executable_path)?;
-            let client = HostClient::new(SystemCommandRunner);
-            let hello = client.hello_ssh(&endpoint, "wsnav")?;
-            catalog.verify_hello(&alias, &hello)?;
-            let snapshot = client.snapshot_ssh(&endpoint)?;
-            println!("host: {alias}");
-            for workstream in snapshot.workstreams {
-                println!(
-                    "{} {} {}",
-                    workstream.workstream_id.short(),
-                    runtime_status_label(workstream.runtime_status),
-                    workstream.display_name
-                );
-            }
-            Ok(())
-        }
+        } => register_ssh_host(&mut catalog, &alias, &destination, &executable),
+        HostCommands::List => list_ssh_hosts(&catalog),
+        HostCommands::Snapshot { alias } => snapshot_ssh_host(&catalog, &alias),
+        HostCommands::Start {
+            alias,
+            workstream_id,
+            revision,
+        } => start_remote_workstream(&catalog, &alias, &workstream_id, revision),
+        HostCommands::Park {
+            alias,
+            workstream_id,
+            revision,
+        } => park_remote_workstream(&catalog, &alias, &workstream_id, revision),
+        HostCommands::Acknowledge {
+            alias,
+            workstream_id,
+            attention_revision,
+        } => acknowledge_remote_workstream(&catalog, &alias, &workstream_id, attention_revision),
+        HostCommands::Attach {
+            alias,
+            workstream_id,
+        } => attach_remote_workstream(&catalog, &alias, &workstream_id),
         HostCommands::Reset { alias } => {
             catalog.reset_ssh_host(&alias)?;
             println!("reset SSH host {alias}");
             Ok(())
         }
     }
+}
+
+fn register_ssh_host(
+    catalog: &mut ClientCatalog,
+    alias: &str,
+    destination: &str,
+    executable: &Path,
+) -> Result<(), AppError> {
+    let endpoint = ssh_endpoint(destination, executable)?;
+    let client = HostClient::new(SystemCommandRunner);
+    let hello = client.hello_ssh(&endpoint, "wsnav")?;
+    let identity = HostIdentity {
+        host_id: hello.host_id,
+        registry_generation: hello.registry_generation,
+    };
+    catalog.register_ssh_host(
+        alias,
+        &identity,
+        executable,
+        endpoint.destination.as_str(),
+        hello.capabilities,
+    )?;
+    println!("registered SSH host {alias}");
+    Ok(())
+}
+
+fn list_ssh_hosts(catalog: &ClientCatalog) -> Result<(), AppError> {
+    for host in catalog.ssh_hosts()? {
+        let ClientHostTransport::Ssh { destination } = host.transport else {
+            continue;
+        };
+        println!("{} {}", host.alias, destination);
+    }
+    Ok(())
+}
+
+fn snapshot_ssh_host(catalog: &ClientCatalog, alias: &str) -> Result<(), AppError> {
+    let endpoint = checked_ssh_endpoint(catalog, alias)?;
+    let snapshot = HostClient::new(SystemCommandRunner).snapshot_ssh(&endpoint)?;
+    println!("host: {alias}");
+    for workstream in snapshot.workstreams {
+        println!(
+            "{} {} {}",
+            workstream.workstream_id.short(),
+            runtime_status_label(workstream.runtime_status),
+            workstream.display_name
+        );
+    }
+    Ok(())
+}
+
+fn start_remote_workstream(
+    catalog: &ClientCatalog,
+    alias: &str,
+    workstream_id: &str,
+    revision: i64,
+) -> Result<(), AppError> {
+    apply_remote_action(
+        catalog,
+        alias,
+        crate::protocol::HostAction::Start {
+            workstream_id: parse_workstream(workstream_id)?,
+            expected_revision: revision,
+        },
+    )?;
+    println!("started remote workstream {workstream_id}");
+    Ok(())
+}
+
+fn park_remote_workstream(
+    catalog: &ClientCatalog,
+    alias: &str,
+    workstream_id: &str,
+    revision: i64,
+) -> Result<(), AppError> {
+    apply_remote_action(
+        catalog,
+        alias,
+        crate::protocol::HostAction::Park {
+            workstream_id: parse_workstream(workstream_id)?,
+            expected_revision: revision,
+        },
+    )?;
+    println!("parked remote workstream {workstream_id}");
+    Ok(())
+}
+
+fn acknowledge_remote_workstream(
+    catalog: &ClientCatalog,
+    alias: &str,
+    workstream_id: &str,
+    attention_revision: i64,
+) -> Result<(), AppError> {
+    apply_remote_action(
+        catalog,
+        alias,
+        crate::protocol::HostAction::AcknowledgeAttention {
+            workstream_id: parse_workstream(workstream_id)?,
+            expected_revision: attention_revision,
+        },
+    )?;
+    println!("acknowledged remote workstream {workstream_id}");
+    Ok(())
+}
+
+fn attach_remote_workstream(
+    catalog: &ClientCatalog,
+    alias: &str,
+    workstream_id: &str,
+) -> Result<(), AppError> {
+    let endpoint = checked_ssh_endpoint(catalog, alias)?;
+    let workstream_id = parse_workstream(workstream_id)?;
+    let runtime_id = HostClient::new(SystemCommandRunner)
+        .snapshot_ssh(&endpoint)?
+        .workstreams
+        .into_iter()
+        .find(|workstream| workstream.workstream_id == workstream_id)
+        .and_then(|workstream| workstream.runtime_id)
+        .ok_or(AppError::RemoteRuntimeUnavailable)?;
+    attach_ssh(&endpoint, runtime_id)?;
+    Ok(())
+}
+
+fn registered_ssh_endpoint(catalog: &ClientCatalog, alias: &str) -> Result<SshEndpoint, AppError> {
+    let host = catalog.host(alias)?.ok_or(AppError::UnknownHostAlias)?;
+    let ClientHostTransport::Ssh { destination } = host.transport else {
+        return Err(AppError::HostIsNotSsh);
+    };
+    ssh_endpoint(&destination, &host.executable_path)
+}
+
+fn checked_ssh_endpoint(catalog: &ClientCatalog, alias: &str) -> Result<SshEndpoint, AppError> {
+    let endpoint = registered_ssh_endpoint(catalog, alias)?;
+    let hello = HostClient::new(SystemCommandRunner).hello_ssh(&endpoint, "wsnav")?;
+    catalog.verify_hello(alias, &hello)?;
+    Ok(endpoint)
+}
+
+fn apply_remote_action(
+    catalog: &ClientCatalog,
+    alias: &str,
+    action: crate::protocol::HostAction,
+) -> Result<(), AppError> {
+    let endpoint = checked_ssh_endpoint(catalog, alias)?;
+    let client = HostClient::new(SystemCommandRunner);
+    client.apply_ssh(&endpoint, action)?;
+    Ok(())
 }
 
 fn ssh_endpoint(destination: &str, executable: &Path) -> Result<SshEndpoint, AppError> {
@@ -530,113 +675,21 @@ fn start(
     registry: &mut HostRegistry,
     workstream_id: WorkstreamId,
 ) -> Result<(), AppError> {
-    let integration = registry
-        .codex_integration()?
-        .ok_or(AppError::ObserverNotInstalled)?;
-    if integration.lifecycle != IntegrationLifecycle::Ready {
-        return Err(AppError::ObserverNotReady);
-    }
-    let manager = observer_profile()?;
-    manager.install(
-        integration.ownership.owner_id.clone(),
-        Some(&integration.ownership),
-    )?;
-    manager.verify_native_trust(&integration.ownership)?;
-    let prior_runtime = registry.runtime_for_workstream(workstream_id)?;
-    if let Some(prior_runtime) = &prior_runtime {
-        let tmux = SystemTmux::default();
-        let process_probe = LinuxProcessProbe;
-        let prior = PrivateRuntime::new(
-            &tmux,
-            &process_probe,
-            RuntimePaths::for_runtime(root.base(), prior_runtime.runtime_id),
-        );
-        match prior.probe()? {
-            RuntimeProbe::Live { .. } => {
-                println!("workstream {workstream_id} is already live");
-                return Ok(());
-            }
-            RuntimeProbe::Missing => {
-                if !matches!(prior_runtime.status, crate::domain::RuntimeStatus::Stopped) {
-                    registry
-                        .mark_runtime_stopped(prior_runtime.runtime_id, prior_runtime.revision)?;
-                }
-            }
-            RuntimeProbe::Unknown { .. } => return Err(AppError::RuntimeProbeAmbiguous),
+    match actions::start(root, registry, workstream_id, None)? {
+        actions::StartOutcome::Started => println!("started workstream {workstream_id}"),
+        actions::StartOutcome::AlreadyLive => {
+            println!("workstream {workstream_id} is already live");
         }
     }
-    let prior_binding = prior_runtime
-        .as_ref()
-        .map(|runtime| registry.binding_for_runtime(runtime.runtime_id))
-        .transpose()?
-        .flatten();
-    let record = registry.reserve_runtime(workstream_id)?;
-    let paths = RuntimePaths::for_runtime(root.base(), record.runtime_id);
-    let tmux = SystemTmux::default();
-    let process_probe = LinuxProcessProbe;
-    let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
-    let launch = NativeLaunch {
-        cwd: record.cwd.clone(),
-        program: codex_launch_program(&record.cwd, prior_binding.as_ref()),
-        environment: BTreeMap::from([
-            (
-                "WSNAV_STATE_ROOT".into(),
-                root.base().as_os_str().to_owned(),
-            ),
-            (
-                "WSNAV_RUNTIME_ID".into(),
-                record.runtime_id.to_string().into(),
-            ),
-            (
-                "WSNAV_RUNTIME_GENERATION".into(),
-                record.tmux_generation.clone().into(),
-            ),
-            ("WSNAV_OBSERVER_AUTHORITY".into(), OBSERVER_AUTHORITY.into()),
-        ]),
-    };
-    if let Err(error) = runtime.start(&launch) {
-        let _ = registry.mark_runtime_stopped(record.runtime_id, record.revision);
-        return Err(AppError::Runtime(error));
-    }
-    let process_birth = match runtime.probe()? {
-        RuntimeProbe::Live {
-            cwd,
-            process_birth: Some(process_birth),
-            ..
-        } if cwd == record.cwd => process_birth,
-        RuntimeProbe::Live { .. } | RuntimeProbe::Missing | RuntimeProbe::Unknown { .. } => {
-            let _ = runtime.park();
-            let _ = registry.mark_runtime_stopped(record.runtime_id, record.revision);
-            return Err(AppError::RuntimeProbeAmbiguous);
-        }
-    };
-    if let Err(error) =
-        registry.record_runtime_process_birth(record.runtime_id, record.revision, &process_birth)
-    {
-        let _ = runtime.park();
-        let _ = registry.mark_runtime_stopped(record.runtime_id, record.revision);
-        return Err(AppError::State(error));
-    }
-    println!("started workstream {workstream_id}");
     Ok(())
 }
 
+#[cfg(test)]
 fn codex_launch_program(
     cwd: &Path,
     binding: Option<&crate::state::ProviderBinding>,
 ) -> Vec<std::ffi::OsString> {
-    let mut program = vec![
-        "codex".into(),
-        "--profile".into(),
-        "wsnav-observer".into(),
-        "-C".into(),
-        cwd.as_os_str().to_owned(),
-    ];
-    if let Some(binding) = binding {
-        program.push("resume".into());
-        program.push(binding.native_session_id.clone().into());
-    }
-    program
+    actions::codex_launch_program(cwd, binding)
 }
 
 fn observer_profile() -> Result<ObserverProfile, AppError> {
@@ -768,18 +821,7 @@ fn park(
     registry: &mut HostRegistry,
     workstream_id: WorkstreamId,
 ) -> Result<(), AppError> {
-    let record = registry
-        .runtime_for_workstream(workstream_id)?
-        .ok_or(AppError::NoRuntime(workstream_id))?;
-    let tmux = SystemTmux::default();
-    let process_probe = LinuxProcessProbe;
-    let runtime = PrivateRuntime::new(
-        &tmux,
-        &process_probe,
-        RuntimePaths::for_runtime(root.base(), record.runtime_id),
-    );
-    runtime.park()?;
-    registry.park_runtime(record.runtime_id, record.revision)?;
+    actions::park(root, registry, workstream_id, None)?;
     println!("parked workstream {workstream_id}");
     Ok(())
 }
@@ -876,6 +918,8 @@ enum AppError {
     HostIsNotSsh,
     #[error("remote executable path is not valid UTF-8")]
     RemoteExecutableNotUtf8,
+    #[error("remote Workstream has no live Runtime to attach")]
+    RemoteRuntimeUnavailable,
     #[error("I/O: {0}")]
     Io(std::io::Error),
     #[error("not a usable Git checkout")]
@@ -889,10 +933,6 @@ enum AppError {
     #[error("observer profile is not installed; run wsnav setup")]
     ObserverNotInstalled,
     #[error(
-        "observer profile trust is pending; run wsnav setup and complete native Codex /hooks review"
-    )]
-    ObserverNotReady,
-    #[error(
         "native hook trust remains pending; rerun wsnav setup and approve the exact observer hooks in Codex"
     )]
     NativeTrustReviewIncomplete,
@@ -900,8 +940,6 @@ enum AppError {
     LiveRuntimePreventsRemoval,
     #[error("observer profile update is refused while a managed runtime is live")]
     LiveRuntimePreventsUpdate,
-    #[error("private runtime probe is ambiguous; refusing to create another Codex process")]
-    RuntimeProbeAmbiguous,
     #[error(transparent)]
     Profile(#[from] crate::provider::codex::profile::ProfileError),
     #[error(transparent)]
@@ -914,6 +952,8 @@ enum AppError {
     Runtime(#[from] crate::runtime::RuntimeError),
     #[error(transparent)]
     Remote(#[from] crate::remote::RemoteError),
+    #[error(transparent)]
+    Action(#[from] crate::actions::ActionError),
     #[error(transparent)]
     Transport(#[from] crate::transport::TransportError),
     #[error(transparent)]

@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod actions;
 pub mod app;
 pub mod domain;
 pub mod navigator;

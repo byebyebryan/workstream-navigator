@@ -12,7 +12,7 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    domain::{Revision, RuntimeId, RuntimeStatus, WorkstreamLifecycle},
+    domain::{Revision, RuntimeId, RuntimeStatus, WorkstreamId, WorkstreamLifecycle},
     protocol::{
         CURRENT_PROTOCOL_VERSION, Capabilities, HelloResponse, HostAction, HostRequest,
         HostResponse, MAX_FRAME_BYTES, RequestEnvelope, ResponseEnvelope, SnapshotResponse,
@@ -146,13 +146,10 @@ fn apply(root: &StateRoot, registry: &mut HostRegistry, action: HostAction) -> R
             workstream_id,
             expected_revision,
         } => apply_park(root, registry, workstream_id, expected_revision),
-        HostAction::Start { .. } => {
-            // Start crosses native process ownership and is added with its
-            // recovery implementation in the next D3 slice. Returning a
-            // protocol rejection is intentional: the client must not guess
-            // that an unsupported action succeeded.
-            rejected("remote start is not available yet")
-        }
+        HostAction::Start {
+            workstream_id,
+            expected_revision,
+        } => apply_start(root, registry, workstream_id, expected_revision),
     }
 }
 
@@ -162,40 +159,63 @@ fn apply_park(
     workstream_id: crate::domain::WorkstreamId,
     expected_revision: i64,
 ) -> ResponseEnvelope {
-    let Ok(overview) = registry.workstream_overviews().and_then(|workstreams| {
-        workstreams
-            .into_iter()
-            .find(|overview| overview.workstream_id == workstream_id)
-            .ok_or(StateError::UnknownOpenWorkstream(workstream_id))
-    }) else {
-        return rejected("workstream is unavailable");
-    };
-    if overview.revision.value() != expected_revision {
-        return rejected("revision conflict; refresh this host");
-    }
-    let Some(runtime_record) = overview.runtime else {
-        return rejected("workstream has no live runtime");
-    };
-    let tmux = SystemTmux::default();
-    let process_probe = LinuxProcessProbe;
-    let runtime = PrivateRuntime::new(
-        &tmux,
-        &process_probe,
-        RuntimePaths::for_runtime(root.base(), runtime_record.runtime_id),
-    );
-    match runtime.park() {
-        Ok(()) => {}
-        Err(_) => return rejected("runtime park failed"),
-    }
-    match registry.park_runtime(runtime_record.runtime_id, runtime_record.revision) {
-        Ok(()) => ResponseEnvelope {
+    match crate::actions::park(
+        root,
+        registry,
+        workstream_id,
+        Revision::try_from(expected_revision).ok(),
+    ) {
+        Ok(revision) => ResponseEnvelope {
             version: CURRENT_PROTOCOL_VERSION,
             response: HostResponse::Applied {
-                revision: runtime_record.revision.next().value(),
+                revision: revision.value(),
             },
         },
+        Err(crate::actions::ActionError::WorkstreamRevisionConflict) => {
+            rejected("revision conflict; refresh this host")
+        }
         Err(_) => rejected("park outcome needs recovery"),
     }
+}
+
+fn apply_start(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: i64,
+) -> ResponseEnvelope {
+    match crate::actions::start(
+        root,
+        registry,
+        workstream_id,
+        Revision::try_from(expected_revision).ok(),
+    ) {
+        Ok(_) => match workstream_revision(registry, workstream_id) {
+            Ok(revision) => ResponseEnvelope {
+                version: CURRENT_PROTOCOL_VERSION,
+                response: HostResponse::Applied {
+                    revision: revision.value(),
+                },
+            },
+            Err(_) => rejected("start outcome needs recovery"),
+        },
+        Err(crate::actions::ActionError::WorkstreamRevisionConflict) => {
+            rejected("revision conflict; refresh this host")
+        }
+        Err(_) => rejected("remote start is unavailable"),
+    }
+}
+
+fn workstream_revision(
+    registry: &HostRegistry,
+    workstream_id: WorkstreamId,
+) -> Result<Revision, StateError> {
+    registry
+        .workstream_overviews()?
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .map(|overview| overview.revision)
+        .ok_or(StateError::UnknownOpenWorkstream(workstream_id))
 }
 
 fn snapshot(root: &StateRoot, registry: &HostRegistry) -> Result<SnapshotResponse, StateError> {
@@ -217,7 +237,7 @@ fn snapshot_workstream(root: &StateRoot, overview: &WorkstreamOverview) -> Snaps
     SnapshotWorkstream {
         workstream_id: overview.workstream_id,
         location_id: overview.location_id,
-        display_name: display_name(overview, runtime_status),
+        display_name: bounded_display_name(&display_name(overview, runtime_status)),
         runtime_id: overview.runtime.as_ref().map(|runtime| runtime.runtime_id),
         runtime_status: if recovery_required {
             RuntimeStatus::Unknown
@@ -283,6 +303,22 @@ fn display_name(overview: &WorkstreamOverview, runtime_status: RuntimeStatus) ->
         &overview.workstream_id.short(),
     )
     .text
+}
+
+fn bounded_display_name(value: &str) -> String {
+    const MAX_BYTES: usize = 256;
+    if value.len() <= MAX_BYTES {
+        return value.to_owned();
+    }
+    let mut bounded = String::with_capacity(MAX_BYTES);
+    for character in value.chars() {
+        if bounded.len() + character.len_utf8() + '…'.len_utf8() > MAX_BYTES {
+            break;
+        }
+        bounded.push(character);
+    }
+    bounded.push('…');
+    bounded
 }
 
 fn local_capabilities() -> Capabilities {
@@ -434,5 +470,59 @@ mod tests {
             response.response,
             HostResponse::Snapshot(SnapshotResponse { ref workstreams }) if workstreams.is_empty()
         ));
+    }
+
+    #[test]
+    fn native_names_are_truncated_before_they_can_overflow_a_protocol_frame() {
+        let name = "multi-byte name ".repeat(100);
+
+        let bounded = bounded_display_name(&name);
+
+        assert!(bounded.len() <= 256);
+        assert!(bounded.ends_with('…'));
+    }
+
+    #[test]
+    fn revision_guarded_acknowledgement_uses_the_host_transaction() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let workstream_id = crate::domain::WorkstreamId::new();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let attention = registry
+            .mark_result_attention(workstream_id, "session".to_owned(), "turn".to_owned())
+            .unwrap();
+        let request = RequestEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            request: HostRequest::Apply {
+                action: HostAction::AcknowledgeAttention {
+                    workstream_id,
+                    expected_revision: attention.revision.value(),
+                },
+            },
+        }
+        .encode()
+        .unwrap();
+        let mut output = Vec::new();
+
+        serve(
+            Some(root.base().to_path_buf()),
+            &mut Cursor::new(request),
+            &mut output,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            ResponseEnvelope::decode(&output).unwrap().response,
+            HostResponse::Applied { revision } if revision == attention.revision.next().value()
+        ));
+        assert_eq!(
+            HostRegistry::open(&root)
+                .unwrap()
+                .attention(workstream_id)
+                .unwrap()
+                .unwrap()
+                .result_unseen_since_revision,
+            None
+        );
     }
 }

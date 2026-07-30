@@ -15,9 +15,10 @@ use std::{
 
 use thiserror::Error;
 
+use crate::domain::RuntimeId;
 use crate::protocol::{
-    HelloResponse, HostRequest, HostResponse, MAX_FRAME_BYTES, RequestEnvelope, ResponseEnvelope,
-    SnapshotResponse,
+    HelloResponse, HostAction, HostRequest, HostResponse, MAX_FRAME_BYTES, RequestEnvelope,
+    ResponseEnvelope, SnapshotResponse,
 };
 
 const MAX_STDERR_BYTES: usize = 4096;
@@ -247,6 +248,35 @@ impl<R: CommandRunner> HostClient<R> {
         self.snapshot(&local_invocation(endpoint, &snapshot_request()?))
     }
 
+    /// Applies one explicitly revision-guarded action through SSH.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for launch/transport/protocol failures, a remote
+    /// rejection, or a response kind different from the requested action.
+    pub fn apply_ssh(
+        &self,
+        endpoint: &SshEndpoint,
+        action: HostAction,
+    ) -> Result<i64, TransportError> {
+        self.apply(&ssh_invocation(endpoint, &apply_request(action)?))
+    }
+
+    /// Applies one explicitly revision-guarded action through the local
+    /// subprocess parity endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for launch/transport/protocol failures, a remote
+    /// rejection, or a response kind different from the requested action.
+    pub fn apply_local(
+        &self,
+        endpoint: &LocalEndpoint,
+        action: HostAction,
+    ) -> Result<i64, TransportError> {
+        self.apply(&local_invocation(endpoint, &apply_request(action)?))
+    }
+
     fn hello(&self, invocation: &CommandInvocation) -> Result<HelloResponse, TransportError> {
         match self.request(invocation)? {
             HostResponse::Hello(response) => Ok(response),
@@ -258,6 +288,14 @@ impl<R: CommandRunner> HostClient<R> {
     fn snapshot(&self, invocation: &CommandInvocation) -> Result<SnapshotResponse, TransportError> {
         match self.request(invocation)? {
             HostResponse::Snapshot(response) => Ok(response),
+            HostResponse::Rejected { diagnostic } => Err(TransportError::Rejected(diagnostic)),
+            _ => Err(TransportError::UnexpectedResponse),
+        }
+    }
+
+    fn apply(&self, invocation: &CommandInvocation) -> Result<i64, TransportError> {
+        match self.request(invocation)? {
+            HostResponse::Applied { revision } => Ok(revision),
             HostResponse::Rejected { diagnostic } => Err(TransportError::Rejected(diagnostic)),
             _ => Err(TransportError::UnexpectedResponse),
         }
@@ -293,6 +331,35 @@ fn snapshot_request() -> Result<RequestEnvelope, TransportError> {
     Ok(request)
 }
 
+fn apply_request(action: HostAction) -> Result<RequestEnvelope, TransportError> {
+    let request = RequestEnvelope {
+        version: crate::protocol::CURRENT_PROTOCOL_VERSION,
+        request: HostRequest::Apply { action },
+    };
+    request.validate()?;
+    Ok(request)
+}
+
+/// Attaches the current terminal to exactly one remote Runtime through an
+/// interactive SSH stream. This bypasses the JSON control runner entirely:
+/// the provider terminal is the only bytes that travel after connection.
+///
+/// # Errors
+///
+/// Returns an error when SSH cannot launch or the remote native attachment
+/// exits unsuccessfully.
+pub fn attach_ssh(endpoint: &SshEndpoint, runtime_id: RuntimeId) -> Result<(), TransportError> {
+    let status = Command::new("ssh")
+        .args(ssh_attach_arguments(endpoint, runtime_id))
+        .status()
+        .map_err(TransportError::Launch)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(TransportError::RemoteCommandFailed)
+    }
+}
+
 fn ssh_invocation(endpoint: &SshEndpoint, request: &RequestEnvelope) -> CommandInvocation {
     CommandInvocation {
         program: OsString::from("ssh"),
@@ -324,6 +391,20 @@ fn local_invocation(endpoint: &LocalEndpoint, request: &RequestEnvelope) -> Comm
             .encode()
             .expect("validated fixed protocol requests always encode"),
     }
+}
+
+fn ssh_attach_arguments(endpoint: &SshEndpoint, runtime_id: RuntimeId) -> Vec<OsString> {
+    vec![
+        OsString::from("-tt"),
+        OsString::from("-o"),
+        OsString::from("BatchMode=yes"),
+        OsString::from("-o"),
+        OsString::from("ConnectTimeout=8"),
+        OsString::from(endpoint.destination.as_str()),
+        OsString::from(endpoint.executable.as_str()),
+        OsString::from("_attach"),
+        OsString::from(runtime_id.to_string()),
+    ]
 }
 
 fn wait_bounded(child: &mut Child) -> Result<bool, TransportError> {
@@ -485,6 +566,23 @@ mod tests {
             HostClient::new(runner).snapshot_ssh(&endpoint),
             Err(TransportError::Rejected(_))
         ));
+    }
+
+    #[test]
+    fn interactive_attachment_is_a_fixed_tty_command_with_no_control_stream() {
+        let endpoint = SshEndpoint::new(
+            SshDestination::parse("snap").unwrap(),
+            RemoteExecutable::parse("/home/bryan/.local/bin/wsnav").unwrap(),
+        );
+        let runtime_id = RuntimeId::new();
+
+        let arguments = ssh_attach_arguments(&endpoint, runtime_id);
+
+        assert_eq!(arguments[0], OsStr::new("-tt"));
+        assert_eq!(arguments[5], OsStr::new("snap"));
+        assert_eq!(arguments[6], OsStr::new("/home/bryan/.local/bin/wsnav"));
+        assert_eq!(arguments[7], OsStr::new("_attach"));
+        assert_eq!(arguments[8], OsStr::new(&runtime_id.to_string()));
     }
 
     fn hello_response() -> ResponseEnvelope {

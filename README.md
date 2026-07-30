@@ -6,8 +6,10 @@ native terminal UI and workflow intact.
 
 ## Status
 
-This repository is a clean-slate Rust reboot. D2 provides a bounded local
-Codex navigator; SSH hosts, Workstream creation/forking, and V1 recovery
+This repository is a clean-slate Rust reboot. D3 now provides registered SSH
+host control, cached multi-host navigation, and direct native terminal
+attachment. Its live remote-Codex acceptance remains pending an operator-owned
+remote `wsnav` installation; Workstream creation/forking and V1 recovery
 closure remain roadmap work. It does not preserve compatibility with the
 earlier Python prototype.
 
@@ -54,6 +56,28 @@ The accepted local two-pane navigator is documented in [D2 local navigator
 acceptance][D2 acceptance]. It keeps the provider pane natively interactive
 and uses a disposable private tmux presentation for navigation only.
 
+The D3 control-plane implementation has local subprocess parity and fake-SSH
+coverage. It deliberately does not install or update any remote executable;
+live remote acceptance is pending a user-installed target. See [D3 control
+plane acceptance][D3 acceptance].
+
+## SSH hosts
+
+Install the same `wsnav` build yourself on the remote host at a fixed absolute
+path, then register its existing SSH destination locally:
+
+```console
+wsnav host register-ssh snap snap /absolute/path/to/wsnav
+wsnav
+```
+
+The navigator polls the registered host with bounded one-shot control calls
+and keeps its last accepted state visible while the host is unavailable. Enter
+on a remote row starts or resumes it when necessary, then opens a direct
+`ssh -tt` provider attachment in the provider pane. `wsnav host reset snap`
+is required after an intentional host-registry replacement or capability
+change; Workstream Navigator never silently adopts it.
+
 ## Decision studies
 
 The isolated tmux/SSH transport, native Codex presentation, scoped observer
@@ -68,6 +92,7 @@ provider capability as a pre-implementation design blocker. See [Spike 0001][],
 [V1 roadmap]: docs/roadmap.md
 [D1 acceptance]: docs/acceptance-d1-local-codex.md
 [D2 acceptance]: docs/acceptance-d2-local-navigator.md
+[D3 acceptance]: docs/acceptance-d3-control-plane.md
 [Spike 0001]: docs/spikes/0001-tmux-remote-transport.md
 [Spike 0002]: docs/spikes/0002-codex-native-tui.md
 [Spike 0004]: docs/spikes/0004-tmux-runtime-isolation.md

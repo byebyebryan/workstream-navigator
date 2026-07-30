@@ -14,6 +14,7 @@ use crate::domain::WorkstreamId;
 const PRESENTATION_DIRECTORY: &str = "presentation";
 const PRESENTATION_PREFIX: &str = "wsnav-presentation-";
 const NAVIGATOR_WINDOW: &str = "navigator";
+const NAVIGATOR_PANE: &str = "0.0";
 const PROVIDER_PANE: &str = "0.1";
 const MAX_TMUX_OUTPUT_BYTES: usize = 16 * 1024;
 
@@ -282,6 +283,23 @@ impl Presentation {
                 "select-pane".into(),
                 "-t".into(),
                 format!("{}:{PROVIDER_PANE}", self.paths.session_name).into(),
+            ],
+        )
+    }
+
+    /// Gives keyboard focus to the navigator pane without touching a provider
+    /// Runtime or its attachment helper.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact owned pane cannot be focused.
+    pub fn focus_navigator(&self) -> Result<(), PresentationError> {
+        self.invoke(
+            None,
+            vec![
+                "select-pane".into(),
+                "-t".into(),
+                format!("{}:{NAVIGATOR_PANE}", self.paths.session_name).into(),
             ],
         )
     }

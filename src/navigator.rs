@@ -510,8 +510,15 @@ pub struct NavigatorView {
     snapshot: LocalNavigatorSnapshot,
     selected: usize,
     attached: Option<(String, WorkstreamId)>,
+    mouse_click: Option<MouseClickIntent>,
     message: Option<String>,
     spinner_frame: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MouseClickIntent {
+    Blank,
+    Row,
 }
 
 impl NavigatorView {
@@ -521,6 +528,7 @@ impl NavigatorView {
             snapshot,
             selected: 0,
             attached: None,
+            mouse_click: None,
             message: None,
             spinner_frame: 0,
         }
@@ -607,6 +615,21 @@ impl NavigatorView {
         if !still_live {
             self.attached = None;
         }
+    }
+
+    fn begin_mouse_click(&mut self, row: Option<usize>) {
+        self.mouse_click = Some(if row.is_some() {
+            MouseClickIntent::Row
+        } else {
+            MouseClickIntent::Blank
+        });
+        if let Some(row) = row {
+            self.select_row(row);
+        }
+    }
+
+    fn take_mouse_click(&mut self) -> Option<MouseClickIntent> {
+        self.mouse_click.take()
     }
 
     pub fn set_message(&mut self, message: impl Into<String>) {
@@ -837,11 +860,19 @@ pub fn run_local_navigator(
                     MouseEventKind::ScrollDown => view.select_next(),
                     MouseEventKind::ScrollUp => view.select_previous(),
                     MouseEventKind::Down(MouseButton::Left) => {
-                        if let Some(row) = view.row_from_y(mouse.row) {
-                            view.select_row(row);
+                        view.begin_mouse_click(view.row_from_y(mouse.row));
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => match view.take_mouse_click() {
+                        Some(MouseClickIntent::Row) => {
                             activate_selected(root, &presentation, &mut remote, &mut view);
                         }
-                    }
+                        Some(MouseClickIntent::Blank) => {
+                            if let Err(error) = presentation.focus_navigator() {
+                                view.set_message(action_message(&error));
+                            }
+                        }
+                        None => {}
+                    },
                     _ => {}
                 },
                 _ => {}
@@ -1089,6 +1120,21 @@ mod tests {
         });
 
         assert!(!view.is_attached_to(view.selected().unwrap()));
+    }
+
+    #[test]
+    fn mouse_click_retains_blank_focus_and_row_activation_intent() {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)],
+            unreachable_hosts: Vec::new(),
+        });
+
+        view.begin_mouse_click(None);
+        assert_eq!(view.take_mouse_click(), Some(MouseClickIntent::Blank));
+
+        view.begin_mouse_click(Some(0));
+        assert_eq!(view.take_mouse_click(), Some(MouseClickIntent::Row));
+        assert_eq!(view.take_mouse_click(), None);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::{
     collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
-    process::{Command, ExitCode},
+    process::{Command, ExitCode, Stdio},
     str::FromStr,
 };
 
@@ -39,8 +39,13 @@ const ABOUT: &str =
 #[must_use]
 pub fn run() -> ExitCode {
     let cli = Cli::parse();
+    let provider_surface = is_provider_surface_command(cli.command.as_ref());
     match execute(cli) {
         Ok(()) => ExitCode::SUCCESS,
+        // These helpers execute inside a provider pane. They deliberately do
+        // not expose CLI diagnostics there; normal navigator polling owns the
+        // bounded state presentation after an attachment ends.
+        Err(_) if provider_surface => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
             ExitCode::FAILURE
@@ -123,6 +128,17 @@ enum Commands {
     /// Internal blank provider-pane placeholder before an exact attachment is selected.
     #[command(name = "_provider_wait", hide = true)]
     ProviderWait,
+    /// Internal local provider-pane attachment helper. It intentionally keeps
+    /// all navigator diagnostics out of the native provider surface.
+    #[command(name = "_provider_attach", hide = true)]
+    ProviderAttach { workstream_id: String },
+    /// Internal SSH provider-pane attachment helper. It intentionally keeps
+    /// all navigator diagnostics out of the native provider surface.
+    #[command(name = "_provider_remote_attach", hide = true)]
+    ProviderRemoteAttach {
+        host_alias: String,
+        workstream_id: String,
+    },
     /// Internal passive Codex lifecycle hook entrypoint.
     #[command(name = "_hook", hide = true)]
     Hook,
@@ -167,6 +183,17 @@ enum HostCommands {
     Reset { alias: String },
 }
 
+const fn is_provider_surface_command(command: Option<&Commands>) -> bool {
+    matches!(
+        command,
+        Some(
+            Commands::ProviderAttach { .. }
+                | Commands::ProviderRemoteAttach { .. }
+                | Commands::RemoteAttach { .. }
+        )
+    )
+}
+
 fn execute(cli: Cli) -> Result<(), AppError> {
     let Cli {
         state_root,
@@ -196,10 +223,22 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 .map_err(AppError::Navigator);
         }
         Commands::ProviderWait => return provider_wait(),
+        Commands::ProviderAttach { workstream_id } => {
+            return provider_attach(&root, &workstream_id);
+        }
+        Commands::ProviderRemoteAttach {
+            host_alias,
+            workstream_id,
+        } => return provider_remote_attach(&root, &host_alias, &workstream_id),
         Commands::RemoteAttach { runtime_id } => {
-            let runtime_id =
-                RuntimeId::from_str(&runtime_id).map_err(AppError::InvalidRuntimeId)?;
-            return crate::remote::attach(&root, runtime_id).map_err(AppError::Remote);
+            let Ok(runtime_id) = RuntimeId::from_str(&runtime_id) else {
+                return Ok(());
+            };
+            // This command runs directly in the provider terminal over SSH.
+            // It must never print management diagnostics into that surface;
+            // the local navigator observes the resulting runtime state.
+            let _ = crate::remote::attach(&root, runtime_id);
+            return Ok(());
         }
         Commands::RegisterRemote {
             host,
@@ -244,6 +283,8 @@ fn execute(cli: Cli) -> Result<(), AppError> {
         Commands::Navigator
         | Commands::NavigatorPane { .. }
         | Commands::ProviderWait
+        | Commands::ProviderAttach { .. }
+        | Commands::ProviderRemoteAttach { .. }
         | Commands::Hook
         | Commands::Remote
         | Commands::RemoteAttach { .. }
@@ -457,6 +498,36 @@ fn attach_remote_workstream(
         .ok_or(AppError::RemoteRuntimeUnavailable)?;
     attach_ssh(&endpoint, runtime_id)?;
     Ok(())
+}
+
+/// Runs an attachment only inside the presentation provider pane.
+///
+/// A provider pane is reserved for native Codex bytes. The navigator refreshes
+/// lifecycle state independently, so an unavailable or unexpectedly stopped
+/// Runtime must leave this pane blank rather than render a CLI diagnostic.
+fn provider_attach(root: &StateRoot, workstream_id: &str) -> Result<(), AppError> {
+    let _ = (|| -> Result<(), AppError> {
+        let workstream_id = parse_workstream(workstream_id)?;
+        let registry = HostRegistry::open(root)?;
+        attach(root, &registry, workstream_id)
+    })();
+    provider_wait()
+}
+
+/// Runs an SSH attachment only inside the presentation provider pane.
+///
+/// The remote `_attach` endpoint follows the same no-diagnostics rule, while
+/// the navigator's normal polling displays the resulting bounded state.
+fn provider_remote_attach(
+    root: &StateRoot,
+    host_alias: &str,
+    workstream_id: &str,
+) -> Result<(), AppError> {
+    let _ = (|| -> Result<(), AppError> {
+        let catalog = ClientCatalog::open(root)?;
+        attach_remote_workstream(&catalog, host_alias, workstream_id)
+    })();
+    provider_wait()
 }
 
 fn registered_ssh_endpoint(catalog: &ClientCatalog, alias: &str) -> Result<SshEndpoint, AppError> {
@@ -841,8 +912,12 @@ fn attach(
         &process_probe,
         RuntimePaths::for_runtime(root.base(), record.runtime_id),
     );
-    let status = runtime.attach_command().status().map_err(AppError::Io)?;
-    if status.success() {
+    let mut command = runtime.attach_command();
+    command.stderr(Stdio::null());
+    let status = command.status().map_err(AppError::Io)?;
+    if status.success()
+        || actions::await_deliberate_park(root, record.runtime_id, record.workstream_id)?
+    {
         Ok(())
     } else {
         Err(AppError::AttachFailed)
@@ -943,8 +1018,6 @@ enum AppError {
     InvalidAttentionRevision,
     #[error("invalid workstream ID")]
     InvalidWorkstreamId(uuid::Error),
-    #[error("invalid runtime ID")]
-    InvalidRuntimeId(uuid::Error),
     #[error("host alias is not registered")]
     UnknownHostAlias,
     #[error("host alias is not an SSH host")]
@@ -1031,6 +1104,30 @@ mod tests {
         let parsed = Cli::try_parse_from(["wsnav", "_hook"]);
         assert!(matches!(parsed.unwrap().command, Some(Commands::Hook)));
         assert!(Cli::try_parse_from(["wsnav", "hook"]).is_err());
+    }
+
+    #[test]
+    fn provider_attachment_helpers_are_the_only_silent_cli_commands() {
+        let local = Cli::try_parse_from([
+            "wsnav",
+            "_provider_attach",
+            "00000000-0000-0000-0000-000000000001",
+        ])
+        .unwrap();
+        assert!(is_provider_surface_command(local.command.as_ref()));
+
+        let remote = Cli::try_parse_from([
+            "wsnav",
+            "_provider_remote_attach",
+            "snap",
+            "00000000-0000-0000-0000-000000000001",
+        ])
+        .unwrap();
+        assert!(is_provider_surface_command(remote.command.as_ref()));
+
+        let user = Cli::try_parse_from(["wsnav", "attach", "00000000-0000-0000-0000-000000000001"])
+            .unwrap();
+        assert!(!is_provider_surface_command(user.command.as_ref()));
     }
 
     #[test]

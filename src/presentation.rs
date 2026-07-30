@@ -252,8 +252,7 @@ impl Presentation {
             self.executable.clone().into_os_string(),
             "--state-root".into(),
             self.state_root.clone().into_os_string(),
-            "host".into(),
-            "attach".into(),
+            "_provider_remote_attach".into(),
             host_alias.into(),
             workstream_id.to_string().into(),
         ];
@@ -389,7 +388,7 @@ impl Presentation {
             self.executable.clone().into_os_string(),
             "--state-root".into(),
             self.state_root.clone().into_os_string(),
-            "attach".into(),
+            "_provider_attach".into(),
             workstream_id.to_string().into(),
         ]
     }
@@ -512,7 +511,11 @@ mod tests {
                 .iter()
                 .all(|argument| argument != "sh" && argument != "/bin/sh")
         );
-        assert!(command.iter().any(|argument| argument == "attach"));
+        assert!(
+            command
+                .iter()
+                .any(|argument| argument == "_provider_attach")
+        );
         assert_eq!(command.len(), 5);
     }
 
@@ -531,7 +534,7 @@ mod tests {
         assert_eq!(arguments.len(), 9);
         assert_eq!(arguments[0], "respawn-pane");
         assert_eq!(arguments[4], "/workspace/wsnav");
-        assert_eq!(arguments[7], "attach");
+        assert_eq!(arguments[7], "_provider_attach");
         assert_eq!(arguments[8], OsString::from(workstream_id.to_string()));
     }
 
@@ -550,10 +553,9 @@ mod tests {
 
         assert_eq!(arguments[4], "/workspace/wsnav");
         assert_eq!(arguments[5], "--state-root");
-        assert_eq!(arguments[7], "host");
-        assert_eq!(arguments[8], "attach");
-        assert_eq!(arguments[9], "snap");
-        assert_eq!(arguments[10], OsString::from(workstream_id.to_string()));
+        assert_eq!(arguments[7], "_provider_remote_attach");
+        assert_eq!(arguments[8], "snap");
+        assert_eq!(arguments[9], OsString::from(workstream_id.to_string()));
     }
 
     #[test]

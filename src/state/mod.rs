@@ -784,6 +784,44 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)
     }
 
+    /// Confirms that one exact Runtime ended through the explicit park action.
+    ///
+    /// This is intentionally stricter than a stopped runtime alone: an
+    /// unexpected native-process exit also leaves a Runtime stopped, but does
+    /// not park its Workstream. Attachment helpers use this distinction after
+    /// their private tmux client exits unexpectedly.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry cannot be queried or contains an
+    /// invalid persisted lifecycle value.
+    pub fn runtime_is_deliberately_parked(
+        &self,
+        runtime_id: RuntimeId,
+        workstream_id: WorkstreamId,
+    ) -> Result<bool, StateError> {
+        let lifecycle: Option<(String, String)> = self
+            .connection
+            .query_row(
+                "SELECT runtimes.lifecycle, workstreams.lifecycle
+                 FROM runtimes
+                 JOIN workstreams ON workstreams.workstream_id = runtimes.workstream_id
+                 WHERE runtimes.runtime_id = ?1 AND runtimes.workstream_id = ?2",
+                params![runtime_id.to_string(), workstream_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?;
+        let Some((runtime_lifecycle, workstream_lifecycle)) = lifecycle else {
+            return Ok(false);
+        };
+        Ok(
+            runtime_status_from_text(&runtime_lifecycle)? == RuntimeStatus::Stopped
+                && workstream_lifecycle_from_text(&workstream_lifecycle)?
+                    == WorkstreamLifecycle::Parked,
+        )
+    }
+
     /// Returns the bounded state needed by one local navigator snapshot.
     /// Provider content, terminal captures, and hook payloads are not queried
     /// or returned.
@@ -3107,10 +3145,28 @@ mod tests {
                 "deadbeef".to_owned(),
             )
             .unwrap();
+        let unexpected_stop = registry.reserve_runtime(registered.workstream_id).unwrap();
+        registry
+            .mark_runtime_stopped(unexpected_stop.runtime_id, unexpected_stop.revision)
+            .unwrap();
+        assert!(
+            !registry
+                .runtime_is_deliberately_parked(
+                    unexpected_stop.runtime_id,
+                    registered.workstream_id,
+                )
+                .unwrap()
+        );
+
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
         registry
             .park_runtime(runtime.runtime_id, runtime.revision)
             .unwrap();
+        assert!(
+            registry
+                .runtime_is_deliberately_parked(runtime.runtime_id, registered.workstream_id)
+                .unwrap()
+        );
         assert_eq!(
             registry.workstream_overviews().unwrap()[0].lifecycle,
             WorkstreamLifecycle::Parked

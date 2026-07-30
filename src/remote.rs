@@ -74,8 +74,16 @@ pub fn attach(root: &StateRoot, runtime_id: RuntimeId) -> Result<(), RemoteError
     if !matches!(runtime.probe()?, RuntimeProbe::Live { .. }) {
         return Err(RemoteError::RuntimeUnavailable);
     }
-    let status = runtime.attach_command().status()?;
-    if status.success() {
+    let mut command = runtime.attach_command();
+    command.stderr(Stdio::null());
+    let status = command.status()?;
+    if status.success()
+        || crate::actions::await_deliberate_park(
+            root,
+            runtime_record.runtime_id,
+            runtime_record.workstream_id,
+        )?
+    {
         Ok(())
     } else {
         Err(RemoteError::AttachFailed)

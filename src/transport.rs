@@ -357,12 +357,16 @@ fn apply_request(action: HostAction) -> Result<RequestEnvelope, TransportError> 
 pub fn attach_ssh(endpoint: &SshEndpoint, runtime_id: RuntimeId) -> Result<(), TransportError> {
     let status = Command::new("ssh")
         .args(ssh_attach_arguments(endpoint, runtime_id))
+        // The provider terminal is the SSH stdout stream. Keep SSH transport
+        // diagnostics out of that terminal; the navigator independently
+        // observes the bounded host state after an attachment ends.
+        .stderr(Stdio::null())
         .status()
         .map_err(TransportError::Launch)?;
     if status.success() {
         Ok(())
     } else {
-        Err(TransportError::RemoteCommandFailed)
+        Err(TransportError::InteractiveAttachmentFailed)
     }
 }
 
@@ -479,6 +483,8 @@ pub enum TransportError {
     OutputTooLarge,
     #[error("host command failed without a usable protocol response")]
     RemoteCommandFailed,
+    #[error("remote native tmux attachment failed")]
+    InteractiveAttachmentFailed,
     #[error("host returned an unexpected protocol response")]
     UnexpectedResponse,
     #[error("host rejected the request: {0}")]

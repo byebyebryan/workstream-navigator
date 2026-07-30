@@ -9,6 +9,8 @@ use std::{
     env,
     ffi::OsString,
     path::{Path, PathBuf},
+    thread,
+    time::{Duration, Instant},
 };
 
 use thiserror::Error;
@@ -23,6 +25,8 @@ use crate::{
 };
 
 pub(crate) const OBSERVER_AUTHORITY: &str = "wsnav-observer-v1";
+const PARK_CONFIRM_TIMEOUT: Duration = Duration::from_millis(500);
+const PARK_CONFIRM_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// The durable outcome of a start-or-resume request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -149,6 +153,35 @@ pub fn park(
     runtime.park()?;
     registry.park_runtime(record.runtime_id, record.revision)?;
     workstream_revision(registry, workstream_id)
+}
+
+/// Waits briefly for the durable outcome of a concurrently requested park.
+///
+/// Parking first stops the private tmux server, which makes an already
+/// attached native client exit before the park action can commit its `SQLite`
+/// transaction. Treat that exit as clean only after the exact Runtime and
+/// Workstream record the deliberate parked outcome. A crash, stale Runtime,
+/// or replacement generation never satisfies this predicate.
+///
+/// # Errors
+///
+/// Returns an error when the registry cannot be opened or queried.
+pub fn await_deliberate_park(
+    root: &crate::state::StateRoot,
+    runtime_id: RuntimeId,
+    workstream_id: WorkstreamId,
+) -> Result<bool, StateError> {
+    let deadline = Instant::now() + PARK_CONFIRM_TIMEOUT;
+    loop {
+        let registry = HostRegistry::open(root)?;
+        if registry.runtime_is_deliberately_parked(runtime_id, workstream_id)? {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(PARK_CONFIRM_POLL_INTERVAL);
+    }
 }
 
 /// Builds the only native provider command permitted for a managed Runtime.

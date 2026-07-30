@@ -253,6 +253,7 @@ fn snapshot_workstream(root: &StateRoot, overview: &WorkstreamOverview) -> Snaps
         recovery_required,
         attention_revision: attention.map(|attention| attention.revision.value()),
         activity_sequence: overview.last_activity_sequence,
+        last_activity_at_millis: overview.last_activity_at_millis,
         revision: overview.revision.value(),
     }
 }
@@ -296,9 +297,9 @@ fn observed_runtime_status(root: &StateRoot, overview: &WorkstreamOverview) -> R
 fn display_name(overview: &WorkstreamOverview, runtime_status: RuntimeStatus) -> String {
     let Some(binding) = &overview.binding else {
         return if runtime_status == RuntimeStatus::Starting {
-            format!("starting · {}", overview.workstream_id.short())
+            "starting".to_owned()
         } else {
-            format!("untitled · {}", overview.workstream_id.short())
+            "untitled".to_owned()
         };
     };
     let context = if binding.start_source == "clear" {
@@ -315,7 +316,6 @@ fn display_name(overview: &WorkstreamOverview, runtime_status: RuntimeStatus) ->
         binding.observed_thread_name.as_deref(),
         binding.observed_thread_name.as_deref(),
         context,
-        &overview.workstream_id.short(),
     )
     .text
 }

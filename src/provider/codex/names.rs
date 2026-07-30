@@ -18,7 +18,6 @@ pub enum NameContext<'a> {
     },
     Fork {
         source_native_name: Option<&'a str>,
-        source_workstream_short_id: &'a str,
     },
 }
 
@@ -45,7 +44,6 @@ pub fn resolve_name(
     native_name: Option<&str>,
     cached_name: Option<&str>,
     context: NameContext<'_>,
-    workstream_short_id: &str,
 ) -> EffectiveName {
     if state == NameState::Named
         && let Some(name) = native_name.filter(|name| !name.trim().is_empty())
@@ -65,7 +63,7 @@ pub fn resolve_name(
     }
     match context {
         NameContext::Starting => EffectiveName {
-            text: format!("starting · {workstream_short_id}"),
+            text: "starting".to_owned(),
             source: EffectiveNameSource::Synthetic,
         },
         NameContext::Cutover {
@@ -77,29 +75,28 @@ pub fn resolve_name(
         NameContext::Cutover {
             prior_effective_name: None,
         } => EffectiveName {
-            text: format!("untitled · {workstream_short_id} ↻"),
+            text: "untitled ↻".to_owned(),
             source: EffectiveNameSource::CutoverFallback,
         },
         NameContext::Fork {
             source_native_name: Some(source),
             ..
         } => EffectiveName {
-            text: format!("{source} · fork · {workstream_short_id}"),
+            text: format!("{source} · fork"),
             source: EffectiveNameSource::ForkFallback,
         },
         NameContext::Fork {
             source_native_name: None,
-            source_workstream_short_id,
         } => EffectiveName {
-            text: format!("fork of {source_workstream_short_id} · {workstream_short_id}"),
+            text: "forked workstream".to_owned(),
             source: EffectiveNameSource::ForkFallback,
         },
         NameContext::Normal if state == NameState::Unavailable => EffectiveName {
-            text: format!("name unavailable · {workstream_short_id}"),
+            text: "name unavailable".to_owned(),
             source: EffectiveNameSource::Synthetic,
         },
         NameContext::Normal => EffectiveName {
-            text: format!("untitled · {workstream_short_id}"),
+            text: "untitled".to_owned(),
             source: EffectiveNameSource::Synthetic,
         },
     }
@@ -112,13 +109,7 @@ mod tests {
     #[test]
     fn native_name_always_wins() {
         assert_eq!(
-            resolve_name(
-                NameState::Named,
-                Some("Native"),
-                None,
-                NameContext::Normal,
-                "a1"
-            ),
+            resolve_name(NameState::Named, Some("Native"), None, NameContext::Normal,),
             EffectiveName {
                 text: "Native".to_owned(),
                 source: EffectiveNameSource::Native
@@ -136,7 +127,6 @@ mod tests {
                 NameContext::Cutover {
                     prior_effective_name: Some("Source")
                 },
-                "a1"
             )
             .text,
             "Source ↻ unnamed"
@@ -148,12 +138,10 @@ mod tests {
                 None,
                 NameContext::Fork {
                     source_native_name: None,
-                    source_workstream_short_id: "a1"
                 },
-                "b2"
             )
             .text,
-            "fork of a1 · b2"
+            "forked workstream"
         );
     }
 
@@ -164,9 +152,32 @@ mod tests {
             None,
             Some("Cached"),
             NameContext::Normal,
-            "a1",
         );
         assert_eq!(name.text, "Cached · stale");
         assert_eq!(name.source, EffectiveNameSource::CachedStale);
+    }
+
+    #[test]
+    fn synthetic_fallbacks_do_not_expose_internal_identifiers() {
+        assert_eq!(
+            resolve_name(NameState::KnownEmpty, None, None, NameContext::Normal).text,
+            "untitled"
+        );
+        assert_eq!(
+            resolve_name(NameState::KnownEmpty, None, None, NameContext::Starting).text,
+            "starting"
+        );
+        assert_eq!(
+            resolve_name(
+                NameState::KnownEmpty,
+                None,
+                None,
+                NameContext::Cutover {
+                    prior_effective_name: None,
+                },
+            )
+            .text,
+            "untitled ↻"
+        );
     }
 }

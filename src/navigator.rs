@@ -32,7 +32,7 @@ use ratatui::{
 use thiserror::Error;
 
 use crate::{
-    domain::{Revision, RuntimeStatus, WorkstreamId, WorkstreamLifecycle},
+    domain::{Clock, Revision, RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle},
     presentation::{Presentation, PresentationError},
     provider::codex::names::{NameContext, resolve_name},
     runtime::{
@@ -56,6 +56,7 @@ pub struct NavigatorWorkstream {
     pub result_ready: bool,
     pub recovery_required: bool,
     pub attention_revision: Option<Revision>,
+    pub last_activity_at_millis: Option<i64>,
     pub workstream_revision: Revision,
 }
 
@@ -214,6 +215,7 @@ fn project_workstream(
         result_ready,
         recovery_required,
         attention_revision,
+        last_activity_at_millis: overview.last_activity_at_millis,
         workstream_revision: overview.revision,
     })
 }
@@ -251,6 +253,7 @@ fn project_remote_workstream(
         result_ready: workstream.result_ready,
         recovery_required: workstream.recovery_required,
         attention_revision,
+        last_activity_at_millis: workstream.last_activity_at_millis,
         workstream_revision,
     })
 }
@@ -284,9 +287,9 @@ fn observed_runtime_status(
 fn display_name(overview: &WorkstreamOverview, runtime_status: NavigatorRuntimeStatus) -> String {
     let Some(binding) = &overview.binding else {
         return if runtime_status == NavigatorRuntimeStatus::Starting {
-            format!("starting · {}", overview.workstream_id.short())
+            "starting".to_owned()
         } else {
-            format!("untitled · {}", overview.workstream_id.short())
+            "untitled".to_owned()
         };
     };
     let context = if binding.start_source == "clear" {
@@ -303,7 +306,6 @@ fn display_name(overview: &WorkstreamOverview, runtime_status: NavigatorRuntimeS
         binding.observed_thread_name.as_deref(),
         binding.observed_thread_name.as_deref(),
         context,
-        &overview.workstream_id.short(),
     )
     .text
 }
@@ -659,17 +661,51 @@ fn row_item(row: &NavigatorWorkstream, selected: bool, spinner_frame: usize) -> 
             Span::raw("   "),
             Span::styled(
                 format!("{} · ", row.host.alias()),
-                Style::default().fg(Color::DarkGray),
+                Style::default()
+                    .fg(Color::LightBlue)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(row.project_label.clone(), project_style),
         ]),
-        Line::from(vec![
-            Span::raw(" "),
-            Span::styled(indicator, indicator_style),
-            Span::raw(" "),
-            Span::styled(row.display_name.clone(), thread_style),
-        ]),
+        Line::from(thread_line(row, indicator, indicator_style, thread_style)),
     ])
+}
+
+fn thread_line(
+    row: &NavigatorWorkstream,
+    indicator: &'static str,
+    indicator_style: Style,
+    thread_style: Style,
+) -> Vec<Span<'static>> {
+    let mut line = vec![
+        Span::raw(" "),
+        Span::styled(indicator, indicator_style),
+        Span::raw(" "),
+        Span::styled(row.display_name.clone(), thread_style),
+    ];
+    if let Some(age) =
+        relative_activity_age(row.last_activity_at_millis, SystemClock.now_millis().ok())
+    {
+        line.push(Span::styled(" · ", Style::default().fg(Color::Gray)));
+        line.push(Span::styled(age, Style::default().fg(Color::Gray)));
+    }
+    line
+}
+
+fn relative_activity_age(
+    last_activity_at_millis: Option<i64>,
+    now_millis: Option<i64>,
+) -> Option<String> {
+    let elapsed_seconds = now_millis?
+        .saturating_sub(last_activity_at_millis?)
+        .max(0)
+        .saturating_div(1_000);
+    Some(match elapsed_seconds {
+        0..=59 => "now".to_owned(),
+        60..=3_599 => format!("{}m ago", elapsed_seconds / 60),
+        3_600..=86_399 => format!("{}h ago", elapsed_seconds / 3_600),
+        _ => format!("{}d ago", elapsed_seconds / 86_400),
+    })
 }
 
 /// Returns a compact user-facing state from bounded lifecycle and attention
@@ -1020,12 +1056,35 @@ mod tests {
             recovery_required: false,
             attention_revision: None,
             activity_sequence: 0,
+            last_activity_at_millis: Some(1_000),
             revision: Revision::INITIAL.value(),
         };
 
         let projected = project_remote_workstream("snap", &remote, true).unwrap();
 
         assert_eq!(projected.project_label, "dms-power-status");
+        assert_eq!(projected.last_activity_at_millis, Some(1_000));
+    }
+
+    #[test]
+    fn activity_age_is_compact_and_safe_for_clock_skew() {
+        assert_eq!(
+            relative_activity_age(Some(60_000), Some(60_999)),
+            Some("now".to_owned())
+        );
+        assert_eq!(
+            relative_activity_age(Some(60_000), Some(180_000)),
+            Some("2m ago".to_owned())
+        );
+        assert_eq!(
+            relative_activity_age(Some(60_000), Some(60_000 + 86_400_000 * 3)),
+            Some("3d ago".to_owned())
+        );
+        assert_eq!(
+            relative_activity_age(Some(60_000), Some(59_000)),
+            Some("now".to_owned())
+        );
+        assert_eq!(relative_activity_age(None, Some(60_000)), None);
     }
 
     #[test]
@@ -1062,6 +1121,14 @@ mod tests {
             .find(|cell| cell.symbol() == "p")
             .unwrap();
         assert_eq!(project_cell.fg, Color::White);
+        let host_cell = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "l")
+            .unwrap();
+        assert_eq!(host_cell.fg, Color::LightBlue);
     }
 
     #[test]
@@ -1159,6 +1226,7 @@ mod tests {
             result_ready: false,
             recovery_required: false,
             attention_revision: None,
+            last_activity_at_millis: None,
             workstream_revision: Revision::INITIAL,
         }
     }

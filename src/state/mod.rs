@@ -8,16 +8,16 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::domain::{
-    AttentionState, CheckoutId, CompoundOperation, DomainError, HostId, IdGenerator, LocationId,
-    OperationId, OperationKind, OperationPhase, ProjectId, RandomIdGenerator, Revision, RuntimeId,
-    RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
+    AttentionState, CheckoutId, Clock, CompoundOperation, DomainError, HostId, IdGenerator,
+    LocationId, OperationId, OperationKind, OperationPhase, ProjectId, RandomIdGenerator, Revision,
+    RuntimeId, RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle,
 };
 use crate::protocol::{Capabilities, HelloResponse};
 use crate::provider::codex::hooks::{HookObservation, LifecycleEvent};
 use crate::provider::codex::names::NameState;
 use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 
-const HOST_SCHEMA_VERSION: i64 = 2;
+const HOST_SCHEMA_VERSION: i64 = 3;
 const CLIENT_SCHEMA_VERSION: i64 = 2;
 const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
@@ -65,6 +65,7 @@ const HOST_SCHEMA_SQL: &str = "
         checkout_id TEXT NOT NULL UNIQUE REFERENCES checkouts(checkout_id),
         lifecycle TEXT NOT NULL,
         last_activity_sequence INTEGER NOT NULL CHECK (last_activity_sequence >= 0),
+        last_activity_at_millis INTEGER NOT NULL CHECK (last_activity_at_millis >= 0),
         revision INTEGER NOT NULL CHECK (revision > 0)
     );
     CREATE TABLE runtimes (
@@ -291,6 +292,9 @@ pub struct WorkstreamOverview {
     pub checkout_path: PathBuf,
     pub lifecycle: WorkstreamLifecycle,
     pub last_activity_sequence: i64,
+    /// Wall-clock time of the most recent known lifecycle activity. `None`
+    /// means the record predates this display metadata and no time is inferred.
+    pub last_activity_at_millis: Option<i64>,
     pub revision: Revision,
     pub runtime: Option<RuntimeRecord>,
     pub binding: Option<ProviderBinding>,
@@ -560,6 +564,7 @@ impl HostRegistry {
     ) -> Result<ExternalWorkstream, StateError> {
         validate_registry_text("repository identity", &repository_identity)?;
         validate_registry_text("default base ref", &default_base_ref)?;
+        let activity_at_millis = SystemClock.now_millis()?;
         let registration = ExternalWorkstream {
             location_id: LocationId::new(),
             checkout_id: CheckoutId::new(),
@@ -606,13 +611,15 @@ impl HostRegistry {
             .execute(
                 "INSERT INTO workstreams (
                     workstream_id, location_id, origin, source_workstream_id,
-                    checkout_id, lifecycle, last_activity_sequence, revision
-                 ) VALUES (?1, ?2, 'external', NULL, ?3, 'open', ?4, 1)",
+                    checkout_id, lifecycle, last_activity_sequence,
+                    last_activity_at_millis, revision
+                 ) VALUES (?1, ?2, 'external', NULL, ?3, 'open', ?4, ?5, 1)",
                 params![
                     registration.workstream_id.to_string(),
                     registration.location_id.to_string(),
                     registration.checkout_id.to_string(),
                     activity_sequence,
+                    activity_at_millis,
                 ],
             )
             .map_err(StateError::Sqlite)?;
@@ -630,6 +637,7 @@ impl HostRegistry {
         &mut self,
         workstream_id: WorkstreamId,
     ) -> Result<RuntimeRecord, StateError> {
+        let activity_at_millis = SystemClock.now_millis()?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -718,9 +726,9 @@ impl HostRegistry {
             record
         };
         if workstream_lifecycle == "parked" {
-            reopen_parked_workstream(&transaction, workstream_id)?;
+            reopen_parked_workstream(&transaction, workstream_id, activity_at_millis)?;
         } else {
-            touch_workstream(&transaction, &workstream_id.to_string())?;
+            touch_workstream(&transaction, &workstream_id.to_string(), activity_at_millis)?;
         }
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(record)
@@ -793,7 +801,8 @@ impl HostRegistry {
                 .prepare(
                     "SELECT workstreams.workstream_id, workstreams.location_id,
                             checkouts.path, workstreams.lifecycle,
-                            workstreams.last_activity_sequence, workstreams.revision
+                            workstreams.last_activity_sequence,
+                            workstreams.last_activity_at_millis, workstreams.revision
                      FROM workstreams
                      JOIN checkouts ON checkouts.checkout_id = workstreams.checkout_id
                      ORDER BY workstreams.last_activity_sequence DESC,
@@ -810,6 +819,7 @@ impl HostRegistry {
                         row.get::<_, String>(3)?,
                         row.get::<_, i64>(4)?,
                         row.get::<_, i64>(5)?,
+                        row.get::<_, i64>(6)?,
                     ))
                 })
                 .map_err(StateError::Sqlite)?
@@ -830,6 +840,7 @@ impl HostRegistry {
                     checkout_path,
                     lifecycle,
                     activity_sequence,
+                    activity_at_millis,
                     revision,
                 )| {
                     let workstream_id = Uuid::parse_str(&workstream_id)
@@ -853,6 +864,8 @@ impl HostRegistry {
                         checkout_path: PathBuf::from(checkout_path),
                         lifecycle,
                         last_activity_sequence: activity_sequence,
+                        last_activity_at_millis: (activity_at_millis != 0)
+                            .then_some(activity_at_millis),
                         revision,
                         runtime,
                         binding,
@@ -1030,6 +1043,7 @@ impl HostRegistry {
         runtime_id: RuntimeId,
         expected: Revision,
     ) -> Result<(), StateError> {
+        let activity_at_millis = SystemClock.now_millis()?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1055,10 +1069,10 @@ impl HostRegistry {
             .execute(
                 "UPDATE workstreams SET lifecycle = CASE
                     WHEN lifecycle = 'open' THEN 'parked' ELSE lifecycle END,
-                    last_activity_sequence = ?1,
+                    last_activity_sequence = ?1, last_activity_at_millis = ?2,
                     revision = revision + 1
-                 WHERE workstream_id = ?2",
-                params![activity_sequence, workstream_id],
+                 WHERE workstream_id = ?3",
+                params![activity_sequence, activity_at_millis, workstream_id],
             )
             .map_err(StateError::Sqlite)?;
         if runtime_changed != 1 || workstream_changed != 1 {
@@ -1085,6 +1099,7 @@ impl HostRegistry {
         generation: &str,
         observation: HookObservation,
     ) -> Result<(), StateError> {
+        let activity_at_millis = SystemClock.now_millis()?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -1157,7 +1172,7 @@ impl HostRegistry {
                 update_runtime_lifecycle(&transaction, runtime_id, revision, "stopped")?;
             }
         }
-        touch_workstream(&transaction, &runtime.0)?;
+        touch_workstream(&transaction, &runtime.0, activity_at_millis)?;
         transaction.commit().map_err(StateError::Sqlite)
     }
 
@@ -1748,7 +1763,17 @@ fn migrate_host_schema(connection: &mut Connection) -> Result<(), StateError> {
             .execute_batch(
                 "ALTER TABLE workstreams
                  ADD COLUMN last_activity_sequence INTEGER NOT NULL DEFAULT 0
-                 CHECK (last_activity_sequence >= 0);",
+                 CHECK (last_activity_sequence >= 0);
+                 ALTER TABLE workstreams
+                 ADD COLUMN last_activity_at_millis INTEGER NOT NULL DEFAULT 0
+                 CHECK (last_activity_at_millis >= 0);",
+            )
+            .map_err(StateError::Sqlite)?,
+        2 => transaction
+            .execute_batch(
+                "ALTER TABLE workstreams
+                 ADD COLUMN last_activity_at_millis INTEGER NOT NULL DEFAULT 0
+                 CHECK (last_activity_at_millis >= 0);",
             )
             .map_err(StateError::Sqlite)?,
         HOST_SCHEMA_VERSION => return Ok(()),
@@ -2220,9 +2245,8 @@ fn update_runtime_lifecycle(
 
 /// Returns the next durable activity order for a Workstream update.
 ///
-/// This sequence is intentionally logical rather than wall-clock time: it is
-/// enough to render deterministic newest-first navigation without storing a
-/// timestamp or depending on clock injection at this boundary.
+/// This sequence is intentionally logical rather than wall-clock time. It
+/// makes newest-first navigation deterministic even when host clocks differ.
 fn next_activity_sequence(transaction: &rusqlite::Transaction<'_>) -> Result<i64, StateError> {
     transaction
         .query_row(
@@ -2237,13 +2261,15 @@ fn next_activity_sequence(transaction: &rusqlite::Transaction<'_>) -> Result<i64
 fn touch_workstream(
     transaction: &rusqlite::Transaction<'_>,
     workstream_id: &str,
+    activity_at_millis: i64,
 ) -> Result<(), StateError> {
     let activity_sequence = next_activity_sequence(transaction)?;
     let changed = transaction
         .execute(
-            "UPDATE workstreams SET last_activity_sequence = ?1, revision = revision + 1
-             WHERE workstream_id = ?2",
-            params![activity_sequence, workstream_id],
+            "UPDATE workstreams SET last_activity_sequence = ?1,
+             last_activity_at_millis = ?2, revision = revision + 1
+             WHERE workstream_id = ?3",
+            params![activity_sequence, activity_at_millis, workstream_id],
         )
         .map_err(StateError::Sqlite)?;
     if changed == 1 {
@@ -2256,14 +2282,20 @@ fn touch_workstream(
 fn reopen_parked_workstream(
     transaction: &rusqlite::Transaction<'_>,
     workstream_id: WorkstreamId,
+    activity_at_millis: i64,
 ) -> Result<(), StateError> {
     let activity_sequence = next_activity_sequence(transaction)?;
     let changed = transaction
         .execute(
             "UPDATE workstreams SET lifecycle = 'open', last_activity_sequence = ?1,
+             last_activity_at_millis = ?2,
              revision = revision + 1
-             WHERE workstream_id = ?2 AND lifecycle = 'parked'",
-            params![activity_sequence, workstream_id.to_string()],
+             WHERE workstream_id = ?3 AND lifecycle = 'parked'",
+            params![
+                activity_sequence,
+                activity_at_millis,
+                workstream_id.to_string()
+            ],
         )
         .map_err(StateError::Sqlite)?;
     if changed == 1 {
@@ -2959,6 +2991,14 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
+        let activity_time_column: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('workstreams')
+                 WHERE name = 'last_activity_at_millis'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         let recorded_version: i64 = connection
             .query_row(
                 "SELECT schema_version FROM host_identity WHERE singleton = 1",
@@ -2968,7 +3008,52 @@ mod tests {
             .unwrap();
 
         assert_eq!(activity_column, 1);
+        assert_eq!(activity_time_column, 1);
         assert_eq!(recorded_version, HOST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn v2_host_schema_adds_unknown_activity_time_without_inventing_one() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE host_identity (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    host_id TEXT NOT NULL UNIQUE,
+                    registry_generation TEXT NOT NULL,
+                    schema_version INTEGER NOT NULL
+                 );
+                 INSERT INTO host_identity VALUES (1, 'host', 'generation', 2);
+                 CREATE TABLE workstreams (
+                    workstream_id TEXT PRIMARY KEY,
+                    location_id TEXT NOT NULL,
+                    origin TEXT NOT NULL,
+                    source_workstream_id TEXT,
+                    checkout_id TEXT NOT NULL UNIQUE,
+                    lifecycle TEXT NOT NULL,
+                    last_activity_sequence INTEGER NOT NULL CHECK (last_activity_sequence >= 0),
+                    revision INTEGER NOT NULL CHECK (revision > 0)
+                 );
+                 PRAGMA user_version = 2;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let registry = HostRegistry::open(&root).unwrap();
+        assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        let default_value: String = connection
+            .query_row(
+                "SELECT dflt_value FROM pragma_table_info('workstreams')
+                 WHERE name = 'last_activity_at_millis'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(default_value, "0");
     }
 
     #[test]
@@ -3146,6 +3231,8 @@ mod tests {
             vec![first.workstream_id, second.workstream_id]
         );
         assert!(overview[0].last_activity_sequence > overview[1].last_activity_sequence);
+        assert!(overview[0].last_activity_at_millis.is_some());
+        assert!(overview[1].last_activity_at_millis.is_some());
     }
 
     #[test]

@@ -523,26 +523,30 @@ erase a cached name.
 
 | Context | Effective display when the current tip has no native name |
 | --- | --- |
-| New Workstream before thread binding | `starting · <workstream-short-id>` |
-| New or existing Workstream with a known-empty name | `untitled · <workstream-short-id>` |
+| New Workstream before thread binding | `starting` |
+| New or existing Workstream with a known-empty name | `untitled` |
 | Same-Workstream cutover from named A to unnamed B | `<A name> ↻ unnamed` |
-| Same-Workstream cutover when A was also unnamed | `untitled · <same-workstream-short-id> ↻` |
-| Fork to a new Workstream from a named source | `<source name> · fork · <destination-short-id>` |
-| Fork from an unnamed source | `fork of <source-workstream-short-id> · <destination-short-id>` |
+| Same-Workstream cutover when A was also unnamed | `untitled ↻` |
+| Fork to a new Workstream from a named source | `<source name> · fork` |
+| Fork from an unnamed source | `forked workstream` |
 | Metadata refresh unavailable with a current-tip cache | Last cached native name with a stale or unreachable indicator |
-| Metadata refresh unavailable without a current-tip cache | The contextual transition display with `name unavailable`; otherwise `name unavailable · <workstream-short-id>` |
-| Provider thread missing during recovery | Last cached native name with `recovery required`; otherwise `recovery required · <workstream-short-id>` |
+| Metadata refresh unavailable without a current-tip cache | The contextual transition display with `name unavailable`; otherwise `name unavailable` |
+| Provider thread missing during recovery | Last cached native name with `recovery required`; otherwise `recovery required` |
 
 Resolution prefers a current non-empty native name, then a current-binding
 cache when refresh is unavailable, then transition context, and finally a
 synthetic lifecycle fallback. An unavailable observation never becomes
-`unnamed` or `untitled`; those displays require `known_empty`. Every final
-fallback uses the stable Workstream short ID, never the moving thread UUID.
-Branch, worktree, host, and cwd remain secondary context rather than naming
-authority.
+`unnamed` or `untitled`; those displays require `known_empty`. Fallbacks never
+expose a workstream or provider identifier. Branch, worktree, host, and cwd
+remain secondary context rather than naming authority.
 
 An exact thread ID, not any displayed text, remains identity and action
 authority. Names and computed fallbacks need not be unique.
+
+Navigator rows show the readable host alias, project, current tip name, and a
+relative age from the last known lifecycle activity. Activity sequence remains
+the deterministic ordering key within each host; the optional wall-clock value
+is display-only and is absent for migrated records without truthful timing.
 
 Native `/rename` and navigator Rename both update the current Codex thread
 name. The navigator action calls `thread/name/set`; a later bounded metadata
@@ -790,9 +794,9 @@ user selects ProjectLocation and Start Workstream
 
 No workstream name, model, branch, session ID, or first prompt is required in a
 manager-owned creation form. Before binding, the row shows
-`starting · <workstream-short-id>`; a bound but unnamed tip shows
-`untitled · <workstream-short-id>`. Later native `/rename`, navigator Rename,
-or an opt-in Codex naming skill updates the one Codex-owned thread name.
+`starting`; a bound but unnamed tip shows `untitled`. Later native `/rename`,
+navigator Rename, or an opt-in Codex naming skill updates the one
+Codex-owned thread name.
 
 ### Fork a running Workstream
 
@@ -845,8 +849,8 @@ Host
 └── Project
     ├── Tip thread name         working
     ├── Prior name ↻ unnamed    working
-    ├── Source · fork · b72c    result ready
-    └── untitled · a91f         parked
+    ├── Source · fork           result ready
+    └── untitled                parked
 
 ┌ navigator ┐┌──────────────── native Codex TUI ────────────────┐
 │ tree      ││ directly interactive; no manager-owned chrome   │

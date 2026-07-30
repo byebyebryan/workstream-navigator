@@ -11,7 +11,7 @@ use crate::domain::{
     HostId, LocationId, Revision, RuntimeId, RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 2;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 3;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -261,6 +261,9 @@ pub struct SnapshotWorkstream {
     pub recovery_required: bool,
     pub attention_revision: Option<i64>,
     pub activity_sequence: i64,
+    /// Optional host wall-clock metadata for display only. A missing value
+    /// means the host has no truthful time for this legacy Workstream.
+    pub last_activity_at_millis: Option<i64>,
     pub revision: i64,
 }
 
@@ -274,6 +277,9 @@ impl SnapshotWorkstream {
         validate_bounded("display name", &self.display_name, MAX_DISPLAY_NAME_BYTES)?;
         if self.activity_sequence < 0 {
             return Err(ProtocolError::InvalidActivitySequence);
+        }
+        if self.last_activity_at_millis.is_some_and(|value| value < 0) {
+            return Err(ProtocolError::InvalidActivityTimestamp);
         }
         Revision::try_from(self.revision).map_err(|_| ProtocolError::InvalidRevision)?;
         if let Some(revision) = self.attention_revision {
@@ -326,6 +332,8 @@ pub enum ProtocolError {
     InvalidRevision,
     #[error("activity sequence must not be negative")]
     InvalidActivitySequence,
+    #[error("activity timestamp must not be negative")]
+    InvalidActivityTimestamp,
     #[error("snapshot has too many workstreams")]
     SnapshotTooLarge,
     #[error("protocol frame exceeds its maximum size")]
@@ -439,6 +447,7 @@ mod tests {
                 recovery_required: false,
                 attention_revision: None,
                 activity_sequence: 0,
+                last_activity_at_millis: None,
                 revision: 1,
             }],
         };

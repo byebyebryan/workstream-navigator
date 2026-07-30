@@ -370,14 +370,7 @@ fn row_item(row: &NavigatorWorkstream, selected: bool) -> ListItem<'static> {
     } else {
         "   "
     };
-    let style = match row.runtime_status {
-        NavigatorRuntimeStatus::Working => Style::default().fg(Color::Yellow),
-        NavigatorRuntimeStatus::RecoveryRequired | NavigatorRuntimeStatus::Unknown => {
-            Style::default().fg(Color::Red)
-        }
-        NavigatorRuntimeStatus::Parked => Style::default().fg(Color::DarkGray),
-        _ => Style::default().fg(Color::Cyan),
-    };
+    let style = status_style(row);
     let project_style = if selected {
         Style::default()
             .fg(Color::White)
@@ -400,12 +393,45 @@ fn row_item(row: &NavigatorWorkstream, selected: bool) -> ListItem<'static> {
         Line::from(vec![
             Span::styled(attention, style),
             Span::styled(row.display_name.clone(), thread_style),
-            Span::styled(
-                format!("  {}", row.runtime_status.label()),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(format!("  {}", status_label(row)), style),
         ]),
     ])
+}
+
+/// Chooses the user-facing state from bounded lifecycle and attention metadata.
+/// A running turn takes precedence over an older unacknowledged result; the
+/// latter remains available as a bullet until acknowledged.
+const fn status_label(row: &NavigatorWorkstream) -> &'static str {
+    match row.runtime_status {
+        NavigatorRuntimeStatus::RecoveryRequired => "recovery required",
+        NavigatorRuntimeStatus::Working => "working",
+        NavigatorRuntimeStatus::Unknown => "unknown",
+        NavigatorRuntimeStatus::Parked => "parked",
+        NavigatorRuntimeStatus::Starting => "starting",
+        NavigatorRuntimeStatus::Idle | NavigatorRuntimeStatus::Attention => {
+            if row.result_ready {
+                "done"
+            } else {
+                "idle"
+            }
+        }
+    }
+}
+
+fn status_style(row: &NavigatorWorkstream) -> Style {
+    match row.runtime_status {
+        NavigatorRuntimeStatus::RecoveryRequired | NavigatorRuntimeStatus::Unknown => {
+            Style::default().fg(Color::Red)
+        }
+        NavigatorRuntimeStatus::Working => Style::default().fg(Color::Yellow),
+        NavigatorRuntimeStatus::Parked => Style::default().fg(Color::DarkGray),
+        NavigatorRuntimeStatus::Idle | NavigatorRuntimeStatus::Attention if row.result_ready => {
+            Style::default().fg(Color::Green)
+        }
+        NavigatorRuntimeStatus::Starting
+        | NavigatorRuntimeStatus::Idle
+        | NavigatorRuntimeStatus::Attention => Style::default().fg(Color::Cyan),
+    }
 }
 
 /// Local navigator projection failures.
@@ -677,7 +703,7 @@ mod tests {
     }
 
     #[test]
-    fn renderer_shows_project_name_and_result_attention_without_provider_content() {
+    fn renderer_shows_done_state_and_result_attention_without_provider_content() {
         let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
         let view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: vec![NavigatorWorkstream {
@@ -699,6 +725,7 @@ mod tests {
         assert!(rendered.contains("project"));
         assert!(rendered.contains("native thread"));
         assert!(rendered.contains('•'));
+        assert!(rendered.contains("done"));
         assert!(!rendered.contains("prompt"));
         let project_cell = terminal
             .backend()
@@ -708,6 +735,23 @@ mod tests {
             .find(|cell| cell.symbol() == "p")
             .unwrap();
         assert_eq!(project_cell.fg, Color::White);
+    }
+
+    #[test]
+    fn working_state_wins_over_a_prior_unacknowledged_result() {
+        let row = NavigatorWorkstream {
+            result_ready: true,
+            ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Working)
+        };
+
+        assert_eq!(status_label(&row), "working");
+    }
+
+    #[test]
+    fn acknowledged_attention_returns_to_idle() {
+        let row = row(WorkstreamId::new(), NavigatorRuntimeStatus::Attention);
+
+        assert_eq!(status_label(&row), "idle");
     }
 
     fn row(

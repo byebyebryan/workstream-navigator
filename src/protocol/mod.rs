@@ -11,7 +11,7 @@ use crate::domain::{
     HostId, LocationId, Revision, RuntimeId, RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 1;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 2;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -250,6 +250,9 @@ impl SnapshotResponse {
 pub struct SnapshotWorkstream {
     pub workstream_id: WorkstreamId,
     pub location_id: LocationId,
+    /// Bounded project label derived from the checkout basename on the host.
+    /// This is presentation metadata, never a checkout path.
+    pub project_display_name: String,
     pub display_name: String,
     pub runtime_id: Option<RuntimeId>,
     pub runtime_status: RuntimeStatus,
@@ -263,6 +266,11 @@ pub struct SnapshotWorkstream {
 
 impl SnapshotWorkstream {
     fn validate(&self) -> Result<(), ProtocolError> {
+        validate_bounded(
+            "project display name",
+            &self.project_display_name,
+            MAX_DISPLAY_NAME_BYTES,
+        )?;
         validate_bounded("display name", &self.display_name, MAX_DISPLAY_NAME_BYTES)?;
         if self.activity_sequence < 0 {
             return Err(ProtocolError::InvalidActivitySequence);
@@ -413,6 +421,34 @@ mod tests {
         assert!(matches!(
             RequestEnvelope::decode(&frame),
             Err(ProtocolError::FrameTooLarge)
+        ));
+    }
+
+    #[test]
+    fn remote_project_display_name_is_bounded() {
+        let snapshot = SnapshotResponse {
+            workstreams: vec![SnapshotWorkstream {
+                workstream_id: WorkstreamId::new(),
+                location_id: LocationId::new(),
+                project_display_name: "x".repeat(MAX_DISPLAY_NAME_BYTES + 1),
+                display_name: "thread".to_owned(),
+                runtime_id: None,
+                runtime_status: RuntimeStatus::Idle,
+                lifecycle: WorkstreamLifecycle::Open,
+                result_ready: false,
+                recovery_required: false,
+                attention_revision: None,
+                activity_sequence: 0,
+                revision: 1,
+            }],
+        };
+
+        assert!(matches!(
+            snapshot.validate(),
+            Err(ProtocolError::FieldTooLong {
+                name: "project display name",
+                ..
+            })
         ));
     }
 }

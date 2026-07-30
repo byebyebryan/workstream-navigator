@@ -6,6 +6,7 @@
 
 use std::{
     io::{self, Read, Write},
+    path::Path,
     process::{Command, Stdio},
 };
 
@@ -237,6 +238,7 @@ fn snapshot_workstream(root: &StateRoot, overview: &WorkstreamOverview) -> Snaps
     SnapshotWorkstream {
         workstream_id: overview.workstream_id,
         location_id: overview.location_id,
+        project_display_name: project_display_name(&overview.checkout_path),
         display_name: bounded_display_name(&display_name(overview, runtime_status)),
         runtime_id: overview.runtime.as_ref().map(|runtime| runtime.runtime_id),
         runtime_status: if recovery_required {
@@ -253,6 +255,19 @@ fn snapshot_workstream(root: &StateRoot, overview: &WorkstreamOverview) -> Snaps
         activity_sequence: overview.last_activity_sequence,
         revision: overview.revision.value(),
     }
+}
+
+/// Returns the sole checkout-derived value allowed in a remote snapshot.
+///
+/// A project label makes the navigator useful across hosts, while preserving
+/// the transport boundary: only the final checkout path component may cross
+/// it, never an absolute or relative checkout path.
+fn project_display_name(checkout_path: &Path) -> String {
+    checkout_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .map_or_else(|| "remote project".to_owned(), bounded_display_name)
 }
 
 fn observed_runtime_status(root: &StateRoot, overview: &WorkstreamOverview) -> RuntimeStatus {
@@ -480,6 +495,15 @@ mod tests {
 
         assert!(bounded.len() <= 256);
         assert!(bounded.ends_with('…'));
+    }
+
+    #[test]
+    fn project_display_name_exposes_only_the_checkout_basename() {
+        assert_eq!(
+            project_display_name(Path::new("/private/place/dms-power-status")),
+            "dms-power-status"
+        );
+        assert_eq!(project_display_name(Path::new("/")), "remote project");
     }
 
     #[test]

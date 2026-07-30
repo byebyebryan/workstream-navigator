@@ -927,6 +927,9 @@ result/attention persistence gap.
   bounded request and shutdown deadlines, and forced cleanup when graceful
   shutdown fails.
 - Remote commands disable forwarding and use bounded fixed protocol entrypoints.
+  Snapshot workstream metadata includes a bounded project display label derived
+  only from the checkout basename; it never includes an absolute or relative
+  checkout path.
 - Provider and Git commands are built as argument vectors. Thread names and
   paths never become shell fragments.
 - Hook stdin is fully drained even for unmanaged, stale, oversized, or malformed

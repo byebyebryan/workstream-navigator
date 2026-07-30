@@ -245,7 +245,7 @@ fn project_remote_workstream(
             },
         },
         workstream_id: workstream.workstream_id,
-        project_label: "remote project".to_owned(),
+        project_label: bounded_display(&workstream.project_display_name),
         display_name: bounded_display(&workstream.display_name),
         runtime_status,
         result_ready: workstream.result_ready,
@@ -1004,6 +1004,28 @@ mod tests {
             fallback_project_label(Path::new("/private/place/project")),
             "project"
         );
+    }
+
+    #[test]
+    fn remote_projection_uses_the_host_project_display_name() {
+        let remote = crate::protocol::SnapshotWorkstream {
+            workstream_id: WorkstreamId::new(),
+            location_id: crate::domain::LocationId::new(),
+            project_display_name: "dms-power-status".to_owned(),
+            display_name: "thread".to_owned(),
+            runtime_id: None,
+            runtime_status: RuntimeStatus::Idle,
+            lifecycle: WorkstreamLifecycle::Open,
+            result_ready: false,
+            recovery_required: false,
+            attention_revision: None,
+            activity_sequence: 0,
+            revision: Revision::INITIAL.value(),
+        };
+
+        let projected = project_remote_workstream("snap", &remote, true).unwrap();
+
+        assert_eq!(projected.project_label, "dms-power-status");
     }
 
     #[test]

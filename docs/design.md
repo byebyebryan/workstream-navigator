@@ -546,7 +546,8 @@ authority. Names and computed fallbacks need not be unique.
 Navigator rows show the readable host alias, project, current tip name, and a
 relative age from the last known lifecycle activity. Activity sequence remains
 the deterministic ordering key within each host; the optional wall-clock value
-is display-only and is absent for migrated records without truthful timing.
+is display-only. A migrated record without truthful timing visibly reports
+`activity unknown` until its next real lifecycle event.
 
 Native `/rename` and navigator Rename both update the current Codex thread
 name. The navigator action calls `thread/name/set`; a later bounded metadata

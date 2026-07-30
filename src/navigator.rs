@@ -640,22 +640,12 @@ impl NavigatorView {
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-fn row_item(row: &NavigatorWorkstream, selected: bool, spinner_frame: usize) -> ListItem<'static> {
+fn row_item(row: &NavigatorWorkstream, _selected: bool, spinner_frame: usize) -> ListItem<'static> {
     let (indicator, indicator_style) = status_indicator(row, spinner_frame);
-    let project_style = if selected {
-        Style::default()
-            .fg(Color::White)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD)
-    };
-    let thread_style = if selected {
-        Style::default().fg(Color::White)
-    } else {
-        Style::default()
-    };
+    let project_style = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let thread_style = Style::default().fg(Color::White);
     ListItem::new(vec![
         Line::from(vec![
             Span::raw("   "),
@@ -683,13 +673,17 @@ fn thread_line(
         Span::raw(" "),
         Span::styled(row.display_name.clone(), thread_style),
     ];
-    if let Some(age) =
-        relative_activity_age(row.last_activity_at_millis, SystemClock.now_millis().ok())
-    {
-        line.push(Span::styled(" · ", Style::default().fg(Color::Gray)));
-        line.push(Span::styled(age, Style::default().fg(Color::Gray)));
-    }
+    line.push(Span::styled(" · ", Style::default().fg(Color::Gray)));
+    line.push(Span::styled(
+        activity_label(row.last_activity_at_millis, SystemClock.now_millis().ok()),
+        Style::default().fg(Color::Gray),
+    ));
     line
+}
+
+fn activity_label(last_activity_at_millis: Option<i64>, now_millis: Option<i64>) -> String {
+    relative_activity_age(last_activity_at_millis, now_millis)
+        .unwrap_or_else(|| "activity unknown".to_owned())
 }
 
 fn relative_activity_age(
@@ -1085,6 +1079,7 @@ mod tests {
             Some("now".to_owned())
         );
         assert_eq!(relative_activity_age(None, Some(60_000)), None);
+        assert_eq!(activity_label(None, Some(60_000)), "activity unknown");
     }
 
     #[test]
@@ -1120,7 +1115,7 @@ mod tests {
             .iter()
             .find(|cell| cell.symbol() == "p")
             .unwrap();
-        assert_eq!(project_cell.fg, Color::White);
+        assert_eq!(project_cell.fg, Color::Cyan);
         let host_cell = terminal
             .backend()
             .buffer()

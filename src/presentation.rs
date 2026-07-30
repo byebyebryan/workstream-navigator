@@ -216,22 +216,19 @@ impl Presentation {
     ///
     /// Returns an error when tmux rejects replacement of the exact owned pane.
     pub fn attach_workstream(&self, workstream_id: WorkstreamId) -> Result<(), PresentationError> {
+        self.invoke(None, self.provider_respawn_arguments(workstream_id))
+    }
+
+    fn provider_respawn_arguments(&self, workstream_id: WorkstreamId) -> Vec<OsString> {
         let command = self.provider_attach_command(workstream_id);
-        self.invoke(
-            None,
-            vec![
-                "respawn-pane".into(),
-                "-k".into(),
-                "-t".into(),
-                format!("{}:{PROVIDER_PANE}", self.paths.session_name).into(),
-                command[0].clone(),
-                command[1].clone(),
-                command[2].clone(),
-                command[3].clone(),
-                command[4].clone(),
-                command[5].clone(),
-            ],
-        )
+        let mut arguments = vec![
+            "respawn-pane".into(),
+            "-k".into(),
+            "-t".into(),
+            format!("{}:{PROVIDER_PANE}", self.paths.session_name).into(),
+        ];
+        arguments.extend(command);
+        arguments
     }
 
     /// Gives keyboard focus to the directly interactive provider pane.
@@ -476,6 +473,26 @@ mod tests {
                 .all(|argument| argument != "sh" && argument != "/bin/sh")
         );
         assert!(command.iter().any(|argument| argument == "attach"));
+        assert_eq!(command.len(), 5);
+    }
+
+    #[test]
+    fn provider_respawn_forwards_the_complete_direct_attachment_command() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        let presentation = Presentation {
+            paths,
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        let workstream_id = WorkstreamId::new();
+        let arguments = presentation.provider_respawn_arguments(workstream_id);
+
+        assert_eq!(arguments.len(), 9);
+        assert_eq!(arguments[0], "respawn-pane");
+        assert_eq!(arguments[4], "/workspace/wsnav");
+        assert_eq!(arguments[7], "attach");
+        assert_eq!(arguments[8], OsString::from(workstream_id.to_string()));
     }
 
     #[test]

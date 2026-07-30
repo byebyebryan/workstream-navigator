@@ -219,8 +219,48 @@ impl Presentation {
         self.invoke(None, self.provider_respawn_arguments(workstream_id))
     }
 
+    /// Replaces only the outer provider attachment helper with an interactive
+    /// SSH attachment command. The remote native Runtime remains owned by its
+    /// remote private tmux server; this local presentation owns no remote
+    /// process or provider output.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when tmux rejects replacement of the exact owned pane.
+    pub fn attach_remote_workstream(
+        &self,
+        host_alias: &str,
+        workstream_id: WorkstreamId,
+    ) -> Result<(), PresentationError> {
+        self.invoke(
+            None,
+            self.provider_remote_respawn_arguments(host_alias, workstream_id),
+        )
+    }
+
     fn provider_respawn_arguments(&self, workstream_id: WorkstreamId) -> Vec<OsString> {
         let command = self.provider_attach_command(workstream_id);
+        self.provider_respawn_for_command(command)
+    }
+
+    fn provider_remote_respawn_arguments(
+        &self,
+        host_alias: &str,
+        workstream_id: WorkstreamId,
+    ) -> Vec<OsString> {
+        let command = vec![
+            self.executable.clone().into_os_string(),
+            "--state-root".into(),
+            self.state_root.clone().into_os_string(),
+            "host".into(),
+            "attach".into(),
+            host_alias.into(),
+            workstream_id.to_string().into(),
+        ];
+        self.provider_respawn_for_command(command)
+    }
+
+    fn provider_respawn_for_command(&self, command: Vec<OsString>) -> Vec<OsString> {
         let mut arguments = vec![
             "respawn-pane".into(),
             "-k".into(),
@@ -493,6 +533,27 @@ mod tests {
         assert_eq!(arguments[4], "/workspace/wsnav");
         assert_eq!(arguments[7], "attach");
         assert_eq!(arguments[8], OsString::from(workstream_id.to_string()));
+    }
+
+    #[test]
+    fn remote_provider_attachment_uses_only_fixed_host_command_arguments() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        let presentation = Presentation {
+            paths,
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        let workstream_id = WorkstreamId::new();
+
+        let arguments = presentation.provider_remote_respawn_arguments("snap", workstream_id);
+
+        assert_eq!(arguments[4], "/workspace/wsnav");
+        assert_eq!(arguments[5], "--state-root");
+        assert_eq!(arguments[7], "host");
+        assert_eq!(arguments[8], "attach");
+        assert_eq!(arguments[9], "snap");
+        assert_eq!(arguments[10], OsString::from(workstream_id.to_string()));
     }
 
     #[test]

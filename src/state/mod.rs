@@ -220,6 +220,29 @@ pub struct ClientHost {
     pub revision: Revision,
 }
 
+impl ClientHost {
+    /// Verifies a fresh host handshake against this fixed client registration.
+    /// The caller must leave the record untouched on a mismatch and require an
+    /// explicit reset/re-registration before any remote mutation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the remote host identity, generation, or
+    /// capabilities disagree with this registration.
+    pub fn verify_hello(&self, hello: &HelloResponse) -> Result<(), StateError> {
+        if self.host_id != hello.host_id {
+            return Err(StateError::ClientHostIdentityMismatch);
+        }
+        if self.registry_generation != hello.registry_generation {
+            return Err(StateError::ClientHostGenerationMismatch);
+        }
+        if self.capabilities != hello.capabilities {
+            return Err(StateError::ClientHostCapabilitiesMismatch);
+        }
+        Ok(())
+    }
+}
+
 /// One V1 external checkout and its initial workstream registration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalWorkstream {
@@ -1604,15 +1627,7 @@ impl ClientCatalog {
         hello: &HelloResponse,
     ) -> Result<ClientHost, StateError> {
         let host = self.host(alias)?.ok_or(StateError::UnknownClientHost)?;
-        if host.host_id != hello.host_id {
-            return Err(StateError::ClientHostIdentityMismatch);
-        }
-        if host.registry_generation != hello.registry_generation {
-            return Err(StateError::ClientHostGenerationMismatch);
-        }
-        if host.capabilities != hello.capabilities {
-            return Err(StateError::ClientHostCapabilitiesMismatch);
-        }
+        host.verify_hello(hello)?;
         Ok(host)
     }
 
@@ -1817,6 +1832,11 @@ fn ensure_local_client_host(
         && existing.registry_generation != identity.registry_generation
     {
         return Err(StateError::ClientHostGenerationMismatch);
+    }
+    if existing.registry_generation == identity.registry_generation
+        && existing.executable_path == executable_path
+    {
+        return Ok(());
     }
     let changed = transaction
         .execute(

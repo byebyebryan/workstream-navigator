@@ -5,9 +5,12 @@
 //! provider payloads.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
     io::{self, stdout},
     path::{Path, PathBuf},
     process::Command,
+    sync::mpsc::{self, Receiver, Sender},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -35,12 +38,17 @@ use crate::{
     runtime::{
         LinuxProcessProbe, PrivateRuntime, RuntimeError, RuntimePaths, RuntimeProbe, SystemTmux,
     },
-    state::{ClientCatalog, HostIdentity, HostRegistry, StateError, StateRoot, WorkstreamOverview},
+    state::{
+        ClientCatalog, ClientHost, ClientHostTransport, HostIdentity, HostRegistry, StateError,
+        StateRoot, WorkstreamOverview,
+    },
+    transport::{HostClient, RemoteExecutable, SshDestination, SshEndpoint, SystemCommandRunner},
 };
 
 /// One bounded row rendered by the local navigator.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NavigatorWorkstream {
+    pub host: NavigatorHost,
     pub workstream_id: WorkstreamId,
     pub project_label: String,
     pub display_name: String,
@@ -49,6 +57,47 @@ pub struct NavigatorWorkstream {
     pub recovery_required: bool,
     pub attention_revision: Option<Revision>,
     pub workstream_revision: Revision,
+}
+
+/// Presentation-only host location for a Workstream row. The reachability
+/// value is a cached transport observation, never a provider lifecycle claim.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum NavigatorHost {
+    Local,
+    Remote {
+        alias: String,
+        reachability: RemoteHostReachability,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteHostReachability {
+    Reachable,
+    Unreachable,
+}
+
+impl NavigatorHost {
+    fn alias(&self) -> &str {
+        match self {
+            Self::Local => "local",
+            Self::Remote { alias, .. } => alias,
+        }
+    }
+
+    const fn is_remote(&self) -> bool {
+        matches!(self, Self::Remote { .. })
+    }
+
+    const fn is_reachable(&self) -> bool {
+        matches!(
+            self,
+            Self::Local
+                | Self::Remote {
+                    reachability: RemoteHostReachability::Reachable,
+                    ..
+                }
+        )
+    }
 }
 
 /// Runtime information safe to expose in the navigator without process or
@@ -82,6 +131,7 @@ impl NavigatorRuntimeStatus {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LocalNavigatorSnapshot {
     pub workstreams: Vec<NavigatorWorkstream>,
+    pub unreachable_hosts: Vec<String>,
 }
 
 /// Reads a fresh local-only navigator projection from the durable host state.
@@ -102,7 +152,10 @@ pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, Naviga
         .into_iter()
         .map(|overview| project_workstream(root, &mut catalog, &host, &executable, &overview))
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(LocalNavigatorSnapshot { workstreams })
+    Ok(LocalNavigatorSnapshot {
+        workstreams,
+        unreachable_hosts: Vec::new(),
+    })
 }
 
 fn project_workstream(
@@ -153,6 +206,7 @@ fn project_workstream(
         }
     };
     Ok(NavigatorWorkstream {
+        host: NavigatorHost::Local,
         workstream_id: overview.workstream_id,
         project_label: bounded_display(&project_label),
         display_name,
@@ -161,6 +215,43 @@ fn project_workstream(
         recovery_required,
         attention_revision,
         workstream_revision: overview.revision,
+    })
+}
+
+fn project_remote_workstream(
+    host_alias: &str,
+    workstream: &crate::protocol::SnapshotWorkstream,
+    host_reachable: bool,
+) -> Result<NavigatorWorkstream, NavigatorError> {
+    let attention_revision = workstream
+        .attention_revision
+        .map(Revision::try_from)
+        .transpose()
+        .map_err(NavigatorError::InvalidRemoteSnapshot)?;
+    let workstream_revision =
+        Revision::try_from(workstream.revision).map_err(NavigatorError::InvalidRemoteSnapshot)?;
+    let runtime_status = if workstream.recovery_required {
+        NavigatorRuntimeStatus::RecoveryRequired
+    } else {
+        navigator_runtime_status(workstream.runtime_status)
+    };
+    Ok(NavigatorWorkstream {
+        host: NavigatorHost::Remote {
+            alias: host_alias.to_owned(),
+            reachability: if host_reachable {
+                RemoteHostReachability::Reachable
+            } else {
+                RemoteHostReachability::Unreachable
+            },
+        },
+        workstream_id: workstream.workstream_id,
+        project_label: "remote project".to_owned(),
+        display_name: bounded_display(&workstream.display_name),
+        runtime_status,
+        result_ready: workstream.result_ready,
+        recovery_required: workstream.recovery_required,
+        attention_revision,
+        workstream_revision,
     })
 }
 
@@ -245,6 +336,172 @@ const fn navigator_runtime_status(status: RuntimeStatus) -> NavigatorRuntimeStat
     }
 }
 
+const REMOTE_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const REMOTE_FOCUSED_POLL_INTERVAL: Duration = Duration::from_millis(750);
+const REMOTE_INITIAL_BACKOFF: Duration = Duration::from_secs(2);
+const REMOTE_MAX_BACKOFF: Duration = Duration::from_secs(30);
+
+/// Non-durable client presentation state for bounded asynchronous SSH refresh.
+/// It retains the last accepted snapshot if a host becomes unavailable; an SSH
+/// disconnect is never projected as a provider stop or attention clear.
+struct RemoteMonitor {
+    sender: Sender<RemotePollResult>,
+    receiver: Receiver<RemotePollResult>,
+    hosts: BTreeMap<String, CachedRemoteHost>,
+}
+
+struct CachedRemoteHost {
+    workstreams: Vec<NavigatorWorkstream>,
+    reachable: bool,
+    pending: bool,
+    next_poll: Instant,
+    backoff: Duration,
+}
+
+struct RemotePollResult {
+    alias: String,
+    outcome: Result<Vec<crate::protocol::SnapshotWorkstream>, ()>,
+}
+
+impl RemoteMonitor {
+    fn new() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        Self {
+            sender,
+            receiver,
+            hosts: BTreeMap::new(),
+        }
+    }
+
+    fn refresh(
+        &mut self,
+        catalog: &ClientCatalog,
+        selected_host: Option<&str>,
+    ) -> Result<(), NavigatorError> {
+        let now = Instant::now();
+        self.collect(now);
+        let registered = catalog.ssh_hosts()?;
+        let aliases = registered
+            .iter()
+            .map(|host| host.alias.clone())
+            .collect::<BTreeSet<_>>();
+        self.hosts.retain(|alias, _| aliases.contains(alias));
+        for host in registered {
+            let entry = self
+                .hosts
+                .entry(host.alias.clone())
+                .or_insert_with(|| CachedRemoteHost {
+                    workstreams: Vec::new(),
+                    reachable: false,
+                    pending: false,
+                    next_poll: now,
+                    backoff: REMOTE_INITIAL_BACKOFF,
+                });
+            if entry.reachable
+                && selected_host.is_some_and(|selected| selected == host.alias)
+                && entry.next_poll > now + REMOTE_FOCUSED_POLL_INTERVAL
+            {
+                entry.next_poll = now + REMOTE_FOCUSED_POLL_INTERVAL;
+            }
+            if entry.pending || entry.next_poll > now {
+                continue;
+            }
+            entry.pending = true;
+            let sender = self.sender.clone();
+            thread::spawn(move || {
+                let outcome = fetch_remote_snapshot(&host);
+                let _ = sender.send(RemotePollResult {
+                    alias: host.alias,
+                    outcome,
+                });
+            });
+        }
+        Ok(())
+    }
+
+    fn collect(&mut self, now: Instant) {
+        while let Ok(result) = self.receiver.try_recv() {
+            let Some(host) = self.hosts.get_mut(&result.alias) else {
+                continue;
+            };
+            host.pending = false;
+            if let Ok(workstreams) = result.outcome {
+                host.workstreams = workstreams
+                    .iter()
+                    .filter_map(|workstream| {
+                        project_remote_workstream(&result.alias, workstream, true).ok()
+                    })
+                    .collect();
+                host.reachable = true;
+                host.backoff = REMOTE_INITIAL_BACKOFF;
+                host.next_poll = now + REMOTE_POLL_INTERVAL;
+            } else {
+                host.reachable = false;
+                host.next_poll = now + host.backoff;
+                host.backoff = host.backoff.saturating_mul(2).min(REMOTE_MAX_BACKOFF);
+            }
+        }
+    }
+
+    fn combine(&self, mut local: LocalNavigatorSnapshot) -> LocalNavigatorSnapshot {
+        for (alias, host) in &self.hosts {
+            local
+                .workstreams
+                .extend(host.workstreams.iter().cloned().map(|mut workstream| {
+                    workstream.host = NavigatorHost::Remote {
+                        alias: alias.clone(),
+                        reachability: if host.reachable {
+                            RemoteHostReachability::Reachable
+                        } else {
+                            RemoteHostReachability::Unreachable
+                        },
+                    };
+                    workstream
+                }));
+            if !host.reachable {
+                local.unreachable_hosts.push(alias.clone());
+            }
+        }
+        local
+    }
+
+    fn request_soon(&mut self, host_alias: &str) {
+        if let Some(host) = self.hosts.get_mut(host_alias) {
+            host.next_poll = Instant::now();
+        }
+    }
+}
+
+fn fetch_remote_snapshot(
+    host: &ClientHost,
+) -> Result<Vec<crate::protocol::SnapshotWorkstream>, ()> {
+    let ClientHostTransport::Ssh { destination } = &host.transport else {
+        return Err(());
+    };
+    let destination = SshDestination::parse(destination).map_err(|_| ())?;
+    let executable = host
+        .executable_path
+        .to_str()
+        .ok_or(())
+        .and_then(|value| RemoteExecutable::parse(value).map_err(|_| ()))?;
+    let endpoint = SshEndpoint::new(destination, executable);
+    let client = HostClient::new(SystemCommandRunner);
+    let hello = client.hello_ssh(&endpoint, "wsnav").map_err(|_| ())?;
+    host.verify_hello(&hello).map_err(|_| ())?;
+    Ok(client.snapshot_ssh(&endpoint).map_err(|_| ())?.workstreams)
+}
+
+fn combined_snapshot(
+    root: &StateRoot,
+    remote: &mut RemoteMonitor,
+    selected_host: Option<&str>,
+) -> Result<LocalNavigatorSnapshot, NavigatorError> {
+    let local = local_snapshot(root)?;
+    let catalog = ClientCatalog::open(root)?;
+    remote.refresh(&catalog, selected_host)?;
+    Ok(remote.combine(local))
+}
+
 /// Pure navigator selection and rendering state.
 #[derive(Clone, Debug, Default)]
 pub struct NavigatorView {
@@ -266,14 +523,15 @@ impl NavigatorView {
     }
 
     pub fn replace_snapshot(&mut self, snapshot: LocalNavigatorSnapshot) {
-        let selected_id = self.selected().map(|row| row.workstream_id);
+        let selected_id = self
+            .selected()
+            .map(|row| (row.host.alias().to_owned(), row.workstream_id));
         self.snapshot = snapshot;
         self.selected = selected_id
-            .and_then(|workstream_id| {
-                self.snapshot
-                    .workstreams
-                    .iter()
-                    .position(|row| row.workstream_id == workstream_id)
+            .and_then(|(host_alias, workstream_id)| {
+                self.snapshot.workstreams.iter().position(|row| {
+                    row.host.alias() == host_alias && row.workstream_id == workstream_id
+                })
             })
             .unwrap_or_else(|| {
                 self.selected
@@ -284,6 +542,10 @@ impl NavigatorView {
     #[must_use]
     pub fn selected(&self) -> Option<&NavigatorWorkstream> {
         self.snapshot.workstreams.get(self.selected)
+    }
+
+    fn selected_host_alias(&self) -> Option<&str> {
+        self.selected().map(|row| row.host.alias())
     }
 
     pub fn select_next(&mut self) {
@@ -348,10 +610,16 @@ impl NavigatorView {
             areas[0],
             &mut state,
         );
-        let help = self
-            .message
-            .as_deref()
-            .unwrap_or("↑↓ select  Enter attach/start  a acknowledge  p park  q close");
+        let help = self.message.clone().unwrap_or_else(|| {
+            if self.snapshot.unreachable_hosts.is_empty() {
+                "↑↓ select  Enter attach/start  a acknowledge  p park  q close".to_owned()
+            } else {
+                format!(
+                    "{} unavailable; showing cached state  ↑↓ select  Enter attach/start  q close",
+                    self.snapshot.unreachable_hosts.join(", ")
+                )
+            }
+        });
         frame.render_widget(
             Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
             areas[1],
@@ -389,6 +657,10 @@ fn row_item(row: &NavigatorWorkstream, selected: bool, spinner_frame: usize) -> 
     ListItem::new(vec![
         Line::from(vec![
             Span::raw("   "),
+            Span::styled(
+                format!("{} · ", row.host.alias()),
+                Style::default().fg(Color::DarkGray),
+            ),
             Span::styled(row.project_label.clone(), project_style),
         ]),
         Line::from(vec![
@@ -404,6 +676,9 @@ fn row_item(row: &NavigatorWorkstream, selected: bool, spinner_frame: usize) -> 
 /// metadata. Ordinary idle is deliberately unmarked; active and completed
 /// work stand out without consuming thread-title space.
 fn status_indicator(row: &NavigatorWorkstream, spinner_frame: usize) -> (&'static str, Style) {
+    if !row.host.is_reachable() {
+        return ("?", Style::default().fg(Color::Red));
+    }
     match row.runtime_status {
         NavigatorRuntimeStatus::RecoveryRequired => ("!", Style::default().fg(Color::Red)),
         NavigatorRuntimeStatus::Working => (
@@ -442,6 +717,10 @@ pub enum NavigatorError {
     ActionOutputTooLarge,
     #[error("the local navigator action failed")]
     ActionFailed,
+    #[error("remote host is unavailable")]
+    RemoteHostUnavailable,
+    #[error("remote host returned an invalid bounded snapshot")]
+    InvalidRemoteSnapshot(#[source] crate::domain::DomainError),
 }
 
 /// Runs the internal Ratatui process inside one owned presentation pane.
@@ -459,7 +738,8 @@ pub fn run_local_navigator(
     session_name: String,
 ) -> Result<(), NavigatorError> {
     let presentation = Presentation::from_control(root.base(), socket, session_name)?;
-    let snapshot = local_snapshot(root)?;
+    let mut remote = RemoteMonitor::new();
+    let snapshot = combined_snapshot(root, &mut remote, None)?;
     let mut view = NavigatorView::new(snapshot);
     let mut terminal = TerminalSession::enter()?;
     let mut last_refresh = Instant::now();
@@ -478,9 +758,11 @@ pub fn run_local_navigator(
                             view.set_message(action_message(&error));
                         }
                     }
-                    KeyCode::Enter => activate_selected(root, &presentation, &mut view),
-                    KeyCode::Char('a') => acknowledge_selected(root, &mut view),
-                    KeyCode::Char('p') => park_selected(root, &mut view),
+                    KeyCode::Enter => {
+                        activate_selected(root, &presentation, &mut remote, &mut view);
+                    }
+                    KeyCode::Char('a') => acknowledge_selected(root, &mut remote, &mut view),
+                    KeyCode::Char('p') => park_selected(root, &mut remote, &mut view),
                     _ => {}
                 },
                 Event::Mouse(mouse) => match mouse.kind {
@@ -489,7 +771,7 @@ pub fn run_local_navigator(
                     MouseEventKind::Down(MouseButton::Left) => {
                         if let Some(row) = view.row_from_y(mouse.row) {
                             view.select_row(row);
-                            activate_selected(root, &presentation, &mut view);
+                            activate_selected(root, &presentation, &mut remote, &mut view);
                         }
                     }
                     _ => {}
@@ -498,7 +780,8 @@ pub fn run_local_navigator(
             }
         }
         if last_refresh.elapsed() >= Duration::from_millis(500) {
-            match local_snapshot(root) {
+            let selected_host = view.selected_host_alias().map(str::to_owned);
+            match combined_snapshot(root, &mut remote, selected_host.as_deref()) {
                 Ok(snapshot) => view.replace_snapshot(snapshot),
                 Err(error) => view.set_message(action_message(&error)),
             }
@@ -516,21 +799,36 @@ pub fn run_local_navigator(
     Ok(())
 }
 
-fn activate_selected(root: &StateRoot, presentation: &Presentation, view: &mut NavigatorView) {
+fn activate_selected(
+    root: &StateRoot,
+    presentation: &Presentation,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+) {
     let Some(selected) = view.selected().cloned() else {
         view.set_message("no Workstream is registered; use wsnav register first");
         return;
     };
+    if selected.host.is_remote() && !selected.host.is_reachable() {
+        view.set_message("remote host is unavailable; cached state is not actionable");
+        return;
+    }
     if matches!(
         selected.runtime_status,
         NavigatorRuntimeStatus::Parked | NavigatorRuntimeStatus::Unknown
-    ) && let Err(error) = run_action(root, "start", selected.workstream_id, None)
+    ) && let Err(error) = run_action(root, "start", &selected, None)
     {
         view.set_message(action_message(&error));
         return;
     }
-    refresh_view(root, view);
-    if let Err(error) = presentation.attach_workstream(selected.workstream_id) {
+    remote.request_soon(selected.host.alias());
+    refresh_view(root, remote, view);
+    let attachment = if selected.host.is_remote() {
+        presentation.attach_remote_workstream(selected.host.alias(), selected.workstream_id)
+    } else {
+        presentation.attach_workstream(selected.workstream_id)
+    };
+    if let Err(error) = attachment {
         view.set_message(action_message(&error));
         return;
     }
@@ -541,7 +839,7 @@ fn activate_selected(root: &StateRoot, presentation: &Presentation, view: &mut N
     }
 }
 
-fn acknowledge_selected(root: &StateRoot, view: &mut NavigatorView) {
+fn acknowledge_selected(root: &StateRoot, remote: &mut RemoteMonitor, view: &mut NavigatorView) {
     let Some(selected) = view.selected().cloned() else {
         return;
     };
@@ -549,35 +847,33 @@ fn acknowledge_selected(root: &StateRoot, view: &mut NavigatorView) {
         view.set_message("no result or recovery attention to acknowledge");
         return;
     };
-    match run_action(
-        root,
-        "acknowledge",
-        selected.workstream_id,
-        Some(revision.value()),
-    ) {
+    match run_action(root, "acknowledge", &selected, Some(revision.value())) {
         Ok(()) => {
-            refresh_view(root, view);
+            remote.request_soon(selected.host.alias());
+            refresh_view(root, remote, view);
             view.set_message("attention acknowledged");
         }
         Err(error) => view.set_message(action_message(&error)),
     }
 }
 
-fn park_selected(root: &StateRoot, view: &mut NavigatorView) {
+fn park_selected(root: &StateRoot, remote: &mut RemoteMonitor, view: &mut NavigatorView) {
     let Some(selected) = view.selected().cloned() else {
         return;
     };
-    match run_action(root, "park", selected.workstream_id, None) {
+    match run_action(root, "park", &selected, None) {
         Ok(()) => {
-            refresh_view(root, view);
+            remote.request_soon(selected.host.alias());
+            refresh_view(root, remote, view);
             view.set_message("Workstream parked; provider history is preserved");
         }
         Err(error) => view.set_message(action_message(&error)),
     }
 }
 
-fn refresh_view(root: &StateRoot, view: &mut NavigatorView) {
-    match local_snapshot(root) {
+fn refresh_view(root: &StateRoot, remote: &mut RemoteMonitor, view: &mut NavigatorView) {
+    let selected_host = view.selected_host_alias().map(str::to_owned);
+    match combined_snapshot(root, remote, selected_host.as_deref()) {
         Ok(snapshot) => view.replace_snapshot(snapshot),
         Err(error) => view.set_message(action_message(&error)),
     }
@@ -586,18 +882,30 @@ fn refresh_view(root: &StateRoot, view: &mut NavigatorView) {
 fn run_action(
     root: &StateRoot,
     action: &str,
-    workstream_id: WorkstreamId,
+    workstream: &NavigatorWorkstream,
     revision: Option<i64>,
 ) -> Result<(), NavigatorError> {
     let executable = std::env::current_exe().map_err(NavigatorError::ActionLaunch)?;
     let mut command = Command::new(executable);
-    command
-        .arg("--state-root")
-        .arg(root.base())
-        .arg(action)
-        .arg(workstream_id.to_string());
-    if let Some(revision) = revision {
+    command.arg("--state-root").arg(root.base());
+    if workstream.host.is_remote() {
+        if !workstream.host.is_reachable() {
+            return Err(NavigatorError::RemoteHostUnavailable);
+        }
+        command
+            .arg("host")
+            .arg(action)
+            .arg(workstream.host.alias())
+            .arg(workstream.workstream_id.to_string());
+        let revision = revision.unwrap_or_else(|| workstream.workstream_revision.value());
         command.arg(revision.to_string());
+    } else {
+        command
+            .arg(action)
+            .arg(workstream.workstream_id.to_string());
+        if let Some(revision) = revision {
+            command.arg(revision.to_string());
+        }
     }
     let output = command.output().map_err(NavigatorError::ActionLaunch)?;
     if output.stdout.len() > 1024 || output.stderr.len() > 1024 {
@@ -664,6 +972,7 @@ mod tests {
                 row(first, NavigatorRuntimeStatus::Idle),
                 row(second, NavigatorRuntimeStatus::Parked),
             ],
+            unreachable_hosts: Vec::new(),
         };
         let mut view = NavigatorView::new(snapshot);
         view.select_previous();
@@ -679,6 +988,7 @@ mod tests {
                 row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle),
                 row(WorkstreamId::new(), NavigatorRuntimeStatus::Parked),
             ],
+            unreachable_hosts: Vec::new(),
         });
         assert_eq!(view.row_from_y(0), None);
         assert_eq!(view.row_from_y(1), Some(0));
@@ -706,6 +1016,7 @@ mod tests {
                 result_ready: true,
                 ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
             }],
+            unreachable_hosts: Vec::new(),
         });
         terminal.draw(|frame| view.render(frame)).unwrap();
         let rendered = terminal
@@ -757,11 +1068,68 @@ mod tests {
         assert_eq!(view.spinner_frame, 1);
     }
 
+    #[test]
+    fn unreachable_remote_keeps_cached_status_and_attention_without_claiming_a_stop() {
+        let mut monitor = RemoteMonitor::new();
+        let workstream_id = WorkstreamId::new();
+        monitor.hosts.insert(
+            "snap".to_owned(),
+            CachedRemoteHost {
+                workstreams: vec![NavigatorWorkstream {
+                    host: NavigatorHost::Remote {
+                        alias: "snap".to_owned(),
+                        reachability: RemoteHostReachability::Reachable,
+                    },
+                    result_ready: true,
+                    ..row(workstream_id, NavigatorRuntimeStatus::Working)
+                }],
+                reachable: false,
+                pending: false,
+                next_poll: Instant::now(),
+                backoff: REMOTE_INITIAL_BACKOFF,
+            },
+        );
+
+        let snapshot = monitor.combine(LocalNavigatorSnapshot::default());
+        let cached = snapshot.workstreams.first().unwrap();
+
+        assert_eq!(cached.runtime_status, NavigatorRuntimeStatus::Working);
+        assert!(cached.result_ready);
+        assert!(!cached.host.is_reachable());
+        assert_eq!(snapshot.unreachable_hosts, vec!["snap"]);
+    }
+
+    #[test]
+    fn selection_uses_host_and_workstream_identity_together() {
+        let shared_workstream_id = WorkstreamId::new();
+        let local = row(shared_workstream_id, NavigatorRuntimeStatus::Idle);
+        let remote = NavigatorWorkstream {
+            host: NavigatorHost::Remote {
+                alias: "snap".to_owned(),
+                reachability: RemoteHostReachability::Reachable,
+            },
+            ..row(shared_workstream_id, NavigatorRuntimeStatus::Working)
+        };
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![local.clone(), remote.clone()],
+            unreachable_hosts: Vec::new(),
+        });
+        view.select_next();
+
+        view.replace_snapshot(LocalNavigatorSnapshot {
+            workstreams: vec![remote, local],
+            unreachable_hosts: Vec::new(),
+        });
+
+        assert_eq!(view.selected().unwrap().host.alias(), "snap");
+    }
+
     fn row(
         workstream_id: WorkstreamId,
         runtime_status: NavigatorRuntimeStatus,
     ) -> NavigatorWorkstream {
         NavigatorWorkstream {
+            host: NavigatorHost::Local,
             workstream_id,
             project_label: "project".to_owned(),
             display_name: "thread".to_owned(),

@@ -251,6 +251,7 @@ pub struct NavigatorView {
     snapshot: LocalNavigatorSnapshot,
     selected: usize,
     message: Option<String>,
+    spinner_frame: usize,
 }
 
 impl NavigatorView {
@@ -260,6 +261,7 @@ impl NavigatorView {
             snapshot,
             selected: 0,
             message: None,
+            spinner_frame: 0,
         }
     }
 
@@ -313,6 +315,10 @@ impl NavigatorView {
         self.message = None;
     }
 
+    fn advance_animation(&mut self) {
+        self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+    }
+
     pub fn render(&self, frame: &mut Frame<'_>) {
         let areas = Layout::default()
             .direction(Direction::Vertical)
@@ -323,7 +329,7 @@ impl NavigatorView {
             .workstreams
             .iter()
             .enumerate()
-            .map(|(index, row)| row_item(row, index == self.selected))
+            .map(|(index, row)| row_item(row, index == self.selected, self.spinner_frame))
             .collect::<Vec<_>>();
         let mut state = ListState::default();
         state.select((!items.is_empty()).then_some(self.selected));
@@ -362,15 +368,10 @@ impl NavigatorView {
     }
 }
 
-fn row_item(row: &NavigatorWorkstream, selected: bool) -> ListItem<'static> {
-    let attention = if row.recovery_required {
-        " ! "
-    } else if row.result_ready {
-        " • "
-    } else {
-        "   "
-    };
-    let style = status_style(row);
+const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn row_item(row: &NavigatorWorkstream, selected: bool, spinner_frame: usize) -> ListItem<'static> {
+    let (indicator, indicator_style) = status_indicator(row, spinner_frame);
     let project_style = if selected {
         Style::default()
             .fg(Color::White)
@@ -391,46 +392,34 @@ fn row_item(row: &NavigatorWorkstream, selected: bool) -> ListItem<'static> {
             Span::styled(row.project_label.clone(), project_style),
         ]),
         Line::from(vec![
-            Span::styled(attention, style),
+            Span::raw(" "),
+            Span::styled(indicator, indicator_style),
+            Span::raw(" "),
             Span::styled(row.display_name.clone(), thread_style),
-            Span::styled(format!("  {}", status_label(row)), style),
         ]),
     ])
 }
 
-/// Chooses the user-facing state from bounded lifecycle and attention metadata.
-/// A running turn takes precedence over an older unacknowledged result; the
-/// latter remains available as a bullet until acknowledged.
-const fn status_label(row: &NavigatorWorkstream) -> &'static str {
+/// Returns a compact user-facing state from bounded lifecycle and attention
+/// metadata. Ordinary idle is deliberately unmarked; active and completed
+/// work stand out without consuming thread-title space.
+fn status_indicator(row: &NavigatorWorkstream, spinner_frame: usize) -> (&'static str, Style) {
     match row.runtime_status {
-        NavigatorRuntimeStatus::RecoveryRequired => "recovery required",
-        NavigatorRuntimeStatus::Working => "working",
-        NavigatorRuntimeStatus::Unknown => "unknown",
-        NavigatorRuntimeStatus::Parked => "parked",
-        NavigatorRuntimeStatus::Starting => "starting",
+        NavigatorRuntimeStatus::RecoveryRequired => ("!", Style::default().fg(Color::Red)),
+        NavigatorRuntimeStatus::Working => (
+            SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()],
+            Style::default().fg(Color::Yellow),
+        ),
+        NavigatorRuntimeStatus::Unknown => ("?", Style::default().fg(Color::Red)),
+        NavigatorRuntimeStatus::Parked => ("‖", Style::default().fg(Color::DarkGray)),
+        NavigatorRuntimeStatus::Starting => ("…", Style::default().fg(Color::Cyan)),
         NavigatorRuntimeStatus::Idle | NavigatorRuntimeStatus::Attention => {
             if row.result_ready {
-                "done"
+                ("✓", Style::default().fg(Color::Green))
             } else {
-                "idle"
+                (" ", Style::default())
             }
         }
-    }
-}
-
-fn status_style(row: &NavigatorWorkstream) -> Style {
-    match row.runtime_status {
-        NavigatorRuntimeStatus::RecoveryRequired | NavigatorRuntimeStatus::Unknown => {
-            Style::default().fg(Color::Red)
-        }
-        NavigatorRuntimeStatus::Working => Style::default().fg(Color::Yellow),
-        NavigatorRuntimeStatus::Parked => Style::default().fg(Color::DarkGray),
-        NavigatorRuntimeStatus::Idle | NavigatorRuntimeStatus::Attention if row.result_ready => {
-            Style::default().fg(Color::Green)
-        }
-        NavigatorRuntimeStatus::Starting
-        | NavigatorRuntimeStatus::Idle
-        | NavigatorRuntimeStatus::Attention => Style::default().fg(Color::Cyan),
     }
 }
 
@@ -474,6 +463,7 @@ pub fn run_local_navigator(
     let mut view = NavigatorView::new(snapshot);
     let mut terminal = TerminalSession::enter()?;
     let mut last_refresh = Instant::now();
+    let mut last_animation = Instant::now();
     let outcome: Result<(), NavigatorError> = loop {
         terminal.terminal.draw(|frame| view.render(frame))?;
         let timeout = Duration::from_millis(100);
@@ -513,6 +503,10 @@ pub fn run_local_navigator(
                 Err(error) => view.set_message(action_message(&error)),
             }
             last_refresh = Instant::now();
+        }
+        if last_animation.elapsed() >= Duration::from_millis(100) {
+            view.advance_animation();
+            last_animation = Instant::now();
         }
     };
     drop(terminal);
@@ -703,7 +697,7 @@ mod tests {
     }
 
     #[test]
-    fn renderer_shows_done_state_and_result_attention_without_provider_content() {
+    fn renderer_shows_done_indicator_without_provider_content() {
         let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
         let view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: vec![NavigatorWorkstream {
@@ -724,8 +718,8 @@ mod tests {
 
         assert!(rendered.contains("project"));
         assert!(rendered.contains("native thread"));
-        assert!(rendered.contains('•'));
-        assert!(rendered.contains("done"));
+        assert!(rendered.contains('✓'));
+        assert!(!rendered.contains("done"));
         assert!(!rendered.contains("prompt"));
         let project_cell = terminal
             .backend()
@@ -744,14 +738,23 @@ mod tests {
             ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Working)
         };
 
-        assert_eq!(status_label(&row), "working");
+        assert_eq!(status_indicator(&row, 0).0, SPINNER_FRAMES[0]);
     }
 
     #[test]
-    fn acknowledged_attention_returns_to_idle() {
+    fn acknowledged_attention_returns_to_an_empty_idle_indicator() {
         let row = row(WorkstreamId::new(), NavigatorRuntimeStatus::Attention);
 
-        assert_eq!(status_label(&row), "idle");
+        assert_eq!(status_indicator(&row, 0).0, " ");
+    }
+
+    #[test]
+    fn working_indicator_advances_between_spinner_frames() {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
+
+        view.advance_animation();
+
+        assert_eq!(view.spinner_frame, 1);
     }
 
     fn row(

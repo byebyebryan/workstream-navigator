@@ -359,6 +359,10 @@ impl<'a> PrivateRuntime<'a> {
         let mut command = Command::new("tmux");
         command.env_remove("TMUX");
         command
+            // A Runtime is created detached, before a terminal client exists.
+            // Explicitly mark the eventual attach client UTF-8 capable so tmux
+            // preserves the native Codex glyphs through an SSH/nested-tmux path.
+            .arg("-u")
             .arg("-S")
             .arg(&self.paths.socket)
             .arg("attach-session")
@@ -618,6 +622,33 @@ mod tests {
                 .arguments
                 .iter()
                 .all(|argument| argument != "sh" && argument != "/bin/sh")
+        );
+    }
+
+    #[test]
+    fn attach_marks_the_client_as_utf8_capable() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let tmux = FakeTmux::default();
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
+
+        let command = runtime.attach_command();
+        let arguments = command
+            .get_args()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            arguments,
+            vec![
+                "-u".to_owned(),
+                "-S".to_owned(),
+                paths.socket.display().to_string(),
+                "attach-session".to_owned(),
+                "-t".to_owned(),
+                paths.session_name,
+            ]
         );
     }
 

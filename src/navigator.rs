@@ -800,8 +800,13 @@ pub fn run_local_navigator(
                     MouseEventKind::ScrollUp => view.select_previous(),
                     MouseEventKind::Down(MouseButton::Left) => {
                         if let Some(row) = view.row_from_y(mouse.row) {
+                            // A mouse click is only navigator selection. In
+                            // particular, it must not cold-resume a parked
+                            // Workstream or respawn an already attached pane.
+                            // tmux can therefore transfer focus to this pane
+                            // with one click; Enter remains the explicit
+                            // start/resume/attach action.
                             view.select_row(row);
-                            activate_selected(root, &presentation, &mut remote, &mut view);
                         }
                     }
                     _ => {}

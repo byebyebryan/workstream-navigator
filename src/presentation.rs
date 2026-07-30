@@ -17,6 +17,7 @@ const NAVIGATOR_WINDOW: &str = "navigator";
 const NAVIGATOR_PANE: &str = "0.0";
 const PROVIDER_PANE: &str = "0.1";
 const MAX_TMUX_OUTPUT_BYTES: usize = 16 * 1024;
+const PRESENTATION_TMUX_CONFIG: &str = "set -g status off\nset -g mouse on\nset -g remain-on-exit on\nset -g default-terminal tmux-256color\nset-environment -g COLORTERM truecolor\nbind-key -n MouseUp1Pane select-pane -t = \\; send-keys -M\n";
 
 /// The exact private paths and tmux session owned by one navigator client.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -474,11 +475,7 @@ fn create_paths(paths: &PresentationPaths) -> Result<(), PresentationError> {
     set_mode(parent, 0o700)?;
     fs::create_dir(&paths.directory).map_err(PresentationError::Io)?;
     set_mode(&paths.directory, 0o700)?;
-    fs::write(
-        &paths.config,
-        "set -g status off\nset -g mouse on\nset -g remain-on-exit on\nset -g default-terminal tmux-256color\nset-environment -g COLORTERM truecolor\n",
-    )
-    .map_err(PresentationError::Io)?;
+    fs::write(&paths.config, PRESENTATION_TMUX_CONFIG).map_err(PresentationError::Io)?;
     set_mode(&paths.config, 0o600)
 }
 
@@ -513,6 +510,15 @@ pub enum PresentationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presentation_config_selects_the_clicked_pane_on_mouse_release() {
+        assert!(PRESENTATION_TMUX_CONFIG.contains("set -g mouse on"));
+        assert!(
+            PRESENTATION_TMUX_CONFIG
+                .contains("bind-key -n MouseUp1Pane select-pane -t = \\; send-keys -M")
+        );
+    }
 
     #[test]
     fn provider_attachment_uses_direct_arguments_not_a_shell() {

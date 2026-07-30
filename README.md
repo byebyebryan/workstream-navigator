@@ -6,9 +6,10 @@ native terminal UI and workflow intact.
 
 ## Status
 
-This repository is a clean-slate Rust reboot. It does not contain a usable
-product yet, and it does not preserve compatibility with the earlier Python
-prototype.
+This repository is a clean-slate Rust reboot. D2 provides a bounded local
+Codex navigator; SSH hosts, Workstream creation/forking, and V1 recovery
+closure remain roadmap work. It does not preserve compatibility with the
+earlier Python prototype.
 
 The frozen prototype remains available as implementation evidence in
 [agent-switchboard-python-reference][].
@@ -49,6 +50,10 @@ are documented in [D1 local native-Codex acceptance][D1 acceptance]. The run
 required an operator's native Codex hook-trust decision and did not bypass that
 review.
 
+The accepted local two-pane navigator is documented in [D2 local navigator
+acceptance][D2 acceptance]. It keeps the provider pane natively interactive
+and uses a disposable private tmux presentation for navigation only.
+
 ## Decision studies
 
 The isolated tmux/SSH transport, native Codex presentation, scoped observer
@@ -62,6 +67,7 @@ provider capability as a pre-implementation design blocker. See [Spike 0001][],
 [V1 design]: docs/design.md
 [V1 roadmap]: docs/roadmap.md
 [D1 acceptance]: docs/acceptance-d1-local-codex.md
+[D2 acceptance]: docs/acceptance-d2-local-navigator.md
 [Spike 0001]: docs/spikes/0001-tmux-remote-transport.md
 [Spike 0002]: docs/spikes/0002-codex-native-tui.md
 [Spike 0004]: docs/spikes/0004-tmux-runtime-isolation.md

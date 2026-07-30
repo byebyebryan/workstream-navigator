@@ -1,0 +1,29 @@
+{
+  "study": "d2-local-native-codex-navigator",
+  "provider": {
+    "id": "codex",
+    "version": "0.146.0",
+    "contract_fingerprint": "codex-d2-private-presentation-v1"
+  },
+  "status": "pass",
+  "assertions": {
+    "native_hook_trust_confirmed": true,
+    "bounded_workstream_projection_rendered": true,
+    "native_provider_pane_directly_interactive": true,
+    "native_image_attachment_confirmed": true,
+    "completed_result_preserved": true,
+    "result_attention_visible_in_navigator": true,
+    "detach_reconnect_preserved_presentation": true,
+    "presentation_exit_preserved_runtime_until_park": true,
+    "ordinary_tmux_unchanged": true,
+    "exact_observer_removal": true,
+    "private_cleanup_complete": true
+  },
+  "privacy_audit": {
+    "identifiers_committed": false,
+    "prompt_or_result_content_committed": false,
+    "image_or_terminal_data_committed": false,
+    "paths_or_pids_committed": false,
+    "credentials_or_raw_payloads_committed": false
+  }
+}

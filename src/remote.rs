@@ -126,7 +126,7 @@ fn dispatch(state_root: Option<std::path::PathBuf>, request: &RequestEnvelope) -
             },
             Ok(None) | Err(_) => rejected("runtime is unavailable"),
         },
-        HostRequest::Apply { action } => apply(&root, &mut registry, *action),
+        HostRequest::Apply { action } => apply(&root, &mut registry, action.clone()),
     }
 }
 
@@ -159,6 +159,94 @@ fn apply(root: &StateRoot, registry: &mut HostRegistry, action: HostAction) -> R
             workstream_id,
             expected_revision,
         } => apply_start(root, registry, workstream_id, expected_revision),
+        HostAction::NewWorkstream {
+            source_workstream_id,
+            expected_revision,
+            request_key,
+        } => apply_new_workstream(
+            root,
+            registry,
+            source_workstream_id,
+            expected_revision,
+            request_key,
+        ),
+        HostAction::ForkWorkstream {
+            source_workstream_id,
+            expected_revision,
+            request_key,
+        } => apply_fork_workstream(
+            root,
+            registry,
+            source_workstream_id,
+            expected_revision,
+            request_key,
+        ),
+    }
+}
+
+fn apply_new_workstream(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+    source_workstream_id: WorkstreamId,
+    expected_revision: i64,
+    request_key: String,
+) -> ResponseEnvelope {
+    apply_created_workstream(
+        &crate::actions::start_independent_workstream(
+            root,
+            registry,
+            source_workstream_id,
+            Revision::try_from(expected_revision).ok(),
+            request_key,
+        ),
+        registry,
+    )
+}
+
+fn apply_fork_workstream(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+    source_workstream_id: WorkstreamId,
+    expected_revision: i64,
+    request_key: String,
+) -> ResponseEnvelope {
+    apply_created_workstream(
+        &crate::actions::fork_workstream(
+            root,
+            registry,
+            source_workstream_id,
+            Revision::try_from(expected_revision).ok(),
+            request_key,
+        ),
+        registry,
+    )
+}
+
+fn apply_created_workstream(
+    outcome: &Result<WorkstreamId, crate::actions::ActionError>,
+    registry: &HostRegistry,
+) -> ResponseEnvelope {
+    match outcome {
+        Ok(workstream_id) => match workstream_revision(registry, *workstream_id) {
+            Ok(revision) => ResponseEnvelope {
+                version: CURRENT_PROTOCOL_VERSION,
+                response: HostResponse::WorkstreamCreated {
+                    workstream_id: *workstream_id,
+                    revision: revision.value(),
+                },
+            },
+            Err(_) => rejected("workstream outcome needs recovery"),
+        },
+        Err(crate::actions::ActionError::WorkstreamRevisionConflict) => {
+            rejected("revision conflict; refresh this host")
+        }
+        Err(crate::actions::ActionError::ManagedWorkstreamRecoveryRequired) => {
+            rejected("workstream outcome needs recovery")
+        }
+        Err(crate::actions::ActionError::ForkSourceUnavailable) => {
+            rejected("fork source is no longer available")
+        }
+        Err(_) => rejected("workstream creation is unavailable"),
     }
 }
 

@@ -15,7 +15,7 @@ use std::{
 
 use thiserror::Error;
 
-use crate::domain::RuntimeId;
+use crate::domain::{RuntimeId, WorkstreamId};
 use crate::protocol::{
     HelloResponse, HostAction, HostRequest, HostResponse, MAX_FRAME_BYTES, RequestEnvelope,
     ResponseEnvelope, SnapshotResponse,
@@ -283,6 +283,35 @@ impl<R: CommandRunner> HostClient<R> {
         self.apply(&local_invocation(endpoint, &apply_request(action)?))
     }
 
+    /// Creates one remote Workstream through the same revision-guarded
+    /// protocol used by the navigator. The returned ID is only accepted from
+    /// the dedicated creation response, never parsed from diagnostics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for transport/protocol failures, a remote rejection,
+    /// or a response kind other than one exact created Workstream.
+    pub fn create_ssh(
+        &self,
+        endpoint: &SshEndpoint,
+        action: HostAction,
+    ) -> Result<WorkstreamId, TransportError> {
+        self.create(&ssh_invocation(endpoint, &apply_request(action)?))
+    }
+
+    /// Local-subprocess parity path for remote Workstream creation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error under the same bounds as [`Self::create_ssh`].
+    pub fn create_local(
+        &self,
+        endpoint: &LocalEndpoint,
+        action: HostAction,
+    ) -> Result<WorkstreamId, TransportError> {
+        self.create(&local_invocation(endpoint, &apply_request(action)?))
+    }
+
     fn hello(&self, invocation: &CommandInvocation) -> Result<HelloResponse, TransportError> {
         match self.request(invocation)? {
             HostResponse::Hello(response) => Ok(response),
@@ -302,6 +331,14 @@ impl<R: CommandRunner> HostClient<R> {
     fn apply(&self, invocation: &CommandInvocation) -> Result<i64, TransportError> {
         match self.request(invocation)? {
             HostResponse::Applied { revision } => Ok(revision),
+            HostResponse::Rejected { diagnostic } => Err(TransportError::Rejected(diagnostic)),
+            _ => Err(TransportError::UnexpectedResponse),
+        }
+    }
+
+    fn create(&self, invocation: &CommandInvocation) -> Result<WorkstreamId, TransportError> {
+        match self.request(invocation)? {
+            HostResponse::WorkstreamCreated { workstream_id, .. } => Ok(workstream_id),
             HostResponse::Rejected { diagnostic } => Err(TransportError::Rejected(diagnostic)),
             _ => Err(TransportError::UnexpectedResponse),
         }
@@ -579,6 +616,39 @@ mod tests {
             HostClient::new(runner).snapshot_ssh(&endpoint),
             Err(TransportError::Rejected(_))
         ));
+    }
+
+    #[test]
+    fn creation_accepts_only_the_dedicated_workstream_response() {
+        let workstream_id = WorkstreamId::new();
+        let runner = RecordingRunner {
+            response: ResponseEnvelope {
+                version: CURRENT_PROTOCOL_VERSION,
+                response: HostResponse::WorkstreamCreated {
+                    workstream_id,
+                    revision: 1,
+                },
+            },
+            calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        let endpoint = SshEndpoint::new(
+            SshDestination::parse("snap").unwrap(),
+            RemoteExecutable::parse("/home/bryan/.local/bin/wsnav").unwrap(),
+        );
+
+        assert_eq!(
+            HostClient::new(runner)
+                .create_ssh(
+                    &endpoint,
+                    HostAction::NewWorkstream {
+                        source_workstream_id: WorkstreamId::new(),
+                        expected_revision: 1,
+                        request_key: "request-key".to_owned(),
+                    },
+                )
+                .unwrap(),
+            workstream_id
+        );
     }
 
     #[test]

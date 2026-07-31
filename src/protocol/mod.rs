@@ -11,7 +11,7 @@ use crate::domain::{
     HostId, LocationId, Revision, RuntimeId, RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 3;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 4;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -20,6 +20,7 @@ const MAX_ALIAS_BYTES: usize = 128;
 const MAX_DISPLAY_NAME_BYTES: usize = 256;
 const MAX_VERSION_BYTES: usize = 64;
 const MAX_REGISTRY_GENERATION_BYTES: usize = 128;
+const MAX_REQUEST_KEY_BYTES: usize = 128;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RequestEnvelope {
@@ -85,7 +86,7 @@ impl HostRequest {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostAction {
     AcknowledgeAttention {
@@ -100,6 +101,18 @@ pub enum HostAction {
         workstream_id: WorkstreamId,
         expected_revision: i64,
     },
+    /// Create a sibling managed checkout from the registered project base.
+    NewWorkstream {
+        source_workstream_id: WorkstreamId,
+        expected_revision: i64,
+        request_key: String,
+    },
+    /// Fork an active source through its last settled native Codex turn.
+    ForkWorkstream {
+        source_workstream_id: WorkstreamId,
+        expected_revision: i64,
+        request_key: String,
+    },
 }
 
 impl HostAction {
@@ -113,9 +126,21 @@ impl HostAction {
             }
             | Self::Start {
                 expected_revision, ..
+            }
+            | Self::NewWorkstream {
+                expected_revision, ..
+            }
+            | Self::ForkWorkstream {
+                expected_revision, ..
             } => *expected_revision,
         };
         Revision::try_from(expected_revision).map_err(|_| ProtocolError::InvalidRevision)?;
+        match self {
+            Self::NewWorkstream { request_key, .. } | Self::ForkWorkstream { request_key, .. } => {
+                validate_bounded("request key", request_key, MAX_REQUEST_KEY_BYTES)?;
+            }
+            Self::AcknowledgeAttention { .. } | Self::Park { .. } | Self::Start { .. } => {}
+        }
         Ok(())
     }
 }
@@ -183,9 +208,19 @@ impl ResponseEnvelope {
 pub enum HostResponse {
     Hello(HelloResponse),
     Snapshot(SnapshotResponse),
-    Applied { revision: i64 },
-    Attach { runtime_id: RuntimeId },
-    Rejected { diagnostic: String },
+    Applied {
+        revision: i64,
+    },
+    WorkstreamCreated {
+        workstream_id: WorkstreamId,
+        revision: i64,
+    },
+    Attach {
+        runtime_id: RuntimeId,
+    },
+    Rejected {
+        diagnostic: String,
+    },
 }
 
 impl HostResponse {
@@ -194,6 +229,9 @@ impl HostResponse {
             Self::Hello(response) => response.validate(),
             Self::Snapshot(response) => response.validate(),
             Self::Applied { revision } => Revision::try_from(*revision)
+                .map(|_| ())
+                .map_err(|_| ProtocolError::InvalidRevision),
+            Self::WorkstreamCreated { revision, .. } => Revision::try_from(*revision)
                 .map(|_| ())
                 .map_err(|_| ProtocolError::InvalidRevision),
             Self::Attach { .. } => Ok(()),
@@ -419,6 +457,25 @@ mod tests {
         assert!(matches!(
             request.validate(),
             Err(ProtocolError::InvalidRevision)
+        ));
+    }
+
+    #[test]
+    fn workstream_creation_requires_a_bounded_idempotency_key() {
+        let request = RequestEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            request: HostRequest::Apply {
+                action: HostAction::ForkWorkstream {
+                    source_workstream_id: WorkstreamId::new(),
+                    expected_revision: 1,
+                    request_key: "unsafe\nkey".to_owned(),
+                },
+            },
+        };
+
+        assert!(matches!(
+            request.validate(),
+            Err(ProtocolError::ControlCharacter("request key"))
         ));
     }
 

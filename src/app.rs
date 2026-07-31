@@ -88,6 +88,8 @@ enum Commands {
     Register { checkout: PathBuf },
     /// Create and start an independent managed Workstream from one registered project location.
     NewWorkstream { source_workstream_id: String },
+    /// Fork one live Workstream at its last completed native Codex turn.
+    ForkWorkstream { source_workstream_id: String },
     /// Start native Codex in a private tmux server for one registered workstream.
     Start { workstream_id: String },
     /// Attach this terminal directly to a live native Codex runtime.
@@ -168,6 +170,18 @@ enum HostCommands {
     Park {
         alias: String,
         workstream_id: String,
+        revision: i64,
+    },
+    /// Create and start an independent managed Workstream on a remote host.
+    New {
+        alias: String,
+        source_workstream_id: String,
+        revision: i64,
+    },
+    /// Fork one remote live Workstream at its last completed native turn.
+    Fork {
+        alias: String,
+        source_workstream_id: String,
         revision: i64,
     },
     /// Clear one remote result-attention revision without provider input.
@@ -269,6 +283,13 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
             &mut registry,
             parse_workstream(&source_workstream_id)?,
         ),
+        Commands::ForkWorkstream {
+            source_workstream_id,
+        } => fork_workstream(
+            root,
+            &mut registry,
+            parse_workstream(&source_workstream_id)?,
+        ),
         Commands::Start { workstream_id } => {
             start(root, &mut registry, parse_workstream(&workstream_id)?)
         }
@@ -346,6 +367,16 @@ fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError>
             workstream_id,
             revision,
         } => park_remote_workstream(&catalog, &alias, &workstream_id, revision),
+        HostCommands::New {
+            alias,
+            source_workstream_id,
+            revision,
+        } => new_remote_workstream(&catalog, &alias, &source_workstream_id, revision),
+        HostCommands::Fork {
+            alias,
+            source_workstream_id,
+            revision,
+        } => fork_remote_workstream(&catalog, &alias, &source_workstream_id, revision),
         HostCommands::Acknowledge {
             alias,
             workstream_id,
@@ -477,6 +508,44 @@ fn park_remote_workstream(
     Ok(())
 }
 
+fn new_remote_workstream(
+    catalog: &ClientCatalog,
+    alias: &str,
+    source_workstream_id: &str,
+    revision: i64,
+) -> Result<(), AppError> {
+    let workstream_id = create_remote_workstream(
+        catalog,
+        alias,
+        crate::protocol::HostAction::NewWorkstream {
+            source_workstream_id: parse_workstream(source_workstream_id)?,
+            expected_revision: revision,
+            request_key: uuid::Uuid::new_v4().to_string(),
+        },
+    )?;
+    println!("started independent workstream {workstream_id}");
+    Ok(())
+}
+
+fn fork_remote_workstream(
+    catalog: &ClientCatalog,
+    alias: &str,
+    source_workstream_id: &str,
+    revision: i64,
+) -> Result<(), AppError> {
+    let workstream_id = create_remote_workstream(
+        catalog,
+        alias,
+        crate::protocol::HostAction::ForkWorkstream {
+            source_workstream_id: parse_workstream(source_workstream_id)?,
+            expected_revision: revision,
+            request_key: uuid::Uuid::new_v4().to_string(),
+        },
+    )?;
+    println!("forked workstream {workstream_id}");
+    Ok(())
+}
+
 fn acknowledge_remote_workstream(
     catalog: &ClientCatalog,
     alias: &str,
@@ -569,6 +638,15 @@ fn apply_remote_action(
     Ok(())
 }
 
+fn create_remote_workstream(
+    catalog: &ClientCatalog,
+    alias: &str,
+    action: crate::protocol::HostAction,
+) -> Result<WorkstreamId, AppError> {
+    let endpoint = checked_ssh_endpoint(catalog, alias)?;
+    Ok(HostClient::new(SystemCommandRunner).create_ssh(&endpoint, action)?)
+}
+
 fn ssh_endpoint(destination: &str, executable: &Path) -> Result<SshEndpoint, AppError> {
     let destination = SshDestination::parse(destination)?;
     let executable = executable
@@ -633,6 +711,22 @@ fn new_workstream(
         uuid::Uuid::new_v4().to_string(),
     )?;
     println!("started independent workstream {workstream_id}");
+    Ok(())
+}
+
+fn fork_workstream(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+    source_workstream_id: WorkstreamId,
+) -> Result<(), AppError> {
+    let workstream_id = actions::fork_workstream(
+        root,
+        registry,
+        source_workstream_id,
+        None,
+        uuid::Uuid::new_v4().to_string(),
+    )?;
+    println!("forked workstream {workstream_id}");
     Ok(())
 }
 

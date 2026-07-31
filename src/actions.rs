@@ -393,8 +393,11 @@ pub fn start(
             &process_probe,
             RuntimePaths::for_runtime(root.base(), prior_runtime.runtime_id),
         );
-        match prior.probe()? {
-            RuntimeProbe::Live { .. } => return Ok(StartOutcome::AlreadyLive),
+        let prior_probe = prior.probe()?;
+        if matches_recorded_runtime(prior_runtime, &prior_probe, false) {
+            return Ok(StartOutcome::AlreadyLive);
+        }
+        match prior_probe {
             RuntimeProbe::Missing => {
                 if prior_runtime.process_birth.is_some()
                     && !matches!(prior_runtime.status, crate::domain::RuntimeStatus::Stopped)
@@ -410,7 +413,9 @@ pub fn start(
                         .mark_runtime_stopped(prior_runtime.runtime_id, prior_runtime.revision)?;
                 }
             }
-            RuntimeProbe::Unknown { .. } => return Err(ActionError::RuntimeProbeAmbiguous),
+            RuntimeProbe::Live { .. } | RuntimeProbe::Unknown { .. } => {
+                return Err(ActionError::RuntimeProbeAmbiguous);
+            }
         }
     }
     let prior_binding = prior_runtime
@@ -473,14 +478,19 @@ pub fn recover(
         &process_probe,
         RuntimePaths::for_runtime(root.base(), prior_runtime.runtime_id),
     );
-    match prior.probe()? {
-        RuntimeProbe::Live { .. } => return Ok(StartOutcome::AlreadyLive),
+    let prior_probe = prior.probe()?;
+    if matches_recorded_runtime(&prior_runtime, &prior_probe, true) {
+        return Ok(StartOutcome::AlreadyLive);
+    }
+    match prior_probe {
         // The path is derived solely from this persisted Runtime ID. Once its
         // exact server is conclusively gone, `park` uses that same private
         // socket and removes only the owned socket/config directory before a
         // new generation is allowed to claim it.
         RuntimeProbe::Missing => prior.park()?,
-        RuntimeProbe::Unknown { .. } => return Err(ActionError::RuntimeProbeAmbiguous),
+        RuntimeProbe::Live { .. } | RuntimeProbe::Unknown { .. } => {
+            return Err(ActionError::RuntimeProbeAmbiguous);
+        }
     }
     let prior_binding = registry.binding_for_runtime(prior_runtime.runtime_id)?;
     let record = registry.reserve_runtime_recovery(workstream_id)?;
@@ -491,6 +501,23 @@ pub fn recover(
         codex_recovery_program(&record.cwd, prior_binding.as_ref()),
     )?;
     Ok(StartOutcome::Started)
+}
+
+fn matches_recorded_runtime(
+    record: &crate::state::RuntimeRecord,
+    probe: &RuntimeProbe,
+    require_starting: bool,
+) -> bool {
+    (!require_starting || matches!(record.status, crate::domain::RuntimeStatus::Starting))
+        && matches!(
+            probe,
+            RuntimeProbe::Live {
+                cwd,
+                process_birth: Some(process_birth),
+                ..
+            } if cwd == &record.cwd
+                && record.process_birth.as_deref() == Some(process_birth.as_str())
+        )
 }
 
 /// Reconciles only conclusive loss of an owned private Runtime before a
@@ -961,6 +988,49 @@ mod tests {
                 .and_then(|attention| attention.recovery_unseen_since_revision)
                 .is_some()
         );
+    }
+
+    #[test]
+    fn live_runtime_is_accepted_only_when_its_recorded_identity_matches() {
+        let record = crate::state::RuntimeRecord {
+            runtime_id: RuntimeId::new(),
+            workstream_id: WorkstreamId::new(),
+            tmux_generation: "generation".to_owned(),
+            tmux_session: "session".to_owned(),
+            cwd: PathBuf::from("/disposable/repository"),
+            process_birth: Some("birth-a".to_owned()),
+            status: crate::domain::RuntimeStatus::Idle,
+            revision: Revision::INITIAL,
+        };
+        let exact = RuntimeProbe::Live {
+            pane_id: "%1".to_owned(),
+            pane_pid: 1,
+            cwd: record.cwd.clone(),
+            process_birth: Some("birth-a".to_owned()),
+        };
+
+        assert!(matches_recorded_runtime(&record, &exact, false));
+        assert!(!matches_recorded_runtime(&record, &exact, true));
+        assert!(!matches_recorded_runtime(
+            &record,
+            &RuntimeProbe::Live {
+                pane_id: "%1".to_owned(),
+                pane_pid: 1,
+                cwd: PathBuf::from("/another/checkout"),
+                process_birth: Some("birth-a".to_owned()),
+            },
+            false,
+        ));
+        assert!(!matches_recorded_runtime(
+            &record,
+            &RuntimeProbe::Live {
+                pane_id: "%1".to_owned(),
+                pane_pid: 1,
+                cwd: record.cwd.clone(),
+                process_birth: Some("birth-b".to_owned()),
+            },
+            false,
+        ));
     }
 
     #[test]

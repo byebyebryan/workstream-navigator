@@ -859,9 +859,12 @@ impl NavigatorView {
             .constraints([Constraint::Min(3), Constraint::Length(2)])
             .split(frame.area());
         let entries = self.list_entries();
+        let project_colors = visible_project_colors(&self.snapshot);
         let items = entries
             .iter()
-            .map(|entry| navigator_list_item(entry, &self.snapshot, self.spinner_frame))
+            .map(|entry| {
+                navigator_list_item(entry, &self.snapshot, &project_colors, self.spinner_frame)
+            })
             .collect::<Vec<_>>();
         let mut state = ListState::default();
         state.select(
@@ -1123,12 +1126,13 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 fn navigator_list_item(
     entry: &NavigatorListEntry,
     snapshot: &LocalNavigatorSnapshot,
+    project_colors: &BTreeMap<ProjectId, Color>,
     spinner_frame: usize,
 ) -> ListItem<'static> {
     match entry {
         NavigatorListEntry::HostHeader { alias } => host_header_item(alias),
         NavigatorListEntry::ProjectHeader { project_id, label } => {
-            project_header_item(*project_id, label)
+            project_header_item(*project_id, label, project_colors)
         }
         NavigatorListEntry::Workstream {
             snapshot_index,
@@ -1136,6 +1140,7 @@ fn navigator_list_item(
         } => workstream_item(
             &snapshot.workstreams[*snapshot_index],
             *context,
+            project_colors,
             spinner_frame,
         ),
     }
@@ -1153,10 +1158,14 @@ fn host_header_item(alias: &str) -> ListItem<'static> {
     ]))
 }
 
-fn project_header_item(project_id: ProjectId, label: &str) -> ListItem<'static> {
+fn project_header_item(
+    project_id: ProjectId,
+    label: &str,
+    project_colors: &BTreeMap<ProjectId, Color>,
+) -> ListItem<'static> {
     ListItem::new(Line::from(vec![
         Span::raw("  "),
-        project_marker(project_id),
+        project_marker(project_id, project_colors),
         Span::raw(" "),
         Span::styled(
             label.to_owned(),
@@ -1168,12 +1177,13 @@ fn project_header_item(project_id: ProjectId, label: &str) -> ListItem<'static> 
 fn workstream_item(
     row: &NavigatorWorkstream,
     context: WorkstreamRowContext,
+    project_colors: &BTreeMap<ProjectId, Color>,
     spinner_frame: usize,
 ) -> ListItem<'static> {
     let (indicator, indicator_style) = status_indicator(row, spinner_frame);
     let thread_style = Style::default().fg(Color::White);
     ListItem::new(vec![
-        workstream_context_line(row, context),
+        workstream_context_line(row, context, project_colors),
         Line::from(thread_line(row, indicator, indicator_style, thread_style)),
     ])
 }
@@ -1181,6 +1191,7 @@ fn workstream_item(
 fn workstream_context_line(
     row: &NavigatorWorkstream,
     context: WorkstreamRowContext,
+    project_colors: &BTreeMap<ProjectId, Color>,
 ) -> Line<'static> {
     let host = || {
         Span::styled(
@@ -1201,13 +1212,13 @@ fn workstream_context_line(
             Span::raw("   "),
             host(),
             Span::styled(" · ", Style::default().fg(Color::Gray)),
-            project_marker(row.project_id),
+            project_marker(row.project_id, project_colors),
             Span::raw(" "),
             project(),
         ]),
         WorkstreamRowContext::Host => Line::from(vec![
             Span::raw("   "),
-            project_marker(row.project_id),
+            project_marker(row.project_id, project_colors),
             Span::raw(" "),
             project(),
         ]),
@@ -1215,38 +1226,74 @@ fn workstream_context_line(
     }
 }
 
-fn project_marker(project_id: ProjectId) -> Span<'static> {
-    Span::styled("•", Style::default().fg(project_color(project_id)))
+fn project_marker(
+    project_id: ProjectId,
+    project_colors: &BTreeMap<ProjectId, Color>,
+) -> Span<'static> {
+    Span::styled(
+        "•",
+        Style::default().fg(*project_colors
+            .get(&project_id)
+            .expect("every visible Project receives one marker color")),
+    )
 }
 
 fn host_color(alias: &str) -> Color {
     if alias == "local" {
         Color::LightBlue
     } else {
-        stable_color(
-            alias.as_bytes(),
-            &[Color::LightCyan, Color::LightMagenta, Color::Cyan],
-        )
+        let palette = [Color::LightCyan, Color::LightMagenta, Color::Cyan];
+        palette[stable_color_index(alias.as_bytes(), palette.len())]
     }
 }
 
-fn project_color(project_id: ProjectId) -> Color {
-    stable_color(
-        project_id.as_uuid().as_bytes(),
-        &[
-            Color::LightCyan,
-            Color::LightBlue,
-            Color::LightMagenta,
-            Color::Cyan,
-        ],
-    )
+const PROJECT_MARKER_PALETTE: [Color; 12] = [
+    Color::Indexed(67),
+    Color::Indexed(68),
+    Color::Indexed(73),
+    Color::Indexed(74),
+    Color::Indexed(96),
+    Color::Indexed(97),
+    Color::Indexed(98),
+    Color::Indexed(103),
+    Color::Indexed(104),
+    Color::Indexed(109),
+    Color::Indexed(110),
+    Color::Indexed(140),
+];
+
+/// Allocates distinct muted accents to concurrently visible Projects. The
+/// Project IDs select a deterministic initial slot; collision probing prevents
+/// a same-color wall for the normal dozen-project navigator scope.
+fn visible_project_colors(snapshot: &LocalNavigatorSnapshot) -> BTreeMap<ProjectId, Color> {
+    let project_ids = snapshot
+        .workstreams
+        .iter()
+        .map(|workstream| workstream.project_id)
+        .collect::<BTreeSet<_>>();
+    let mut used = [false; PROJECT_MARKER_PALETTE.len()];
+    let mut colors = BTreeMap::new();
+    for project_id in project_ids {
+        let start = stable_color_index(
+            project_id.as_uuid().as_bytes(),
+            PROJECT_MARKER_PALETTE.len(),
+        );
+        let index = (0..PROJECT_MARKER_PALETTE.len())
+            .map(|offset| (start + offset) % PROJECT_MARKER_PALETTE.len())
+            .find(|index| !used[*index])
+            .unwrap_or(start);
+        used[index] = true;
+        colors.insert(project_id, PROJECT_MARKER_PALETTE[index]);
+    }
+    colors
 }
 
-fn stable_color(seed: &[u8], palette: &[Color]) -> Color {
+fn stable_color_index(seed: &[u8], palette_len: usize) -> usize {
+    debug_assert!(palette_len > 0);
     let hash = seed.iter().fold(0_u64, |hash, byte| {
         hash.wrapping_mul(31).wrapping_add(u64::from(*byte))
     });
-    palette[usize::try_from(hash % u64::try_from(palette.len()).unwrap()).unwrap()]
+    usize::try_from(hash % u64::try_from(palette_len).unwrap()).unwrap()
 }
 
 fn thread_line(
@@ -1995,6 +2042,9 @@ mod tests {
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
+        let expected_project_color = *visible_project_colors(&view.snapshot)
+            .get(&view.snapshot.workstreams[0].project_id)
+            .unwrap();
         terminal.draw(|frame| view.render(frame)).unwrap();
         let rendered = terminal
             .backend()
@@ -2016,10 +2066,7 @@ mod tests {
             .iter()
             .find(|cell| cell.symbol() == "•")
             .unwrap();
-        assert_eq!(
-            project_marker_cell.fg,
-            project_color(view.snapshot.workstreams[0].project_id)
-        );
+        assert_eq!(project_marker_cell.fg, expected_project_color);
         let host_cell = terminal
             .backend()
             .buffer()
@@ -2028,6 +2075,37 @@ mod tests {
             .find(|cell| cell.symbol() == "l")
             .unwrap();
         assert_eq!(host_cell.fg, Color::LightBlue);
+    }
+
+    #[test]
+    fn visible_projects_receive_distinct_stable_marker_colors() {
+        let workstreams = (0..PROJECT_MARKER_PALETTE.len())
+            .map(|index| NavigatorWorkstream {
+                project_label: format!("project-{index}"),
+                ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
+            })
+            .collect::<Vec<_>>();
+        let project_ids = workstreams
+            .iter()
+            .map(|workstream| workstream.project_id)
+            .collect::<Vec<_>>();
+        let snapshot = LocalNavigatorSnapshot {
+            workstreams,
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+        };
+
+        let colors = visible_project_colors(&snapshot);
+        let assigned = project_ids
+            .iter()
+            .map(|project_id| *colors.get(project_id).unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(colors.len(), PROJECT_MARKER_PALETTE.len());
+        for (index, color) in assigned.iter().enumerate() {
+            assert!(!assigned[..index].contains(color));
+        }
+        assert_eq!(colors, visible_project_colors(&snapshot));
     }
 
     #[test]

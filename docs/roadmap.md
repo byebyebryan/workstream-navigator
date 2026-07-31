@@ -2,7 +2,7 @@
 
 Date: 2026-07-31
 
-Status: D0 through D6.4 complete
+Status: D0 through D6.5 complete
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -41,6 +41,7 @@ This document owns sequencing, exit gates, and progress.
 | D6.2 | Navigator shortcut-reference polish | Complete |
 | D6.3 | Cross-host activity ordering polish | Complete |
 | D6.4 | Navigator grouping and visual-hierarchy polish | Complete |
+| D6.5 | Project-marker collision correction | Complete |
 
 ## D0 - Contract kernel
 
@@ -562,6 +563,33 @@ Exit gate:
 - selection and provider attachment continue to refer only to exact host and
   Workstream identity, never a group header or display label;
 - no host schema, remote protocol, Runtime, or provider contract changes; and
+- formatting, tests, lint, package checks, and `git diff --check` pass.
+
+## D6.5 - Project-marker collision correction
+
+Implementation status: complete. Visible Project markers now use a
+collision-resolved muted 256-color palette while retaining neutral row text
+and the existing host/status color boundaries.
+
+Correct the D6.4 marker palette so concurrently visible Projects do not land on
+the same accent merely because a small independent hash palette collided. Keep
+the accent quiet, bounded, terminal-safe, and presentation-only.
+
+Scope:
+
+- replace the four-color Project hash with a curated muted 256-color marker
+  palette;
+- allocate distinct colors to the first twelve visible Project identities using
+  deterministic collision probing; and
+- preserve neutral Project/Workstream text, host-label accents, and reserved
+  lifecycle-state colors.
+
+Exit gate:
+
+- deterministic rendering tests prove all twelve visible Project markers are
+  distinct and stable for an unchanged projection;
+- no color becomes durable identity, action authority, provider traffic, or a
+  host/protocol contract; and
 - formatting, tests, lint, package checks, and `git diff --check` pass.
 
 ## Deferred beyond V1

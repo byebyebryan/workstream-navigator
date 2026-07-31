@@ -17,8 +17,9 @@ validation][D6 acceptance], and D6.1 adds accepted linked-worktree identity and
 cross-host Project grouping polish, documented in the [D6.1 project-identity
 acceptance][D6.1 acceptance]. D6.2 makes navigator controls discoverable
 without adding another terminal surface, and D6.3 orders local and remote rows
-by visible activity recency. D6.4 adds quiet host/Project grouping views. The
-Rust implementation does not preserve
+by visible activity recency. D6.4 adds quiet host/Project grouping views, and
+D6.5 makes visible Project marker accents collision-free. The Rust
+implementation does not preserve
 compatibility with the earlier Python prototype.
 
 The frozen prototype remains available as implementation evidence in
@@ -52,7 +53,7 @@ keeps the native Codex workflow canonical, uses dedicated tmux runtimes and SSH
 for attachment, and limits Workstream Navigator to hosts, project locations,
 workstreams, status, and conservative worktree operations.
 
-The approved D0-D6.4 implementation sequence and checkpoint acceptance gates are
+The approved D0-D6.5 implementation sequence and checkpoint acceptance gates are
 tracked in the [V1 roadmap][].
 
 The accepted local Codex CLI slice and its sanitized native acceptance evidence

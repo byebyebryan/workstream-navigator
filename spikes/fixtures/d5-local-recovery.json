@@ -1,0 +1,28 @@
+{
+  "study": "d5-disposable-native-runtime-recovery",
+  "provider": {
+    "id": "codex",
+    "contract_fingerprint": "wsnav-d5-native-resume-recovery-v1"
+  },
+  "status": "pass",
+  "assertions": {
+    "missing_private_runtime_becomes_recovery_required": true,
+    "known_binding_resumes_only_through_native_resume": true,
+    "unbound_recovery_uses_native_resume_picker": true,
+    "recovery_startup_evidence_is_rejected": true,
+    "recovery_resume_evidence_reopens_the_workstream": true,
+    "prior_result_attention_is_preserved": true,
+    "private_runtime_directory_is_reused_only_after_exact_missing_probe": true,
+    "observer_removal_is_exact": true,
+    "ordinary_tmux_unchanged": true,
+    "temporary_acceptance_artifacts_removed": true,
+    "fresh_packaged_install_runs_owned_profile_lifecycle": true
+  },
+  "privacy_audit": {
+    "identifiers_committed": false,
+    "prompt_or_result_content_committed": false,
+    "terminal_or_image_data_committed": false,
+    "paths_or_pids_committed": false,
+    "credentials_or_raw_payloads_committed": false
+  }
+}

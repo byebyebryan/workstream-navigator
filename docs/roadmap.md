@@ -2,7 +2,7 @@
 
 Date: 2026-07-29
 
-Status: D0 through D4 complete; D5 planned
+Status: D0 through D4 complete; D5 in progress
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -278,6 +278,11 @@ Scope:
 - navigator UX and accessibility polish;
 - operator and user documentation; and
 - package-content and fresh-host installation verification.
+
+The disposable native-recovery and fresh-install gates now pass. See the
+[D5 acceptance record](acceptance-d5-v1-closure.md). The combined real-Codex
+local/remote operator acceptance remains required before this checkpoint can
+be marked complete.
 
 Exit gate:
 

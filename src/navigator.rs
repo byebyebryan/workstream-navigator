@@ -689,11 +689,11 @@ impl NavigatorView {
         );
         let help = self.message.clone().unwrap_or_else(|| {
             if self.snapshot.unreachable_hosts.is_empty() {
-                "↑↓ select  Enter attach/start  n new  f fork  a acknowledge  p park  q close"
+                "↑↓ select  Enter open/start/recover  n new  f fork  a acknowledge  p park  q close"
                     .to_owned()
             } else {
                 format!(
-                    "{} unavailable; showing cached state  ↑↓ select  Enter attach/start  n new  f fork  q close",
+                    "{} unavailable; showing cached state  ↑↓ select  Enter open/start/recover  n new  f fork  q close",
                     self.snapshot.unreachable_hosts.join(", ")
                 )
             }

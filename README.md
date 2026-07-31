@@ -9,9 +9,10 @@ native terminal UI and workflow intact.
 This repository is a clean-slate Rust reboot. D3 provides registered SSH host
 control, cached multi-host navigation, and direct native terminal attachment.
 D4 adds independent Workstreams and settled-prefix native-Codex forks; both
-the disposable harness and bounded real-Codex acceptance passed. D5 recovery
-and V1 closure remain roadmap work. It does not preserve compatibility with the
-earlier Python prototype.
+the disposable harness and bounded real-Codex acceptance passed. D5's
+disposable runtime-recovery and fresh-install gates now pass; its final
+combined local/remote operator acceptance remains. It does not preserve
+compatibility with the earlier Python prototype.
 
 The frozen prototype remains available as implementation evidence in
 [agent-switchboard-python-reference][].
@@ -74,6 +75,12 @@ wsnav new-workstream <source-workstream-id>
 wsnav fork-workstream <source-workstream-id>
 ```
 
+If a private runtime is conclusively gone, its row becomes `recovery required`.
+Enter on that row (or `wsnav recover <workstream-id>`) opens native Codex resume:
+an exact known thread resumes directly, while an unbound workstream uses
+Codex's own resume picker. WSNav keeps the row in recovery until it observes a
+corroborated native `resume`; it never replaces it with a blank thread.
+
 The remote equivalents are `wsnav host new` and `wsnav host fork`, each with
 the selected source revision. The normal navigator supplies that revision and
 the opaque request key automatically. Fork is unavailable until a managed
@@ -118,6 +125,7 @@ provider capability as a pre-implementation design blocker. See [Spike 0001][],
 [D1 acceptance]: docs/acceptance-d1-local-codex.md
 [D2 acceptance]: docs/acceptance-d2-local-navigator.md
 [D3 acceptance]: docs/acceptance-d3-control-plane.md
+[D5 acceptance]: docs/acceptance-d5-v1-closure.md
 [Spike 0001]: docs/spikes/0001-tmux-remote-transport.md
 [Spike 0002]: docs/spikes/0002-codex-native-tui.md
 [Spike 0004]: docs/spikes/0004-tmux-runtime-isolation.md

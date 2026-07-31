@@ -352,7 +352,7 @@ fn ensure_live_fork_source(
     let private_runtime = PrivateRuntime::new(
         &tmux,
         &process_probe,
-        RuntimePaths::for_runtime(root.base(), runtime.runtime_id),
+        RuntimePaths::for_record(root.base(), runtime.runtime_id, &runtime.tmux_session)?,
     );
     match private_runtime.probe()? {
         RuntimeProbe::Live { cwd, .. } if cwd == runtime.cwd => {
@@ -527,7 +527,11 @@ pub fn start(
         let prior = PrivateRuntime::new(
             &tmux,
             &process_probe,
-            RuntimePaths::for_runtime(root.base(), prior_runtime.runtime_id),
+            RuntimePaths::for_record(
+                root.base(),
+                prior_runtime.runtime_id,
+                &prior_runtime.tmux_session,
+            )?,
         );
         let prior_probe = prior.probe()?;
         if matches_recorded_runtime(prior_runtime, &prior_probe, false) {
@@ -612,7 +616,11 @@ pub fn recover(
     let prior = PrivateRuntime::new(
         &tmux,
         &process_probe,
-        RuntimePaths::for_runtime(root.base(), prior_runtime.runtime_id),
+        RuntimePaths::for_record(
+            root.base(),
+            prior_runtime.runtime_id,
+            &prior_runtime.tmux_session,
+        )?,
     );
     let prior_probe = prior.probe()?;
     if matches_recorded_runtime(&prior_runtime, &prior_probe, true) {
@@ -687,11 +695,14 @@ pub fn reconcile_lost_runtimes(
         }
         let tmux = SystemTmux::default();
         let process_probe = LinuxProcessProbe;
-        let runtime = PrivateRuntime::new(
-            &tmux,
-            &process_probe,
-            RuntimePaths::for_runtime(root.base(), runtime_record.runtime_id),
-        );
+        let Ok(paths) = RuntimePaths::for_record(
+            root.base(),
+            runtime_record.runtime_id,
+            &runtime_record.tmux_session,
+        ) else {
+            continue;
+        };
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
         let conclusively_lost = match runtime.probe() {
             Ok(RuntimeProbe::Missing) => true,
             Ok(RuntimeProbe::Live {
@@ -718,7 +729,7 @@ fn launch_reserved_runtime(
     record: &crate::state::RuntimeRecord,
     program: Vec<OsString>,
 ) -> Result<(), ActionError> {
-    let paths = RuntimePaths::for_runtime(root.base(), record.runtime_id);
+    let paths = RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?;
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
     let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
@@ -779,7 +790,7 @@ pub fn park(
     let runtime = PrivateRuntime::new(
         &tmux,
         &process_probe,
-        RuntimePaths::for_runtime(root.base(), record.runtime_id),
+        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
     );
     runtime.park()?;
     registry.park_runtime(record.runtime_id, record.revision)?;

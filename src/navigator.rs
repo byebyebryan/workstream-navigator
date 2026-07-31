@@ -35,6 +35,7 @@ use thiserror::Error;
 use crate::{
     domain::{Clock, Revision, RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle},
     presentation::{Presentation, PresentationError},
+    process::{BoundedProcessError, output_bounded},
     provider::codex::names::{NameContext, resolve_name},
     runtime::{
         LinuxProcessProbe, PrivateRuntime, RuntimeError, RuntimePaths, RuntimeProbe, SystemTmux,
@@ -280,7 +281,7 @@ fn observed_runtime_status(
     let runtime = PrivateRuntime::new(
         &tmux,
         &process_probe,
-        RuntimePaths::for_runtime(root.base(), record.runtime_id),
+        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
     );
     match runtime.probe()? {
         RuntimeProbe::Live { .. } => Ok(navigator_runtime_status(record.status)),
@@ -697,35 +698,46 @@ impl NavigatorView {
             areas[0],
             &mut state,
         );
-        let help = self.message.clone().unwrap_or_else(|| {
-            let operation_hint = (self.snapshot.unresolved_operation_count > 0).then(|| {
-                format!(
-                    "  ! {} operation{} needs recovery; use wsnav operations",
-                    self.snapshot.unresolved_operation_count,
-                    if self.snapshot.unresolved_operation_count == 1 {
-                        ""
-                    } else {
-                        "s"
-                    }
-                )
-            });
-            if self.snapshot.unreachable_hosts.is_empty() {
-                format!(
-                    "↑↓ select  Enter open/start/recover  n new  f fork  a acknowledge  p park  q close{}",
-                    operation_hint.unwrap_or_default()
-                )
-            } else {
-                format!(
-                    "{} unavailable; showing cached state  ↑↓ select  Enter open/start/recover  n new  f fork  q close{}",
-                    self.snapshot.unreachable_hosts.join(", "),
-                    operation_hint.unwrap_or_default(),
-                )
-            }
-        });
+        let help = self.footer_help();
         frame.render_widget(
             Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
             areas[1],
         );
+    }
+
+    fn footer_help(&self) -> String {
+        if let Some(message) = &self.message {
+            return message.clone();
+        }
+        let operation_hint = (self.snapshot.unresolved_operation_count > 0).then(|| {
+            format!(
+                "  ! {} operation{} needs recovery; use wsnav operations",
+                self.snapshot.unresolved_operation_count,
+                if self.snapshot.unresolved_operation_count == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            )
+        });
+        if self.snapshot.workstreams.is_empty() {
+            return format!(
+                "No Workstreams yet; run wsnav register /path/to/git-checkout{}",
+                operation_hint.unwrap_or_default()
+            );
+        }
+        if self.snapshot.unreachable_hosts.is_empty() {
+            format!(
+                "↑↓ select  Enter open/start/recover  n new  f fork  a acknowledge  p park  q close{}",
+                operation_hint.unwrap_or_default()
+            )
+        } else {
+            format!(
+                "{} unavailable; showing cached state  ↑↓ select  Enter open/start/recover  n new  f fork  q close{}",
+                self.snapshot.unreachable_hosts.join(", "),
+                operation_hint.unwrap_or_default(),
+            )
+        }
     }
 
     #[must_use]
@@ -845,6 +857,8 @@ pub enum NavigatorError {
     CurrentExecutable(io::Error),
     #[error("the local navigator action produced oversized diagnostics")]
     ActionOutputTooLarge,
+    #[error("the local navigator action could not be completed")]
+    ActionProcess(#[source] BoundedProcessError),
     #[error("the local navigator action failed")]
     ActionFailed,
     #[error("the local navigator action did not return one Workstream ID")]
@@ -853,6 +867,15 @@ pub enum NavigatorError {
     RemoteHostUnavailable,
     #[error("remote host returned an invalid bounded snapshot")]
     InvalidRemoteSnapshot(#[source] crate::domain::DomainError),
+}
+
+impl NavigatorError {
+    fn from_action_process(source: BoundedProcessError) -> Self {
+        match source {
+            BoundedProcessError::OutputTooLarge => Self::ActionOutputTooLarge,
+            other => Self::ActionProcess(other),
+        }
+    }
 }
 
 /// Runs the internal Ratatui process inside one owned presentation pane.
@@ -964,7 +987,7 @@ fn activate_selected(
     view: &mut NavigatorView,
 ) {
     let Some(selected) = view.selected().cloned() else {
-        view.set_message("no Workstream is registered; use wsnav register first");
+        view.set_message("no Workstream is registered; run wsnav register /path/to/git-checkout");
         return;
     };
     if selected.host.is_remote() && !selected.host.is_reachable() {
@@ -1085,7 +1108,7 @@ fn create_workstream_selected(
     action: CreationAction,
 ) {
     let Some(source) = view.selected().cloned() else {
-        view.set_message("no Workstream is registered; use wsnav register first");
+        view.set_message("no Workstream is registered; run wsnav register /path/to/git-checkout");
         return;
     };
     let destination = match run_creation_action(root, action, &source) {
@@ -1151,10 +1174,8 @@ fn run_action(
             command.arg(revision.to_string());
         }
     }
-    let output = command.output().map_err(NavigatorError::ActionLaunch)?;
-    if output.stdout.len() > 1024 || output.stderr.len() > 1024 {
-        return Err(NavigatorError::ActionOutputTooLarge);
-    }
+    let output =
+        output_bounded(&mut command, 1024, 1024).map_err(NavigatorError::from_action_process)?;
     if output.status.success() {
         Ok(())
     } else {
@@ -1185,10 +1206,8 @@ fn run_creation_action(
             .arg(action.local_command())
             .arg(source.workstream_id.to_string());
     }
-    let output = command.output().map_err(NavigatorError::ActionLaunch)?;
-    if output.stdout.len() > 1024 || output.stderr.len() > 1024 {
-        return Err(NavigatorError::ActionOutputTooLarge);
-    }
+    let output =
+        output_bounded(&mut command, 1024, 1024).map_err(NavigatorError::from_action_process)?;
     if !output.status.success() {
         return Err(NavigatorError::ActionFailed);
     }
@@ -1450,6 +1469,16 @@ mod tests {
 
         assert!(rendered.contains("operation needs recovery"));
         assert!(rendered.contains("wsnav operations"));
+    }
+
+    #[test]
+    fn empty_navigator_requires_an_explicit_checkout_registration() {
+        let view = NavigatorView::new(LocalNavigatorSnapshot::default());
+
+        assert_eq!(
+            view.footer_help(),
+            "No Workstreams yet; run wsnav register /path/to/git-checkout"
+        );
     }
 
     #[test]

@@ -6,6 +6,7 @@ pub mod build_info;
 pub mod domain;
 pub mod navigator;
 pub mod presentation;
+pub mod process;
 pub mod protocol;
 pub mod provider;
 pub mod remote;

@@ -54,6 +54,7 @@ done
 scripts/d4-local-workstream-acceptance.sh
 scripts/d5-local-recovery-acceptance.sh
 scripts/d5-fresh-install-acceptance.sh
+scripts/d5.1-operational-closure-acceptance.sh
 
 git diff --check
 git diff --cached --check

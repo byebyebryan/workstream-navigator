@@ -9,10 +9,12 @@ use std::{
     ffi::OsString,
     fs,
     path::{Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Command, Output},
 };
 
 use thiserror::Error;
+
+use crate::process::{BoundedProcessError, output_bounded};
 
 const MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
 
@@ -170,17 +172,10 @@ fn run_git(
     repository: &Path,
     arguments: impl IntoIterator<Item = OsString>,
 ) -> Result<Output, WorktreeError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repository)
-        .args(arguments)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(WorktreeError::Launch)?;
-    if output.stdout.len() > MAX_GIT_OUTPUT_BYTES || output.stderr.len() > MAX_GIT_OUTPUT_BYTES {
-        return Err(WorktreeError::OutputTooLarge);
-    }
-    Ok(output)
+    let mut command = Command::new("git");
+    command.arg("-C").arg(repository).args(arguments);
+    output_bounded(&mut command, MAX_GIT_OUTPUT_BYTES, MAX_GIT_OUTPUT_BYTES)
+        .map_err(WorktreeError::from_bounded_git)
 }
 
 fn worktree_evidence_from_porcelain(
@@ -274,8 +269,6 @@ pub enum WorktreeError {
     InvalidGitOutput,
     #[error("managed worktree plan is invalid")]
     InvalidPlan,
-    #[error("could not inspect or launch Git")]
-    Launch(std::io::Error),
     #[error("Git output exceeded its bound")]
     OutputTooLarge,
     #[error("configured Git base is not locally available")]
@@ -284,6 +277,17 @@ pub enum WorktreeError {
     InspectRejected,
     #[error("managed worktree path or branch already exists")]
     TargetAlreadyExists,
+    #[error("could not execute bounded Git command")]
+    Process(#[source] BoundedProcessError),
+}
+
+impl WorktreeError {
+    fn from_bounded_git(source: BoundedProcessError) -> Self {
+        match source {
+            BoundedProcessError::OutputTooLarge => Self::OutputTooLarge,
+            other => Self::Process(other),
+        }
+    }
 }
 
 #[cfg(test)]

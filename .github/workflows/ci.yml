@@ -33,3 +33,15 @@ jobs:
 
       - name: Run repository checks
         run: scripts/check
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Install declared MSRV
+        uses: dtolnay/rust-toolchain@1.85.0
+
+      - name: Test declared MSRV
+        run: cargo test --locked --all-targets --all-features

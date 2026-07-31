@@ -84,6 +84,11 @@ grep -F 'result attention: unseen' <<<"$initial_status" >/dev/null
 shopt -s nullglob
 runtime_sockets=("$state_root"/run/*/tmux.sock)
 (( ${#runtime_sockets[@]} == 1 ))
+runtime_directory="$(dirname "${runtime_sockets[0]}")"
+runtime_leaf="${runtime_directory##*/}"
+[[ "$runtime_leaf" =~ ^runtime-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]
+runtime_session="$(env -u TMUX tmux -S "${runtime_sockets[0]}" display-message -p '#S')"
+[[ "$runtime_session" == "wsnav-${runtime_leaf#runtime-}" ]]
 env -u TMUX tmux -S "${runtime_sockets[0]}" kill-server
 sleep 1
 

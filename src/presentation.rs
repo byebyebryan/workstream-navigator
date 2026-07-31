@@ -9,7 +9,10 @@ use std::{
 
 use thiserror::Error;
 
-use crate::domain::WorkstreamId;
+use crate::{
+    domain::WorkstreamId,
+    process::{BoundedProcessError, output_bounded},
+};
 
 const PRESENTATION_DIRECTORY: &str = "presentation";
 const PRESENTATION_PREFIX: &str = "wsnav-presentation-";
@@ -353,18 +356,14 @@ impl Presentation {
     }
 
     fn is_live(&self) -> Result<bool, PresentationError> {
-        let output = Command::new("tmux")
+        let mut command = Command::new("tmux");
+        command
             .env_remove("TMUX")
             .arg("-S")
             .arg(&self.paths.socket)
-            .args(["has-session", "-t", &self.paths.session_name])
-            .output()
-            .map_err(PresentationError::Io)?;
-        if output.stdout.len() > MAX_TMUX_OUTPUT_BYTES
-            || output.stderr.len() > MAX_TMUX_OUTPUT_BYTES
-        {
-            return Err(PresentationError::OutputTooLarge);
-        }
+            .args(["has-session", "-t", &self.paths.session_name]);
+        let output = output_bounded(&mut command, MAX_TMUX_OUTPUT_BYTES, MAX_TMUX_OUTPUT_BYTES)
+            .map_err(PresentationError::from_bounded_tmux)?;
         if output.status.success() {
             return Ok(true);
         }
@@ -422,17 +421,9 @@ impl Presentation {
         if let Some(config) = config {
             command.arg("-f").arg(config);
         }
-        let output = command
-            .arg("-S")
-            .arg(&self.paths.socket)
-            .args(arguments)
-            .output()
-            .map_err(PresentationError::Io)?;
-        if output.stdout.len() > MAX_TMUX_OUTPUT_BYTES
-            || output.stderr.len() > MAX_TMUX_OUTPUT_BYTES
-        {
-            return Err(PresentationError::OutputTooLarge);
-        }
+        command.arg("-S").arg(&self.paths.socket).args(arguments);
+        let output = output_bounded(&mut command, MAX_TMUX_OUTPUT_BYTES, MAX_TMUX_OUTPUT_BYTES)
+            .map_err(PresentationError::from_bounded_tmux)?;
         if output.status.success() {
             Ok(())
         } else {
@@ -505,6 +496,17 @@ pub enum PresentationError {
     OutputTooLarge,
     #[error("private presentation tmux action failed: {0}")]
     TmuxRejected(String),
+    #[error("could not execute bounded private presentation tmux command")]
+    TmuxOutput(#[source] BoundedProcessError),
+}
+
+impl PresentationError {
+    fn from_bounded_tmux(source: BoundedProcessError) -> Self {
+        match source {
+            BoundedProcessError::OutputTooLarge => Self::OutputTooLarge,
+            other => Self::TmuxOutput(other),
+        }
+    }
 }
 
 #[cfg(test)]

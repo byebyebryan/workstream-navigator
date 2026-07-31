@@ -1,0 +1,32 @@
+{
+  "study": "d5.1-disposable-operational-closure",
+  "provider": {
+    "id": "codex-control-plane",
+    "contract_fingerprint": "wsnav-d5.1-control-abi-1-protocol-6-schema-4"
+  },
+  "status": "pass",
+  "assertions": {
+    "release_probe_is_stateless": true,
+    "release_probe_contains_only_compatibility_metadata": true,
+    "missing_or_incompatible_remote_release_is_rejected_before_stateful_control": true,
+    "unresolved_operations_are_visible_and_recoverable_by_opaque_id": true,
+    "recorded_fork_attempt_is_reconciled_without_a_second_provider_fork": true,
+    "finite_local_child_output_is_streaming_bounded": true,
+    "new_private_runtime_paths_and_sessions_use_full_ids": true,
+    "legacy_private_runtime_records_select_only_their_exact_legacy_path": true,
+    "empty_navigator_requires_explicit_checkout_registration": true,
+    "declared_msrv_is_ci_tested": true
+  },
+  "isolation": {
+    "ordinary_tmux_mutated": false,
+    "ordinary_codex_or_hooks_mutated": false,
+    "temporary_state_removed": true
+  },
+  "privacy_audit": {
+    "identifiers_committed": false,
+    "prompt_or_result_content_committed": false,
+    "terminal_or_image_data_committed": false,
+    "paths_or_pids_committed": false,
+    "credentials_or_raw_payloads_committed": false
+  }
+}

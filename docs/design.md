@@ -203,6 +203,13 @@ Every managed host owns:
 - the workstream, checkout, Start/Fork recovery, binding, and attention records
   for work physically running on that host.
 
+Every newly created Runtime derives its private tmux directory and session name
+from the complete opaque Runtime UUID. The persisted session value must match
+that exact current form before WSNav probes, attaches, parks, or removes a
+private server. A narrowly defined former short-ID form is read only for a
+Runtime record created by an older build; any other value is ambiguous and no
+tmux action is attempted.
+
 tmux owns live process persistence. SQLite owns metadata and recoverable
 Start/Fork state. Codex owns session history.
 
@@ -947,6 +954,10 @@ creation effect before a destination Workstream can safely exist.
   never bare `tmux` or `tmux -L`. A native provider retains the private `TMUX`
   environment by design, so a bare `tmux ls` inside it sees at most that one
   Runtime. Spike 0005 accepted this terminal configuration.
+- Finite local control commands (tmux probes/actions, Git, and child WSNav
+  actions) drain stdout and stderr concurrently while retaining only their
+  explicit per-stream bounds. Direct provider attachment is a terminal stream,
+  not captured child output.
 - Private tmux sockets are a namespace and accidental-discovery boundary, not
   a same-user security boundary. Workstream Navigator does not prevent a user
   who knows the socket path from attaching or stopping the Runtime.

@@ -16,6 +16,7 @@ use crate::{
     domain::{OperationId, RuntimeId, WorkstreamId},
     navigator::run_local_navigator,
     presentation::Presentation,
+    process::output_bounded,
     provider::codex::app_server::EphemeralAppServer,
     provider::codex::hooks::drain_and_parse,
     provider::codex::profile::ObserverProfile,
@@ -795,7 +796,7 @@ fn acknowledge(
 
 fn provider_wait() -> Result<(), AppError> {
     loop {
-        std::thread::sleep(std::time::Duration::from_mins(1));
+        std::thread::sleep(std::time::Duration::from_secs(60));
     }
 }
 
@@ -1090,13 +1091,15 @@ fn observe_hook(state_root: Option<PathBuf>) {
     let Ok(expected_birth) = registry.expected_hook_process_birth(runtime_id, &generation) else {
         return;
     };
+    let Ok(Some(record)) = registry.runtime_by_id(runtime_id) else {
+        return;
+    };
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
-    let runtime = PrivateRuntime::new(
-        &tmux,
-        &process_probe,
-        RuntimePaths::for_runtime(root.base(), runtime_id),
-    );
+    let Ok(paths) = RuntimePaths::for_record(root.base(), runtime_id, &record.tmux_session) else {
+        return;
+    };
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
     let Ok(RuntimeProbe::Live {
         pane_pid,
         cwd,
@@ -1163,7 +1166,7 @@ fn attach(
     let runtime = PrivateRuntime::new(
         &tmux,
         &process_probe,
-        RuntimePaths::for_runtime(root.base(), record.runtime_id),
+        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
     );
     let mut command = runtime.attach_command();
     command.stderr(Stdio::null());
@@ -1204,7 +1207,7 @@ fn status(
     let runtime = PrivateRuntime::new(
         &tmux,
         &process_probe,
-        RuntimePaths::for_runtime(root.base(), record.runtime_id),
+        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
     );
     let probe = runtime.probe()?;
     let binding = registry.binding_for_runtime(record.runtime_id)?.is_some();
@@ -1311,12 +1314,9 @@ fn default_state_root() -> PathBuf {
 }
 
 fn git_value(checkout: &Path, arguments: &[&str]) -> Result<String, AppError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(checkout)
-        .args(arguments)
-        .output()
-        .map_err(AppError::Io)?;
+    let mut command = Command::new("git");
+    command.arg("-C").arg(checkout).args(arguments);
+    let output = output_bounded(&mut command, 4096, 4096).map_err(AppError::Process)?;
     if !output.status.success() {
         return Err(AppError::NotGitCheckout);
     }
@@ -1348,6 +1348,8 @@ enum AppError {
     RemoteRuntimeUnavailable,
     #[error("I/O: {0}")]
     Io(std::io::Error),
+    #[error("could not execute bounded local control command")]
+    Process(crate::process::BoundedProcessError),
     #[error("not a usable Git checkout")]
     NotGitCheckout,
     #[error("workstream {0} has no runtime")]

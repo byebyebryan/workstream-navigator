@@ -10,7 +10,10 @@ use std::{
 
 use thiserror::Error;
 
-use crate::domain::RuntimeId;
+use crate::{
+    domain::RuntimeId,
+    process::{BoundedProcessError, output_bounded},
+};
 
 const RUNTIME_DIRECTORY: &str = "run";
 const PROVIDER_WINDOW: &str = "provider";
@@ -26,16 +29,51 @@ pub struct RuntimePaths {
 }
 
 impl RuntimePaths {
-    /// Derives the only private tmux path set allowed for a runtime.
+    /// Derives the only current private tmux path set allowed for a runtime.
+    ///
+    /// The complete opaque runtime identifier is used in every externally
+    /// owned path and session name. An eight-character prefix is insufficient
+    /// for an ownership boundary because two valid UUIDs can share it.
     #[must_use]
     pub fn for_runtime(state_root: &Path, runtime_id: RuntimeId) -> Self {
+        Self::for_identifier(state_root, runtime_id.to_string())
+    }
+
+    /// Reconstructs the exact private paths for one persisted runtime record.
+    ///
+    /// Only the current full-ID session format and the former short-ID format
+    /// are accepted. The latter is read-only compatibility for an existing
+    /// runtime; every newly reserved runtime uses [`Self::for_runtime`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persisted session metadata does not prove which
+    /// private tmux path set this Runtime owns.
+    pub fn for_record(
+        state_root: &Path,
+        runtime_id: RuntimeId,
+        recorded_session: &str,
+    ) -> Result<Self, RuntimeError> {
+        let current = Self::for_runtime(state_root, runtime_id);
+        if recorded_session == current.session_name {
+            return Ok(current);
+        }
+        let legacy = Self::for_identifier(state_root, runtime_id.short());
+        if recorded_session == legacy.session_name {
+            return Ok(legacy);
+        }
+        Err(RuntimeError::RuntimeSessionMismatch)
+    }
+
+    fn for_identifier(state_root: &Path, identifier: impl AsRef<str>) -> Self {
+        let identifier = identifier.as_ref();
         let directory = state_root
             .join(RUNTIME_DIRECTORY)
-            .join(format!("runtime-{}", runtime_id.short()));
+            .join(format!("runtime-{identifier}"));
         Self {
             socket: directory.join("tmux.sock"),
             config: directory.join("tmux.conf"),
-            session_name: format!("wsnav-{}", runtime_id.short()),
+            session_name: format!("wsnav-{identifier}"),
             directory,
         }
     }
@@ -142,12 +180,8 @@ impl TmuxClient for SystemTmux {
         }
         command.arg("-S").arg(&invocation.socket);
         command.args(&invocation.arguments);
-        let output = command
-            .output()
-            .map_err(|source| RuntimeError::TmuxLaunch {
-                executable: self.executable.clone(),
-                source,
-            })?;
+        let output = output_bounded(&mut command, MAX_TMUX_OUTPUT_BYTES, MAX_TMUX_OUTPUT_BYTES)
+            .map_err(RuntimeError::from_bounded_tmux)?;
         response_from_output(output.status, &output.stdout, &output.stderr)
     }
 }
@@ -514,6 +548,8 @@ pub enum RuntimeError {
     InvalidWorkingDirectory(PathBuf),
     #[error("invalid private runtime path {0}")]
     InvalidRuntimePath(PathBuf),
+    #[error("private runtime session identity did not match its persisted record")]
+    RuntimeSessionMismatch,
     #[error("I/O at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -525,11 +561,17 @@ pub enum RuntimeError {
     RuntimeAlreadyOwned(PathBuf),
     #[error("tmux rejected the private runtime action: {0}")]
     TmuxRejected(String),
-    #[error("could not launch tmux executable {executable:?}: {source}")]
-    TmuxLaunch {
-        executable: OsString,
-        source: std::io::Error,
-    },
+    #[error("could not execute bounded private tmux control command")]
+    TmuxOutput(#[source] BoundedProcessError),
+}
+
+impl RuntimeError {
+    fn from_bounded_tmux(source: BoundedProcessError) -> Self {
+        match source {
+            BoundedProcessError::OutputTooLarge => Self::OutputTooLarge,
+            other => Self::TmuxOutput(other),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -590,6 +632,43 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         }
+    }
+
+    #[test]
+    fn private_paths_use_the_complete_runtime_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first =
+            RuntimeId::from(uuid::Uuid::parse_str("01234567-0000-0000-0000-000000000001").unwrap());
+        let second =
+            RuntimeId::from(uuid::Uuid::parse_str("01234567-0000-0000-0000-000000000002").unwrap());
+
+        let first_paths = RuntimePaths::for_runtime(temporary.path(), first);
+        let second_paths = RuntimePaths::for_runtime(temporary.path(), second);
+
+        assert_ne!(first_paths.directory, second_paths.directory);
+        assert_ne!(first_paths.session_name, second_paths.session_name);
+        assert_eq!(first_paths.session_name, format!("wsnav-{first}"));
+        assert!(first_paths.directory.ends_with(format!("runtime-{first}")));
+    }
+
+    #[test]
+    fn persisted_legacy_session_selects_only_the_legacy_private_path() {
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime_id =
+            RuntimeId::from(uuid::Uuid::parse_str("01234567-0000-0000-0000-000000000001").unwrap());
+        let paths = RuntimePaths::for_record(
+            temporary.path(),
+            runtime_id,
+            &format!("wsnav-{}", runtime_id.short()),
+        )
+        .unwrap();
+
+        assert_eq!(paths.session_name, "wsnav-01234567");
+        assert!(paths.directory.ends_with("runtime-01234567"));
+        assert!(matches!(
+            RuntimePaths::for_record(temporary.path(), runtime_id, "wsnav-foreign"),
+            Err(RuntimeError::RuntimeSessionMismatch)
+        ));
     }
 
     #[test]

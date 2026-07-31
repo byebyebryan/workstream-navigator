@@ -69,7 +69,11 @@ pub fn attach(root: &StateRoot, runtime_id: RuntimeId) -> Result<(), RemoteError
     let runtime = PrivateRuntime::new(
         &tmux,
         &process_probe,
-        RuntimePaths::for_runtime(root.base(), runtime_record.runtime_id),
+        RuntimePaths::for_record(
+            root.base(),
+            runtime_record.runtime_id,
+            &runtime_record.tmux_session,
+        )?,
     );
     if !matches!(runtime.probe()?, RuntimeProbe::Live { .. }) {
         return Err(RemoteError::RuntimeUnavailable);
@@ -465,11 +469,11 @@ fn observed_runtime_status(root: &StateRoot, overview: &WorkstreamOverview) -> R
     }
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
-    let runtime = PrivateRuntime::new(
-        &tmux,
-        &process_probe,
-        RuntimePaths::for_runtime(root.base(), record.runtime_id),
-    );
+    let Ok(paths) = RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)
+    else {
+        return RuntimeStatus::Unknown;
+    };
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
     match runtime.probe() {
         Ok(RuntimeProbe::Live { .. }) => record.status,
         Ok(RuntimeProbe::Missing | RuntimeProbe::Unknown { .. }) | Err(_) => RuntimeStatus::Unknown,

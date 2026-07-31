@@ -8,10 +8,11 @@ native terminal UI and workflow intact.
 
 This repository is a clean-slate Rust reboot. D3 provides registered SSH host
 control, cached multi-host navigation, and direct native terminal attachment.
-D4 adds independent Workstreams and settled-prefix native-Codex forks. D5
-closes V1 with runtime recovery, fresh-install/package verification, and
-bounded combined local/remote native-Codex acceptance. It does not preserve
-compatibility with the earlier Python prototype.
+D4 adds independent Workstreams and settled-prefix native-Codex forks. D5 and
+D5.1 close V1 with runtime/operation recovery, fresh-install/package
+verification, remote release diagnostics, bounded control I/O, and combined
+local/remote native-Codex acceptance. It does not preserve compatibility with
+the earlier Python prototype.
 
 The frozen prototype remains available as implementation evidence in
 [agent-switchboard-python-reference][].
@@ -60,6 +61,24 @@ The D3 control-plane implementation has local subprocess parity and fake-SSH
 coverage. It deliberately does not install or update any remote executable.
 Its recorded native-Codex acceptance used user-installed matching builds. See
 [D3 control plane acceptance][D3 acceptance].
+
+## First local project
+
+Setup is an explicit once-per-host native Codex trust action; it does not infer
+or register the current directory. Then register the Git checkout you want
+WSNav to manage explicitly:
+
+```console
+# once on this host; complete Codex's native hook review
+wsnav setup
+
+# from the checkout, or supply another explicit Git checkout path
+wsnav register "$PWD"
+wsnav
+```
+
+An empty navigator repeats the registration command rather than guessing a
+project from the process working directory.
 
 ## Workstreams
 
@@ -150,6 +169,7 @@ provider capability as a pre-implementation design blocker. See [Spike 0001][],
 [D2 acceptance]: docs/acceptance-d2-local-navigator.md
 [D3 acceptance]: docs/acceptance-d3-control-plane.md
 [D5 acceptance]: docs/acceptance-d5-v1-closure.md
+[D5.1 acceptance]: docs/acceptance-d5.1-operational-closure.md
 [Spike 0001]: docs/spikes/0001-tmux-remote-transport.md
 [Spike 0002]: docs/spikes/0002-codex-native-tui.md
 [Spike 0004]: docs/spikes/0004-tmux-runtime-isolation.md

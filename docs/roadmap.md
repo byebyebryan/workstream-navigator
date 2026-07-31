@@ -2,7 +2,7 @@
 
 Date: 2026-07-29
 
-Status: D0 through D5 complete; D5.1 operational closure in progress
+Status: D0 through D5.1 complete
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -34,7 +34,7 @@ This document owns sequencing, exit gates, and progress.
 | D3 | Local and SSH hosts through one protocol | Complete |
 | D4 | Independent and conversation-forked Workstreams | Complete |
 | D5 | Recovery, combined acceptance, and V1 closure | Complete |
-| D5.1 | Operational closure for recovery, release diagnostics, and bounded I/O | In progress |
+| D5.1 | Operational closure for recovery, release diagnostics, and bounded I/O | Complete |
 
 ## D0 - Contract kernel
 
@@ -296,6 +296,11 @@ Exit gate:
 - all repository, package, cleanup, and documentation gates pass.
 
 ## D5.1 - Operational closure
+
+Implementation status: complete. Durable operation recovery, release probing,
+streaming local child-output bounds, full Runtime identities, explicit
+first-run guidance, and declared/CI-enforced MSRV passed the disposable and
+full local repository gates. See the [D5.1 operational closure acceptance](acceptance-d5.1-operational-closure.md).
 
 Close the release-quality gaps found by the post-D5 broad review without
 expanding the approved V1 product.

@@ -1158,7 +1158,7 @@ impl HostRegistry {
             }
             let next = RuntimeRecord {
                 tmux_generation: generation,
-                tmux_session: format!("wsnav-{}", current.runtime_id.short()),
+                tmux_session: format!("wsnav-{}", current.runtime_id),
                 cwd: PathBuf::from(checkout_path),
                 process_birth: None,
                 status: RuntimeStatus::Starting,
@@ -1187,7 +1187,7 @@ impl HostRegistry {
                 runtime_id,
                 workstream_id,
                 tmux_generation: generation,
-                tmux_session: format!("wsnav-{}", runtime_id.short()),
+                tmux_session: format!("wsnav-{runtime_id}"),
                 cwd: PathBuf::from(checkout_path),
                 process_birth: None,
                 status: RuntimeStatus::Starting,
@@ -1259,7 +1259,7 @@ impl HostRegistry {
             .ok_or(StateError::RecoveryUnavailable(workstream_id))?;
         let next = RuntimeRecord {
             tmux_generation: Uuid::new_v4().to_string(),
-            tmux_session: format!("wsnav-{}", current.runtime_id.short()),
+            tmux_session: format!("wsnav-{}", current.runtime_id),
             cwd: PathBuf::from(checkout_path),
             process_birth: None,
             status: RuntimeStatus::Starting,
@@ -2353,7 +2353,7 @@ fn insert_pending_fork_runtime(
 ) -> Result<(), StateError> {
     let runtime_id = RuntimeId::new();
     let runtime_generation = format!("pending-fork-{}", Uuid::new_v4());
-    let tmux_session = format!("wsnav-{}", runtime_id.short());
+    let tmux_session = format!("wsnav-{runtime_id}");
     transaction
         .execute(
             "INSERT INTO runtimes (
@@ -3941,6 +3941,25 @@ mod tests {
             .runtime_for_workstream(workstream_id)
             .unwrap()
             .unwrap()
+    }
+
+    #[test]
+    fn newly_reserved_runtime_records_the_complete_private_session_identity() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+
+        assert_eq!(
+            runtime.tmux_session,
+            format!("wsnav-{}", runtime.runtime_id)
+        );
     }
 
     #[test]

@@ -1,8 +1,8 @@
 # Workstream Navigator V1 Design
 
-Date: 2026-07-28
+Date: 2026-07-31
 
-Status: approved V1 implementation baseline; no compatibility contract
+Status: implemented V1 operator-beta contract; no compatibility contract
 
 ## Product thesis
 
@@ -1047,9 +1047,9 @@ The provider interface should remain small and capability-based. V1 has one
 real implementation. No speculative Claude abstractions or generic
 lowest-common-denominator behavior should shape the Codex implementation.
 
-## Validation gates before production implementation
+## Validation and acceptance evidence
 
-The existing spikes validate transport, native presentation, the shell-only
+The original spikes validate transport, native presentation, the shell-only
 per-Runtime tmux topology, and the automated local two-pane Codex presentation
 path. Terminal presentation is a settled design prerequisite: Spike 0005
 proves the selected retained-TMUX configuration, direct native attachment,
@@ -1060,7 +1060,7 @@ mouse support in an equivalent private-tmux layout. That implementation is
 behavioral evidence only; it is not a Rust dependency or compatibility
 constraint.
 
-Spikes 0006-0008 now settle the remaining provider-facing prerequisites:
+Spikes 0006-0008 settled the remaining provider-facing prerequisites:
 
 - the selected observer profile layers over a disabled base, uses native trust,
   leaves ordinary launches unobserved, drains large unmanaged input, and rejects
@@ -1075,8 +1075,8 @@ Spikes 0006-0008 now settle the remaining provider-facing prerequisites:
   recovered after an unread response without retry, and resumed in an
   independent default-base worktree while both native Workstreams diverge.
 
-No provider capability remains as a pre-implementation design blocker. The
-following are delivery validation rather than reasons to widen the product:
+The implemented checkpoints and their acceptance records corroborate the
+following behavior without widening the product:
 
 1. **Integration lifecycle:** another selected named profile is rejected
    clearly, disabled-hook policy is visible, malformed/racing/unavailable hook
@@ -1085,8 +1085,7 @@ following are delivery validation rather than reasons to widen the product:
 2. **Status transactions and native transitions:** accepted startup/resume
    hooks and the separately proven native `/clear` transition update binding,
    settled-turn, and sticky attention atomically. Native `/new`, `/fork`, and
-   compact remain Codex-owned workflow until their distinct contracts are
-   proven; missed events and races fail closed.
+   compact remain Codex-owned workflow; missed events and races fail closed.
 3. **Cold recovery:** loss of an exact private runtime followed by
    `codex -C <checkout> resume <session-id>` restores the same native history
    and creates one new runtime generation.
@@ -1192,6 +1191,14 @@ Fork action, or replacement provider UI.
   diagnostics.
 - Scroll-aware mouse targeting and bounded cursor-paged snapshots.
 
+### D6 — Source-installed operator-beta closure
+
+- Present-tense product, architecture, and acceptance documentation.
+- Exact-candidate local and SSH operator smoke against matching builds.
+- Sanitized final isolation, cleanup, privacy, and release evidence.
+- Explicit source-installed `0.1.0` posture without an implied public release
+  channel.
+
 ## Settled V1 design decisions
 
 The reconciled design settles these potentially expansive questions:
@@ -1217,9 +1224,9 @@ The reconciled design settles these potentially expansive questions:
 - live TUIs use dedicated process-owned runtimes while App Server access is
   short-lived stdio only; each Runtime has its own bounded private tmux server.
 
-No product-boundary decision remains open before implementation. The validation
-gates may still falsify an assumed provider capability and force a narrower
-workflow, but they do not authorize silently weakening isolation, trust,
+No product-boundary decision remains open for V1. Future implementation or
+provider evidence that contradicts this contract must narrow or reopen the
+affected workflow; it does not authorize silently weakening isolation, trust,
 result-tip preservation, or the no-transcript boundary.
 
 ## Evidence basis

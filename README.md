@@ -6,13 +6,15 @@ native terminal UI and workflow intact.
 
 ## Status
 
-This repository is a clean-slate Rust reboot. D3 provides registered SSH host
-control, cached multi-host navigation, and direct native terminal attachment.
-D4 adds independent Workstreams and settled-prefix native-Codex forks. D5 and
-D5.1 close V1 with runtime/operation recovery, fresh-install/package
-verification, remote release diagnostics, bounded control I/O, and combined
-local/remote native-Codex acceptance. It does not preserve compatibility with
-the earlier Python prototype.
+This repository is the clean-slate Rust implementation. D3 provides registered
+SSH host control, cached multi-host navigation, and direct native terminal
+attachment. D4 adds independent Workstreams and settled-prefix native-Codex
+forks. D5 through D5.2 close the implemented V1 with runtime and operation
+recovery, fresh-install/package verification, remote release diagnostics,
+bounded control I/O, presentation correctness, and combined local/remote
+native-Codex acceptance. D6 records the final source-installed operator-beta
+validation. The Rust implementation does not preserve compatibility with the
+earlier Python prototype.
 
 The frozen prototype remains available as implementation evidence in
 [agent-switchboard-python-reference][].
@@ -45,7 +47,7 @@ keeps the native Codex workflow canonical, uses dedicated tmux runtimes and SSH
 for attachment, and limits Workstream Navigator to hosts, project locations,
 workstreams, status, and conservative worktree operations.
 
-The approved D0-D5 implementation sequence and checkpoint acceptance gates are
+The approved D0-D6 implementation sequence and checkpoint acceptance gates are
 tracked in the [V1 roadmap][].
 
 The accepted local Codex CLI slice and its sanitized native acceptance evidence
@@ -61,6 +63,29 @@ The D3 control-plane implementation has local subprocess parity and fake-SSH
 coverage. It deliberately does not install or update any remote executable.
 Its recorded native-Codex acceptance used user-installed matching builds. See
 [D3 control plane acceptance][D3 acceptance].
+
+Independent and conversation-forked Workstreams are recorded in the [D4
+acceptance][D4 acceptance]. Recovery and the final correctness hardening are
+recorded in the [D5 acceptance][D5 acceptance], [D5.1 acceptance][D5.1
+acceptance], and [D5.2 acceptance][D5.2 acceptance].
+
+## Distribution
+
+V1 is a source-installed operator beta at version `0.1.0`. It has no tagged
+binary release, automatic updater, remote deployment service, or crates.io
+publication. Build the reviewed checkout and install the executable explicitly:
+
+```console
+cargo build --locked --release
+install -m 755 target/release/wsnav ~/.local/bin/wsnav
+```
+
+Use the same reviewed commit on every registered host. Before a stateful remote
+action, verify the release, protocol, and schema contract:
+
+```console
+wsnav host doctor <alias>
+```
 
 ## First local project
 
@@ -157,10 +182,10 @@ change; Workstream Navigator never silently adopts it.
 
 The isolated tmux/SSH transport, native Codex presentation, scoped observer
 profile, ephemeral naming, and running-source settled-fork gates passed. The
-results support the dedicated-TUI plus short-lived-stdio split and leave no
-provider capability as a pre-implementation design blocker. See [Spike 0001][],
-[Spike 0002][], [Spike 0004][], [Spike 0005][], [Spike 0006][], [Spike 0007][],
-[Spike 0008][], [Study 0003][], and the sanitized [fixtures][].
+results support the implemented dedicated-TUI plus short-lived-stdio split and
+its accepted provider contract. See [Spike 0001][], [Spike 0002][], [Spike
+0004][], [Spike 0005][], [Spike 0006][], [Spike 0007][], [Spike 0008][], [Study
+0003][], and the sanitized [fixtures][].
 
 [agent-switchboard-python-reference]: https://github.com/byebyebryan/agent-switchboard-python-reference
 [V1 design]: docs/design.md
@@ -168,8 +193,10 @@ provider capability as a pre-implementation design blocker. See [Spike 0001][],
 [D1 acceptance]: docs/acceptance-d1-local-codex.md
 [D2 acceptance]: docs/acceptance-d2-local-navigator.md
 [D3 acceptance]: docs/acceptance-d3-control-plane.md
+[D4 acceptance]: docs/acceptance-d4-workstreams.md
 [D5 acceptance]: docs/acceptance-d5-v1-closure.md
 [D5.1 acceptance]: docs/acceptance-d5.1-operational-closure.md
+[D5.2 acceptance]: docs/acceptance-d5.2-correctness-closure.md
 [Spike 0001]: docs/spikes/0001-tmux-remote-transport.md
 [Spike 0002]: docs/spikes/0002-codex-native-tui.md
 [Spike 0004]: docs/spikes/0004-tmux-runtime-isolation.md

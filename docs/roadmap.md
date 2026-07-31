@@ -2,7 +2,7 @@
 
 Date: 2026-07-31
 
-Status: D0 through D6.3 complete
+Status: D0 through D6.4 complete
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -40,6 +40,7 @@ This document owns sequencing, exit gates, and progress.
 | D6.1 | Repository identity and cross-host Project grouping polish | Complete |
 | D6.2 | Navigator shortcut-reference polish | Complete |
 | D6.3 | Cross-host activity ordering polish | Complete |
+| D6.4 | Navigator grouping and visual-hierarchy polish | Complete |
 
 ## D0 - Contract kernel
 
@@ -526,6 +527,40 @@ Exit gate:
 
 - a deterministic test proves local and remote rows interleave by recency,
   with stable fallbacks;
+- no host schema, remote protocol, Runtime, or provider contract changes; and
+- formatting, tests, lint, package checks, and `git diff --check` pass.
+
+## D6.4 - Navigator grouping and visual-hierarchy polish
+
+Implementation status: complete. The navigator now has local-only Recent,
+host, and Project views with quiet dual-axis context cues, group-header-safe
+selection, and deterministic terminal coverage. No durable or provider-facing
+behavior changed.
+
+Make multi-host and multi-Project navigation easier to scan without adding a
+dashboard, a new durable preference, or a second control surface. The native
+provider pane remains the primary visual focus.
+
+Scope:
+
+- add local-only `Recent`, `By host`, and `By project` navigator views, cycled
+  with `v`;
+- keep global recency as the default and use first visible activity to order
+  groups and rows within a group;
+- render non-actionable group headers while preserving keyboard selection,
+  same-row activation, and correct mouse targeting for Workstream rows;
+- use quiet, deterministic host-label accents and project-marker accents;
+  preserve neutral row text and reserve green, yellow, and red for lifecycle
+  state; and
+- make the active view discoverable in the border title, footer, and help
+  overlay.
+
+Exit gate:
+
+- deterministic tests cover view cycling, host and Project group construction,
+  neutral header clicks, scrolling mouse targeting, and color-marker rendering;
+- selection and provider attachment continue to refer only to exact host and
+  Workstream identity, never a group header or display label;
 - no host schema, remote protocol, Runtime, or provider contract changes; and
 - formatting, tests, lint, package checks, and `git diff --check` pass.
 

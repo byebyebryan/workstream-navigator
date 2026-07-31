@@ -583,9 +583,11 @@ fn combined_snapshot(
 pub struct NavigatorView {
     snapshot: LocalNavigatorSnapshot,
     selected: usize,
+    view_mode: NavigatorViewMode,
     attached: Option<(String, WorkstreamId)>,
     observed_attachment: Option<(uuid::Uuid, AttachmentPhase)>,
     rendered_offset: usize,
+    rendered_mouse_rows: Vec<(u16, usize)>,
     mouse_click: Option<MouseClickIntent>,
     message: Option<String>,
     help_visible: bool,
@@ -598,15 +600,82 @@ enum MouseClickIntent {
     Row,
 }
 
+/// Local presentation grouping only. It is deliberately not durable state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum NavigatorViewMode {
+    #[default]
+    Recent,
+    Host,
+    Project,
+}
+
+impl NavigatorViewMode {
+    const fn next(self) -> Self {
+        match self {
+            Self::Recent => Self::Host,
+            Self::Host => Self::Project,
+            Self::Project => Self::Recent,
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Recent => "Recent",
+            Self::Host => "By host",
+            Self::Project => "By project",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WorkstreamRowContext {
+    Recent,
+    Host,
+    Project,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NavigatorListEntry {
+    HostHeader {
+        alias: String,
+    },
+    ProjectHeader {
+        project_id: ProjectId,
+        label: String,
+    },
+    Workstream {
+        snapshot_index: usize,
+        context: WorkstreamRowContext,
+    },
+}
+
+impl NavigatorListEntry {
+    const fn height(&self) -> u16 {
+        match self {
+            Self::HostHeader { .. } | Self::ProjectHeader { .. } => 1,
+            Self::Workstream { .. } => 2,
+        }
+    }
+
+    const fn workstream_index(&self) -> Option<usize> {
+        match self {
+            Self::Workstream { snapshot_index, .. } => Some(*snapshot_index),
+            Self::HostHeader { .. } | Self::ProjectHeader { .. } => None,
+        }
+    }
+}
+
 impl NavigatorView {
     #[must_use]
     pub fn new(snapshot: LocalNavigatorSnapshot) -> Self {
         Self {
             snapshot,
             selected: 0,
+            view_mode: NavigatorViewMode::Recent,
             attached: None,
             observed_attachment: None,
             rendered_offset: 0,
+            rendered_mouse_rows: Vec::new(),
             mouse_click: None,
             message: None,
             help_visible: false,
@@ -772,6 +841,14 @@ impl NavigatorView {
         self.help_visible
     }
 
+    fn cycle_view_mode(&mut self) {
+        self.view_mode = self.view_mode.next();
+    }
+
+    const fn view_mode(&self) -> NavigatorViewMode {
+        self.view_mode
+    }
+
     fn advance_animation(&mut self) {
         self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
     }
@@ -781,21 +858,23 @@ impl NavigatorView {
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(3), Constraint::Length(2)])
             .split(frame.area());
-        let items = self
-            .snapshot
-            .workstreams
+        let entries = self.list_entries();
+        let items = entries
             .iter()
-            .enumerate()
-            .map(|(index, row)| row_item(row, index == self.selected, self.spinner_frame))
+            .map(|entry| navigator_list_item(entry, &self.snapshot, self.spinner_frame))
             .collect::<Vec<_>>();
         let mut state = ListState::default();
-        state.select((!items.is_empty()).then_some(self.selected));
+        state.select(
+            entries
+                .iter()
+                .position(|entry| entry.workstream_index() == Some(self.selected)),
+        );
         frame.render_stateful_widget(
             List::new(items)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Workstreams "),
+                        .title(format!(" Workstreams · {} ", self.view_mode().label())),
                 )
                 .highlight_style(
                     Style::default()
@@ -806,10 +885,99 @@ impl NavigatorView {
             &mut state,
         );
         self.rendered_offset = state.offset();
+        self.update_rendered_mouse_rows(&entries, areas[0]);
         let help = self.footer_help();
         frame.render_widget(Paragraph::new(help).style(self.footer_style()), areas[1]);
         if self.help_visible {
             Self::render_help_overlay(frame, areas[0]);
+        }
+    }
+
+    fn list_entries(&self) -> Vec<NavigatorListEntry> {
+        match self.view_mode {
+            NavigatorViewMode::Recent => self
+                .snapshot
+                .workstreams
+                .iter()
+                .enumerate()
+                .map(|(snapshot_index, _)| NavigatorListEntry::Workstream {
+                    snapshot_index,
+                    context: WorkstreamRowContext::Recent,
+                })
+                .collect(),
+            NavigatorViewMode::Host => {
+                let mut groups = Vec::<(String, Vec<usize>)>::new();
+                for (snapshot_index, row) in self.snapshot.workstreams.iter().enumerate() {
+                    if let Some((_, indexes)) = groups
+                        .iter_mut()
+                        .find(|(alias, _)| alias == row.host.alias())
+                    {
+                        indexes.push(snapshot_index);
+                    } else {
+                        groups.push((row.host.alias().to_owned(), vec![snapshot_index]));
+                    }
+                }
+                groups
+                    .into_iter()
+                    .flat_map(|(alias, indexes)| {
+                        std::iter::once(NavigatorListEntry::HostHeader { alias }).chain(
+                            indexes.into_iter().map(|snapshot_index| {
+                                NavigatorListEntry::Workstream {
+                                    snapshot_index,
+                                    context: WorkstreamRowContext::Host,
+                                }
+                            }),
+                        )
+                    })
+                    .collect()
+            }
+            NavigatorViewMode::Project => {
+                let mut groups = Vec::<(ProjectId, String, Vec<usize>)>::new();
+                for (snapshot_index, row) in self.snapshot.workstreams.iter().enumerate() {
+                    if let Some((_, _, indexes)) = groups
+                        .iter_mut()
+                        .find(|(project_id, _, _)| *project_id == row.project_id)
+                    {
+                        indexes.push(snapshot_index);
+                    } else {
+                        groups.push((
+                            row.project_id,
+                            row.project_label.clone(),
+                            vec![snapshot_index],
+                        ));
+                    }
+                }
+                groups
+                    .into_iter()
+                    .flat_map(|(project_id, label, indexes)| {
+                        std::iter::once(NavigatorListEntry::ProjectHeader { project_id, label })
+                            .chain(indexes.into_iter().map(|snapshot_index| {
+                                NavigatorListEntry::Workstream {
+                                    snapshot_index,
+                                    context: WorkstreamRowContext::Project,
+                                }
+                            }))
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    fn update_rendered_mouse_rows(&mut self, entries: &[NavigatorListEntry], area: Rect) {
+        self.rendered_mouse_rows.clear();
+        let content_top = area.y.saturating_add(1);
+        let content_bottom = area.y.saturating_add(area.height.saturating_sub(1));
+        let mut y = content_top;
+        for entry in entries.iter().skip(self.rendered_offset) {
+            if y >= content_bottom {
+                break;
+            }
+            let next_y = y.saturating_add(entry.height()).min(content_bottom);
+            if let Some(snapshot_index) = entry.workstream_index() {
+                self.rendered_mouse_rows
+                    .extend((y..next_y).map(|row_y| (row_y, snapshot_index)));
+            }
+            y = next_y;
         }
     }
 
@@ -837,14 +1005,15 @@ impl NavigatorView {
                 operation_hint.map_or_else(String::new, |hint| format!("  ·  {hint}"))
             );
         }
+        let view_hint = format!("v view: {}  ·  ? help", self.view_mode().label());
         if let Some(operation_hint) = operation_hint {
-            return format!("{operation_hint}  ·  ? help");
+            return format!("{operation_hint}  ·  {view_hint}");
         }
         if self.snapshot.unreachable_hosts.is_empty() {
-            "? help".to_owned()
+            view_hint
         } else {
             format!(
-                "{} unavailable; showing cached state  ·  ? help",
+                "{} unavailable; showing cached state  ·  {view_hint}",
                 self.snapshot.unreachable_hosts.join(", "),
             )
         }
@@ -881,11 +1050,9 @@ impl NavigatorView {
 
     #[must_use]
     pub fn row_from_y(&self, y: u16) -> Option<usize> {
-        // List content starts immediately after the one-line top border. Each
-        // Workstream intentionally has a project line and a native-thread line.
-        y.checked_sub(1)
-            .map(|offset| self.rendered_offset + usize::from(offset / 2))
-            .filter(|row| *row < self.snapshot.workstreams.len())
+        self.rendered_mouse_rows
+            .iter()
+            .find_map(|(row_y, snapshot_index)| (*row_y == y).then_some(*snapshot_index))
     }
 }
 
@@ -919,7 +1086,9 @@ fn help_lines() -> Vec<Line<'static>> {
         ]),
         Line::from(vec![
             Span::styled("Tab", key),
-            Span::raw("         focus the native agent pane"),
+            Span::raw(" focus native agent   "),
+            Span::styled("v", key),
+            Span::raw(" change view"),
         ]),
         Line::raw(""),
         Line::from(Span::styled("Workstreams", heading)),
@@ -951,25 +1120,133 @@ fn help_lines() -> Vec<Line<'static>> {
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-fn row_item(row: &NavigatorWorkstream, _selected: bool, spinner_frame: usize) -> ListItem<'static> {
+fn navigator_list_item(
+    entry: &NavigatorListEntry,
+    snapshot: &LocalNavigatorSnapshot,
+    spinner_frame: usize,
+) -> ListItem<'static> {
+    match entry {
+        NavigatorListEntry::HostHeader { alias } => host_header_item(alias),
+        NavigatorListEntry::ProjectHeader { project_id, label } => {
+            project_header_item(*project_id, label)
+        }
+        NavigatorListEntry::Workstream {
+            snapshot_index,
+            context,
+        } => workstream_item(
+            &snapshot.workstreams[*snapshot_index],
+            *context,
+            spinner_frame,
+        ),
+    }
+}
+
+fn host_header_item(alias: &str) -> ListItem<'static> {
+    ListItem::new(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            alias.to_owned(),
+            Style::default()
+                .fg(host_color(alias))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ]))
+}
+
+fn project_header_item(project_id: ProjectId, label: &str) -> ListItem<'static> {
+    ListItem::new(Line::from(vec![
+        Span::raw("  "),
+        project_marker(project_id),
+        Span::raw(" "),
+        Span::styled(
+            label.to_owned(),
+            Style::default().add_modifier(Modifier::BOLD),
+        ),
+    ]))
+}
+
+fn workstream_item(
+    row: &NavigatorWorkstream,
+    context: WorkstreamRowContext,
+    spinner_frame: usize,
+) -> ListItem<'static> {
     let (indicator, indicator_style) = status_indicator(row, spinner_frame);
-    let project_style = Style::default()
-        .fg(Color::Cyan)
-        .add_modifier(Modifier::BOLD);
     let thread_style = Style::default().fg(Color::White);
     ListItem::new(vec![
-        Line::from(vec![
-            Span::raw("   "),
-            Span::styled(
-                format!("{} · ", row.host.alias()),
-                Style::default()
-                    .fg(Color::LightBlue)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(row.project_label.clone(), project_style),
-        ]),
+        workstream_context_line(row, context),
         Line::from(thread_line(row, indicator, indicator_style, thread_style)),
     ])
+}
+
+fn workstream_context_line(
+    row: &NavigatorWorkstream,
+    context: WorkstreamRowContext,
+) -> Line<'static> {
+    let host = || {
+        Span::styled(
+            row.host.alias().to_owned(),
+            Style::default()
+                .fg(host_color(row.host.alias()))
+                .add_modifier(Modifier::BOLD),
+        )
+    };
+    let project = || {
+        Span::styled(
+            row.project_label.clone(),
+            Style::default().add_modifier(Modifier::BOLD),
+        )
+    };
+    match context {
+        WorkstreamRowContext::Recent => Line::from(vec![
+            Span::raw("   "),
+            host(),
+            Span::styled(" · ", Style::default().fg(Color::Gray)),
+            project_marker(row.project_id),
+            Span::raw(" "),
+            project(),
+        ]),
+        WorkstreamRowContext::Host => Line::from(vec![
+            Span::raw("   "),
+            project_marker(row.project_id),
+            Span::raw(" "),
+            project(),
+        ]),
+        WorkstreamRowContext::Project => Line::from(vec![Span::raw("   "), host()]),
+    }
+}
+
+fn project_marker(project_id: ProjectId) -> Span<'static> {
+    Span::styled("•", Style::default().fg(project_color(project_id)))
+}
+
+fn host_color(alias: &str) -> Color {
+    if alias == "local" {
+        Color::LightBlue
+    } else {
+        stable_color(
+            alias.as_bytes(),
+            &[Color::LightCyan, Color::LightMagenta, Color::Cyan],
+        )
+    }
+}
+
+fn project_color(project_id: ProjectId) -> Color {
+    stable_color(
+        project_id.as_uuid().as_bytes(),
+        &[
+            Color::LightCyan,
+            Color::LightBlue,
+            Color::LightMagenta,
+            Color::Cyan,
+        ],
+    )
+}
+
+fn stable_color(seed: &[u8], palette: &[Color]) -> Color {
+    let hash = seed.iter().fold(0_u64, |hash, byte| {
+        hash.wrapping_mul(31).wrapping_add(u64::from(*byte))
+    });
+    palette[usize::try_from(hash % u64::try_from(palette.len()).unwrap()).unwrap()]
 }
 
 fn thread_line(
@@ -1113,6 +1390,7 @@ pub fn run_local_navigator(
                 Event::Key(key) => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
                     KeyCode::Char('?') => view.toggle_help(),
+                    KeyCode::Char('v') => view.cycle_view_mode(),
                     KeyCode::Down | KeyCode::Char('j') => view.select_next(),
                     KeyCode::Up | KeyCode::Char('k') => view.select_previous(),
                     KeyCode::Tab => {
@@ -1601,7 +1879,7 @@ mod tests {
 
     #[test]
     fn row_mapping_covers_both_lines_of_each_workstream() {
-        let view = NavigatorView::new(LocalNavigatorSnapshot {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: vec![
                 row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle),
                 row(WorkstreamId::new(), NavigatorRuntimeStatus::Parked),
@@ -1609,6 +1887,10 @@ mod tests {
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
+        let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+
+        terminal.draw(|frame| view.render(frame)).unwrap();
+
         assert_eq!(view.row_from_y(0), None);
         assert_eq!(view.row_from_y(1), Some(0));
         assert_eq!(view.row_from_y(2), Some(0));
@@ -1727,14 +2009,17 @@ mod tests {
         assert!(rendered.contains('✓'));
         assert!(!rendered.contains("done"));
         assert!(!rendered.contains("prompt"));
-        let project_cell = terminal
+        let project_marker_cell = terminal
             .backend()
             .buffer()
             .content()
             .iter()
-            .find(|cell| cell.symbol() == "p")
+            .find(|cell| cell.symbol() == "•")
             .unwrap();
-        assert_eq!(project_cell.fg, Color::Cyan);
+        assert_eq!(
+            project_marker_cell.fg,
+            project_color(view.snapshot.workstreams[0].project_id)
+        );
         let host_cell = terminal
             .backend()
             .buffer()
@@ -1791,6 +2076,121 @@ mod tests {
     }
 
     #[test]
+    fn view_mode_cycles_without_changing_the_selected_workstream() {
+        let workstream_id = WorkstreamId::new();
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![row(workstream_id, NavigatorRuntimeStatus::Idle)],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+        });
+
+        assert_eq!(view.view_mode(), NavigatorViewMode::Recent);
+        view.cycle_view_mode();
+        assert_eq!(view.view_mode(), NavigatorViewMode::Host);
+        assert!(view.footer_help().contains("v view: By host"));
+        view.cycle_view_mode();
+        assert_eq!(view.view_mode(), NavigatorViewMode::Project);
+        view.cycle_view_mode();
+
+        assert_eq!(view.view_mode(), NavigatorViewMode::Recent);
+        assert_eq!(
+            view.selected().map(|row| row.workstream_id),
+            Some(workstream_id)
+        );
+    }
+
+    #[test]
+    fn grouped_views_add_non_actionable_headers_and_keep_group_order_recent_first() {
+        let shared_project = ProjectId::new();
+        let other_project = ProjectId::new();
+        let snap_workstream = WorkstreamId::new();
+        let local_shared = WorkstreamId::new();
+        let local_other = WorkstreamId::new();
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![
+                NavigatorWorkstream {
+                    host: NavigatorHost::Remote {
+                        alias: "snap".to_owned(),
+                        reachability: RemoteHostReachability::Reachable,
+                    },
+                    project_id: shared_project,
+                    project_label: "shared".to_owned(),
+                    ..row(snap_workstream, NavigatorRuntimeStatus::Working)
+                },
+                NavigatorWorkstream {
+                    project_id: shared_project,
+                    project_label: "shared".to_owned(),
+                    ..row(local_shared, NavigatorRuntimeStatus::Idle)
+                },
+                NavigatorWorkstream {
+                    project_id: other_project,
+                    project_label: "other".to_owned(),
+                    ..row(local_other, NavigatorRuntimeStatus::Parked)
+                },
+            ],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+        });
+
+        view.cycle_view_mode();
+        assert_eq!(
+            view.list_entries(),
+            vec![
+                NavigatorListEntry::HostHeader {
+                    alias: "snap".to_owned(),
+                },
+                NavigatorListEntry::Workstream {
+                    snapshot_index: 0,
+                    context: WorkstreamRowContext::Host,
+                },
+                NavigatorListEntry::HostHeader {
+                    alias: "local".to_owned(),
+                },
+                NavigatorListEntry::Workstream {
+                    snapshot_index: 1,
+                    context: WorkstreamRowContext::Host,
+                },
+                NavigatorListEntry::Workstream {
+                    snapshot_index: 2,
+                    context: WorkstreamRowContext::Host,
+                },
+            ]
+        );
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+        terminal.draw(|frame| view.render(frame)).unwrap();
+        assert_eq!(view.row_from_y(1), None);
+        assert_eq!(view.row_from_y(2), Some(0));
+        assert_eq!(view.row_from_y(3), Some(0));
+
+        view.cycle_view_mode();
+        assert_eq!(
+            view.list_entries(),
+            vec![
+                NavigatorListEntry::ProjectHeader {
+                    project_id: shared_project,
+                    label: "shared".to_owned(),
+                },
+                NavigatorListEntry::Workstream {
+                    snapshot_index: 0,
+                    context: WorkstreamRowContext::Project,
+                },
+                NavigatorListEntry::Workstream {
+                    snapshot_index: 1,
+                    context: WorkstreamRowContext::Project,
+                },
+                NavigatorListEntry::ProjectHeader {
+                    project_id: other_project,
+                    label: "other".to_owned(),
+                },
+                NavigatorListEntry::Workstream {
+                    snapshot_index: 2,
+                    context: WorkstreamRowContext::Project,
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn renderer_draws_a_navigator_only_shortcut_overlay() {
         let mut terminal = Terminal::new(TestBackend::new(80, 22)).unwrap();
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
@@ -1817,6 +2217,7 @@ mod tests {
         assert!(rendered.contains("Navigation"));
         assert!(rendered.contains("Workstreams"));
         assert!(rendered.contains("click row: open/focus"));
+        assert!(rendered.contains("change view"));
         assert!(rendered.contains("? or Esc closes help"));
         assert!(!rendered.contains("provider pane"));
     }

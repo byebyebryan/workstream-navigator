@@ -2,7 +2,7 @@
 
 Date: 2026-07-29
 
-Status: D0 through D4 complete; D5 in progress
+Status: D0 through D5 complete
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -33,7 +33,7 @@ This document owns sequencing, exit gates, and progress.
 | D2 | Minimal directly interactive navigator | Complete |
 | D3 | Local and SSH hosts through one protocol | Complete |
 | D4 | Independent and conversation-forked Workstreams | Complete |
-| D5 | Recovery, combined acceptance, and V1 closure | Planned |
+| D5 | Recovery, combined acceptance, and V1 closure | Complete |
 
 ## D0 - Contract kernel
 
@@ -279,10 +279,9 @@ Scope:
 - operator and user documentation; and
 - package-content and fresh-host installation verification.
 
-The disposable native-recovery and fresh-install gates now pass. See the
-[D5 acceptance record](acceptance-d5-v1-closure.md). The combined real-Codex
-local/remote operator acceptance remains required before this checkpoint can
-be marked complete.
+The disposable native-recovery and fresh-install gates plus the bounded
+combined real-Codex local/remote operator acceptance pass. See the
+[D5 acceptance record](acceptance-d5-v1-closure.md).
 
 Exit gate:
 

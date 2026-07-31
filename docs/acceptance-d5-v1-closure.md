@@ -2,8 +2,8 @@
 
 Date: 2026-07-30
 
-Status: in progress — disposable recovery and fresh-install gates pass; the
-combined operator-run local/remote acceptance remains the final gate.
+Status: pass — disposable recovery/fresh-install gates and the bounded
+operator-run local/remote native-Codex acceptance passed.
 
 ## Automated recovery and installation evidence
 
@@ -32,16 +32,42 @@ combined operator-run local/remote acceptance remains the final gate.
 `scripts/check` runs both gates, all unit/transport tests, package verification,
 dependency policy checks, script/fixture linting, and diff checks.
 
-## Remaining bounded operator acceptance
+## Recorded combined native-Codex acceptance
 
-The final D5 operator run must use explicit disposable local and remote test
-roots with the installed current Codex version. It will cover a local start and
-settled-prefix fork, remote start and direct native attachment, an intentional
-bounded control disconnect/reconnect, private-runtime loss followed by native
-resume, and observer cleanup. The record will contain only boolean assertions,
-version/fingerprint, isolation comparisons, and cleanup status.
+- The operator created fresh local and remote Git test repositories, started
+  one native Codex Workstream on each host, and completed harmless turns through
+  direct native terminal attachment. Both resulting bindings and result tips
+  were observed without injecting navigator traffic into either provider pane.
+- A local settled source forked to a distinct managed Checkout and native
+  thread. The source remained live with its own unseen result while the
+  destination completed a divergent native turn.
+- The destination's exact private tmux server was deliberately stopped. A
+  status refresh marked only that Workstream `recovery_required`, retaining its
+  prior binding and result attention. `recover` opened the exact native
+  conversation rather than a blank session. After the first resumed native
+  turn, corroborated lifecycle evidence returned it to ordinary attention with
+  recovery attention cleared.
+- The remote test Workstream was parked and cold-resumed through separate
+  short-lived SSH control connections. The operator reattached natively and
+  confirmed its completed history. This proves the normal reconnect path;
+  D3's cached-unavailable behavior remains separately covered by automated and
+  bounded live evidence.
+- All three acceptance Runtimes were parked. Their Checkouts remained clean and
+  retained, as V1 deliberately has no destructive Workstream retirement. The
+  ordinary tmux fingerprints on both hosts were unchanged, and an unrelated
+  pre-existing remote Runtime remained live and unchanged.
+- The regular observer integration was pre-existing and remains in place;
+  removal is intentionally unsafe while unrelated Runtimes exist. Exact
+  observer removal is instead proven by the isolated D5 fresh-install gate.
+  During the run, the remote's stale development binary was found unable to
+  read its existing state schema, so a matching current development binary was
+  retained there rather than leaving the remote control plane broken. No source
+  repository was copied or pushed as part of that operator deployment.
 
-The current automated evidence is intentionally not a claim that this final
-real-Codex combined run has already occurred.
+The committed record contains only booleans, version/fingerprint, isolation
+comparisons, and cleanup status. It excludes provider identifiers, prompts,
+responses, terminal data, paths, process IDs, credentials, and raw provider
+payloads.
 
-See the sanitized [D5 recovery fixture](../spikes/fixtures/d5-local-recovery.json).
+See the sanitized [D5 recovery fixture](../spikes/fixtures/d5-local-recovery.json)
+and [combined native-Codex fixture](../spikes/fixtures/d5-combined-native-codex.json).

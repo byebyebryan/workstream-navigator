@@ -1,0 +1,37 @@
+{
+  "study": "d5-combined-local-remote-native-codex",
+  "provider": {
+    "id": "codex",
+    "version": "0.146.0",
+    "contract_fingerprint": "codex-d5-native-recovery-and-remote-resume-v1"
+  },
+  "status": "pass",
+  "assertions": {
+    "local_and_remote_initial_bindings_corroborated": true,
+    "native_provider_panes_remained_directly_interactive": true,
+    "source_and_destination_result_tips_preserved": true,
+    "settled_prefix_fork_created_distinct_native_thread_and_checkout": true,
+    "fork_destination_completed_a_divergent_native_turn": true,
+    "only_exact_private_runtime_loss_became_recovery_required": true,
+    "known_binding_recovery_reopened_the_exact_native_history": true,
+    "first_resumed_native_turn_cleared_recovery_attention": true,
+    "remote_park_and_cold_resume_used_separate_ssh_control_connections": true,
+    "remote_native_history_reopened_after_cold_resume": true,
+    "ordinary_tmux_unchanged_on_both_hosts": true,
+    "unrelated_remote_runtime_unchanged": true
+  },
+  "cleanup": {
+    "all_acceptance_runtimes_parked": true,
+    "acceptance_checkouts_clean_and_retained": true,
+    "preexisting_observer_integration_preserved": true,
+    "exact_observer_removal_proven_by_isolated_fresh_install_gate": true,
+    "matching_remote_development_binary_retained_after_stale_binary_failed_schema_check": true
+  },
+  "privacy_audit": {
+    "identifiers_committed": false,
+    "prompt_or_result_content_committed": false,
+    "terminal_or_image_data_committed": false,
+    "paths_or_pids_committed": false,
+    "credentials_or_raw_payloads_committed": false
+  }
+}

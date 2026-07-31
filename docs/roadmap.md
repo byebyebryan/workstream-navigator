@@ -2,7 +2,7 @@
 
 Date: 2026-07-31
 
-Status: D0 through D5.2 complete; D6 in progress
+Status: D0 through D6 complete
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -36,7 +36,7 @@ This document owns sequencing, exit gates, and progress.
 | D5 | Recovery, combined acceptance, and V1 closure | Complete |
 | D5.1 | Operational closure for recovery, release diagnostics, and bounded I/O | Complete |
 | D5.2 | Correctness closure for release, identity, recovery, and presentation | Complete |
-| D6 | Source-installed operator-beta closure | In progress |
+| D6 | Source-installed operator-beta closure | Complete |
 
 ## D0 - Contract kernel
 
@@ -381,6 +381,11 @@ Exit gate:
   and `git diff --check` pass.
 
 ## D6 - Source-installed operator-beta closure
+
+Implementation status: complete. Present-tense documentation, the explicit
+source-installed distribution posture, exact-candidate local/SSH release
+parity, clean navigator shutdown, and bounded native operator smoke passed. See
+the [D6 operator-beta acceptance](acceptance-d6-operator-beta.md).
 
 Close the implemented V1 as an operator-ready beta without adding another
 workflow or changing the approved ownership boundaries.

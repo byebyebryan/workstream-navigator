@@ -1240,6 +1240,7 @@ result-tip preservation, or the no-transcript boundary.
 - [Spike 0008: running-source settled-prefix fork](spikes/0008-codex-running-settled-fork.md)
 - [Python Phase 7F terminal evidence](https://github.com/byebyebryan/agent-switchboard-python-reference/blob/main/docs/phase-7f-acceptance.md)
 - [Study 0003: Codex App Server runtime boundary](studies/0003-codex-app-server-runtime-boundary.md)
+- [D6 source-installed operator-beta acceptance](acceptance-d6-operator-beta.md)
 - [Current Codex CLI commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
 - [Current Codex configuration profiles](https://learn.chatgpt.com/docs/config-file/config-advanced#profiles)
 - [Current Codex App Server](https://learn.chatgpt.com/docs/app-server)

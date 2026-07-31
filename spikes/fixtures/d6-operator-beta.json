@@ -1,0 +1,42 @@
+{
+  "study": "d6-source-installed-operator-beta",
+  "provider": {
+    "id": "codex-native-tui",
+    "contract_fingerprint": "wsnav-0.1.0-control-abi-1-protocol-7-schema-4"
+  },
+  "status": "pass",
+  "assertions": {
+    "present_tense_v1_documentation": true,
+    "source_installed_distribution_is_explicit": true,
+    "local_and_ssh_release_artifacts_match": true,
+    "remote_release_probe_is_compatible": true,
+    "observer_path_migration_fails_closed": true,
+    "native_remote_resume_and_attachment_work": true,
+    "result_attention_is_visible_only_in_the_navigator": true,
+    "single_click_focus_works_in_both_directions": true,
+    "park_reopen_preserves_the_native_result_tip": true,
+    "navigator_quit_is_a_clean_outer_attach_exit": true,
+    "disposable_failure_and_retry_gates_pass": true
+  },
+  "isolation": {
+    "ordinary_tmux_mutated": false,
+    "unrelated_managed_runtime_changed": false,
+    "new_workstream_or_checkout_created": false,
+    "acceptance_workstream_parked": true,
+    "observer_profiles_ready": true,
+    "temporary_presentation_removed": true
+  },
+  "distribution": {
+    "version": "0.1.0",
+    "source_installed": true,
+    "tag_or_hosted_binary_published": false,
+    "automatic_remote_deployment_enabled": false
+  },
+  "privacy_audit": {
+    "provider_or_workstream_identifiers_committed": false,
+    "prompt_or_result_content_committed": false,
+    "terminal_data_committed": false,
+    "paths_or_process_ids_committed": false,
+    "credentials_or_raw_payloads_committed": false
+  }
+}

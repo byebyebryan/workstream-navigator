@@ -12,9 +12,9 @@ attachment. D4 adds independent Workstreams and settled-prefix native-Codex
 forks. D5 through D5.2 close the implemented V1 with runtime and operation
 recovery, fresh-install/package verification, remote release diagnostics,
 bounded control I/O, presentation correctness, and combined local/remote
-native-Codex acceptance. D6 records the final source-installed operator-beta
-validation. The Rust implementation does not preserve compatibility with the
-earlier Python prototype.
+native-Codex acceptance. D6 records the final [source-installed operator-beta
+validation][D6 acceptance]. The Rust implementation does not preserve
+compatibility with the earlier Python prototype.
 
 The frozen prototype remains available as implementation evidence in
 [agent-switchboard-python-reference][].
@@ -205,6 +205,7 @@ its accepted provider contract. See [Spike 0001][], [Spike 0002][], [Spike
 [D5 acceptance]: docs/acceptance-d5-v1-closure.md
 [D5.1 acceptance]: docs/acceptance-d5.1-operational-closure.md
 [D5.2 acceptance]: docs/acceptance-d5.2-correctness-closure.md
+[D6 acceptance]: docs/acceptance-d6-operator-beta.md
 [Spike 0001]: docs/spikes/0001-tmux-remote-transport.md
 [Spike 0002]: docs/spikes/0002-codex-native-tui.md
 [Spike 0004]: docs/spikes/0004-tmux-runtime-isolation.md

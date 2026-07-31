@@ -2,7 +2,7 @@
 
 Date: 2026-07-29
 
-Status: D0 through D5 complete
+Status: D0 through D5 complete; D5.1 operational closure in progress
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -34,6 +34,7 @@ This document owns sequencing, exit gates, and progress.
 | D3 | Local and SSH hosts through one protocol | Complete |
 | D4 | Independent and conversation-forked Workstreams | Complete |
 | D5 | Recovery, combined acceptance, and V1 closure | Complete |
+| D5.1 | Operational closure for recovery, release diagnostics, and bounded I/O | In progress |
 
 ## D0 - Contract kernel
 
@@ -293,6 +294,40 @@ Exit gate:
 - no UUIDs, prompts, transcripts, paths, PIDs, credentials, or raw provider
   payloads appear in committed evidence; and
 - all repository, package, cleanup, and documentation gates pass.
+
+## D5.1 - Operational closure
+
+Close the release-quality gaps found by the post-D5 broad review without
+expanding the approved V1 product.
+
+Scope:
+
+- list and recover an exact unresolved Start or Fork CompoundOperation through
+  local CLI, SSH protocol, and navigator visibility;
+- preserve the exact-once Fork marker: recovery may reconcile a marked fork but
+  never issue a second provider `thread/fork` call;
+- stateless remote release probe, safe state-schema incompatibility diagnostic,
+  and manual remote-upgrade documentation;
+- streaming output caps for runtime tmux, presentation tmux, Git, and navigator
+  child commands;
+- full Runtime UUID private paths, an explicit empty navigator registration
+  path, and declared plus CI-tested MSRV; and
+- disposable recovery and compatibility acceptance with no normal Codex,
+  provider, or default-tmux mutation.
+
+Exit gate:
+
+- a simulated client loss after each Start/Fork effect can be recovered from a
+  visible opaque operation ID without its original request key;
+- a stale or missing remote executable is diagnosed before stateful control,
+  while matching hosts continue to work through local-subprocess and SSH
+  protocol paths;
+- every affected child process is output-bounded while it is read, not after it
+  is buffered;
+- first-run guidance requires an explicit checkout registration rather than a
+  guessed current directory;
+- the complete repository gate, package verification, disposable acceptance,
+  and privacy audit pass.
 
 ## Deferred beyond V1
 

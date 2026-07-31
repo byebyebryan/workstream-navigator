@@ -284,6 +284,16 @@ override remains available for a nonstandard installation. It diagnoses missing
 or incompatible binaries but does not copy, bootstrap, or update remote
 executables.
 
+Before a client uses the stateful protocol, it runs a stateless release probe on
+the registered executable. The probe contains only the package version, control
+ABI, protocol version, and host-schema version; it does not open the host state
+or disclose a path, host identity, registry generation, or provider metadata.
+A missing, malformed, or incompatible probe leaves the cached host visible but
+unavailable for actions and tells the operator to install a matching build.
+Normal registration, polling, and mutation repeat that check. This is a manual
+deployment boundary: V1 diagnoses an upgrade requirement and provides a
+runbook, but never copies, bootstraps, or updates a remote executable.
+
 The handshake returns a stable host ID and registry generation. If either
 changes unexpectedly for an existing client registration, the client preserves
 its cached view but disables mutation. V1 does not merge catalogs, adopt
@@ -908,6 +918,24 @@ Result completion and the sticky AttentionState update must commit in one host
 transaction. This directly avoids the Python prototype's split
 result/attention persistence gap.
 
+### Durable operation recovery
+
+An unresolved Start or Fork is visible through an explicit local or remote
+operation list. It exposes only an opaque operation ID, kind, phase, and
+safe-to-display outcome state; request keys, checkout paths, provider IDs, and
+raw operation evidence remain host-private. `recover-operation <id>` reopens
+only that recorded plan. A Start checks its exact Git evidence and may commit
+the already-created Workstream. A Fork with no recorded provider-attempt marker
+may continue to the one permitted fork call; after that marker exists it may
+only reconcile exact provider lineage and can never call `thread/fork` again.
+Zero or multiple candidates remain visible as recovery-required. The navigator
+does not hide an unresolved operation behind a generic Workstream row.
+
+This recovery path is intentionally separate from native Runtime recovery:
+`recover <workstream>` resumes a known Codex thread after a lost private tmux
+Runtime, while `recover-operation <id>` resolves an incomplete external
+creation effect before a destination Workstream can safely exist.
+
 ## Security and privacy
 
 - State roots are user-private; directories use mode `0700` and files use
@@ -1106,6 +1134,20 @@ of each checkpoint.
 Each checkpoint should be reviewable, committed, and accepted separately. No
 checkpoint should install hooks, adopt existing sessions, or mutate ordinary
 tmux/provider state during automated tests.
+
+### D5.1 — Operational closure
+
+- Product-surface recovery for unresolved Start and Fork operations after a
+  client or transport loss.
+- Stateless remote release/schema compatibility probe and manual-upgrade
+  diagnostics.
+- Streaming bounds for every local child-process output path.
+- Explicit empty-state registration guidance, exact private-runtime path
+  identity, and declared/tested MSRV.
+
+D5.1 is hardening within the approved V1 product boundary. It adds no daemon,
+automatic deployment, session adoption, provider mutation beyond the existing
+Fork action, or replacement provider UI.
 
 ## Settled V1 design decisions
 

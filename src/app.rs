@@ -311,7 +311,7 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
             park(root, &mut registry, parse_workstream(&workstream_id)?)
         }
         Commands::Status { workstream_id } => {
-            status(root, &registry, parse_workstream(&workstream_id)?)
+            status(root, &mut registry, parse_workstream(&workstream_id)?)
         }
         Commands::Rename {
             workstream_id,
@@ -1109,12 +1109,16 @@ fn park(
 
 fn status(
     root: &StateRoot,
-    registry: &HostRegistry,
+    registry: &mut HostRegistry,
     workstream_id: WorkstreamId,
 ) -> Result<(), AppError> {
-    let record = registry
-        .runtime_for_workstream(workstream_id)?
+    actions::reconcile_lost_runtimes(root, registry)?;
+    let overview = registry
+        .workstream_overviews()?
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
         .ok_or(AppError::NoRuntime(workstream_id))?;
+    let record = overview.runtime.ok_or(AppError::NoRuntime(workstream_id))?;
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
     let runtime = PrivateRuntime::new(
@@ -1124,7 +1128,8 @@ fn status(
     );
     let probe = runtime.probe()?;
     let binding = registry.binding_for_runtime(record.runtime_id)?.is_some();
-    let attention = registry.attention(workstream_id)?;
+    let attention = overview.attention;
+    println!("workstream: {:?}", overview.lifecycle);
     println!("lifecycle: {:?}", record.status);
     println!("private runtime: {}", runtime_probe_label(&probe));
     println!(
@@ -1134,7 +1139,20 @@ fn status(
     println!(
         "result attention: {}",
         if attention
+            .as_ref()
             .and_then(|value| value.result_unseen_since_revision)
+            .is_some()
+        {
+            "unseen"
+        } else {
+            "none"
+        }
+    );
+    println!(
+        "recovery attention: {}",
+        if attention
+            .as_ref()
+            .and_then(|value| value.recovery_unseen_since_revision)
             .is_some()
         {
             "unseen"

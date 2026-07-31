@@ -475,7 +475,11 @@ pub fn recover(
     );
     match prior.probe()? {
         RuntimeProbe::Live { .. } => return Ok(StartOutcome::AlreadyLive),
-        RuntimeProbe::Missing => {}
+        // The path is derived solely from this persisted Runtime ID. Once its
+        // exact server is conclusively gone, `park` uses that same private
+        // socket and removes only the owned socket/config directory before a
+        // new generation is allowed to claim it.
+        RuntimeProbe::Missing => prior.park()?,
         RuntimeProbe::Unknown { .. } => return Err(ActionError::RuntimeProbeAmbiguous),
     }
     let prior_binding = registry.binding_for_runtime(prior_runtime.runtime_id)?;

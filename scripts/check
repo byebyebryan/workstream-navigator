@@ -52,6 +52,7 @@ for fixture_file in "${fixture_files[@]}"; do
 done
 
 scripts/d4-local-workstream-acceptance.sh
+scripts/d5-local-recovery-acceptance.sh
 
 git diff --check
 git diff --cached --check

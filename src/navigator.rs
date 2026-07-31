@@ -5,6 +5,7 @@
 //! provider payloads.
 
 use std::{
+    cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     io::{self, stdout},
     path::{Path, PathBuf},
@@ -518,6 +519,7 @@ impl RemoteMonitor {
             }
             local.unresolved_operation_count += host.unresolved_operation_count;
         }
+        local.workstreams.sort_by(compare_workstream_activity);
         local
     }
 
@@ -526,6 +528,21 @@ impl RemoteMonitor {
             host.next_poll = Instant::now();
         }
     }
+}
+
+/// Orders the combined client view by the same cross-host activity age it
+/// displays. Per-host activity sequences remain authoritative only inside
+/// their own durable host registry, so they cannot order rows from two hosts.
+fn compare_workstream_activity(
+    left: &NavigatorWorkstream,
+    right: &NavigatorWorkstream,
+) -> Ordering {
+    right
+        .last_activity_at_millis
+        .cmp(&left.last_activity_at_millis)
+        .then_with(|| left.host.alias().cmp(right.host.alias()))
+        .then_with(|| left.project_id.cmp(&right.project_id))
+        .then_with(|| left.workstream_id.cmp(&right.workstream_id))
 }
 
 fn fetch_remote_snapshot(host: &ClientHost) -> Result<crate::protocol::SnapshotResponse, ()> {
@@ -1860,6 +1877,94 @@ mod tests {
         assert!(cached.result_ready);
         assert!(!cached.host.is_reachable());
         assert_eq!(snapshot.unreachable_hosts, vec!["snap"]);
+    }
+
+    #[test]
+    fn combined_snapshot_interleaves_hosts_by_visible_activity_age() {
+        let local_older = WorkstreamId::new();
+        let local_unknown = WorkstreamId::new();
+        let remote_newest = WorkstreamId::new();
+        let remote_middle = WorkstreamId::new();
+        let mut monitor = RemoteMonitor::new();
+        monitor.hosts.insert(
+            "snap".to_owned(),
+            CachedRemoteHost {
+                workstreams: vec![
+                    NavigatorWorkstream {
+                        last_activity_at_millis: Some(3_000),
+                        ..row(remote_middle, NavigatorRuntimeStatus::Idle)
+                    },
+                    NavigatorWorkstream {
+                        last_activity_at_millis: Some(5_000),
+                        ..row(remote_newest, NavigatorRuntimeStatus::Working)
+                    },
+                ],
+                unresolved_operation_count: 0,
+                reachable: true,
+                pending: false,
+                next_poll: Instant::now(),
+                backoff: REMOTE_INITIAL_BACKOFF,
+            },
+        );
+
+        let snapshot = monitor.combine(LocalNavigatorSnapshot {
+            workstreams: vec![
+                NavigatorWorkstream {
+                    last_activity_at_millis: Some(1_000),
+                    ..row(local_older, NavigatorRuntimeStatus::Idle)
+                },
+                row(local_unknown, NavigatorRuntimeStatus::Parked),
+            ],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+        });
+
+        assert_eq!(
+            snapshot
+                .workstreams
+                .iter()
+                .map(|workstream| workstream.workstream_id)
+                .collect::<Vec<_>>(),
+            vec![remote_newest, remote_middle, local_older, local_unknown]
+        );
+    }
+
+    #[test]
+    fn equal_or_unknown_activity_uses_stable_identity_fallbacks() {
+        let local = NavigatorWorkstream {
+            last_activity_at_millis: Some(1_000),
+            ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
+        };
+        let remote = NavigatorWorkstream {
+            host: NavigatorHost::Remote {
+                alias: "snap".to_owned(),
+                reachability: RemoteHostReachability::Reachable,
+            },
+            last_activity_at_millis: Some(1_000),
+            ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
+        };
+        let unknown = NavigatorWorkstream {
+            last_activity_at_millis: None,
+            ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
+        };
+        let remote_unknown = NavigatorWorkstream {
+            host: NavigatorHost::Remote {
+                alias: "snap".to_owned(),
+                reachability: RemoteHostReachability::Reachable,
+            },
+            last_activity_at_millis: None,
+            ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
+        };
+
+        assert_eq!(compare_workstream_activity(&local, &remote), Ordering::Less);
+        assert_eq!(
+            compare_workstream_activity(&local, &unknown),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_workstream_activity(&unknown, &remote_unknown),
+            Ordering::Less
+        );
     }
 
     #[test]

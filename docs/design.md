@@ -591,10 +591,13 @@ authority. Names and computed fallbacks need not be unique.
 
 Navigator rows show the readable host alias, project, current tip name, and a
 relative age from the last observed native conversation activity. Activity
-sequence remains the deterministic ordering key within each host; the optional
-wall-clock value is display-only and survives start, resume, and park. A
-migrated Workstream or one with no observed turn visibly reports `activity
-unknown` until its first prompt submission or settled result.
+sequence remains the deterministic ordering key within each host. In a combined
+client view, rows with a known wall-clock activity time sort newest first, then
+fall back to host, Project, and Workstream identity for a stable order; unknown
+activity sorts last. This presentation-only cross-host ordering does not mutate
+or authorize any host state. The wall-clock value survives start, resume, and
+park. A migrated Workstream or one with no observed turn visibly reports
+`activity unknown` until its first prompt submission or settled result.
 
 Native `/rename` and navigator Rename both update the current Codex thread
 name. The navigator action calls `thread/name/set`; a later bounded metadata

@@ -2,7 +2,7 @@
 
 Date: 2026-07-31
 
-Status: D0 through D6.2 complete
+Status: D0 through D6.3 complete
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -39,6 +39,7 @@ This document owns sequencing, exit gates, and progress.
 | D6 | Source-installed operator-beta closure | Complete |
 | D6.1 | Repository identity and cross-host Project grouping polish | Complete |
 | D6.2 | Navigator shortcut-reference polish | Complete |
+| D6.3 | Cross-host activity ordering polish | Complete |
 
 ## D0 - Contract kernel
 
@@ -501,6 +502,31 @@ Exit gate:
   surface;
 - action keys cannot perform a Workstream operation while the reference is
   visible; and
+- formatting, tests, lint, package checks, and `git diff --check` pass.
+
+## D6.3 - Cross-host activity ordering polish
+
+Implementation status: complete. The combined navigator projection now orders
+known local and remote activity timestamps newest first, then uses stable
+identity fallbacks without changing host or provider authority.
+
+Make the navigator's global row order agree with its visible relative-activity
+labels. This is a client-side presentation correction only; it must not turn a
+remote wall clock into state or action authority.
+
+Scope:
+
+- after combining local and cached remote projections, sort known activity
+  timestamps newest first across hosts;
+- keep unknown activity after known rows; and
+- use stable host, Project, and Workstream identity fallbacks for equal or
+  unknown timestamps.
+
+Exit gate:
+
+- a deterministic test proves local and remote rows interleave by recency,
+  with stable fallbacks;
+- no host schema, remote protocol, Runtime, or provider contract changes; and
 - formatting, tests, lint, package checks, and `git diff --check` pass.
 
 ## Deferred beyond V1

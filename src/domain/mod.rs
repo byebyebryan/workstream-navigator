@@ -105,6 +105,19 @@ pub enum WorkstreamLifecycle {
     RecoveryRequired,
 }
 
+/// The one explicit creation lineage of a Workstream.
+///
+/// This is durable operational metadata, not a task concept and not a
+/// user-facing display name. A native `/clear` changes only the current
+/// conversation tip; it never changes this filesystem/runtime lineage.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkstreamOrigin {
+    External,
+    Independent,
+    Fork,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuntimeStatus {

@@ -2,8 +2,7 @@
 
 Date: 2026-07-29
 
-Status: D0 through D3 complete; D4 implementation in progress (automated
-acceptance complete, native-Codex acceptance pending)
+Status: D0 through D4 complete; D5 planned
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -33,7 +32,7 @@ This document owns sequencing, exit gates, and progress.
 | D1.5 | Reconcile native trust and same-workstream tip transitions | Complete |
 | D2 | Minimal directly interactive navigator | Complete |
 | D3 | Local and SSH hosts through one protocol | Complete |
-| D4 | Independent and conversation-forked Workstreams | In progress — automated local acceptance complete; bounded native-Codex acceptance pending |
+| D4 | Independent and conversation-forked Workstreams | Complete |
 | D5 | Recovery, combined acceptance, and V1 closure | Planned |
 
 ## D0 - Contract kernel
@@ -232,6 +231,11 @@ Exit gate:
 
 Complete the explicit parallel-workstream actions.
 
+Implementation status: complete. The disposable local harness and a bounded
+native-Codex run both passed. See the [D4 Workstream and fork
+acceptance](acceptance-d4-workstreams.md) and its [sanitized
+fixture](../spikes/fixtures/d4-local-codex-workstream-fork.json).
+
 Scope:
 
 - collision-free managed branches and worktrees from one recorded
@@ -253,14 +257,13 @@ Exit gate:
 - dirty, external, shared, mismatched, or ambiguously owned worktrees are
   preserved.
 
-Implementation evidence currently includes a disposable local harness
-(`scripts/d4-local-workstream-acceptance.sh`) and parser/state/transport tests.
-It drives a source with one completed turn followed by an in-progress turn,
-asserts that the provider request names only the completed turn, proves the
-destination worktree contains the recorded base but not source-only files, and
-compares the ordinary tmux fingerprint before and after cleanup. The remaining
-checkpoint gate is an operator-owned native Codex TUI run, including the real
-App Server fork and destination resume.
+The disposable local harness (`scripts/d4-local-workstream-acceptance.sh`) and
+parser/state/transport tests drive a source with one completed turn followed by
+an in-progress turn, assert that the provider request names only the completed
+turn, prove the destination worktree contains the recorded base but not
+source-only files, and compare the ordinary tmux fingerprint before and after
+cleanup. The native run corroborated the same contract against the installed
+Codex App Server and direct provider TUI.
 
 ## D5 - Recovery and V1 acceptance
 

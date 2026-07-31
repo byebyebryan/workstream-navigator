@@ -1,0 +1,36 @@
+{
+  "study": "d4-local-native-codex-workstream-fork",
+  "provider": {
+    "id": "codex",
+    "version": "0.146.0",
+    "contract_fingerprint": "codex-d4-settled-prefix-native-fork-v1"
+  },
+  "status": "pass",
+  "assertions": {
+    "source_initial_binding_corroborated": true,
+    "source_result_tip_preserved": true,
+    "idle_source_fork_created_distinct_thread_and_checkout": true,
+    "destination_native_resume_was_directly_interactive": true,
+    "destination_turn_diverged_from_source": true,
+    "running_source_fork_used_recorded_settled_prefix": true,
+    "running_source_continued_and_advanced_after_fork": true,
+    "managed_checkouts_started_at_recorded_base": true,
+    "managed_checkouts_were_clean": true,
+    "ordinary_tmux_unchanged": true,
+    "all_acceptance_runtimes_parked": true,
+    "unavailable_optional_mcp_did_not_block_lifecycle_or_fork": true
+  },
+  "retention": {
+    "existing_observer_integration_reused": true,
+    "observer_profile_not_modified_by_acceptance": true,
+    "managed_workstreams_and_clean_worktrees_retained": true,
+    "destructive_retirement_not_attempted": true
+  },
+  "privacy_audit": {
+    "identifiers_committed": false,
+    "prompt_or_result_content_committed": false,
+    "terminal_or_image_data_committed": false,
+    "paths_or_pids_committed": false,
+    "credentials_or_raw_payloads_committed": false
+  }
+}

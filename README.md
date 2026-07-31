@@ -7,11 +7,11 @@ native terminal UI and workflow intact.
 ## Status
 
 This repository is a clean-slate Rust reboot. D3 provides registered SSH host
-control, cached multi-host navigation, and direct native terminal attachment;
-its bounded local/remote Codex acceptance passed. D4 now has disposable
-automated coverage for independent Workstreams and settled-prefix forks. Its
-real native-Codex fork acceptance and V1 recovery closure remain roadmap work.
-It does not preserve compatibility with the earlier Python prototype.
+control, cached multi-host navigation, and direct native terminal attachment.
+D4 adds independent Workstreams and settled-prefix native-Codex forks; both
+the disposable harness and bounded real-Codex acceptance passed. D5 recovery
+and V1 closure remain roadmap work. It does not preserve compatibility with the
+earlier Python prototype.
 
 The frozen prototype remains available as implementation evidence in
 [agent-switchboard-python-reference][].

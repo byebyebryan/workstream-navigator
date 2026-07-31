@@ -1,0 +1,32 @@
+{
+  "study": "d5.2-correctness-closure",
+  "provider": {
+    "id": "codex-control-plane",
+    "contract_fingerprint": "wsnav-d5.2-control-abi-1-protocol-7-schema-4"
+  },
+  "status": "pass",
+  "assertions": {
+    "declared_msrv_matches_locked_graph_and_passes_ci": true,
+    "project_location_label_survives_managed_checkout_creation": true,
+    "ambiguous_tmux_failure_remains_unknown": true,
+    "provider_launch_authority_precedes_session_start": true,
+    "attachment_outcome_is_reported_outside_provider_pane": true,
+    "same_row_attachment_retry_is_available": true,
+    "finite_control_process_groups_are_terminated_at_deadline": true,
+    "mouse_target_includes_rendered_scroll_offset": true,
+    "multi_page_snapshot_is_ordered_bounded_and_complete": true,
+    "matching_ssh_host_reports_release_compatibility": true
+  },
+  "isolation": {
+    "ordinary_tmux_mutated": false,
+    "ordinary_codex_or_hooks_mutated": false,
+    "temporary_state_removed": true
+  },
+  "privacy_audit": {
+    "identifiers_committed": false,
+    "prompt_or_result_content_committed": false,
+    "terminal_or_image_data_committed": false,
+    "paths_or_pids_committed": false,
+    "credentials_or_raw_payloads_committed": false
+  }
+}

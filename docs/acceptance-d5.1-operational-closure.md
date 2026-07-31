@@ -29,10 +29,11 @@ touching ordinary Codex state or the user's tmux server.
 - The empty navigator and README require `wsnav register
   /path/to/git-checkout`; setup remains a separate host-level native trust
   action and no current-working-directory heuristic was added.
-- `Cargo.toml` declares Rust 1.85, and CI is configured to execute the full
-  target/feature test matrix with that exact toolchain. The local host currently
-  has a newer distro-managed compiler, so the 1.85 execution is deliberately
-  left to that pinned CI job rather than an unpinned local download.
+- D5.1 initially declared Rust 1.85 and configured a pinned CI job, but the
+  later post-checkpoint review found that the locked Ratatui graph required
+  Rust 1.88. That contradiction reopened V1 closure and is superseded by the
+  passing Rust 1.88 evidence in
+  [D5.2](acceptance-d5.2-correctness-closure.md).
 
 `scripts/check` runs the new disposable probe/output gate, existing fake-Codex
 runtime recovery, fresh package install, all tests, Cargo Deny, shell lint,

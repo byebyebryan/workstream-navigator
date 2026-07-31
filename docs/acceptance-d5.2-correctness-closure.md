@@ -1,0 +1,52 @@
+# D5.2 Correctness Closure Acceptance
+
+Date: 2026-07-31
+
+Status: pass — the reopened release, identity, recovery, presentation, and
+boundedness gates passed without changing the approved V1 workflow.
+
+## Evidence
+
+- `Cargo.toml` and CI declare Rust 1.88. Every locked dependency that declares
+  an MSRV is compatible with 1.88, and the exact pinned Rust 1.88 CI test job
+  passed. The SQLite stack is intentionally pinned to `rusqlite 0.39` because
+  the newer transitive build script used a language feature unavailable at the
+  declared MSRV despite not declaring that incompatibility.
+- Local and remote projections derive their project labels from the registered
+  ProjectLocation repository. Managed independent and forked checkout names no
+  longer replace that stable project identity.
+- A failed private `tmux has-session` probe is `missing` only when the socket or
+  bounded diagnostic conclusively proves server absence. Other failures remain
+  `unknown` and cannot authorize recovery cleanup.
+- A silent one-shot launch barrier records the exact pane process birth before
+  replacing itself with Codex through `exec`. The D4 fake provider had exposed
+  an immediate-`SessionStart` race; the same disposable fork acceptance now
+  passes with authority established before the provider can emit hooks.
+- Each provider-pane attachment has one ephemeral mode-`0600` status record.
+  Pending, running, completed, failed, stale, and dead-helper paths are
+  navigator-observable without writing management text into the provider pane.
+  A terminal outcome clears attachment state and permits Enter or a click on
+  the same row to retry.
+- Finite tmux, Git, capability, local child, SSH control, and protocol commands
+  have retained-output bounds plus wall deadlines. Unix tests launch a
+  background child and prove the complete isolated process group is terminated
+  at timeout.
+- Ratatui's rendered list offset is retained after each draw. Mouse tests scroll
+  beyond the first visible rows and select the exact two-line Workstream item
+  under the pointer.
+- Host protocol version 7 returns fixed-size snapshot pages with advancing
+  cursors. The client rejects replayed identities, inconsistent pages, and
+  excessive page counts. A local-subprocess integration creates 33 retained
+  Workstreams and assembles both bounded pages without truncation.
+- The local and `snap` executables were rebuilt from the same checkpoint.
+  Stateless release probing reports protocol 7 and host schema 4, and the
+  registered SSH host completes its compatibility check and bounded snapshot.
+
+`scripts/check` passes 158 tests, formatting, lint, package verification, Cargo
+Deny policy, shell/Python checks, the D4 fork harness, D5 native recovery,
+fresh-install acceptance, D5.1 operational closure, and `git diff --check`.
+
+The [sanitized D5.2 fixture](../spikes/fixtures/d5.2-correctness-closure.json)
+contains only fixed capability, isolation, cleanup, and privacy assertions. It
+contains no provider identifiers, Workstream IDs, prompts, results, terminal
+data, paths, process IDs, credentials, or raw payloads.

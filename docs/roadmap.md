@@ -2,7 +2,7 @@
 
 Date: 2026-07-29
 
-Status: D0 through D5.1 complete; D5.2 in progress
+Status: D0 through D5.2 complete
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -35,7 +35,7 @@ This document owns sequencing, exit gates, and progress.
 | D4 | Independent and conversation-forked Workstreams | Complete |
 | D5 | Recovery, combined acceptance, and V1 closure | Complete |
 | D5.1 | Operational closure for recovery, release diagnostics, and bounded I/O | Complete |
-| D5.2 | Correctness closure for release, identity, recovery, and presentation | In progress |
+| D5.2 | Correctness closure for release, identity, recovery, and presentation | Complete |
 
 ## D0 - Contract kernel
 
@@ -336,6 +336,13 @@ Exit gate:
   and privacy audit pass.
 
 ## D5.2 - Correctness closure
+
+Implementation status: complete. The declared Rust 1.88 toolchain now matches
+the locked production graph and passes its pinned CI job. Stable project
+labels, fail-closed tmux probes, authority-before-provider launch, observable
+attachment outcomes, process-group deadlines, scrolled mouse targeting, and
+cursor-paged snapshots passed the full local and disposable gates. See the
+[D5.2 correctness closure acceptance](acceptance-d5.2-correctness-closure.md).
 
 Reopen V1 closure for the concrete contradictions found by the post-D5.1
 project-wide review. This is hardening of the approved product, not a new

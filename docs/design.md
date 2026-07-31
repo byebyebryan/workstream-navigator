@@ -179,6 +179,12 @@ TUI behavior without building a PTY server or terminal emulator.
 The dedicated tmux status line stays disabled because it consumes a row from
 the provider surface. Navigation and status live in the navigator pane.
 
+The navigator keeps its persistent footer compact. `?` opens a centered
+shortcut reference rendered only within the Ratatui navigator pane; `?`, `Esc`,
+or `q` closes it. This is not a tmux popup, window, or provider overlay. While
+the reference is visible, all other navigator keyboard and mouse actions are
+inert, so opening help cannot accidentally activate or mutate a Workstream.
+
 Switching workstreams replaces only the provider pane's attachment helper. It
 does not stop, restart, type into, or resize an inactive provider process beyond
 the normal detach/attach terminal negotiation.

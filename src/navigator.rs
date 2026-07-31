@@ -25,10 +25,10 @@ use crossterm::{
 use ratatui::{
     Frame, Terminal,
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout},
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use thiserror::Error;
 
@@ -571,6 +571,7 @@ pub struct NavigatorView {
     rendered_offset: usize,
     mouse_click: Option<MouseClickIntent>,
     message: Option<String>,
+    help_visible: bool,
     spinner_frame: usize,
 }
 
@@ -591,6 +592,7 @@ impl NavigatorView {
             rendered_offset: 0,
             mouse_click: None,
             message: None,
+            help_visible: false,
             spinner_frame: 0,
         }
     }
@@ -741,6 +743,18 @@ impl NavigatorView {
         self.message = None;
     }
 
+    fn toggle_help(&mut self) {
+        self.help_visible = !self.help_visible;
+    }
+
+    fn dismiss_help(&mut self) {
+        self.help_visible = false;
+    }
+
+    const fn help_visible(&self) -> bool {
+        self.help_visible
+    }
+
     fn advance_animation(&mut self) {
         self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
     }
@@ -776,19 +790,22 @@ impl NavigatorView {
         );
         self.rendered_offset = state.offset();
         let help = self.footer_help();
-        frame.render_widget(
-            Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
-            areas[1],
-        );
+        frame.render_widget(Paragraph::new(help).style(self.footer_style()), areas[1]);
+        if self.help_visible {
+            Self::render_help_overlay(frame, areas[0]);
+        }
     }
 
     fn footer_help(&self) -> String {
+        if self.help_visible {
+            return "? or Esc closes help".to_owned();
+        }
         if let Some(message) = &self.message {
             return message.clone();
         }
         let operation_hint = (self.snapshot.unresolved_operation_count > 0).then(|| {
             format!(
-                "  ! {} operation{} needs recovery; use wsnav operations",
+                "! {} operation{} needs recovery; use wsnav operations",
                 self.snapshot.unresolved_operation_count,
                 if self.snapshot.unresolved_operation_count == 1 {
                     ""
@@ -799,22 +816,50 @@ impl NavigatorView {
         });
         if self.snapshot.workstreams.is_empty() {
             return format!(
-                "No Workstreams yet; run wsnav register /path/to/git-checkout{}",
-                operation_hint.unwrap_or_default()
+                "No Workstreams yet; run wsnav register /path/to/git-checkout  ·  ? help{}",
+                operation_hint.map_or_else(String::new, |hint| format!("  ·  {hint}"))
             );
         }
+        if let Some(operation_hint) = operation_hint {
+            return format!("{operation_hint}  ·  ? help");
+        }
         if self.snapshot.unreachable_hosts.is_empty() {
-            format!(
-                "↑↓ select  Enter open/start/recover  n new  f fork  a acknowledge  p park  q close{}",
-                operation_hint.unwrap_or_default()
-            )
+            "? help".to_owned()
         } else {
             format!(
-                "{} unavailable; showing cached state  ↑↓ select  Enter open/start/recover  n new  f fork  q close{}",
+                "{} unavailable; showing cached state  ·  ? help",
                 self.snapshot.unreachable_hosts.join(", "),
-                operation_hint.unwrap_or_default(),
             )
         }
+    }
+
+    fn footer_style(&self) -> Style {
+        if self.help_visible {
+            Style::default().fg(Color::Cyan)
+        } else if self.message.is_some()
+            || self.snapshot.unresolved_operation_count > 0
+            || !self.snapshot.unreachable_hosts.is_empty()
+        {
+            Style::default().fg(Color::Yellow)
+        } else {
+            Style::default().fg(Color::Gray)
+        }
+    }
+
+    fn render_help_overlay(frame: &mut Frame<'_>, area: Rect) {
+        let overlay = centered_help_area(area);
+        frame.render_widget(Clear, overlay);
+        frame.render_widget(
+            Paragraph::new(help_lines())
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Keyboard shortcuts ")
+                        .border_style(Style::default().fg(Color::Cyan)),
+                )
+                .wrap(Wrap { trim: true }),
+            overlay,
+        );
     }
 
     #[must_use]
@@ -825,6 +870,66 @@ impl NavigatorView {
             .map(|offset| self.rendered_offset + usize::from(offset / 2))
             .filter(|row| *row < self.snapshot.workstreams.len())
     }
+}
+
+fn centered_help_area(area: Rect) -> Rect {
+    const MAX_WIDTH: u16 = 52;
+    const MAX_HEIGHT: u16 = 16;
+    let width = area.width.saturating_sub(2).min(MAX_WIDTH);
+    let height = area.height.saturating_sub(2).min(MAX_HEIGHT);
+    Rect::new(
+        area.x + area.width.saturating_sub(width) / 2,
+        area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    )
+}
+
+fn help_lines() -> Vec<Line<'static>> {
+    let heading = Style::default()
+        .fg(Color::Cyan)
+        .add_modifier(Modifier::BOLD);
+    let key = Style::default().fg(Color::Yellow);
+    vec![
+        Line::from(Span::styled("Navigation", heading)),
+        Line::from(vec![
+            Span::styled("↑/↓ or j/k", key),
+            Span::raw("  select a Workstream"),
+        ]),
+        Line::from(vec![
+            Span::styled("Enter", key),
+            Span::raw("       open, start, or recover"),
+        ]),
+        Line::from(vec![
+            Span::styled("Tab", key),
+            Span::raw("         focus the native agent pane"),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled("Workstreams", heading)),
+        Line::from(vec![
+            Span::styled("n", key),
+            Span::raw(" new Workstream     "),
+            Span::styled("f", key),
+            Span::raw(" fork at last settled turn"),
+        ]),
+        Line::from(vec![
+            Span::styled("p", key),
+            Span::raw(" park               "),
+            Span::styled("a", key),
+            Span::raw(" acknowledge attention"),
+        ]),
+        Line::raw(""),
+        Line::from(Span::styled("Mouse", heading)),
+        Line::raw("click row: open/focus   scroll: select"),
+        Line::raw("click empty navigator space: focus navigator"),
+        Line::raw(""),
+        Line::from(vec![
+            Span::styled("? / Esc", key),
+            Span::raw(" close help; then "),
+            Span::styled("q", key),
+            Span::raw(" close navigator"),
+        ]),
+    ]
 }
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -982,8 +1087,15 @@ pub fn run_local_navigator(
         let timeout = Duration::from_millis(100);
         if event::poll(timeout)? {
             match event::read()? {
+                Event::Key(key) if view.help_visible() => match key.code {
+                    KeyCode::Char('?' | 'q') | KeyCode::Esc => {
+                        view.dismiss_help();
+                    }
+                    _ => {}
+                },
                 Event::Key(key) => match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
+                    KeyCode::Char('?') => view.toggle_help(),
                     KeyCode::Down | KeyCode::Char('j') => view.select_next(),
                     KeyCode::Up | KeyCode::Char('k') => view.select_previous(),
                     KeyCode::Tab => {
@@ -1016,7 +1128,7 @@ pub fn run_local_navigator(
                     }
                     _ => {}
                 },
-                Event::Mouse(mouse) => match mouse.kind {
+                Event::Mouse(mouse) if !view.help_visible() => match mouse.kind {
                     MouseEventKind::ScrollDown => view.select_next(),
                     MouseEventKind::ScrollUp => view.select_previous(),
                     MouseEventKind::Down(MouseButton::Left) => {
@@ -1635,6 +1747,7 @@ mod tests {
 
         assert!(rendered.contains("operation needs recovery"));
         assert!(rendered.contains("wsnav operations"));
+        assert!(rendered.contains("? help"));
     }
 
     #[test]
@@ -1643,8 +1756,52 @@ mod tests {
 
         assert_eq!(
             view.footer_help(),
-            "No Workstreams yet; run wsnav register /path/to/git-checkout"
+            "No Workstreams yet; run wsnav register /path/to/git-checkout  ·  ? help"
         );
+    }
+
+    #[test]
+    fn help_toggle_is_navigator_local_state() {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
+
+        assert!(!view.help_visible());
+        view.toggle_help();
+        assert!(view.help_visible());
+        assert_eq!(view.footer_help(), "? or Esc closes help");
+
+        view.dismiss_help();
+        assert!(!view.help_visible());
+    }
+
+    #[test]
+    fn renderer_draws_a_navigator_only_shortcut_overlay() {
+        let mut terminal = Terminal::new(TestBackend::new(80, 22)).unwrap();
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![NavigatorWorkstream {
+                project_label: "project".to_owned(),
+                display_name: "native thread".to_owned(),
+                ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
+            }],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+        });
+        view.toggle_help();
+
+        terminal.draw(|frame| view.render(frame)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(rendered.contains("Keyboard shortcuts"));
+        assert!(rendered.contains("Navigation"));
+        assert!(rendered.contains("Workstreams"));
+        assert!(rendered.contains("click row: open/focus"));
+        assert!(rendered.contains("? or Esc closes help"));
+        assert!(!rendered.contains("provider pane"));
     }
 
     #[test]

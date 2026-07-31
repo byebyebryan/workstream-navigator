@@ -2,7 +2,7 @@
 
 Date: 2026-07-31
 
-Status: D0 through D6.1 complete
+Status: D0 through D6.2 complete
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -38,6 +38,7 @@ This document owns sequencing, exit gates, and progress.
 | D5.2 | Correctness closure for release, identity, recovery, and presentation | Complete |
 | D6 | Source-installed operator-beta closure | Complete |
 | D6.1 | Repository identity and cross-host Project grouping polish | Complete |
+| D6.2 | Navigator shortcut-reference polish | Complete |
 
 ## D0 - Contract kernel
 
@@ -469,6 +470,38 @@ Exit gate:
   packaging, and `git diff --check` pass; and
 - matching local and remote builds remain required after the protocol/schema
   revision.
+
+## D6.2 - Navigator shortcut-reference polish
+
+Implementation status: complete. The navigator keeps a compact footer and
+renders its complete shortcut reference only within its own Ratatui pane. The
+full automated repository gate passed without changing any Runtime, provider,
+or presentation-tmux ownership boundary.
+
+Polish the existing navigator without adding a workflow, new durable state, or
+another terminal surface. The full control reference must be easy to discover
+without consuming the small navigator pane during ordinary work.
+
+Scope:
+
+- replace the long persistent shortcut sentence with a compact `? help` footer
+  while retaining registration, recovery, and unavailable-host warnings;
+- render a centered shortcut reference only inside the navigator's Ratatui
+  pane, never as a tmux popup/window or inside the provider pane;
+- make the overlay a local modal: `?`, `Esc`, and `q` dismiss it, while its
+  remaining keyboard and mouse inputs cannot activate or mutate a Workstream;
+  and
+- cover footer priority, overlay rendering, and local modal state with
+  deterministic terminal tests.
+
+Exit gate:
+
+- help is discoverable in normal, empty, unavailable, and recovery states;
+- it never writes to, resizes, replaces, or overlays the native provider
+  surface;
+- action keys cannot perform a Workstream operation while the reference is
+  visible; and
+- formatting, tests, lint, package checks, and `git diff --check` pass.
 
 ## Deferred beyond V1
 

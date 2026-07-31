@@ -15,7 +15,8 @@ bounded control I/O, presentation correctness, and combined local/remote
 native-Codex acceptance. D6 records the final [source-installed operator-beta
 validation][D6 acceptance], and D6.1 adds accepted linked-worktree identity and
 cross-host Project grouping polish, documented in the [D6.1 project-identity
-acceptance][D6.1 acceptance]. The Rust implementation does not preserve
+acceptance][D6.1 acceptance]. D6.2 makes navigator controls discoverable
+without adding another terminal surface. The Rust implementation does not preserve
 compatibility with the earlier Python prototype.
 
 The frozen prototype remains available as implementation evidence in
@@ -49,7 +50,7 @@ keeps the native Codex workflow canonical, uses dedicated tmux runtimes and SSH
 for attachment, and limits Workstream Navigator to hosts, project locations,
 workstreams, status, and conservative worktree operations.
 
-The approved D0-D6.1 implementation sequence and checkpoint acceptance gates are
+The approved D0-D6.2 implementation sequence and checkpoint acceptance gates are
 tracked in the [V1 roadmap][].
 
 The accepted local Codex CLI slice and its sanitized native acceptance evidence
@@ -118,6 +119,10 @@ checkout, an externally created linked worktree, or a directory below either.
 WSNav normalizes the selected checkout root separately from the repository's
 primary worktree, so the selected Workstream keeps its own filesystem while
 later managed Workstreams remain repository siblings.
+
+The navigator footer stays compact during ordinary work. Press `?` for its
+keyboard and mouse reference; this opens only inside the navigator pane, and
+`?`, `Esc`, or `q` closes it. It never replaces or covers the native Codex pane.
 
 ## Workstreams
 

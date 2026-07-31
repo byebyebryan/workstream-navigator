@@ -87,6 +87,14 @@ action, verify the release, protocol, and schema contract:
 wsnav host doctor <alias>
 ```
 
+The observer profile owns its exact hook executable path. On a fresh host,
+install the final executable before running `wsnav setup`. If an existing
+development install moves from a build-tree symlink to the stable installed
+path, first park every managed Workstream on that host, install the new binary,
+then run `wsnav update-observer` followed by `wsnav setup` and complete Codex's
+native hook review again. Profile updates deliberately refuse to run while a
+managed Runtime is live.
+
 ## First local project
 
 Setup is an explicit once-per-host native Codex trust action; it does not infer

@@ -232,12 +232,15 @@ impl Presentation {
             .status()
             .map_err(PresentationError::Io)?;
         if status.success() {
-            Ok(())
-        } else {
-            Err(PresentationError::TmuxRejected(
-                "presentation attach failed".to_owned(),
-            ))
+            return Ok(());
         }
+        if stopped_owned_presentation(self.is_live()?) {
+            self.close()?;
+            return Ok(());
+        }
+        Err(PresentationError::TmuxRejected(
+            "presentation attach failed".to_owned(),
+        ))
     }
 
     /// Replaces only the outer provider attachment helper. The managed Codex
@@ -705,6 +708,10 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<(), PresentationError> {
     Ok(())
 }
 
+fn stopped_owned_presentation(presentation_live: bool) -> bool {
+    !presentation_live
+}
+
 /// Presentation ownership failures; no provider content is retained in their
 /// diagnostics.
 #[derive(Debug, Error)]
@@ -739,6 +746,16 @@ impl PresentationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_outer_attach_accepts_a_stopped_owned_presentation() {
+        assert!(stopped_owned_presentation(false));
+    }
+
+    #[test]
+    fn failed_outer_attach_rejects_a_live_owned_presentation() {
+        assert!(!stopped_owned_presentation(true));
+    }
 
     #[test]
     fn presentation_config_selects_the_clicked_pane_on_mouse_release() {

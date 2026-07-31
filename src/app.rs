@@ -92,6 +92,8 @@ enum Commands {
     ForkWorkstream { source_workstream_id: String },
     /// Start native Codex in a private tmux server for one registered workstream.
     Start { workstream_id: String },
+    /// Recover a lost private Runtime through Codex's native resume flow.
+    Recover { workstream_id: String },
     /// Attach this terminal directly to a live native Codex runtime.
     Attach { workstream_id: String },
     /// Park a runtime without deleting its checkout or Codex session history.
@@ -162,6 +164,12 @@ enum HostCommands {
     Snapshot { alias: String },
     /// Start or cold-resume one remote Workstream at an observed revision.
     Start {
+        alias: String,
+        workstream_id: String,
+        revision: i64,
+    },
+    /// Recover one remote Workstream through its native Codex resume flow.
+    Recover {
         alias: String,
         workstream_id: String,
         revision: i64,
@@ -293,6 +301,9 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
         Commands::Start { workstream_id } => {
             start(root, &mut registry, parse_workstream(&workstream_id)?)
         }
+        Commands::Recover { workstream_id } => {
+            recover(root, &mut registry, parse_workstream(&workstream_id)?)
+        }
         Commands::Attach { workstream_id } => {
             attach(root, &registry, parse_workstream(&workstream_id)?)
         }
@@ -362,6 +373,11 @@ fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError>
             workstream_id,
             revision,
         } => start_remote_workstream(&catalog, &alias, &workstream_id, revision),
+        HostCommands::Recover {
+            alias,
+            workstream_id,
+            revision,
+        } => recover_remote_workstream(&catalog, &alias, &workstream_id, revision),
         HostCommands::Park {
             alias,
             workstream_id,
@@ -487,6 +503,24 @@ fn start_remote_workstream(
         },
     )?;
     println!("started remote workstream {workstream_id}");
+    Ok(())
+}
+
+fn recover_remote_workstream(
+    catalog: &ClientCatalog,
+    alias: &str,
+    workstream_id: &str,
+    revision: i64,
+) -> Result<(), AppError> {
+    apply_remote_action(
+        catalog,
+        alias,
+        crate::protocol::HostAction::Recover {
+            workstream_id: parse_workstream(workstream_id)?,
+            expected_revision: revision,
+        },
+    )?;
+    println!("recovering remote workstream {workstream_id}");
     Ok(())
 }
 
@@ -904,6 +938,22 @@ fn start(
 ) -> Result<(), AppError> {
     match actions::start(root, registry, workstream_id, None)? {
         actions::StartOutcome::Started => println!("started workstream {workstream_id}"),
+        actions::StartOutcome::AlreadyLive => {
+            println!("workstream {workstream_id} is already live");
+        }
+    }
+    Ok(())
+}
+
+fn recover(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+) -> Result<(), AppError> {
+    match actions::recover(root, registry, workstream_id, None)? {
+        actions::StartOutcome::Started => {
+            println!("recovering workstream {workstream_id}; complete native Codex resume");
+        }
         actions::StartOutcome::AlreadyLive => {
             println!("workstream {workstream_id} is already live");
         }

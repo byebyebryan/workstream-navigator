@@ -1152,6 +1152,76 @@ impl HostRegistry {
         Ok(record)
     }
 
+    /// Reserves a new private tmux generation for an explicitly recovering
+    /// Workstream. The Workstream remains `recovery_required` until a verified
+    /// native `SessionStart(source=resume)` binds the launched Codex process.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless this Workstream has one runtime in the exact
+    /// `unknown` state established by [`Self::mark_runtime_recovery_required`].
+    pub fn reserve_runtime_recovery(
+        &mut self,
+        workstream_id: WorkstreamId,
+    ) -> Result<RuntimeRecord, StateError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let checkout_path: String = transaction
+            .query_row(
+                "SELECT checkouts.path FROM workstreams
+                 JOIN checkouts ON checkouts.checkout_id = workstreams.checkout_id
+                 WHERE workstreams.workstream_id = ?1
+                   AND workstreams.lifecycle = 'recovery_required'",
+                [workstream_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::RecoveryUnavailable(workstream_id))?;
+        let current: RuntimeRecord = transaction
+            .query_row(
+                "SELECT runtime_id, tmux_generation, tmux_session, cwd, process_birth, lifecycle, revision
+                 FROM runtimes WHERE workstream_id = ?1 AND lifecycle = 'unknown'",
+                [workstream_id.to_string()],
+                |row| row_to_runtime(row, workstream_id),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::RecoveryUnavailable(workstream_id))?;
+        let next = RuntimeRecord {
+            tmux_generation: Uuid::new_v4().to_string(),
+            tmux_session: format!("wsnav-{}", current.runtime_id.short()),
+            cwd: PathBuf::from(checkout_path),
+            process_birth: None,
+            status: RuntimeStatus::Starting,
+            revision: current.revision.next(),
+            ..current
+        };
+        let changed = transaction
+            .execute(
+                "UPDATE runtimes SET tmux_generation = ?1, tmux_session = ?2, cwd = ?3,
+                 process_birth = NULL, lifecycle = 'starting', revision = ?4
+                 WHERE runtime_id = ?5 AND revision = ?6 AND lifecycle = 'unknown'",
+                params![
+                    next.tmux_generation,
+                    next.tmux_session,
+                    next.cwd.to_string_lossy(),
+                    next.revision.value(),
+                    next.runtime_id.to_string(),
+                    current.revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if changed != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        touch_workstream(&transaction, &workstream_id.to_string(), None)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(next)
+    }
+
     /// Reads the single persisted runtime record for a workstream.
     ///
     /// # Errors
@@ -1486,6 +1556,74 @@ impl HostRegistry {
         Ok(())
     }
 
+    /// Records that an owned private Runtime disappeared without a deliberate
+    /// park or verified native end. Its provider binding and checkout are
+    /// retained, but neither a blank start nor a stale hook may continue it.
+    ///
+    /// This operation is idempotent after the first transition so cleanup of a
+    /// failed recovery launch cannot erase the original recovery evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an unknown or stale runtime, or a failed atomic
+    /// transition of the Runtime, Workstream, and attention state.
+    pub fn mark_runtime_recovery_required(
+        &mut self,
+        runtime_id: RuntimeId,
+        expected: Revision,
+    ) -> Result<(), StateError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let workstream_id: String = transaction
+            .query_row(
+                "SELECT workstream_id FROM runtimes
+                 WHERE runtime_id = ?1 AND revision = ?2",
+                params![runtime_id.to_string(), expected.value()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::ConcurrentWrite)?;
+        let workstream_id = Uuid::parse_str(&workstream_id)
+            .map(WorkstreamId::from)
+            .map_err(StateError::InvalidPersistedUuid)?;
+        let runtime_changed = transaction
+            .execute(
+                "UPDATE runtimes SET lifecycle = 'unknown', revision = revision + 1
+                 WHERE runtime_id = ?1 AND revision = ?2",
+                params![runtime_id.to_string(), expected.value()],
+            )
+            .map_err(StateError::Sqlite)?;
+        if runtime_changed != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        let activity_sequence = next_activity_sequence(&transaction)?;
+        let workstream_changed = transaction
+            .execute(
+                "UPDATE workstreams SET lifecycle = 'recovery_required',
+                 last_activity_sequence = ?1, revision = revision + 1
+                 WHERE workstream_id = ?2 AND lifecycle IN ('open', 'parked')",
+                params![activity_sequence, workstream_id.to_string()],
+            )
+            .map_err(StateError::Sqlite)?;
+        if workstream_changed == 0 {
+            let lifecycle: String = transaction
+                .query_row(
+                    "SELECT lifecycle FROM workstreams WHERE workstream_id = ?1",
+                    [workstream_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(StateError::Sqlite)?;
+            if lifecycle != "recovery_required" {
+                return Err(StateError::ConcurrentWrite);
+            }
+        }
+        ensure_recovery_attention_in_transaction(&transaction, workstream_id)?;
+        transaction.commit().map_err(StateError::Sqlite)
+    }
+
     /// Records an explicit user park after the exact private tmux server has
     /// stopped. Provider history and the checkout are retained, while the
     /// Workstream's durable lifecycle becomes `parked`.
@@ -1566,8 +1704,10 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?;
         let runtime = transaction
             .query_row(
-                "SELECT workstream_id, tmux_generation, cwd, lifecycle, revision
-                 FROM runtimes WHERE runtime_id = ?1",
+                "SELECT runtimes.workstream_id, runtimes.tmux_generation, runtimes.cwd,
+                        runtimes.lifecycle, runtimes.revision, workstreams.lifecycle
+                 FROM runtimes JOIN workstreams ON workstreams.workstream_id = runtimes.workstream_id
+                 WHERE runtimes.runtime_id = ?1",
                 [runtime_id.to_string()],
                 |row| {
                     Ok((
@@ -1576,6 +1716,7 @@ impl HostRegistry {
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
                         row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
                     ))
                 },
             )
@@ -1598,6 +1739,8 @@ impl HostRegistry {
                     runtime_status: &runtime.3,
                     runtime_revision: revision,
                     generation,
+                    workstream_id,
+                    workstream_lifecycle: workstream_lifecycle_from_text(&runtime.5)?,
                 },
                 existing,
                 &observation.native_session_id,
@@ -2955,6 +3098,8 @@ struct SessionStartContext<'a> {
     runtime_status: &'a str,
     runtime_revision: Revision,
     generation: &'a str,
+    workstream_id: WorkstreamId,
+    workstream_lifecycle: WorkstreamLifecycle,
 }
 
 fn apply_session_start(
@@ -2974,12 +3119,12 @@ fn apply_session_start(
         if context.runtime_status != "starting" {
             return Err(StateError::HookEvidenceMismatch);
         }
-        return update_runtime_lifecycle(
-            transaction,
-            context.runtime_id,
-            context.runtime_revision,
-            "idle",
-        );
+        if context.workstream_lifecycle == WorkstreamLifecycle::RecoveryRequired
+            && source != Some("resume")
+        {
+            return Err(StateError::HookEvidenceMismatch);
+        }
+        return complete_session_start(transaction, context);
     }
     if source != Some("clear") || !matches!(context.runtime_status, "idle" | "attention") {
         return Err(StateError::HookEvidenceMismatch);
@@ -3026,6 +3171,11 @@ fn insert_initial_binding(
     if context.runtime_status != "starting" || !matches!(source, Some("startup" | "resume")) {
         return Err(StateError::HookEvidenceMismatch);
     }
+    if context.workstream_lifecycle == WorkstreamLifecycle::RecoveryRequired
+        && source != Some("resume")
+    {
+        return Err(StateError::HookEvidenceMismatch);
+    }
     transaction
         .execute(
             "INSERT INTO provider_bindings (
@@ -3044,12 +3194,24 @@ fn insert_initial_binding(
             ],
         )
         .map_err(StateError::Sqlite)?;
+    complete_session_start(transaction, context)
+}
+
+fn complete_session_start(
+    transaction: &rusqlite::Transaction<'_>,
+    context: &SessionStartContext<'_>,
+) -> Result<(), StateError> {
     update_runtime_lifecycle(
         transaction,
         context.runtime_id,
         context.runtime_revision,
         "idle",
-    )
+    )?;
+    if context.workstream_lifecycle == WorkstreamLifecycle::RecoveryRequired {
+        reopen_recovery_workstream(transaction, context.workstream_id)?;
+        clear_recovery_attention_in_transaction(transaction, context.workstream_id)?;
+    }
+    Ok(())
 }
 
 fn require_matching_binding(
@@ -3140,16 +3302,59 @@ fn reopen_parked_workstream(
     }
 }
 
-fn mark_result_attention_in_transaction(
+fn reopen_recovery_workstream(
     transaction: &rusqlite::Transaction<'_>,
     workstream_id: WorkstreamId,
-    session_id: String,
-    turn_id: String,
 ) -> Result<(), StateError> {
-    let current = load_attention_from_transaction(transaction, workstream_id)?;
-    let mut attention = current.unwrap_or_else(|| AttentionState::new(workstream_id));
+    let activity_sequence = next_activity_sequence(transaction)?;
+    let changed = transaction
+        .execute(
+            "UPDATE workstreams SET lifecycle = 'open', last_activity_sequence = ?1,
+             revision = revision + 1
+             WHERE workstream_id = ?2 AND lifecycle = 'recovery_required'",
+            params![activity_sequence, workstream_id.to_string()],
+        )
+        .map_err(StateError::Sqlite)?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(StateError::ConcurrentWrite)
+    }
+}
+
+fn ensure_recovery_attention_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    workstream_id: WorkstreamId,
+) -> Result<(), StateError> {
+    let mut attention = load_attention_from_transaction(transaction, workstream_id)?
+        .unwrap_or_else(|| AttentionState::new(workstream_id));
+    if attention.recovery_unseen_since_revision.is_some() {
+        return Ok(());
+    }
     let prior_revision = attention.revision;
-    attention.mark_result(session_id, turn_id)?;
+    attention.mark_recovery_required();
+    save_attention_in_transaction(transaction, &attention, prior_revision)
+}
+
+fn clear_recovery_attention_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    workstream_id: WorkstreamId,
+) -> Result<(), StateError> {
+    let mut attention = load_attention_from_transaction(transaction, workstream_id)?
+        .ok_or(StateError::HookEvidenceMismatch)?;
+    if attention.recovery_unseen_since_revision.is_none() {
+        return Err(StateError::HookEvidenceMismatch);
+    }
+    let prior_revision = attention.revision;
+    attention.clear_recovery_required();
+    save_attention_in_transaction(transaction, &attention, prior_revision)
+}
+
+fn save_attention_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    attention: &AttentionState,
+    prior_revision: Revision,
+) -> Result<(), StateError> {
     let changed = transaction
         .execute(
             "INSERT INTO attention_states (
@@ -3182,6 +3387,19 @@ fn mark_result_attention_in_transaction(
     } else {
         Err(StateError::ConcurrentWrite)
     }
+}
+
+fn mark_result_attention_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    workstream_id: WorkstreamId,
+    session_id: String,
+    turn_id: String,
+) -> Result<(), StateError> {
+    let current = load_attention_from_transaction(transaction, workstream_id)?;
+    let mut attention = current.unwrap_or_else(|| AttentionState::new(workstream_id));
+    let prior_revision = attention.revision;
+    attention.mark_result(session_id, turn_id)?;
+    save_attention_in_transaction(transaction, &attention, prior_revision)
 }
 
 fn load_attention_from_connection(
@@ -3484,6 +3702,8 @@ pub enum StateError {
     UnknownOpenWorkstream(WorkstreamId),
     #[error("workstream {0} already has a live runtime")]
     RuntimeAlreadyLive(WorkstreamId),
+    #[error("workstream {0} is not ready for explicit native recovery")]
+    RecoveryUnavailable(WorkstreamId),
     #[error("hook evidence does not match the managed runtime")]
     HookEvidenceMismatch,
     #[error("unknown runtime {0}")]
@@ -3535,6 +3755,49 @@ mod tests {
         let root = StateRoot::create(temporary.path()).unwrap();
         let registry = HostRegistry::open(&root).unwrap();
         (temporary, registry)
+    }
+
+    fn settled_runtime(registry: &mut HostRegistry, workstream_id: WorkstreamId) -> RuntimeRecord {
+        let initial = registry.reserve_runtime(workstream_id).unwrap();
+        let cwd = initial.cwd.to_string_lossy().into_owned();
+        registry
+            .record_runtime_process_birth(initial.runtime_id, initial.revision, "birth-a")
+            .unwrap();
+        for event in [
+            HookObservation {
+                event: LifecycleEvent::SessionStart,
+                cwd: cwd.clone(),
+                native_session_id: "session-a".to_owned(),
+                turn_id: None,
+                source: Some("startup".to_owned()),
+            },
+            HookObservation {
+                event: LifecycleEvent::UserPromptSubmit,
+                cwd: cwd.clone(),
+                native_session_id: "session-a".to_owned(),
+                turn_id: None,
+                source: None,
+            },
+            HookObservation {
+                event: LifecycleEvent::Stop,
+                cwd,
+                native_session_id: "session-a".to_owned(),
+                turn_id: Some("settled-a".to_owned()),
+                source: None,
+            },
+        ] {
+            let runtime = registry
+                .runtime_for_workstream(workstream_id)
+                .unwrap()
+                .unwrap();
+            registry
+                .apply_hook_observation(runtime.runtime_id, &runtime.tmux_generation, event)
+                .unwrap();
+        }
+        registry
+            .runtime_for_workstream(workstream_id)
+            .unwrap()
+            .unwrap()
     }
 
     #[test]
@@ -4492,6 +4755,138 @@ mod tests {
                 .as_ref()
                 .map(|binding| binding.name_state),
             Some(NameState::Named)
+        );
+    }
+
+    #[test]
+    fn lost_runtime_requires_verified_native_resume_to_reopen() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let lost = settled_runtime(&mut registry, registered.workstream_id);
+        registry
+            .mark_runtime_recovery_required(lost.runtime_id, lost.revision)
+            .unwrap();
+
+        let overview = registry.workstream_overviews().unwrap().remove(0);
+        assert_eq!(overview.lifecycle, WorkstreamLifecycle::RecoveryRequired);
+        assert_eq!(overview.runtime.unwrap().status, RuntimeStatus::Unknown);
+        assert_eq!(
+            overview.binding.unwrap().native_session_id,
+            "session-a".to_owned()
+        );
+        assert!(
+            overview
+                .attention
+                .as_ref()
+                .and_then(|attention| attention.recovery_unseen_since_revision)
+                .is_some()
+        );
+        assert!(
+            overview
+                .attention
+                .as_ref()
+                .and_then(|attention| attention.result_unseen_since_revision)
+                .is_some()
+        );
+
+        let recovery = registry
+            .reserve_runtime_recovery(registered.workstream_id)
+            .unwrap();
+        let cwd = recovery.cwd.to_string_lossy().into_owned();
+        assert!(matches!(
+            registry.apply_hook_observation(
+                recovery.runtime_id,
+                &recovery.tmux_generation,
+                HookObservation {
+                    event: LifecycleEvent::SessionStart,
+                    cwd: cwd.clone(),
+                    native_session_id: "session-a".to_owned(),
+                    turn_id: None,
+                    source: Some("startup".to_owned()),
+                },
+            ),
+            Err(StateError::HookEvidenceMismatch)
+        ));
+        registry
+            .apply_hook_observation(
+                recovery.runtime_id,
+                &recovery.tmux_generation,
+                HookObservation {
+                    event: LifecycleEvent::SessionStart,
+                    cwd,
+                    native_session_id: "session-a".to_owned(),
+                    turn_id: None,
+                    source: Some("resume".to_owned()),
+                },
+            )
+            .unwrap();
+
+        let reopened = registry.workstream_overviews().unwrap().remove(0);
+        assert_eq!(reopened.lifecycle, WorkstreamLifecycle::Open);
+        assert_eq!(reopened.runtime.unwrap().status, RuntimeStatus::Idle);
+        let attention = reopened.attention.unwrap();
+        assert_eq!(attention.recovery_unseen_since_revision, None);
+        assert!(attention.result_unseen_since_revision.is_some());
+    }
+
+    #[test]
+    fn unbound_runtime_recovery_accepts_only_a_native_resume_picker_selection() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        registry
+            .record_runtime_process_birth(runtime.runtime_id, runtime.revision, "birth-a")
+            .unwrap();
+        let launched = registry
+            .runtime_for_workstream(registered.workstream_id)
+            .unwrap()
+            .unwrap();
+        registry
+            .mark_runtime_recovery_required(launched.runtime_id, launched.revision)
+            .unwrap();
+        let recovery = registry
+            .reserve_runtime_recovery(registered.workstream_id)
+            .unwrap();
+        let observation = |source: &str| HookObservation {
+            event: LifecycleEvent::SessionStart,
+            cwd: recovery.cwd.to_string_lossy().into_owned(),
+            native_session_id: "selected-session".to_owned(),
+            turn_id: None,
+            source: Some(source.to_owned()),
+        };
+
+        assert!(matches!(
+            registry.apply_hook_observation(
+                recovery.runtime_id,
+                &recovery.tmux_generation,
+                observation("startup"),
+            ),
+            Err(StateError::HookEvidenceMismatch)
+        ));
+        registry
+            .apply_hook_observation(
+                recovery.runtime_id,
+                &recovery.tmux_generation,
+                observation("resume"),
+            )
+            .unwrap();
+        let overview = registry.workstream_overviews().unwrap().remove(0);
+        assert_eq!(overview.lifecycle, WorkstreamLifecycle::Open);
+        assert_eq!(
+            overview.binding.unwrap().native_session_id,
+            "selected-session".to_owned()
         );
     }
 

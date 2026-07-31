@@ -110,7 +110,7 @@ fn dispatch(state_root: Option<std::path::PathBuf>, request: &RequestEnvelope) -
             },
             Err(_) => rejected("host identity is unavailable"),
         },
-        HostRequest::Snapshot => match snapshot(&root, &registry) {
+        HostRequest::Snapshot => match snapshot(&root, &mut registry) {
             Ok(snapshot) => ResponseEnvelope {
                 version: CURRENT_PROTOCOL_VERSION,
                 response: HostResponse::Snapshot(snapshot),
@@ -159,6 +159,10 @@ fn apply(root: &StateRoot, registry: &mut HostRegistry, action: HostAction) -> R
             workstream_id,
             expected_revision,
         } => apply_start(root, registry, workstream_id, expected_revision),
+        HostAction::Recover {
+            workstream_id,
+            expected_revision,
+        } => apply_recover(root, registry, workstream_id, expected_revision),
         HostAction::NewWorkstream {
             source_workstream_id,
             expected_revision,
@@ -303,6 +307,40 @@ fn apply_start(
     }
 }
 
+fn apply_recover(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: i64,
+) -> ResponseEnvelope {
+    match crate::actions::recover(
+        root,
+        registry,
+        workstream_id,
+        Revision::try_from(expected_revision).ok(),
+    ) {
+        Ok(_) => match workstream_revision(registry, workstream_id) {
+            Ok(revision) => ResponseEnvelope {
+                version: CURRENT_PROTOCOL_VERSION,
+                response: HostResponse::Applied {
+                    revision: revision.value(),
+                },
+            },
+            Err(_) => rejected("native recovery outcome is unavailable"),
+        },
+        Err(crate::actions::ActionError::WorkstreamRevisionConflict) => {
+            rejected("revision conflict; refresh this host")
+        }
+        Err(crate::actions::ActionError::NativeRecoveryUnavailable) => {
+            rejected("workstream is not awaiting native recovery")
+        }
+        Err(crate::actions::ActionError::RuntimeProbeAmbiguous) => {
+            rejected("native recovery probe is ambiguous")
+        }
+        Err(_) => rejected("native recovery is unavailable"),
+    }
+}
+
 fn workstream_revision(
     registry: &HostRegistry,
     workstream_id: WorkstreamId,
@@ -315,7 +353,8 @@ fn workstream_revision(
         .ok_or(StateError::UnknownOpenWorkstream(workstream_id))
 }
 
-fn snapshot(root: &StateRoot, registry: &HostRegistry) -> Result<SnapshotResponse, StateError> {
+fn snapshot(root: &StateRoot, registry: &mut HostRegistry) -> Result<SnapshotResponse, StateError> {
+    crate::actions::reconcile_lost_runtimes(root, registry)?;
     let workstreams = registry
         .workstream_overviews()?
         .iter()

@@ -11,7 +11,7 @@ use crate::domain::{
     HostId, LocationId, Revision, RuntimeId, RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 4;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 5;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -101,6 +101,11 @@ pub enum HostAction {
         workstream_id: WorkstreamId,
         expected_revision: i64,
     },
+    /// Reopen a Workstream only through verified native Codex resume evidence.
+    Recover {
+        workstream_id: WorkstreamId,
+        expected_revision: i64,
+    },
     /// Create a sibling managed checkout from the registered project base.
     NewWorkstream {
         source_workstream_id: WorkstreamId,
@@ -127,6 +132,9 @@ impl HostAction {
             | Self::Start {
                 expected_revision, ..
             }
+            | Self::Recover {
+                expected_revision, ..
+            }
             | Self::NewWorkstream {
                 expected_revision, ..
             }
@@ -139,7 +147,10 @@ impl HostAction {
             Self::NewWorkstream { request_key, .. } | Self::ForkWorkstream { request_key, .. } => {
                 validate_bounded("request key", request_key, MAX_REQUEST_KEY_BYTES)?;
             }
-            Self::AcknowledgeAttention { .. } | Self::Park { .. } | Self::Start { .. } => {}
+            Self::AcknowledgeAttention { .. }
+            | Self::Park { .. }
+            | Self::Start { .. }
+            | Self::Recover { .. } => {}
         }
         Ok(())
     }

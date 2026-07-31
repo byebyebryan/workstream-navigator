@@ -145,7 +145,8 @@ pub struct LocalNavigatorSnapshot {
 /// Returns an error when the local registry cannot be opened or contains
 /// invalid persisted state.
 pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, NavigatorError> {
-    let registry = HostRegistry::open(root)?;
+    let mut registry = HostRegistry::open(root)?;
+    crate::actions::reconcile_lost_runtimes(root, &mut registry)?;
     let host = registry.identity()?;
     let mut catalog = ClientCatalog::open(root)?;
     let executable = std::env::current_exe().map_err(NavigatorError::CurrentExecutable)?;
@@ -957,10 +958,16 @@ fn activate_selected(
         }
         return;
     }
-    if matches!(
-        selected.runtime_status,
-        NavigatorRuntimeStatus::Parked | NavigatorRuntimeStatus::Unknown
-    ) && let Err(error) = run_action(root, "start", &selected, None)
+    let lifecycle_action = match selected.runtime_status {
+        NavigatorRuntimeStatus::Parked | NavigatorRuntimeStatus::Unknown => Some("start"),
+        NavigatorRuntimeStatus::RecoveryRequired => Some("recover"),
+        NavigatorRuntimeStatus::Starting
+        | NavigatorRuntimeStatus::Idle
+        | NavigatorRuntimeStatus::Working
+        | NavigatorRuntimeStatus::Attention => None,
+    };
+    if let Some(action) = lifecycle_action
+        && let Err(error) = run_action(root, action, &selected, None)
     {
         view.set_message(action_message(&error));
         return;

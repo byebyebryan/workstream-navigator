@@ -328,6 +328,17 @@ impl AttentionState {
         self.revision = next;
     }
 
+    /// Clears only the recovery-required signal while preserving any unseen
+    /// native result. A verified native resume is the sole caller: ordinary
+    /// navigator acknowledgement must not make an uncertain Runtime look
+    /// healthy.
+    pub fn clear_recovery_required(&mut self) {
+        if self.recovery_unseen_since_revision.is_some() {
+            self.recovery_unseen_since_revision = None;
+            self.revision = self.revision.next();
+        }
+    }
+
     /// Clears result attention only when the caller saw the current revision.
     ///
     /// # Errors

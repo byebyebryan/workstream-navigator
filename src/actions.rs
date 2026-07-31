@@ -16,7 +16,9 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    domain::{OperationKind, OperationPhase, Revision, RuntimeId, WorkstreamId},
+    domain::{
+        OperationKind, OperationPhase, Revision, RuntimeId, WorkstreamId, WorkstreamLifecycle,
+    },
     provider::codex::app_server::{EphemeralAppServer, ForkReconciliation},
     provider::codex::profile::{ObserverProfile, ProfileError},
     runtime::{
@@ -367,6 +369,9 @@ pub fn start(
     expected_revision: Option<Revision>,
 ) -> Result<StartOutcome, ActionError> {
     ensure_workstream_revision(registry, workstream_id, expected_revision)?;
+    if workstream_lifecycle(registry, workstream_id)? == WorkstreamLifecycle::RecoveryRequired {
+        return Err(ActionError::NativeRecoveryRequired);
+    }
     let integration = registry
         .codex_integration()?
         .ok_or(ActionError::ObserverNotInstalled)?;
@@ -391,6 +396,15 @@ pub fn start(
         match prior.probe()? {
             RuntimeProbe::Live { .. } => return Ok(StartOutcome::AlreadyLive),
             RuntimeProbe::Missing => {
+                if prior_runtime.process_birth.is_some()
+                    && !matches!(prior_runtime.status, crate::domain::RuntimeStatus::Stopped)
+                {
+                    registry.mark_runtime_recovery_required(
+                        prior_runtime.runtime_id,
+                        prior_runtime.revision,
+                    )?;
+                    return Err(ActionError::NativeRecoveryRequired);
+                }
                 if !matches!(prior_runtime.status, crate::domain::RuntimeStatus::Stopped) {
                     registry
                         .mark_runtime_stopped(prior_runtime.runtime_id, prior_runtime.revision)?;
@@ -405,13 +419,145 @@ pub fn start(
         .transpose()?
         .flatten();
     let record = registry.reserve_runtime(workstream_id)?;
+    launch_reserved_runtime(
+        root,
+        registry,
+        &record,
+        codex_launch_program(&record.cwd, prior_binding.as_ref()),
+    )?;
+    Ok(StartOutcome::Started)
+}
+
+/// Starts a new private tmux generation only after a lost Runtime has been
+/// made visible as recovery-required. A known native session resumes exactly;
+/// an unbound Runtime opens Codex's native resume picker rather than creating
+/// an unrelated blank thread.
+///
+/// The Workstream remains recovery-required until its verified
+/// `SessionStart(source=resume)` hook arrives.
+///
+/// # Errors
+///
+/// Returns an error when the Workstream is not recovery-required, observer
+/// trust is incomplete, the owned private runtime cannot be verified missing,
+/// or its replacement process cannot be recorded safely.
+pub fn recover(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: Option<Revision>,
+) -> Result<StartOutcome, ActionError> {
+    ensure_workstream_revision(registry, workstream_id, expected_revision)?;
+    if workstream_lifecycle(registry, workstream_id)? != WorkstreamLifecycle::RecoveryRequired {
+        return Err(ActionError::NativeRecoveryUnavailable);
+    }
+    let integration = registry
+        .codex_integration()?
+        .ok_or(ActionError::ObserverNotInstalled)?;
+    if integration.lifecycle != IntegrationLifecycle::Ready {
+        return Err(ActionError::ObserverNotReady);
+    }
+    let manager = observer_profile()?;
+    manager.install(
+        integration.ownership.owner_id.clone(),
+        Some(&integration.ownership),
+    )?;
+    manager.verify_native_trust(&integration.ownership)?;
+    let prior_runtime = registry
+        .runtime_for_workstream(workstream_id)?
+        .ok_or(ActionError::NoRuntime(workstream_id))?;
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let prior = PrivateRuntime::new(
+        &tmux,
+        &process_probe,
+        RuntimePaths::for_runtime(root.base(), prior_runtime.runtime_id),
+    );
+    match prior.probe()? {
+        RuntimeProbe::Live { .. } => return Ok(StartOutcome::AlreadyLive),
+        RuntimeProbe::Missing => {}
+        RuntimeProbe::Unknown { .. } => return Err(ActionError::RuntimeProbeAmbiguous),
+    }
+    let prior_binding = registry.binding_for_runtime(prior_runtime.runtime_id)?;
+    let record = registry.reserve_runtime_recovery(workstream_id)?;
+    launch_reserved_runtime(
+        root,
+        registry,
+        &record,
+        codex_recovery_program(&record.cwd, prior_binding.as_ref()),
+    )?;
+    Ok(StartOutcome::Started)
+}
+
+/// Reconciles only conclusive loss of an owned private Runtime before a
+/// navigator snapshot is projected. An unavailable tmux socket, changed cwd,
+/// or changed provider-process birth makes the Workstream recovery-required;
+/// an ambiguous probe is deliberately left unchanged.
+///
+/// This is observation, not adoption: it never discovers or attaches an
+/// external process and it preserves the existing provider binding verbatim.
+///
+/// # Errors
+///
+/// Returns an error only when a conclusive loss cannot be durably recorded.
+/// Ambiguous or unavailable probes deliberately leave state unchanged.
+pub fn reconcile_lost_runtimes(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+) -> Result<(), StateError> {
+    let overviews = registry.workstream_overviews()?;
+    for overview in overviews {
+        if overview.lifecycle == WorkstreamLifecycle::RecoveryRequired {
+            continue;
+        }
+        let Some(runtime_record) = overview.runtime else {
+            continue;
+        };
+        if runtime_record.process_birth.is_none()
+            || matches!(runtime_record.status, crate::domain::RuntimeStatus::Stopped)
+        {
+            continue;
+        }
+        let tmux = SystemTmux::default();
+        let process_probe = LinuxProcessProbe;
+        let runtime = PrivateRuntime::new(
+            &tmux,
+            &process_probe,
+            RuntimePaths::for_runtime(root.base(), runtime_record.runtime_id),
+        );
+        let conclusively_lost = match runtime.probe() {
+            Ok(RuntimeProbe::Missing) => true,
+            Ok(RuntimeProbe::Live {
+                cwd, process_birth, ..
+            }) => {
+                cwd != runtime_record.cwd
+                    || process_birth.as_deref() != runtime_record.process_birth.as_deref()
+            }
+            Ok(RuntimeProbe::Unknown { .. }) | Err(_) => false,
+        };
+        if conclusively_lost {
+            registry.mark_runtime_recovery_required(
+                runtime_record.runtime_id,
+                runtime_record.revision,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn launch_reserved_runtime(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    record: &crate::state::RuntimeRecord,
+    program: Vec<OsString>,
+) -> Result<(), ActionError> {
     let paths = RuntimePaths::for_runtime(root.base(), record.runtime_id);
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
     let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
     let launch = NativeLaunch {
         cwd: record.cwd.clone(),
-        program: codex_launch_program(&record.cwd, prior_binding.as_ref()),
+        program,
         environment: managed_codex_environment(
             root.base(),
             &record.runtime_id,
@@ -419,7 +565,8 @@ pub fn start(
         ),
     };
     if let Err(error) = runtime.start(&launch) {
-        let _ = registry.mark_runtime_stopped(record.runtime_id, record.revision);
+        let _ = runtime.park();
+        let _ = registry.mark_runtime_recovery_required(record.runtime_id, record.revision);
         return Err(ActionError::Runtime(error));
     }
     let process_birth = match runtime.probe()? {
@@ -430,7 +577,7 @@ pub fn start(
         } if cwd == record.cwd => process_birth,
         RuntimeProbe::Live { .. } | RuntimeProbe::Missing | RuntimeProbe::Unknown { .. } => {
             let _ = runtime.park();
-            let _ = registry.mark_runtime_stopped(record.runtime_id, record.revision);
+            let _ = registry.mark_runtime_recovery_required(record.runtime_id, record.revision);
             return Err(ActionError::RuntimeProbeAmbiguous);
         }
     };
@@ -438,10 +585,10 @@ pub fn start(
         registry.record_runtime_process_birth(record.runtime_id, record.revision, &process_birth)
     {
         let _ = runtime.park();
-        let _ = registry.mark_runtime_stopped(record.runtime_id, record.revision);
+        let _ = registry.mark_runtime_recovery_required(record.runtime_id, record.revision);
         return Err(ActionError::State(error));
     }
-    Ok(StartOutcome::Started)
+    Ok(())
 }
 
 /// Parks one live Runtime while preserving its provider history and checkout.
@@ -521,6 +668,23 @@ pub fn codex_launch_program(
     program
 }
 
+/// Builds the recovery-only native Codex command. Deliberately omit a session
+/// identifier when no authoritative binding survived: Codex then presents its
+/// own resume picker, and only the observed `source=resume` selection may bind
+/// the managed Runtime.
+#[must_use]
+pub fn codex_recovery_program(
+    cwd: &Path,
+    binding: Option<&ProviderBinding>,
+) -> Vec<std::ffi::OsString> {
+    let mut program = codex_launch_program(cwd, None);
+    program.push("resume".into());
+    if let Some(binding) = binding {
+        program.push(binding.native_session_id.clone().into());
+    }
+    program
+}
+
 /// Builds the environment owned by a managed Codex Runtime.
 ///
 /// Remote starts use one-shot non-interactive SSH commands. Those commands can
@@ -573,6 +737,18 @@ fn workstream_revision(
         .ok_or(ActionError::UnknownWorkstream)
 }
 
+fn workstream_lifecycle(
+    registry: &HostRegistry,
+    workstream_id: WorkstreamId,
+) -> Result<WorkstreamLifecycle, ActionError> {
+    registry
+        .workstream_overviews()?
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .map(|overview| overview.lifecycle)
+        .ok_or(ActionError::UnknownWorkstream)
+}
+
 fn observer_profile() -> Result<ObserverProfile, ActionError> {
     let codex_home = env::var_os("CODEX_HOME")
         .map(PathBuf::from)
@@ -598,6 +774,10 @@ pub enum ActionError {
     ObserverNotReady,
     #[error("private runtime probe is ambiguous; refusing to create another Codex process")]
     RuntimeProbeAmbiguous,
+    #[error("private runtime disappeared; select native recovery before continuing")]
+    NativeRecoveryRequired,
+    #[error("workstream is not awaiting native recovery")]
+    NativeRecoveryUnavailable,
     #[error("workstream is unknown")]
     UnknownWorkstream,
     #[error("workstream revision changed; refresh before acting")]
@@ -702,6 +882,80 @@ mod tests {
         assert_eq!(
             environment.get(&OsString::from("WSNAV_STATE_ROOT")),
             Some(&OsString::from("/state"))
+        );
+    }
+
+    #[test]
+    fn native_recovery_uses_an_exact_binding_or_the_native_picker() {
+        let cwd = Path::new("/disposable/repository");
+        let binding = ProviderBinding {
+            runtime_id: RuntimeId::new(),
+            native_session_id: "known-session".to_owned(),
+            start_source: "resume".to_owned(),
+            last_settled_turn_id: Some("settled-turn".to_owned()),
+            observed_thread_name: None,
+            name_state: crate::provider::codex::names::NameState::Unavailable,
+            predecessor_native_session_id: None,
+            predecessor_effective_name: None,
+            revision: Revision::INITIAL,
+        };
+
+        assert_eq!(
+            codex_recovery_program(cwd, Some(&binding)),
+            vec![
+                "codex".into(),
+                "--profile".into(),
+                "wsnav-observer".into(),
+                "-C".into(),
+                cwd.as_os_str().to_owned(),
+                "resume".into(),
+                "known-session".into(),
+            ]
+        );
+        assert_eq!(
+            codex_recovery_program(cwd, None),
+            vec![
+                "codex".into(),
+                "--profile".into(),
+                "wsnav-observer".into(),
+                "-C".into(),
+                cwd.as_os_str().to_owned(),
+                "resume".into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn conclusive_private_runtime_loss_becomes_recovery_required_before_snapshot() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = crate::state::StateRoot::create(temporary.path()).unwrap();
+        let mut registry = crate::state::HostRegistry::open(&root).unwrap();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir".to_owned(),
+                "main".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        registry
+            .record_runtime_process_birth(runtime.runtime_id, runtime.revision, "birth-a")
+            .unwrap();
+
+        reconcile_lost_runtimes(&root, &mut registry).unwrap();
+
+        let overview = registry.workstream_overviews().unwrap().remove(0);
+        assert_eq!(overview.lifecycle, WorkstreamLifecycle::RecoveryRequired);
+        assert_eq!(
+            overview.runtime.as_ref().map(|runtime| runtime.status),
+            Some(crate::domain::RuntimeStatus::Unknown)
+        );
+        assert!(
+            overview
+                .attention
+                .as_ref()
+                .and_then(|attention| attention.recovery_unseen_since_revision)
+                .is_some()
         );
     }
 

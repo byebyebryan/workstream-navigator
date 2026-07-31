@@ -23,7 +23,7 @@ fn local_subprocess_uses_the_same_bounded_protocol_service_as_ssh() {
     assert_eq!(hello.wsnav_version, env!("CARGO_PKG_VERSION"));
     assert!(hello.registry_generation.len() <= 128);
     assert!(snapshot.workstreams.is_empty());
-    assert_eq!(CURRENT_PROTOCOL_VERSION, 4);
+    assert_eq!(CURRENT_PROTOCOL_VERSION, 5);
 }
 
 #[test]

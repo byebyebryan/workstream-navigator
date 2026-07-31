@@ -195,12 +195,11 @@ navigator clients.
 
 The navigator uses two deliberately quiet color axes. A readable host-label
 accent distinguishes the few active hosts. A deterministic collision-resolved
-muted 256-color marker beside a Project name distinguishes up to twelve
-concurrently visible Projects without coloring the whole row; the Project name
-and Workstream text remain neutral. Selection changes only the row background.
-Green, yellow, and red remain reserved for completed, working, and
-recovery/error state, so color never becomes action authority or pulls focus
-from the native provider pane.
+muted 256-color marker and compact Project label distinguish up to twelve
+concurrently visible Projects without coloring the Workstream title or whole
+row. Selection changes only the row background. Green, yellow, and red remain
+reserved for completed, working, and recovery/error state, so color never
+becomes action authority or pulls focus from the native provider pane.
 
 Switching workstreams replaces only the provider pane's attachment helper. It
 does not stop, restart, type into, or resize an inactive provider process beyond

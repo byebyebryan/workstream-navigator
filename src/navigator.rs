@@ -1169,7 +1169,9 @@ fn project_header_item(
         Span::raw(" "),
         Span::styled(
             label.to_owned(),
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(project_accent(project_id, project_colors))
+                .add_modifier(Modifier::BOLD),
         ),
     ]))
 }
@@ -1204,7 +1206,9 @@ fn workstream_context_line(
     let project = || {
         Span::styled(
             row.project_label.clone(),
-            Style::default().add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(project_accent(row.project_id, project_colors))
+                .add_modifier(Modifier::BOLD),
         )
     };
     match context {
@@ -1232,10 +1236,14 @@ fn project_marker(
 ) -> Span<'static> {
     Span::styled(
         "•",
-        Style::default().fg(*project_colors
-            .get(&project_id)
-            .expect("every visible Project receives one marker color")),
+        Style::default().fg(project_accent(project_id, project_colors)),
     )
+}
+
+fn project_accent(project_id: ProjectId, project_colors: &BTreeMap<ProjectId, Color>) -> Color {
+    *project_colors
+        .get(&project_id)
+        .expect("every visible Project receives one accent color")
 }
 
 fn host_color(alias: &str) -> Color {
@@ -2067,6 +2075,14 @@ mod tests {
             .find(|cell| cell.symbol() == "•")
             .unwrap();
         assert_eq!(project_marker_cell.fg, expected_project_color);
+        let project_name_cell = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .find(|cell| cell.symbol() == "p")
+            .unwrap();
+        assert_eq!(project_name_cell.fg, expected_project_color);
         let host_cell = terminal
             .backend()
             .buffer()
@@ -2265,6 +2281,14 @@ mod tests {
                     context: WorkstreamRowContext::Project,
                 },
             ]
+        );
+        let project_colors = visible_project_colors(&view.snapshot);
+        terminal.draw(|frame| view.render(frame)).unwrap();
+        let project_header_label = &terminal.backend().buffer().content()[80 + 5];
+        assert_eq!(project_header_label.symbol(), "s");
+        assert_eq!(
+            project_header_label.fg,
+            project_accent(shared_project, &project_colors)
         );
     }
 

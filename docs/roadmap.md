@@ -2,7 +2,7 @@
 
 Date: 2026-07-31
 
-Status: D0 through D6.5 complete
+Status: D0 through D6.6 complete
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -42,6 +42,7 @@ This document owns sequencing, exit gates, and progress.
 | D6.3 | Cross-host activity ordering polish | Complete |
 | D6.4 | Navigator grouping and visual-hierarchy polish | Complete |
 | D6.5 | Project-marker collision correction | Complete |
+| D6.6 | Project-label accent refinement | Complete |
 
 ## D0 - Contract kernel
 
@@ -590,6 +591,31 @@ Exit gate:
   distinct and stable for an unchanged projection;
 - no color becomes durable identity, action authority, provider traffic, or a
   host/protocol contract; and
+- formatting, tests, lint, package checks, and `git diff --check` pass.
+
+## D6.6 - Project-label accent refinement
+
+Implementation status: complete. Compact Project labels and Project headers
+now carry their same muted marker accent; host labels, Workstream titles, and
+lifecycle-state colors remain separate.
+
+Promote the existing quiet Project accent from marker-only decoration to the
+compact Project text the user actually scans, without coloring Workstream
+titles, host labels, or lifecycle state.
+
+Scope:
+
+- apply each visible Project's collision-resolved muted accent to its compact
+  flat/host-view label and project-group header;
+- retain the small marker as a visual anchor; and
+- preserve the separate host-label axis, neutral Workstream title, selected-row
+  background, and reserved lifecycle-state colors.
+
+Exit gate:
+
+- terminal rendering tests prove the compact Project label and Project header
+  use the same allocated accent as their marker;
+- no durable state, control path, Runtime, or provider behavior changes; and
 - formatting, tests, lint, package checks, and `git diff --check` pass.
 
 ## Deferred beyond V1

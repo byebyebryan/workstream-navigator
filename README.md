@@ -18,7 +18,7 @@ cross-host Project grouping polish, documented in the [D6.1 project-identity
 acceptance][D6.1 acceptance]. D6.2 makes navigator controls discoverable
 without adding another terminal surface, and D6.3 orders local and remote rows
 by visible activity recency. D6.4 adds quiet host/Project grouping views, and
-D6.5 makes visible Project marker accents collision-free. The Rust
+D6.5-D6.6 make visible Project accents distinct and readable. The Rust
 implementation does not preserve
 compatibility with the earlier Python prototype.
 

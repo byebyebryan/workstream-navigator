@@ -1,8 +1,8 @@
 # Workstream Navigator V1 Roadmap
 
-Date: 2026-07-29
+Date: 2026-07-31
 
-Status: D0 through D5.2 complete
+Status: D0 through D5.2 complete; D6 in progress
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -36,6 +36,7 @@ This document owns sequencing, exit gates, and progress.
 | D5 | Recovery, combined acceptance, and V1 closure | Complete |
 | D5.1 | Operational closure for recovery, release diagnostics, and bounded I/O | Complete |
 | D5.2 | Correctness closure for release, identity, recovery, and presentation | Complete |
+| D6 | Source-installed operator-beta closure | In progress |
 
 ## D0 - Contract kernel
 
@@ -378,6 +379,50 @@ Exit gate:
 - multi-page snapshots preserve deterministic order and bounded frames; and
 - `scripts/check`, package verification, disposable acceptance, privacy audit,
   and `git diff --check` pass.
+
+## D6 - Source-installed operator-beta closure
+
+Close the implemented V1 as an operator-ready beta without adding another
+workflow or changing the approved ownership boundaries.
+
+Scope:
+
+- reconcile the README, design, roadmap, and acceptance index with the final
+  D5.2 behavior and remove stale pre-implementation wording;
+- run the complete repository gate from the exact candidate commit;
+- run one bounded local-plus-SSH operator smoke against matching builds,
+  exercising native attachment, switching, parking, reopening, status
+  visibility, mouse focus, and result-tip preservation;
+- corroborate attachment failure, same-row retry, scrolled mouse targeting,
+  snapshot paging, and process cleanup through the disposable automated gates
+  rather than injecting failures into an operator's active provider pane;
+- record sanitized release, isolation, cleanup, and privacy evidence; and
+- state the V1 distribution posture explicitly.
+
+Distribution posture:
+
+- D6 remains a source-installed operator beta at version `0.1.0`;
+- local and remote executables are built from the same reviewed commit and
+  installed by the operator;
+- no tag, hosted binary, automatic remote deployment, update service, or Cargo
+  publication is implied by V1 acceptance; and
+- a public binary release is a separate post-D6 product decision.
+
+Exit gate:
+
+- top-level documentation describes D0 through D6 in present tense and links
+  every final acceptance record;
+- the current stable toolchain and declared Rust 1.88 gate pass against the
+  locked dependency graph;
+- the exact candidate build completes the bounded local-plus-SSH smoke without
+  provider-pane management text, result-tip loss, or default-tmux mutation;
+- disposable tests cover destructive failure injection and remove all owned
+  temporary state;
+- committed evidence contains no provider or Workstream identifiers, prompts,
+  results, terminal captures, paths, process IDs, credentials, or raw payloads;
+  and
+- the repository is clean, synchronized, and remains explicitly
+  source-installed rather than presenting an unshipped release channel.
 
 ## Deferred beyond V1
 

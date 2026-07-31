@@ -3,9 +3,11 @@
 use std::{
     collections::BTreeMap,
     ffi::OsString,
-    fs,
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
     process::{Command, ExitStatus},
+    thread,
+    time::{Duration, Instant},
 };
 
 use thiserror::Error;
@@ -18,6 +20,9 @@ use crate::{
 const RUNTIME_DIRECTORY: &str = "run";
 const PROVIDER_WINDOW: &str = "provider";
 const MAX_TMUX_OUTPUT_BYTES: usize = 16 * 1024;
+const LAUNCH_BARRIER_FILE: &str = "launch.ready";
+const LAUNCH_BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
+const LAUNCH_BARRIER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 /// A private runtime server's owned paths and stable tmux session name.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -76,6 +81,10 @@ impl RuntimePaths {
             session_name: format!("wsnav-{identifier}"),
             directory,
         }
+    }
+
+    fn launch_barrier(&self) -> PathBuf {
+        self.directory.join(LAUNCH_BARRIER_FILE)
     }
 }
 
@@ -322,6 +331,17 @@ impl<'a> PrivateRuntime<'a> {
         Ok(())
     }
 
+    /// Releases the already-started pane process to replace itself with the
+    /// native provider after its exact process birth has been persisted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error unless this owner can create the one fresh private
+    /// barrier file with mode `0600`.
+    pub fn release_launch(&self) -> Result<(), RuntimeError> {
+        create_launch_barrier(&self.paths.launch_barrier())
+    }
+
     /// Returns the current single-pane evidence without inspecting any default tmux socket.
     ///
     /// # Errors
@@ -339,7 +359,20 @@ impl<'a> PrivateRuntime<'a> {
             ],
         })?;
         if !exists.success {
-            return Ok(RuntimeProbe::Missing);
+            let diagnostic = trim_diagnostic(&exists.stderr);
+            return Ok(
+                if !self.paths.socket.exists() || is_missing_server(&exists.stderr) {
+                    RuntimeProbe::Missing
+                } else {
+                    RuntimeProbe::Unknown {
+                        diagnostic: if diagnostic.is_empty() {
+                            "private tmux session probe was unavailable".to_owned()
+                        } else {
+                            diagnostic
+                        },
+                    }
+                },
+            );
         }
 
         let pane_target = OsString::from(format!("{}:0.0", self.paths.session_name));
@@ -432,6 +465,48 @@ impl<'a> PrivateRuntime<'a> {
     }
 }
 
+/// Waits for the owning action to persist launch authority, then consumes its
+/// one-shot signal before the caller replaces itself with the native provider.
+///
+/// # Errors
+///
+/// Returns an error when the barrier is malformed, inaccessible, or not
+/// released within the bounded startup interval.
+pub fn await_launch_release(paths: &RuntimePaths) -> Result<(), RuntimeError> {
+    await_launch_release_with_timeout(paths, LAUNCH_BARRIER_TIMEOUT)
+}
+
+fn await_launch_release_with_timeout(
+    paths: &RuntimePaths,
+    timeout: Duration,
+) -> Result<(), RuntimeError> {
+    let barrier = paths.launch_barrier();
+    let deadline = Instant::now() + timeout;
+    loop {
+        match fs::symlink_metadata(&barrier) {
+            Ok(metadata) if metadata.file_type().is_file() => {
+                fs::remove_file(&barrier).map_err(|source| RuntimeError::Io {
+                    path: barrier,
+                    source,
+                })?;
+                return Ok(());
+            }
+            Ok(_) => return Err(RuntimeError::InvalidLaunchBarrier(barrier)),
+            Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+            Err(source) => {
+                return Err(RuntimeError::Io {
+                    path: barrier,
+                    source,
+                });
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(RuntimeError::LaunchBarrierTimedOut);
+        }
+        thread::sleep(LAUNCH_BARRIER_POLL_INTERVAL);
+    }
+}
+
 fn response_from_output(
     status: ExitStatus,
     stdout: &[u8],
@@ -466,6 +541,21 @@ fn create_private_runtime_directory(path: &Path) -> Result<(), RuntimeError> {
 fn write_tmux_config(path: &Path) -> Result<(), RuntimeError> {
     const CONFIG: &str = "set -g status off\nset -g mouse on\nset -g default-terminal tmux-256color\nset-environment -g COLORTERM truecolor\n";
     fs::write(path, CONFIG).map_err(|source| RuntimeError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    set_mode(path, 0o600)
+}
+
+fn create_launch_barrier(path: &Path) -> Result<(), RuntimeError> {
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path).map_err(|source| RuntimeError::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -548,6 +638,10 @@ pub enum RuntimeError {
     InvalidWorkingDirectory(PathBuf),
     #[error("invalid private runtime path {0}")]
     InvalidRuntimePath(PathBuf),
+    #[error("invalid private runtime launch barrier {0}")]
+    InvalidLaunchBarrier(PathBuf),
+    #[error("private runtime launch authority was not released in time")]
+    LaunchBarrierTimedOut,
     #[error("private runtime session identity did not match its persisted record")]
     RuntimeSessionMismatch,
     #[error("I/O at {path}: {source}")]
@@ -632,6 +726,41 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         }
+    }
+
+    #[test]
+    fn launch_barrier_is_private_and_consumed_once() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        fs::create_dir_all(&paths.directory).unwrap();
+        set_mode(&paths.directory, 0o700).unwrap();
+        let tmux = FakeTmux::default();
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
+
+        runtime.release_launch().unwrap();
+
+        let barrier = paths.launch_barrier();
+        assert_eq!(
+            fs::metadata(&barrier).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        await_launch_release_with_timeout(&paths, Duration::from_millis(100)).unwrap();
+        assert!(!barrier.exists());
+    }
+
+    #[test]
+    fn launch_barrier_wait_is_bounded() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        fs::create_dir_all(&paths.directory).unwrap();
+
+        assert!(matches!(
+            await_launch_release_with_timeout(&paths, Duration::from_millis(20)),
+            Err(RuntimeError::LaunchBarrierTimedOut)
+        ));
     }
 
     #[test]
@@ -760,6 +889,43 @@ mod tests {
             runtime.probe().unwrap(),
             RuntimeProbe::Unknown { .. }
         ));
+    }
+
+    #[test]
+    fn failed_session_probe_is_missing_only_with_conclusive_server_evidence() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        fs::create_dir_all(&paths.directory).unwrap();
+        fs::write(&paths.socket, []).unwrap();
+        let tmux = FakeTmux::with_responses([TmuxResponse {
+            success: false,
+            stdout: String::new(),
+            stderr: "can't find session: expected".to_owned(),
+        }]);
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+
+        assert!(matches!(
+            runtime.probe().unwrap(),
+            RuntimeProbe::Unknown { .. }
+        ));
+    }
+
+    #[test]
+    fn no_server_diagnostic_is_conclusive_runtime_absence() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        fs::create_dir_all(&paths.directory).unwrap();
+        fs::write(&paths.socket, []).unwrap();
+        let tmux = FakeTmux::with_responses([TmuxResponse {
+            success: false,
+            stdout: String::new(),
+            stderr: "no server running on the private socket".to_owned(),
+        }]);
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+
+        assert_eq!(runtime.probe().unwrap(), RuntimeProbe::Missing);
     }
 
     #[test]

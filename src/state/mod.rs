@@ -434,6 +434,7 @@ pub struct ProviderBinding {
 pub struct WorkstreamOverview {
     pub workstream_id: WorkstreamId,
     pub location_id: LocationId,
+    pub project_repository_path: PathBuf,
     pub checkout_path: PathBuf,
     pub lifecycle: WorkstreamLifecycle,
     pub last_activity_sequence: i64,
@@ -1393,10 +1394,13 @@ impl HostRegistry {
                 .connection
                 .prepare(
                     "SELECT workstreams.workstream_id, workstreams.location_id,
-                            checkouts.path, workstreams.lifecycle,
+                            project_locations.repository_path, checkouts.path,
+                            workstreams.lifecycle,
                             workstreams.last_activity_sequence,
                             workstreams.last_activity_at_millis, workstreams.revision
                      FROM workstreams
+                     JOIN project_locations
+                       ON project_locations.location_id = workstreams.location_id
                      JOIN checkouts ON checkouts.checkout_id = workstreams.checkout_id
                      ORDER BY workstreams.last_activity_sequence DESC,
                               checkouts.path, workstreams.workstream_id
@@ -1410,9 +1414,10 @@ impl HostRegistry {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(4)?,
                         row.get::<_, i64>(5)?,
                         row.get::<_, i64>(6)?,
+                        row.get::<_, i64>(7)?,
                     ))
                 })
                 .map_err(StateError::Sqlite)?
@@ -1430,6 +1435,7 @@ impl HostRegistry {
                 |(
                     workstream_id,
                     location_id,
+                    project_repository_path,
                     checkout_path,
                     lifecycle,
                     activity_sequence,
@@ -1454,6 +1460,7 @@ impl HostRegistry {
                     Ok(WorkstreamOverview {
                         workstream_id,
                         location_id,
+                        project_repository_path: PathBuf::from(project_repository_path),
                         checkout_path: PathBuf::from(checkout_path),
                         lifecycle,
                         last_activity_sequence: activity_sequence,

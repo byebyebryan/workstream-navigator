@@ -2,7 +2,7 @@
 name = "wsnav"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 description = "A native-workflow terminal navigator for persistent coding workstreams across hosts."
 repository = "https://github.com/byebyebryan/workstream-navigator"
 license = "MIT"
@@ -26,6 +26,9 @@ sha2 = "0.10"
 thiserror = "2.0"
 toml = "0.8"
 uuid = { version = "1.21", features = ["serde", "v4"] }
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.31", features = ["process", "signal"] }
 
 [dev-dependencies]
 tempfile = "3.23"

@@ -22,7 +22,7 @@ use crate::{
     provider::codex::profile::ObserverProfile,
     runtime::{
         LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
-        is_direct_provider_hook,
+        await_launch_release, is_direct_provider_hook,
     },
     state::{
         ClientCatalog, ClientHostTransport, HostIdentity, HostRegistry, IntegrationLifecycle,
@@ -162,6 +162,13 @@ enum Commands {
     /// Internal native-terminal-only attachment endpoint used through ssh -tt.
     #[command(name = "_attach", hide = true)]
     RemoteAttach { runtime_id: String },
+    /// Internal one-shot launch barrier that replaces itself with the provider.
+    #[command(name = "_runtime_launch", hide = true)]
+    RuntimeLaunch {
+        runtime_id: String,
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        program: Vec<std::ffi::OsString>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -228,6 +235,7 @@ const fn is_provider_surface_command(command: Option<&Commands>) -> bool {
             Commands::ProviderAttach { .. }
                 | Commands::ProviderRemoteAttach { .. }
                 | Commands::RemoteAttach { .. }
+                | Commands::RuntimeLaunch { .. }
         )
     )
 }
@@ -282,6 +290,10 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             let _ = crate::remote::attach(&root, runtime_id);
             return Ok(());
         }
+        Commands::RuntimeLaunch {
+            runtime_id,
+            program,
+        } => return runtime_launch(&root, &runtime_id, program),
         Commands::RegisterRemote {
             host,
             destination,
@@ -356,9 +368,37 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
         | Commands::Remote
         | Commands::Probe
         | Commands::RemoteAttach { .. }
+        | Commands::RuntimeLaunch { .. }
         | Commands::RegisterRemote { .. }
         | Commands::Host { .. } => {
             unreachable!("special command dispatch returns before state setup")
+        }
+    }
+}
+
+fn runtime_launch(
+    root: &StateRoot,
+    runtime_id: &str,
+    mut program: Vec<std::ffi::OsString>,
+) -> Result<(), AppError> {
+    let runtime_id = RuntimeId::from_str(runtime_id).map_err(AppError::InvalidRuntimeId)?;
+    let paths = RuntimePaths::for_runtime(root.base(), runtime_id);
+    await_launch_release(&paths)?;
+    let executable = program.remove(0);
+    let mut command = Command::new(executable);
+    command.args(program);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(AppError::RuntimeExec(command.exec()))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status().map_err(AppError::Io)?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(AppError::RuntimeExited)
         }
     }
 }
@@ -1338,6 +1378,8 @@ enum AppError {
     InvalidWorkstreamId(uuid::Error),
     #[error("invalid operation ID")]
     InvalidOperationId(uuid::Error),
+    #[error("invalid runtime ID")]
+    InvalidRuntimeId(uuid::Error),
     #[error("host alias is not registered")]
     UnknownHostAlias,
     #[error("host alias is not an SSH host")]
@@ -1348,6 +1390,11 @@ enum AppError {
     RemoteRuntimeUnavailable,
     #[error("I/O: {0}")]
     Io(std::io::Error),
+    #[error("native provider exec failed")]
+    RuntimeExec(std::io::Error),
+    #[cfg(not(unix))]
+    #[error("native provider exited during the internal launch handoff")]
+    RuntimeExited,
     #[error("could not execute bounded local control command")]
     Process(crate::process::BoundedProcessError),
     #[error("not a usable Git checkout")]
@@ -1438,7 +1485,39 @@ mod tests {
     }
 
     #[test]
-    fn provider_attachment_helpers_are_the_only_silent_cli_commands() {
+    fn runtime_launch_barrier_is_parseable_but_hidden() {
+        let parsed = Cli::try_parse_from([
+            "wsnav",
+            "--state-root",
+            "/state",
+            "_runtime_launch",
+            "00000000-0000-0000-0000-000000000001",
+            "--",
+            "codex",
+            "--profile",
+            "wsnav-observer",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Commands::RuntimeLaunch { program, .. })
+                if program == ["codex", "--profile", "wsnav-observer"]
+                    .into_iter()
+                    .map(std::ffi::OsString::from)
+                    .collect::<Vec<_>>()
+        ));
+        assert!(
+            Cli::try_parse_from([
+                "wsnav",
+                "_runtime_launch",
+                "00000000-0000-0000-0000-000000000001"
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn provider_surface_helpers_are_silent_cli_commands() {
         let local = Cli::try_parse_from([
             "wsnav",
             "_provider_attach",
@@ -1455,6 +1534,16 @@ mod tests {
         ])
         .unwrap();
         assert!(is_provider_surface_command(remote.command.as_ref()));
+
+        let launch = Cli::try_parse_from([
+            "wsnav",
+            "_runtime_launch",
+            "00000000-0000-0000-0000-000000000001",
+            "--",
+            "codex",
+        ])
+        .unwrap();
+        assert!(is_provider_surface_command(launch.command.as_ref()));
 
         let user = Cli::try_parse_from(["wsnav", "attach", "00000000-0000-0000-0000-000000000001"])
             .unwrap();

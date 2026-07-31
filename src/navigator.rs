@@ -206,7 +206,7 @@ fn project_workstream(
                     host,
                     overview.location_id,
                     executable,
-                    &fallback_project_label(&overview.checkout_path),
+                    &fallback_project_label(&overview.project_repository_path),
                 )?
                 .display_name
         }

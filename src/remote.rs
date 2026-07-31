@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use crate::{
     domain::{Revision, RuntimeId, RuntimeStatus, WorkstreamId, WorkstreamLifecycle},
+    process::output_bounded,
     protocol::{
         CURRENT_PROTOCOL_VERSION, Capabilities, HelloResponse, HostAction, HostRequest,
         HostResponse, MAX_FRAME_BYTES, OperationSnapshot, OperationsResponse, RequestEnvelope,
@@ -424,7 +425,7 @@ fn snapshot_workstream(root: &StateRoot, overview: &WorkstreamOverview) -> Snaps
     SnapshotWorkstream {
         workstream_id: overview.workstream_id,
         location_id: overview.location_id,
-        project_display_name: project_display_name(&overview.checkout_path),
+        project_display_name: project_display_name(&overview.project_repository_path),
         display_name: bounded_display_name(&display_name(overview, runtime_status)),
         runtime_id: overview.runtime.as_ref().map(|runtime| runtime.runtime_id),
         runtime_status: if recovery_required {
@@ -444,13 +445,14 @@ fn snapshot_workstream(root: &StateRoot, overview: &WorkstreamOverview) -> Snaps
     }
 }
 
-/// Returns the sole checkout-derived value allowed in a remote snapshot.
+/// Returns the sole repository-derived value allowed in a remote snapshot.
 ///
 /// A project label makes the navigator useful across hosts, while preserving
-/// the transport boundary: only the final checkout path component may cross
-/// it, never an absolute or relative checkout path.
-fn project_display_name(checkout_path: &Path) -> String {
-    checkout_path
+/// the transport boundary: only the registered `ProjectLocation` repository's
+/// final component may cross it, never an absolute or relative path and never
+/// a generated managed-checkout name.
+fn project_display_name(repository_path: &Path) -> String {
+    repository_path
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.trim().is_empty())
@@ -531,13 +533,9 @@ fn local_capabilities() -> Capabilities {
 }
 
 fn command_available(program: &str) -> bool {
-    Command::new(program)
-        .arg("--version")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|status| status.success())
+    let mut command = Command::new(program);
+    command.arg("--version");
+    output_bounded(&mut command, 4096, 4096).is_ok_and(|output| output.status.success())
 }
 
 fn read_frame(input: &mut impl Read) -> Result<Vec<u8>, RemoteError> {
@@ -770,12 +768,38 @@ mod tests {
     }
 
     #[test]
-    fn project_display_name_exposes_only_the_checkout_basename() {
+    fn project_display_name_exposes_only_the_repository_basename() {
         assert_eq!(
             project_display_name(Path::new("/private/place/dms-power-status")),
             "dms-power-status"
         );
         assert_eq!(project_display_name(Path::new("/")), "remote project");
+    }
+
+    #[test]
+    fn managed_remote_workstream_keeps_the_project_location_label() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let overview = WorkstreamOverview {
+            workstream_id: WorkstreamId::new(),
+            location_id: crate::domain::LocationId::new(),
+            project_repository_path: PathBuf::from("/private/place/dms-power-status"),
+            checkout_path: PathBuf::from(
+                "/private/state/worktrees/location/00000000-0000-0000-0000-000000000001",
+            ),
+            lifecycle: WorkstreamLifecycle::Open,
+            last_activity_sequence: 1,
+            last_activity_at_millis: None,
+            revision: Revision::INITIAL,
+            runtime: None,
+            binding: None,
+            attention: None,
+        };
+
+        assert_eq!(
+            snapshot_workstream(&root, &overview).project_display_name,
+            "dms-power-status"
+        );
     }
 
     #[test]

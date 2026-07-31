@@ -733,6 +733,7 @@ fn launch_reserved_runtime(
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
     let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+    let program = runtime_launch_program(root.base(), record.runtime_id, program)?;
     let launch = NativeLaunch {
         cwd: record.cwd.clone(),
         program,
@@ -766,7 +767,34 @@ fn launch_reserved_runtime(
         let _ = registry.mark_runtime_recovery_required(record.runtime_id, record.revision);
         return Err(ActionError::State(error));
     }
+    if let Err(error) = runtime.release_launch() {
+        let _ = runtime.park();
+        if let Ok(Some(current)) = registry.runtime_for_workstream(record.workstream_id)
+            && current.runtime_id == record.runtime_id
+        {
+            let _ = registry.mark_runtime_recovery_required(current.runtime_id, current.revision);
+        }
+        return Err(ActionError::Runtime(error));
+    }
     Ok(())
+}
+
+fn runtime_launch_program(
+    state_root: &Path,
+    runtime_id: RuntimeId,
+    program: Vec<OsString>,
+) -> Result<Vec<OsString>, ActionError> {
+    let executable = env::current_exe().map_err(ActionError::Io)?;
+    let mut wrapped = vec![
+        executable.into_os_string(),
+        "--state-root".into(),
+        state_root.as_os_str().to_owned(),
+        "_runtime_launch".into(),
+        runtime_id.to_string().into(),
+        "--".into(),
+    ];
+    wrapped.extend(program);
+    Ok(wrapped)
 }
 
 /// Parks one live Runtime while preserving its provider history and checkout.
@@ -1099,6 +1127,31 @@ mod tests {
                 "-C".into(),
                 cwd.as_os_str().to_owned(),
                 "resume".into(),
+            ]
+        );
+    }
+
+    #[test]
+    fn native_provider_is_wrapped_by_the_private_launch_barrier() {
+        let runtime_id = RuntimeId::new();
+        let wrapped = runtime_launch_program(
+            Path::new("/state"),
+            runtime_id,
+            vec!["codex".into(), "--profile".into(), "wsnav-observer".into()],
+        )
+        .unwrap();
+
+        assert_eq!(
+            &wrapped[1..],
+            &[
+                OsString::from("--state-root"),
+                OsString::from("/state"),
+                OsString::from("_runtime_launch"),
+                OsString::from(runtime_id.to_string()),
+                OsString::from("--"),
+                OsString::from("codex"),
+                OsString::from("--profile"),
+                OsString::from("wsnav-observer"),
             ]
         );
     }

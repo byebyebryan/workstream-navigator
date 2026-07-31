@@ -7,14 +7,19 @@
 
 use std::{
     io::{self, Read},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, ExitStatus, Output, Stdio},
     thread,
+    time::{Duration, Instant},
 };
 
 use thiserror::Error;
 
+const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+const WAIT_INTERVAL: Duration = Duration::from_millis(20);
+
 /// Runs a finite local child command while draining each output stream and
-/// retaining no more than its caller-provided cap.
+/// retaining no more than its caller-provided cap. The child and, on Unix, its
+/// process group are terminated if the finite control deadline expires.
 ///
 /// # Errors
 ///
@@ -27,6 +32,20 @@ pub fn output_bounded(
     max_stdout_bytes: usize,
     max_stderr_bytes: usize,
 ) -> Result<Output, BoundedProcessError> {
+    output_bounded_with_timeout(command, max_stdout_bytes, max_stderr_bytes, CONTROL_TIMEOUT)
+}
+
+fn output_bounded_with_timeout(
+    command: &mut Command,
+    max_stdout_bytes: usize,
+    max_stderr_bytes: usize,
+    timeout: Duration,
+) -> Result<Output, BoundedProcessError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command
         // Match `Command::output`: control commands must never consume the
         // caller's terminal input while their output is being collected.
@@ -45,21 +64,70 @@ pub fn output_bounded(
         .ok_or(BoundedProcessError::MissingPipe)?;
     let stdout_reader = thread::spawn(move || read_capped(stdout, max_stdout_bytes));
     let stderr_reader = thread::spawn(move || read_capped(stderr, max_stderr_bytes));
-    // Wait first, then always collect both readers. In particular, do not
-    // abandon a draining thread if waiting reports an operating-system error.
-    let status = child.wait();
+    let status = wait_bounded(&mut child, timeout);
+    if matches!(status, Err(BoundedProcessError::TimedOut)) {
+        terminate_process_group(&mut child)?;
+    }
+    // Always collect both readers after the whole process group has exited, so
+    // a child cannot keep a pipe full or retain an unbounded background task.
     let stdout = stdout_reader
         .join()
         .map_err(|_| BoundedProcessError::ReaderPanicked)??;
     let stderr = stderr_reader
         .join()
         .map_err(|_| BoundedProcessError::ReaderPanicked)??;
-    let status = status.map_err(BoundedProcessError::Wait)?;
+    let status = status?;
     Ok(Output {
         status,
         stdout,
         stderr,
     })
+}
+
+fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<ExitStatus, BoundedProcessError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait().map_err(BoundedProcessError::Wait)? {
+            return Ok(status);
+        }
+        if Instant::now() >= deadline {
+            return Err(BoundedProcessError::TimedOut);
+        }
+        thread::sleep(WAIT_INTERVAL);
+    }
+}
+
+#[cfg(unix)]
+fn terminate_process_group(child: &mut Child) -> Result<(), BoundedProcessError> {
+    use nix::{
+        sys::signal::{Signal, killpg},
+        unistd::Pid,
+    };
+
+    let process_group = i32::try_from(child.id()).map_err(|_| BoundedProcessError::InvalidPid)?;
+    if killpg(Pid::from_raw(process_group), Signal::SIGKILL).is_err()
+        && child
+            .try_wait()
+            .map_err(BoundedProcessError::Wait)?
+            .is_none()
+    {
+        child.kill().map_err(BoundedProcessError::Kill)?;
+    }
+    child.wait().map_err(BoundedProcessError::Wait)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(child: &mut Child) -> Result<(), BoundedProcessError> {
+    if child
+        .try_wait()
+        .map_err(BoundedProcessError::Wait)?
+        .is_none()
+    {
+        child.kill().map_err(BoundedProcessError::Kill)?;
+    }
+    child.wait().map_err(BoundedProcessError::Wait)?;
+    Ok(())
 }
 
 fn read_capped(mut reader: impl Read, maximum: usize) -> Result<Vec<u8>, BoundedProcessError> {
@@ -93,12 +161,18 @@ pub enum BoundedProcessError {
     MissingPipe,
     #[error("could not wait for bounded child command")]
     Wait(io::Error),
+    #[error("could not stop timed-out bounded child command")]
+    Kill(io::Error),
+    #[error("bounded child command exposed an invalid process ID")]
+    InvalidPid,
     #[error("could not read bounded child output")]
     Read(io::Error),
     #[error("bounded child output reader panicked")]
     ReaderPanicked,
     #[error("bounded child output exceeded its configured limit")]
     OutputTooLarge,
+    #[error("bounded child command exceeded its control deadline")]
+    TimedOut,
 }
 
 #[cfg(test)]
@@ -116,5 +190,18 @@ mod tests {
             output_bounded(&mut command, 1024, 1024),
             Err(BoundedProcessError::OutputTooLarge)
         ));
+    }
+
+    #[test]
+    fn stalled_process_group_is_terminated_at_the_control_deadline() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 30 & wait"]);
+        let started = Instant::now();
+
+        assert!(matches!(
+            output_bounded_with_timeout(&mut command, 1024, 1024, Duration::from_millis(100)),
+            Err(BoundedProcessError::TimedOut)
+        ));
+        assert!(started.elapsed() < Duration::from_secs(2));
     }
 }

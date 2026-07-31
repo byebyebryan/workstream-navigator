@@ -41,7 +41,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Install declared MSRV
-        uses: dtolnay/rust-toolchain@1.85.0
+        uses: dtolnay/rust-toolchain@1.88.0
 
       - name: Test declared MSRV
         run: cargo test --locked --all-targets --all-features

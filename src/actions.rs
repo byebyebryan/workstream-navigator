@@ -17,7 +17,8 @@ use thiserror::Error;
 
 use crate::{
     domain::{
-        OperationKind, OperationPhase, Revision, RuntimeId, WorkstreamId, WorkstreamLifecycle,
+        OperationId, OperationKind, OperationPhase, Revision, RuntimeId, WorkstreamId,
+        WorkstreamLifecycle,
     },
     provider::codex::app_server::{EphemeralAppServer, ForkReconciliation},
     provider::codex::profile::{ObserverProfile, ProfileError},
@@ -190,6 +191,112 @@ pub fn fork_workstream(
     Ok(created.workstream_id)
 }
 
+/// Reopens one exact interrupted Start or Fork operation without its original
+/// request key. Recovery is always evidence-led: it never recreates a missing
+/// Git effect, and a recorded provider fork attempt is reconciled rather than
+/// retried.
+///
+/// # Errors
+///
+/// Returns an error when the operation is terminal, its recorded effects are
+/// not exact, the source is no longer eligible for an unattempted fork, or the
+/// provider result is still ambiguous.
+pub fn recover_managed_operation(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    operation_id: OperationId,
+) -> Result<WorkstreamId, ActionError> {
+    let plan = registry.managed_workstream_plan(operation_id)?;
+    if !matches!(
+        plan.operation.phase,
+        OperationPhase::ExternalEffectStarted
+            | OperationPhase::AwaitingReconciliation
+            | OperationPhase::RecoveryRequired
+    ) {
+        return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+    }
+    match plan.operation.kind {
+        OperationKind::Start => recover_independent_operation(root, registry, &plan),
+        OperationKind::Fork => recover_fork_operation(root, registry, plan),
+    }
+}
+
+fn recover_independent_operation(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    plan: &crate::state::ManagedWorkstreamPlan,
+) -> Result<WorkstreamId, ActionError> {
+    if plan.origin != crate::domain::WorkstreamOrigin::Independent {
+        return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+    }
+    ensure_recorded_managed_worktree_evidence(registry, plan, &SystemGitWorktree)?;
+    let created = registry.commit_recovered_managed_workstream(plan)?;
+    let _ = start(
+        root,
+        registry,
+        created.workstream_id,
+        Some(created.revision),
+    )?;
+    Ok(created.workstream_id)
+}
+
+fn recover_fork_operation(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    plan: crate::state::ManagedWorkstreamPlan,
+) -> Result<WorkstreamId, ActionError> {
+    if plan.origin != crate::domain::WorkstreamOrigin::Fork {
+        return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+    }
+    ensure_recorded_managed_worktree_evidence(registry, &plan, &SystemGitWorktree)?;
+
+    let provider_fork_already_attempted = plan.fork_attempted_at_millis.is_some();
+    let prepared = if provider_fork_already_attempted {
+        plan
+    } else {
+        if ensure_live_fork_source(root, registry, &plan).is_err() {
+            require_managed_operation_recovery(registry, &plan);
+            return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+        }
+        // The marker is the exact boundary after which no path may issue a
+        // second provider fork. A recovered unmarked plan may cross it once.
+        registry.record_managed_fork_attempt(&plan)?
+    };
+    let source_session_id = prepared
+        .source_native_session_id
+        .as_deref()
+        .ok_or(ActionError::ForkSourceUnavailable)?;
+    let settled_turn_id = prepared
+        .last_settled_turn_id
+        .as_deref()
+        .ok_or(ActionError::ForkSourceUnavailable)?;
+    let app_server = EphemeralAppServer::default();
+    let destination = if provider_fork_already_attempted {
+        reconcile_fork(&app_server, &prepared, source_session_id, settled_turn_id)
+    } else {
+        match app_server.fork_thread(source_session_id, settled_turn_id, &prepared.worktree_path) {
+            Ok(destination) => Ok(destination),
+            Err(_) => reconcile_fork(&app_server, &prepared, source_session_id, settled_turn_id),
+        }
+    };
+    let destination = match destination {
+        Ok(destination) => destination,
+        Err(error) => {
+            require_managed_operation_recovery(registry, &prepared);
+            return Err(error);
+        }
+    };
+    let created = registry
+        .commit_recovered_forked_managed_workstream(&prepared, &destination.native_session_id)?;
+    let _ = start(
+        root,
+        registry,
+        created.workstream_id,
+        Some(created.revision),
+    )?;
+    Ok(created.workstream_id)
+}
+
 fn reconcile_fork(
     app_server: &EphemeralAppServer,
     prepared: &crate::state::ManagedWorkstreamPlan,
@@ -333,24 +440,53 @@ fn ensure_managed_worktree_evidence(
     if prepared.plan.operation.phase != OperationPhase::ExternalEffectStarted {
         return Err(ActionError::ManagedWorkstreamRecoveryRequired);
     }
-    let worktree = ManagedWorktree {
-        repository: prepared.plan.repository_path.clone(),
-        path: prepared.plan.worktree_path.clone(),
-        branch: prepared.plan.branch.clone(),
-        base_commit: prepared.plan.base_commit.clone(),
-    };
     if prepared.newly_prepared {
+        let worktree = ManagedWorktree {
+            repository: prepared.plan.repository_path.clone(),
+            path: prepared.plan.worktree_path.clone(),
+            branch: prepared.plan.branch.clone(),
+            base_commit: prepared.plan.base_commit.clone(),
+        };
         // A nonzero Git exit after the external effect began is not enough to
         // retry. Exact durable evidence below is the only safe way to commit.
         let _ = git.create(&worktree);
     }
+    ensure_recorded_managed_worktree_evidence(registry, &prepared.plan, git)
+}
+
+fn ensure_recorded_managed_worktree_evidence(
+    registry: &mut HostRegistry,
+    prepared: &crate::state::ManagedWorkstreamPlan,
+    git: &dyn GitWorktree,
+) -> Result<(), ActionError> {
+    if !matches!(
+        prepared.operation.phase,
+        OperationPhase::ExternalEffectStarted | OperationPhase::RecoveryRequired
+    ) {
+        return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+    }
+    let worktree = ManagedWorktree {
+        repository: prepared.repository_path.clone(),
+        path: prepared.worktree_path.clone(),
+        branch: prepared.branch.clone(),
+        base_commit: prepared.base_commit.clone(),
+    };
     let evidence = git.evidence(&worktree);
     match evidence {
         Ok(WorktreeEvidence::Exact) => Ok(()),
         Ok(WorktreeEvidence::Absent | WorktreeEvidence::Mismatch) | Err(_) => {
-            let _ = registry.mark_managed_workstream_recovery(&prepared.plan);
+            require_managed_operation_recovery(registry, prepared);
             Err(ActionError::ManagedWorkstreamRecoveryRequired)
         }
+    }
+}
+
+fn require_managed_operation_recovery(
+    registry: &mut HostRegistry,
+    prepared: &crate::state::ManagedWorkstreamPlan,
+) {
+    if prepared.operation.phase != OperationPhase::RecoveryRequired {
+        let _ = registry.mark_managed_workstream_recovery(prepared);
     }
 }
 

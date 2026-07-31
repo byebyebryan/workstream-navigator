@@ -16,8 +16,8 @@ use crate::{
     domain::{Revision, RuntimeId, RuntimeStatus, WorkstreamId, WorkstreamLifecycle},
     protocol::{
         CURRENT_PROTOCOL_VERSION, Capabilities, HelloResponse, HostAction, HostRequest,
-        HostResponse, MAX_FRAME_BYTES, RequestEnvelope, ResponseEnvelope, SnapshotResponse,
-        SnapshotWorkstream,
+        HostResponse, MAX_FRAME_BYTES, OperationSnapshot, OperationsResponse, RequestEnvelope,
+        ResponseEnvelope, SnapshotResponse, SnapshotWorkstream,
     },
     provider::codex::names::{NameContext, resolve_name},
     runtime::{LinuxProcessProbe, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux},
@@ -117,6 +117,13 @@ fn dispatch(state_root: Option<std::path::PathBuf>, request: &RequestEnvelope) -
             },
             Err(_) => rejected("host snapshot is unavailable"),
         },
+        HostRequest::Operations => match operations(&registry) {
+            Ok(operations) => ResponseEnvelope {
+                version: CURRENT_PROTOCOL_VERSION,
+                response: HostResponse::Operations(operations),
+            },
+            Err(_) => rejected("host operation list is unavailable"),
+        },
         HostRequest::Attach { runtime_id } => match registry.runtime_by_id(*runtime_id) {
             Ok(Some(_)) => ResponseEnvelope {
                 version: CURRENT_PROTOCOL_VERSION,
@@ -163,6 +170,9 @@ fn apply(root: &StateRoot, registry: &mut HostRegistry, action: HostAction) -> R
             workstream_id,
             expected_revision,
         } => apply_recover(root, registry, workstream_id, expected_revision),
+        HostAction::RecoverOperation { operation_id } => {
+            apply_recover_operation(root, registry, operation_id)
+        }
         HostAction::NewWorkstream {
             source_workstream_id,
             expected_revision,
@@ -222,6 +232,17 @@ fn apply_fork_workstream(
             Revision::try_from(expected_revision).ok(),
             request_key,
         ),
+        registry,
+    )
+}
+
+fn apply_recover_operation(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+    operation_id: crate::domain::OperationId,
+) -> ResponseEnvelope {
+    apply_created_workstream(
+        &crate::actions::recover_managed_operation(root, registry, operation_id),
         registry,
     )
 }
@@ -360,7 +381,29 @@ fn snapshot(root: &StateRoot, registry: &mut HostRegistry) -> Result<SnapshotRes
         .iter()
         .map(|overview| snapshot_workstream(root, overview))
         .collect();
-    Ok(SnapshotResponse { workstreams })
+    let unresolved_operation_count = registry
+        .unresolved_operation_overviews()?
+        .len()
+        .try_into()
+        .map_err(|_| StateError::NavigatorSnapshotTooLarge)?;
+    Ok(SnapshotResponse {
+        workstreams,
+        unresolved_operation_count,
+    })
+}
+
+fn operations(registry: &HostRegistry) -> Result<OperationsResponse, StateError> {
+    let operations = registry
+        .unresolved_operation_overviews()?
+        .into_iter()
+        .map(|operation| OperationSnapshot {
+            operation_id: operation.operation_id,
+            kind: operation.kind,
+            phase: operation.phase,
+            revision: operation.revision.value(),
+        })
+        .collect();
+    Ok(OperationsResponse { operations })
 }
 
 fn snapshot_workstream(root: &StateRoot, overview: &WorkstreamOverview) -> SnapshotWorkstream {
@@ -562,6 +605,7 @@ pub enum RemoteError {
 #[cfg(test)]
 mod tests {
     use std::io::Cursor;
+    use std::path::PathBuf;
 
     use super::*;
 
@@ -618,7 +662,59 @@ mod tests {
         let response = ResponseEnvelope::decode(&output).unwrap();
         assert!(matches!(
             response.response,
-            HostResponse::Snapshot(SnapshotResponse { ref workstreams }) if workstreams.is_empty()
+            HostResponse::Snapshot(SnapshotResponse { ref workstreams, .. }) if workstreams.is_empty()
+        ));
+    }
+
+    #[test]
+    fn operation_listing_exposes_no_request_key_or_effect_plan() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let operation_id = {
+            let mut registry = HostRegistry::open(&root).unwrap();
+            let source = registry
+                .register_external_workstream(
+                    PathBuf::from("/private/repository"),
+                    "common-dir".to_owned(),
+                    "deadbeef".to_owned(),
+                )
+                .unwrap();
+            let prepared = registry
+                .prepare_managed_workstream(
+                    "private-request-key".to_owned(),
+                    crate::domain::OperationKind::Start,
+                    source.workstream_id,
+                    Revision::INITIAL,
+                    "a".repeat(40),
+                )
+                .unwrap();
+            registry
+                .mark_managed_workstream_recovery(&prepared.plan)
+                .unwrap();
+            prepared.plan.operation.id
+        };
+        let request = RequestEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            request: HostRequest::Operations,
+        }
+        .encode()
+        .unwrap();
+        let mut output = Vec::new();
+
+        serve(
+            Some(root.base().to_path_buf()),
+            &mut Cursor::new(request),
+            &mut output,
+        )
+        .unwrap();
+
+        let text = String::from_utf8(output.clone()).unwrap();
+        assert!(!text.contains("private-request-key"));
+        assert!(!text.contains("/private/repository"));
+        assert!(matches!(
+            ResponseEnvelope::decode(&output).unwrap().response,
+            HostResponse::Operations(OperationsResponse { operations })
+                if operations.len() == 1 && operations[0].operation_id == operation_id
         ));
     }
 

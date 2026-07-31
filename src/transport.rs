@@ -17,8 +17,8 @@ use thiserror::Error;
 
 use crate::domain::{RuntimeId, WorkstreamId};
 use crate::protocol::{
-    HelloResponse, HostAction, HostRequest, HostResponse, MAX_FRAME_BYTES, RequestEnvelope,
-    ResponseEnvelope, SnapshotResponse,
+    HelloResponse, HostAction, HostRequest, HostResponse, MAX_FRAME_BYTES, OperationsResponse,
+    RequestEnvelope, ResponseEnvelope, SnapshotResponse,
 };
 
 const MAX_STDERR_BYTES: usize = 4096;
@@ -254,6 +254,32 @@ impl<R: CommandRunner> HostClient<R> {
         self.snapshot(&local_invocation(endpoint, &snapshot_request()?))
     }
 
+    /// Lists unresolved remote creation operations through the same bounded
+    /// stateful protocol as snapshots.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for transport/protocol failure, host rejection, or an
+    /// unexpected response type.
+    pub fn operations_ssh(
+        &self,
+        endpoint: &SshEndpoint,
+    ) -> Result<OperationsResponse, TransportError> {
+        self.operations(&ssh_invocation(endpoint, &operations_request()?))
+    }
+
+    /// Local-subprocess parity path for unresolved operation inspection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error under the same bounds as [`Self::operations_ssh`].
+    pub fn operations_local(
+        &self,
+        endpoint: &LocalEndpoint,
+    ) -> Result<OperationsResponse, TransportError> {
+        self.operations(&local_invocation(endpoint, &operations_request()?))
+    }
+
     /// Applies one explicitly revision-guarded action through SSH.
     ///
     /// # Errors
@@ -328,6 +354,17 @@ impl<R: CommandRunner> HostClient<R> {
         }
     }
 
+    fn operations(
+        &self,
+        invocation: &CommandInvocation,
+    ) -> Result<OperationsResponse, TransportError> {
+        match self.request(invocation)? {
+            HostResponse::Operations(response) => Ok(response),
+            HostResponse::Rejected { diagnostic } => Err(TransportError::Rejected(diagnostic)),
+            _ => Err(TransportError::UnexpectedResponse),
+        }
+    }
+
     fn apply(&self, invocation: &CommandInvocation) -> Result<i64, TransportError> {
         match self.request(invocation)? {
             HostResponse::Applied { revision } => Ok(revision),
@@ -369,6 +406,15 @@ fn snapshot_request() -> Result<RequestEnvelope, TransportError> {
     let request = RequestEnvelope {
         version: crate::protocol::CURRENT_PROTOCOL_VERSION,
         request: HostRequest::Snapshot,
+    };
+    request.validate()?;
+    Ok(request)
+}
+
+fn operations_request() -> Result<RequestEnvelope, TransportError> {
+    let request = RequestEnvelope {
+        version: crate::protocol::CURRENT_PROTOCOL_VERSION,
+        request: HostRequest::Operations,
     };
     request.validate()?;
     Ok(request)

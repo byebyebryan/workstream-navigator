@@ -151,10 +151,7 @@ pub enum OperationPhase {
 impl OperationPhase {
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Committed | Self::RecoveryRequired | Self::Failed
-        )
+        matches!(self, Self::Committed | Self::Failed)
     }
 }
 
@@ -274,7 +271,7 @@ const fn permits_transition(from: OperationPhase, to: OperationPhase) -> bool {
         ) | (
             OperationPhase::AwaitingReconciliation,
             OperationPhase::Committed | OperationPhase::RecoveryRequired | OperationPhase::Failed
-        )
+        ) | (OperationPhase::RecoveryRequired, OperationPhase::Committed)
     )
 }
 
@@ -434,7 +431,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn terminal_operation_cannot_be_retried() {
+    fn recovery_required_operation_can_only_finish() {
         let mut operation =
             CompoundOperation::new("request-1".to_owned(), OperationKind::Fork, "{}".to_owned())
                 .unwrap();
@@ -452,6 +449,10 @@ mod tests {
             operation.transition(OperationPhase::ExternalEffectStarted, None, None),
             Err(DomainError::InvalidOperationTransition { .. })
         ));
+        operation
+            .transition(OperationPhase::Committed, None, None)
+            .unwrap();
+        assert!(operation.phase.is_terminal());
     }
 
     #[test]
@@ -522,6 +523,10 @@ mod tests {
                 Some("provider-fork-issued".to_owned()),
                 Some("{\"reason\":\"no_unique_candidate\"}".to_owned()),
             )
+            .unwrap();
+        assert!(!ambiguous.phase.is_terminal());
+        ambiguous
+            .transition(OperationPhase::Committed, None, None)
             .unwrap();
         assert!(ambiguous.phase.is_terminal());
     }

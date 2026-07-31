@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::{
     actions::{self, OBSERVER_AUTHORITY},
-    domain::{RuntimeId, WorkstreamId},
+    domain::{OperationId, RuntimeId, WorkstreamId},
     navigator::run_local_navigator,
     presentation::Presentation,
     provider::codex::app_server::EphemeralAppServer,
@@ -100,6 +100,10 @@ enum Commands {
     Park { workstream_id: String },
     /// Show one local runtime's durable record and live private-tmux probe.
     Status { workstream_id: String },
+    /// List unresolved Start and Fork operations without exposing request keys or provider data.
+    Operations,
+    /// Reopen one exact unresolved Start or Fork operation.
+    RecoverOperation { operation_id: String },
     /// Rename the current managed Codex thread through its canonical name field.
     Rename { workstream_id: String, name: String },
     /// Clear one observed result/recovery attention revision without sending provider input.
@@ -162,6 +166,8 @@ enum HostCommands {
     List,
     /// Fetch one validated bounded snapshot from a registered SSH host.
     Snapshot { alias: String },
+    /// List unresolved creation operations on one registered SSH host.
+    Operations { alias: String },
     /// Start or cold-resume one remote Workstream at an observed revision.
     Start {
         alias: String,
@@ -192,6 +198,8 @@ enum HostCommands {
         source_workstream_id: String,
         revision: i64,
     },
+    /// Reopen one exact unresolved creation operation on a registered SSH host.
+    RecoverOperation { alias: String, operation_id: String },
     /// Clear one remote result-attention revision without provider input.
     Acknowledge {
         alias: String,
@@ -313,6 +321,10 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
         Commands::Status { workstream_id } => {
             status(root, &mut registry, parse_workstream(&workstream_id)?)
         }
+        Commands::Operations => operations(&registry),
+        Commands::RecoverOperation { operation_id } => {
+            recover_operation(root, &mut registry, parse_operation(&operation_id)?)
+        }
         Commands::Rename {
             workstream_id,
             name,
@@ -368,6 +380,7 @@ fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError>
     match command {
         HostCommands::List => list_ssh_hosts(&catalog),
         HostCommands::Snapshot { alias } => snapshot_ssh_host(&catalog, &alias),
+        HostCommands::Operations { alias } => operations_ssh_host(&catalog, &alias),
         HostCommands::Start {
             alias,
             workstream_id,
@@ -393,6 +406,10 @@ fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError>
             source_workstream_id,
             revision,
         } => fork_remote_workstream(&catalog, &alias, &source_workstream_id, revision),
+        HostCommands::RecoverOperation {
+            alias,
+            operation_id,
+        } => recover_remote_operation(&catalog, &alias, &operation_id),
         HostCommands::Acknowledge {
             alias,
             workstream_id,
@@ -488,6 +505,20 @@ fn snapshot_ssh_host(catalog: &ClientCatalog, alias: &str) -> Result<(), AppErro
     Ok(())
 }
 
+fn operations_ssh_host(catalog: &ClientCatalog, alias: &str) -> Result<(), AppError> {
+    let endpoint = checked_ssh_endpoint(catalog, alias)?;
+    let operations = HostClient::new(SystemCommandRunner).operations_ssh(&endpoint)?;
+    print_operations(operations.operations.into_iter().map(|operation| {
+        (
+            operation.operation_id,
+            operation.kind,
+            operation.phase,
+            operation.revision,
+        )
+    }));
+    Ok(())
+}
+
 fn start_remote_workstream(
     catalog: &ClientCatalog,
     alias: &str,
@@ -577,6 +608,21 @@ fn fork_remote_workstream(
         },
     )?;
     println!("forked workstream {workstream_id}");
+    Ok(())
+}
+
+fn recover_remote_operation(
+    catalog: &ClientCatalog,
+    alias: &str,
+    operation_id: &str,
+) -> Result<(), AppError> {
+    let operation_id = parse_operation(operation_id)?;
+    let workstream_id = create_remote_workstream(
+        catalog,
+        alias,
+        crate::protocol::HostAction::RecoverOperation { operation_id },
+    )?;
+    println!("recovered operation {operation_id}; workstream {workstream_id}");
     Ok(())
 }
 
@@ -1163,6 +1209,49 @@ fn status(
     Ok(())
 }
 
+fn operations(registry: &HostRegistry) -> Result<(), AppError> {
+    let operations = registry.unresolved_operation_overviews()?;
+    print_operations(operations.into_iter().map(|operation| {
+        (
+            operation.operation_id,
+            operation.kind,
+            operation.phase,
+            operation.revision.value(),
+        )
+    }));
+    Ok(())
+}
+
+fn print_operations(
+    operations: impl IntoIterator<
+        Item = (
+            OperationId,
+            crate::domain::OperationKind,
+            crate::domain::OperationPhase,
+            i64,
+        ),
+    >,
+) {
+    let mut any = false;
+    for (operation_id, kind, phase, revision) in operations {
+        any = true;
+        println!("operation {operation_id} {kind:?} {phase:?} revision {revision}");
+    }
+    if !any {
+        println!("no unresolved operations");
+    }
+}
+
+fn recover_operation(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+    operation_id: OperationId,
+) -> Result<(), AppError> {
+    let workstream_id = actions::recover_managed_operation(root, registry, operation_id)?;
+    println!("recovered operation {operation_id}; workstream {workstream_id}");
+    Ok(())
+}
+
 const fn runtime_probe_label(probe: &RuntimeProbe) -> &'static str {
     match probe {
         RuntimeProbe::Live { .. } => "live",
@@ -1173,6 +1262,10 @@ const fn runtime_probe_label(probe: &RuntimeProbe) -> &'static str {
 
 fn parse_workstream(value: &str) -> Result<WorkstreamId, AppError> {
     WorkstreamId::from_str(value).map_err(AppError::InvalidWorkstreamId)
+}
+
+fn parse_operation(value: &str) -> Result<OperationId, AppError> {
+    OperationId::from_str(value).map_err(AppError::InvalidOperationId)
 }
 
 fn default_state_root() -> PathBuf {
@@ -1209,6 +1302,8 @@ enum AppError {
     InvalidAttentionRevision,
     #[error("invalid workstream ID")]
     InvalidWorkstreamId(uuid::Error),
+    #[error("invalid operation ID")]
+    InvalidOperationId(uuid::Error),
     #[error("host alias is not registered")]
     UnknownHostAlias,
     #[error("host alias is not an SSH host")]

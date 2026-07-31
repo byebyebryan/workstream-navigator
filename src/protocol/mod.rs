@@ -8,10 +8,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::domain::{
-    HostId, LocationId, Revision, RuntimeId, RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
+    HostId, LocationId, OperationId, OperationKind, OperationPhase, Revision, RuntimeId,
+    RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 5;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 6;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -70,6 +71,7 @@ impl RequestEnvelope {
 pub enum HostRequest {
     Hello { client_alias: String },
     Snapshot,
+    Operations,
     Attach { runtime_id: RuntimeId },
     Apply { action: HostAction },
 }
@@ -80,7 +82,7 @@ impl HostRequest {
             Self::Hello { client_alias } => {
                 validate_bounded("client alias", client_alias, MAX_ALIAS_BYTES)
             }
-            Self::Snapshot | Self::Attach { .. } => Ok(()),
+            Self::Snapshot | Self::Operations | Self::Attach { .. } => Ok(()),
             Self::Apply { action } => action.validate(),
         }
     }
@@ -106,6 +108,8 @@ pub enum HostAction {
         workstream_id: WorkstreamId,
         expected_revision: i64,
     },
+    /// Reconcile one explicitly selected unresolved creation operation.
+    RecoverOperation { operation_id: OperationId },
     /// Create a sibling managed checkout from the registered project base.
     NewWorkstream {
         source_workstream_id: WorkstreamId,
@@ -140,9 +144,12 @@ impl HostAction {
             }
             | Self::ForkWorkstream {
                 expected_revision, ..
-            } => *expected_revision,
+            } => Some(*expected_revision),
+            Self::RecoverOperation { .. } => None,
         };
-        Revision::try_from(expected_revision).map_err(|_| ProtocolError::InvalidRevision)?;
+        if let Some(expected_revision) = expected_revision {
+            Revision::try_from(expected_revision).map_err(|_| ProtocolError::InvalidRevision)?;
+        }
         match self {
             Self::NewWorkstream { request_key, .. } | Self::ForkWorkstream { request_key, .. } => {
                 validate_bounded("request key", request_key, MAX_REQUEST_KEY_BYTES)?;
@@ -150,7 +157,8 @@ impl HostAction {
             Self::AcknowledgeAttention { .. }
             | Self::Park { .. }
             | Self::Start { .. }
-            | Self::Recover { .. } => {}
+            | Self::Recover { .. }
+            | Self::RecoverOperation { .. } => {}
         }
         Ok(())
     }
@@ -219,6 +227,7 @@ impl ResponseEnvelope {
 pub enum HostResponse {
     Hello(HelloResponse),
     Snapshot(SnapshotResponse),
+    Operations(OperationsResponse),
     Applied {
         revision: i64,
     },
@@ -239,6 +248,7 @@ impl HostResponse {
         match self {
             Self::Hello(response) => response.validate(),
             Self::Snapshot(response) => response.validate(),
+            Self::Operations(response) => response.validate(),
             Self::Applied { revision } => Revision::try_from(*revision)
                 .map(|_| ())
                 .map_err(|_| ProtocolError::InvalidRevision),
@@ -282,6 +292,7 @@ pub struct Capabilities {
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SnapshotResponse {
     pub workstreams: Vec<SnapshotWorkstream>,
+    pub unresolved_operation_count: u16,
 }
 
 impl SnapshotResponse {
@@ -291,7 +302,44 @@ impl SnapshotResponse {
         }
         self.workstreams
             .iter()
-            .try_for_each(SnapshotWorkstream::validate)
+            .try_for_each(SnapshotWorkstream::validate)?;
+        if usize::from(self.unresolved_operation_count) > MAX_SNAPSHOT_WORKSTREAMS {
+            return Err(ProtocolError::SnapshotTooLarge);
+        }
+        Ok(())
+    }
+}
+
+/// Bounded, opaque projection of one unresolved host-side creation operation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OperationSnapshot {
+    pub operation_id: OperationId,
+    pub kind: OperationKind,
+    pub phase: OperationPhase,
+    pub revision: i64,
+}
+
+impl OperationSnapshot {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        Revision::try_from(self.revision)
+            .map(|_| ())
+            .map_err(|_| ProtocolError::InvalidRevision)
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct OperationsResponse {
+    pub operations: Vec<OperationSnapshot>,
+}
+
+impl OperationsResponse {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        if self.operations.len() > MAX_SNAPSHOT_WORKSTREAMS {
+            return Err(ProtocolError::SnapshotTooLarge);
+        }
+        self.operations
+            .iter()
+            .try_for_each(OperationSnapshot::validate)
     }
 }
 
@@ -439,6 +487,20 @@ mod tests {
     }
 
     #[test]
+    fn recovery_operation_needs_only_an_opaque_operation_id() {
+        let request = RequestEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            request: HostRequest::Apply {
+                action: HostAction::RecoverOperation {
+                    operation_id: OperationId::new(),
+                },
+            },
+        };
+
+        assert!(request.validate().is_ok());
+    }
+
+    #[test]
     fn frame_round_trip_uses_only_one_bounded_json_document() {
         let request = RequestEnvelope {
             version: CURRENT_PROTOCOL_VERSION,
@@ -518,6 +580,7 @@ mod tests {
                 last_activity_at_millis: None,
                 revision: 1,
             }],
+            unresolved_operation_count: 0,
         };
 
         assert!(matches!(

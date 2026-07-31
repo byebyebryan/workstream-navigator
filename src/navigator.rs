@@ -134,6 +134,7 @@ impl NavigatorRuntimeStatus {
 pub struct LocalNavigatorSnapshot {
     pub workstreams: Vec<NavigatorWorkstream>,
     pub unreachable_hosts: Vec<String>,
+    pub unresolved_operation_count: usize,
 }
 
 /// Reads a fresh local-only navigator projection from the durable host state.
@@ -158,6 +159,7 @@ pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, Naviga
     Ok(LocalNavigatorSnapshot {
         workstreams,
         unreachable_hosts: Vec::new(),
+        unresolved_operation_count: registry.unresolved_operation_overviews()?.len(),
     })
 }
 
@@ -356,6 +358,7 @@ struct RemoteMonitor {
 
 struct CachedRemoteHost {
     workstreams: Vec<NavigatorWorkstream>,
+    unresolved_operation_count: usize,
     reachable: bool,
     pending: bool,
     next_poll: Instant,
@@ -364,7 +367,7 @@ struct CachedRemoteHost {
 
 struct RemotePollResult {
     alias: String,
-    outcome: Result<Vec<crate::protocol::SnapshotWorkstream>, ()>,
+    outcome: Result<crate::protocol::SnapshotResponse, ()>,
 }
 
 impl RemoteMonitor {
@@ -396,6 +399,7 @@ impl RemoteMonitor {
                 .entry(host.alias.clone())
                 .or_insert_with(|| CachedRemoteHost {
                     workstreams: Vec::new(),
+                    unresolved_operation_count: 0,
                     reachable: false,
                     pending: false,
                     next_poll: now,
@@ -429,13 +433,15 @@ impl RemoteMonitor {
                 continue;
             };
             host.pending = false;
-            if let Ok(workstreams) = result.outcome {
-                host.workstreams = workstreams
+            if let Ok(snapshot) = result.outcome {
+                host.workstreams = snapshot
+                    .workstreams
                     .iter()
                     .filter_map(|workstream| {
                         project_remote_workstream(&result.alias, workstream, true).ok()
                     })
                     .collect();
+                host.unresolved_operation_count = usize::from(snapshot.unresolved_operation_count);
                 host.reachable = true;
                 host.backoff = REMOTE_INITIAL_BACKOFF;
                 host.next_poll = now + REMOTE_POLL_INTERVAL;
@@ -465,6 +471,7 @@ impl RemoteMonitor {
             if !host.reachable {
                 local.unreachable_hosts.push(alias.clone());
             }
+            local.unresolved_operation_count += host.unresolved_operation_count;
         }
         local
     }
@@ -476,9 +483,7 @@ impl RemoteMonitor {
     }
 }
 
-fn fetch_remote_snapshot(
-    host: &ClientHost,
-) -> Result<Vec<crate::protocol::SnapshotWorkstream>, ()> {
+fn fetch_remote_snapshot(host: &ClientHost) -> Result<crate::protocol::SnapshotResponse, ()> {
     let ClientHostTransport::Ssh { destination } = &host.transport else {
         return Err(());
     };
@@ -492,7 +497,7 @@ fn fetch_remote_snapshot(
     let client = HostClient::new(SystemCommandRunner);
     let hello = client.hello_ssh(&endpoint, "wsnav").map_err(|_| ())?;
     host.verify_hello(&hello).map_err(|_| ())?;
-    Ok(client.snapshot_ssh(&endpoint).map_err(|_| ())?.workstreams)
+    client.snapshot_ssh(&endpoint).map_err(|_| ())
 }
 
 fn combined_snapshot(
@@ -688,13 +693,27 @@ impl NavigatorView {
             &mut state,
         );
         let help = self.message.clone().unwrap_or_else(|| {
+            let operation_hint = (self.snapshot.unresolved_operation_count > 0).then(|| {
+                format!(
+                    "  ! {} operation{} needs recovery; use wsnav operations",
+                    self.snapshot.unresolved_operation_count,
+                    if self.snapshot.unresolved_operation_count == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                )
+            });
             if self.snapshot.unreachable_hosts.is_empty() {
-                "↑↓ select  Enter open/start/recover  n new  f fork  a acknowledge  p park  q close"
-                    .to_owned()
+                format!(
+                    "↑↓ select  Enter open/start/recover  n new  f fork  a acknowledge  p park  q close{}",
+                    operation_hint.unwrap_or_default()
+                )
             } else {
                 format!(
-                    "{} unavailable; showing cached state  ↑↓ select  Enter open/start/recover  n new  f fork  q close",
-                    self.snapshot.unreachable_hosts.join(", ")
+                    "{} unavailable; showing cached state  ↑↓ select  Enter open/start/recover  n new  f fork  q close{}",
+                    self.snapshot.unreachable_hosts.join(", "),
+                    operation_hint.unwrap_or_default(),
                 )
             }
         });
@@ -1234,6 +1253,7 @@ mod tests {
                 row(second, NavigatorRuntimeStatus::Parked),
             ],
             unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
         };
         let mut view = NavigatorView::new(snapshot);
         view.select_previous();
@@ -1252,6 +1272,7 @@ mod tests {
                 row(second, NavigatorRuntimeStatus::Idle),
             ],
             unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
         });
         let first_row = view.selected().unwrap().clone();
         let second_row = view.snapshot.workstreams[1].clone();
@@ -1266,6 +1287,7 @@ mod tests {
                 row(second, NavigatorRuntimeStatus::Idle),
             ],
             unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
         });
 
         assert!(!view.is_attached_to(view.selected().unwrap()));
@@ -1276,6 +1298,7 @@ mod tests {
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: vec![row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)],
             unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
         });
 
         view.begin_mouse_click(None);
@@ -1294,6 +1317,7 @@ mod tests {
                 row(WorkstreamId::new(), NavigatorRuntimeStatus::Parked),
             ],
             unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
         });
         assert_eq!(view.row_from_y(0), None);
         assert_eq!(view.row_from_y(1), Some(0));
@@ -1368,6 +1392,7 @@ mod tests {
                 ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
             }],
             unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
         });
         terminal.draw(|frame| view.render(frame)).unwrap();
         let rendered = terminal
@@ -1399,6 +1424,27 @@ mod tests {
             .find(|cell| cell.symbol() == "l")
             .unwrap();
         assert_eq!(host_cell.fg, Color::LightBlue);
+    }
+
+    #[test]
+    fn renderer_makes_unresolved_operation_recovery_visible() {
+        let mut terminal = Terminal::new(TestBackend::new(200, 8)).unwrap();
+        let view = NavigatorView::new(LocalNavigatorSnapshot {
+            unresolved_operation_count: 1,
+            ..LocalNavigatorSnapshot::default()
+        });
+
+        terminal.draw(|frame| view.render(frame)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(rendered.contains("operation needs recovery"));
+        assert!(rendered.contains("wsnav operations"));
     }
 
     #[test]
@@ -1442,6 +1488,7 @@ mod tests {
                     result_ready: true,
                     ..row(workstream_id, NavigatorRuntimeStatus::Working)
                 }],
+                unresolved_operation_count: 0,
                 reachable: false,
                 pending: false,
                 next_poll: Instant::now(),
@@ -1472,12 +1519,14 @@ mod tests {
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: vec![local.clone(), remote.clone()],
             unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
         });
         view.select_next();
 
         view.replace_snapshot(LocalNavigatorSnapshot {
             workstreams: vec![remote, local],
             unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
         });
 
         assert_eq!(view.selected().unwrap().host.alias(), "snap");
@@ -1500,6 +1549,7 @@ mod tests {
                 remote_destination,
             ],
             unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
         });
 
         assert!(view.select_workstream("snap", destination));

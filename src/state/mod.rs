@@ -18,7 +18,10 @@ use crate::provider::codex::hooks::{HookObservation, LifecycleEvent};
 use crate::provider::codex::names::NameState;
 use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 
-const HOST_SCHEMA_VERSION: i64 = 4;
+/// The newest host-registry schema this build can open or create.
+///
+/// This is safe release-probe metadata; it is not a host-state observation.
+pub const HOST_SCHEMA_VERSION: i64 = 4;
 const CLIENT_SCHEMA_VERSION: i64 = 2;
 const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
@@ -312,6 +315,19 @@ pub struct ManagedWorkstreamPreparation {
     /// `true` only when this call atomically recorded the external-effect plan.
     /// A later caller must reconcile the recorded plan rather than run Git again.
     pub newly_prepared: bool,
+}
+
+/// Bounded operator-visible state for one unresolved creation operation.
+///
+/// Request keys, checkout paths, provider identifiers, and raw effect evidence
+/// remain host-private. The opaque operation ID is enough to reopen the exact
+/// durable plan through the explicit recovery action.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperationOverview {
+    pub operation_id: OperationId,
+    pub kind: OperationKind,
+    pub phase: OperationPhase,
+    pub revision: Revision,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -893,7 +909,24 @@ impl HostRegistry {
         &mut self,
         prepared: &ManagedWorkstreamPlan,
     ) -> Result<ManagedWorkstream, StateError> {
-        self.commit_managed_workstream_with_destination(prepared, None)
+        self.commit_managed_workstream_with_destination(prepared, None, false)
+    }
+
+    /// Commits a Start plan only after the explicit recovery action has
+    /// rechecked its exact external Git effect.
+    ///
+    /// Ordinary creation paths deliberately cannot use this method: a
+    /// recovery-required phase is not permission to retry or guess.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the recovered plan no longer matches its durable
+    /// operation or cannot be atomically committed.
+    pub fn commit_recovered_managed_workstream(
+        &mut self,
+        prepared: &ManagedWorkstreamPlan,
+    ) -> Result<ManagedWorkstream, StateError> {
+        self.commit_managed_workstream_with_destination(prepared, None, true)
     }
 
     /// Commits a confirmed provider fork together with its destination
@@ -916,6 +949,30 @@ impl HostRegistry {
         self.commit_managed_workstream_with_destination(
             prepared,
             Some(destination_native_session_id),
+            false,
+        )
+    }
+
+    /// Commits a Fork plan only after explicit recovery has found exactly one
+    /// provider destination for the recorded attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the destination identifier is invalid, the plan
+    /// is stale, or the exact recovered effect cannot be atomically committed.
+    pub fn commit_recovered_forked_managed_workstream(
+        &mut self,
+        prepared: &ManagedWorkstreamPlan,
+        destination_native_session_id: &str,
+    ) -> Result<ManagedWorkstream, StateError> {
+        if prepared.origin != WorkstreamOrigin::Fork {
+            return Err(StateError::ManagedWorktreePlanMismatch);
+        }
+        validate_provider_metadata(destination_native_session_id)?;
+        self.commit_managed_workstream_with_destination(
+            prepared,
+            Some(destination_native_session_id),
+            true,
         )
     }
 
@@ -923,6 +980,7 @@ impl HostRegistry {
         &mut self,
         prepared: &ManagedWorkstreamPlan,
         destination_native_session_id: Option<&str>,
+        allow_recovery_required: bool,
     ) -> Result<ManagedWorkstream, StateError> {
         let transaction = self
             .connection
@@ -948,7 +1006,9 @@ impl HostRegistry {
             transaction.commit().map_err(StateError::Sqlite)?;
             return Ok(created);
         }
-        if operation.phase != OperationPhase::ExternalEffectStarted {
+        if operation.phase != OperationPhase::ExternalEffectStarted
+            && !(allow_recovery_required && operation.phase == OperationPhase::RecoveryRequired)
+        {
             return Err(StateError::ManagedWorktreeOperationUnavailable);
         }
         if matches!(persisted.origin, WorkstreamOrigin::Fork)
@@ -978,6 +1038,9 @@ impl HostRegistry {
         &mut self,
         prepared: &ManagedWorkstreamPlan,
     ) -> Result<(), StateError> {
+        if prepared.operation.phase == OperationPhase::RecoveryRequired {
+            return Ok(());
+        }
         let operation = self.transition_operation(
             prepared.operation.id,
             prepared.operation.revision,
@@ -1016,7 +1079,10 @@ impl HostRegistry {
             PersistedManagedWorktreePlan::decode(operation.effect_watermark.as_deref())?;
         if operation != prepared.operation
             || persisted.public_plan(operation.clone()) != *prepared
-            || operation.phase != OperationPhase::ExternalEffectStarted
+            || !matches!(
+                operation.phase,
+                OperationPhase::ExternalEffectStarted | OperationPhase::RecoveryRequired
+            )
             || persisted.fork_attempted_at_millis.is_some()
         {
             return Err(StateError::ManagedWorktreeOperationUnavailable);
@@ -1027,7 +1093,8 @@ impl HostRegistry {
             .execute(
                 "UPDATE compound_operations
                  SET effect_watermark = ?1, revision = ?2
-                 WHERE operation_id = ?3 AND revision = ?4 AND phase = 'external_effect_started'",
+                 WHERE operation_id = ?3 AND revision = ?4
+                   AND phase IN ('external_effect_started', 'recovery_required')",
                 params![
                     persisted.encode()?,
                     next_revision.value(),
@@ -1400,6 +1467,82 @@ impl HostRegistry {
                 },
             )
             .collect()
+    }
+
+    /// Lists only durable creation operations that still require an explicit
+    /// operator decision. This is presentation metadata, not provider or
+    /// checkout discovery.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bounded operation projection cannot be read
+    /// or contains an invalid persisted identity, kind, phase, or revision.
+    pub fn unresolved_operation_overviews(&self) -> Result<Vec<OperationOverview>, StateError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT operation_id, kind, phase, revision
+                 FROM compound_operations
+                 WHERE phase IN ('external_effect_started', 'awaiting_reconciliation', 'recovery_required')
+                 ORDER BY operation_id
+                 LIMIT ?1",
+            )
+            .map_err(StateError::Sqlite)?;
+        let operations = statement
+            .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })
+            .map_err(StateError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::Sqlite)?;
+        if operations.len() > MAX_NAVIGATOR_WORKSTREAMS {
+            return Err(StateError::NavigatorSnapshotTooLarge);
+        }
+        operations
+            .into_iter()
+            .map(|(operation_id, kind, phase, revision)| {
+                Ok(OperationOverview {
+                    operation_id: Uuid::parse_str(&operation_id)
+                        .map(OperationId::from)
+                        .map_err(StateError::InvalidPersistedUuid)?,
+                    kind: operation_kind_from_text(&kind)?,
+                    phase: operation_phase_from_text(&phase)?,
+                    revision: Revision::try_from(revision)?,
+                })
+            })
+            .collect()
+    }
+
+    /// Loads the one host-private managed-worktree plan owned by an explicit
+    /// operation ID. It never scans worktrees or provider history.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation is unknown, has no valid managed
+    /// plan, or contains malformed persisted state.
+    pub fn managed_workstream_plan(
+        &self,
+        operation_id: OperationId,
+    ) -> Result<ManagedWorkstreamPlan, StateError> {
+        let operation = self
+            .connection
+            .query_row(
+                "SELECT operation_id, request_key, kind, phase, expected_revisions_json,
+                        effect_watermark, outcome_json, revision
+                 FROM compound_operations WHERE operation_id = ?1",
+                [operation_id.to_string()],
+                row_to_operation,
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::UnknownOperation(operation_id))?;
+        let plan = PersistedManagedWorktreePlan::decode(operation.effect_watermark.as_deref())?;
+        Ok(plan.public_plan(operation))
     }
 
     /// Reads the current exact native-session binding for one runtime.
@@ -4534,6 +4677,55 @@ mod tests {
             registry.commit_managed_workstream(&replay.plan),
             Err(StateError::ManagedWorktreeOperationUnavailable)
         ));
+    }
+
+    #[test]
+    fn explicit_recovery_exposes_and_commits_only_the_exact_start_plan() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let prepared = registry
+            .prepare_managed_workstream(
+                "private-request-key".to_owned(),
+                OperationKind::Start,
+                registered.workstream_id,
+                Revision::INITIAL,
+                "a".repeat(40),
+            )
+            .unwrap();
+        registry
+            .mark_managed_workstream_recovery(&prepared.plan)
+            .unwrap();
+
+        let operations = registry.unresolved_operation_overviews().unwrap();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0].operation_id, prepared.plan.operation.id);
+        assert_eq!(operations[0].kind, OperationKind::Start);
+        assert_eq!(operations[0].phase, OperationPhase::RecoveryRequired);
+
+        let recovered_plan = registry
+            .managed_workstream_plan(prepared.plan.operation.id)
+            .unwrap();
+        assert_eq!(
+            recovered_plan.operation.phase,
+            OperationPhase::RecoveryRequired
+        );
+        let created = registry
+            .commit_recovered_managed_workstream(&recovered_plan)
+            .unwrap();
+
+        assert_eq!(created.workstream_id, prepared.plan.workstream_id);
+        assert!(
+            registry
+                .unresolved_operation_overviews()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

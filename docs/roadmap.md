@@ -2,8 +2,7 @@
 
 Date: 2026-07-29
 
-Status: D0 through D2 complete; D3 implementation complete, with live SSH
-acceptance pending a user-installed remote target
+Status: D0 through D3 complete; D4 planned
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -32,7 +31,7 @@ This document owns sequencing, exit gates, and progress.
 | D1 | Local Codex CLI vertical slice | Complete (reconciled by D1.5) |
 | D1.5 | Reconcile native trust and same-workstream tip transitions | Complete |
 | D2 | Minimal directly interactive navigator | Complete |
-| D3 | Local and SSH hosts through one protocol | Code complete; live acceptance pending |
+| D3 | Local and SSH hosts through one protocol | Complete |
 | D4 | Independent and conversation-forked Workstreams | Planned |
 | D5 | Recovery, combined acceptance, and V1 closure | Planned |
 
@@ -200,14 +199,14 @@ Exit gate:
 
 Extend the accepted local semantics across pre-registered hosts.
 
-Implementation status: The bounded one-shot `_remote` service, strict
-shell-free SSH adapter, fixed client registration fingerprint, local
+Implementation status: complete. The bounded one-shot `_remote` service,
+strict shell-free SSH adapter, fixed client registration fingerprint, local
 subprocess parity tests, revision-guarded remote actions, interactive
-`ssh -tt` attachment, and cached/backing-off navigator view are complete.
-The implementation never copies or installs a remote binary. The remaining
-exit evidence is a sanitized operator-run native-Codex acceptance on a host
-where the user has already installed `wsnav`; see the [D3 control-plane
-acceptance](acceptance-d3-control-plane.md).
+`ssh -tt` attachment, and cached/backing-off navigator view passed automated
+coverage and bounded operator-run native-Codex acceptance. The implementation
+never copies or installs a remote binary; the remote executable remains an
+explicit operator prerequisite. See the [D3 control-plane
+acceptance](acceptance-d3-control-plane.md) and its [sanitized fixture](../spikes/fixtures/d3-ssh-control-plane.json).
 
 Scope:
 

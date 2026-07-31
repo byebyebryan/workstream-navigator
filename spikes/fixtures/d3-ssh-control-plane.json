@@ -1,0 +1,31 @@
+{
+  "study": "d3-ssh-native-codex-control-plane",
+  "provider": {
+    "id": "codex",
+    "version": "0.146.0",
+    "contract_fingerprint": "codex-d3-ssh-native-attachment-v1"
+  },
+  "status": "pass",
+  "assertions": {
+    "registered_host_handshake_verified": true,
+    "local_and_remote_native_result_tips_preserved": true,
+    "remote_native_pane_directly_interactive": true,
+    "remote_park_kept_management_diagnostics_out_of_provider_pane": true,
+    "remote_cold_resume_reopened_exact_native_tip": true,
+    "transient_disconnect_retained_cached_attention": true,
+    "host_drift_disables_mutation_in_automated_coverage": true,
+    "ordinary_tmux_unchanged_on_both_hosts": true,
+    "private_runtime_isolation_preserved": true
+  },
+  "cleanup": {
+    "acceptance_specific_artifacts_created": false,
+    "owned_artifact_cleanup_required": false
+  },
+  "privacy_audit": {
+    "identifiers_committed": false,
+    "prompt_or_result_content_committed": false,
+    "image_or_terminal_data_committed": false,
+    "paths_or_pids_committed": false,
+    "credentials_or_raw_payloads_committed": false
+  }
+}

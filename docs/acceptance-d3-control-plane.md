@@ -2,9 +2,9 @@
 
 Date: 2026-07-30
 
-Status: automated control-plane acceptance passed; live remote-Codex acceptance pending
+Status: pass — automated control-plane and bounded native-Codex acceptance
 
-## What passed
+## Automated contract evidence
 
 - Versioned requests and responses use one bounded JSON frame. Oversized and
   malformed input is drained and rejected without provider data.
@@ -23,16 +23,23 @@ Status: automated control-plane acceptance passed; live remote-Codex acceptance 
   installs a Codex profile, launches a normal Codex session, or uses the
   default tmux server.
 
-## Remaining live gate
+## Recorded native-Codex acceptance
 
-The designated SSH target is reachable but does not yet have a user-installed
-`wsnav` executable. That is an expected V1 precondition, not a deployment
-failure: Workstream Navigator must not copy, bootstrap, or update the remote
-binary. After the operator installs it and completes the remote observer setup,
-the pending acceptance is one bounded start/attach/complete/park/resume run.
+- The operator used preinstalled, matching `wsnav` builds on local and remote
+  hosts. Workstream Navigator neither copied nor updated the remote binary.
+- Existing local and remote native Codex result tips remained visible and
+  directly interactive through their respective provider panes.
+- Parking the remote Runtime kept attachment and SSH diagnostics out of the
+  provider pane. Selecting it again cold-resumed the exact native tip.
+- A bounded transient-disconnect exercise retained cached remote attention and
+  recovered it without changing durable remote state.
+- Sanitized pre/post comparisons confirmed that ordinary tmux state was
+  unchanged on both hosts. All managed Runtime and presentation state used
+  private tmux servers.
+- No acceptance-specific owned artifacts required cleanup. The normal remote
+  installation remains user-owned.
 
-The live record must prove that both hosts keep their provider result tips,
-their default tmux servers remain unchanged, and a disconnect leaves remote
-attention durable. It must contain only sanitized relationships, event order,
-capability checks, timings, and cleanup status—never raw IDs, prompts,
-responses, paths, terminal output, process IDs, or credentials.
+The recorded fixture contains only sanitized relationships, capability checks,
+and cleanup status. It excludes provider identifiers, prompts, responses,
+paths, terminal output, process IDs, credentials, and raw provider payloads:
+[D3 SSH control-plane fixture](../spikes/fixtures/d3-ssh-control-plane.json).

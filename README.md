@@ -13,7 +13,9 @@ forks. D5 through D5.2 close the implemented V1 with runtime and operation
 recovery, fresh-install/package verification, remote release diagnostics,
 bounded control I/O, presentation correctness, and combined local/remote
 native-Codex acceptance. D6 records the final [source-installed operator-beta
-validation][D6 acceptance]. The Rust implementation does not preserve
+validation][D6 acceptance], and D6.1 adds accepted linked-worktree identity and
+cross-host Project grouping polish, documented in the [D6.1 project-identity
+acceptance][D6.1 acceptance]. The Rust implementation does not preserve
 compatibility with the earlier Python prototype.
 
 The frozen prototype remains available as implementation evidence in
@@ -47,7 +49,7 @@ keeps the native Codex workflow canonical, uses dedicated tmux runtimes and SSH
 for attachment, and limits Workstream Navigator to hosts, project locations,
 workstreams, status, and conservative worktree operations.
 
-The approved D0-D6 implementation sequence and checkpoint acceptance gates are
+The approved D0-D6.1 implementation sequence and checkpoint acceptance gates are
 tracked in the [V1 roadmap][].
 
 The accepted local Codex CLI slice and its sanitized native acceptance evidence
@@ -111,7 +113,11 @@ wsnav
 ```
 
 An empty navigator repeats the registration command rather than guessing a
-project from the process working directory.
+project from the process working directory. Registration accepts a main
+checkout, an externally created linked worktree, or a directory below either.
+WSNav normalizes the selected checkout root separately from the repository's
+primary worktree, so the selected Workstream keeps its own filesystem while
+later managed Workstreams remain repository siblings.
 
 ## Workstreams
 
@@ -146,6 +152,13 @@ Install the same `wsnav` build yourself on the remote host at
 wsnav register-remote snap
 wsnav
 ```
+
+When registered locations on different hosts have the same unambiguous
+canonical fetch remote, WSNav presents them as one logical Project while
+retaining separate host-owned Workstreams and checkouts. SSH and HTTPS
+spellings of the same remote match. Repositories with missing, local-path, or
+ambiguous remotes remain separate; WSNav never transmits the raw remote URL or
+credentials.
 
 Verify the remote's state-free release probe before using it:
 
@@ -206,6 +219,7 @@ its accepted provider contract. See [Spike 0001][], [Spike 0002][], [Spike
 [D5.1 acceptance]: docs/acceptance-d5.1-operational-closure.md
 [D5.2 acceptance]: docs/acceptance-d5.2-correctness-closure.md
 [D6 acceptance]: docs/acceptance-d6-operator-beta.md
+[D6.1 acceptance]: docs/acceptance-d6.1-project-identity.md
 [Spike 0001]: docs/spikes/0001-tmux-remote-transport.md
 [Spike 0002]: docs/spikes/0002-codex-native-tui.md
 [Spike 0004]: docs/spikes/0004-tmux-runtime-isolation.md

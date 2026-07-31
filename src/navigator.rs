@@ -33,7 +33,10 @@ use ratatui::{
 use thiserror::Error;
 
 use crate::{
-    domain::{Clock, Revision, RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle},
+    domain::{
+        Clock, HostId, ProjectId, Revision, RuntimeStatus, SystemClock, WorkstreamId,
+        WorkstreamLifecycle,
+    },
     presentation::{AttachmentPhase, AttachmentStatus, Presentation, PresentationError},
     process::{BoundedProcessError, output_bounded},
     provider::codex::names::{NameContext, resolve_name},
@@ -41,8 +44,8 @@ use crate::{
         LinuxProcessProbe, PrivateRuntime, RuntimeError, RuntimePaths, RuntimeProbe, SystemTmux,
     },
     state::{
-        ClientCatalog, ClientHost, ClientHostTransport, HostIdentity, HostRegistry, StateError,
-        StateRoot, WorkstreamOverview,
+        ClientCatalog, ClientHost, ClientHostTransport, ClientProjectLocation, HostIdentity,
+        HostRegistry, StateError, StateRoot, WorkstreamOverview,
     },
     transport::{HostClient, RemoteExecutable, SshDestination, SshEndpoint, SystemCommandRunner},
 };
@@ -51,6 +54,7 @@ use crate::{
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NavigatorWorkstream {
     pub host: NavigatorHost,
+    pub project_id: ProjectId,
     pub workstream_id: WorkstreamId,
     pub project_label: String,
     pub display_name: String,
@@ -149,6 +153,7 @@ pub struct LocalNavigatorSnapshot {
 pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, NavigatorError> {
     let mut registry = HostRegistry::open(root)?;
     crate::actions::reconcile_lost_runtimes(root, &mut registry)?;
+    crate::repository::refresh_pending_metadata(&mut registry)?;
     let host = registry.identity()?;
     let mut catalog = ClientCatalog::open(root)?;
     let executable = std::env::current_exe().map_err(NavigatorError::CurrentExecutable)?;
@@ -198,23 +203,29 @@ fn project_workstream(
         observed_runtime_status(root, overview)?
     };
     let display_name = bounded_display(&display_name(overview, runtime_status));
-    let project_label = match catalog.local_project_location(host.host_id, overview.location_id)? {
-        Some(project) => project.display_name,
-        None => {
-            catalog
-                .register_local_project_location(
-                    host,
-                    overview.location_id,
-                    executable,
-                    &fallback_project_label(&overview.project_repository_path),
-                )?
-                .display_name
+    let project = match catalog.local_project_location(host.host_id, overview.location_id)? {
+        Some(project)
+            if project_metadata_matches(
+                &project,
+                &overview.project_display_name,
+                overview.remote_identity_fingerprint.as_deref(),
+            ) =>
+        {
+            project
         }
+        _ => catalog.register_local_project_location_with_identity(
+            host,
+            overview.location_id,
+            executable,
+            &overview.project_display_name,
+            overview.remote_identity_fingerprint.as_deref(),
+        )?,
     };
     Ok(NavigatorWorkstream {
         host: NavigatorHost::Local,
+        project_id: project.project_id,
         workstream_id: overview.workstream_id,
-        project_label: bounded_display(&project_label),
+        project_label: bounded_display(&project.display_name),
         display_name,
         runtime_status,
         result_ready,
@@ -226,6 +237,8 @@ fn project_workstream(
 }
 
 fn project_remote_workstream(
+    catalog: &mut ClientCatalog,
+    host_id: HostId,
     host_alias: &str,
     workstream: &crate::protocol::SnapshotWorkstream,
     host_reachable: bool,
@@ -242,6 +255,23 @@ fn project_remote_workstream(
     } else {
         navigator_runtime_status(workstream.runtime_status)
     };
+    let project = match catalog.local_project_location(host_id, workstream.location_id)? {
+        Some(project)
+            if project_metadata_matches(
+                &project,
+                &workstream.project_display_name,
+                workstream.repository_fingerprint.as_deref(),
+            ) =>
+        {
+            project
+        }
+        _ => catalog.register_host_project_location(
+            host_id,
+            workstream.location_id,
+            &workstream.project_display_name,
+            workstream.repository_fingerprint.as_deref(),
+        )?,
+    };
     Ok(NavigatorWorkstream {
         host: NavigatorHost::Remote {
             alias: host_alias.to_owned(),
@@ -251,8 +281,9 @@ fn project_remote_workstream(
                 RemoteHostReachability::Unreachable
             },
         },
+        project_id: project.project_id,
         workstream_id: workstream.workstream_id,
-        project_label: bounded_display(&workstream.project_display_name),
+        project_label: bounded_display(&project.display_name),
         display_name: bounded_display(&workstream.display_name),
         runtime_status,
         result_ready: workstream.result_ready,
@@ -261,6 +292,18 @@ fn project_remote_workstream(
         last_activity_at_millis: workstream.last_activity_at_millis,
         workstream_revision,
     })
+}
+
+fn project_metadata_matches(
+    project: &ClientProjectLocation,
+    display_name: &str,
+    repository_fingerprint: Option<&str>,
+) -> bool {
+    match repository_fingerprint {
+        Some(fingerprint) => project.repository_fingerprint.as_deref() == Some(fingerprint),
+        None if project.repository_fingerprint.is_some() => true,
+        None => project.display_name == display_name,
+    }
 }
 
 fn observed_runtime_status(
@@ -315,14 +358,6 @@ fn display_name(overview: &WorkstreamOverview, runtime_status: NavigatorRuntimeS
     .text
 }
 
-fn fallback_project_label(checkout_path: &Path) -> String {
-    checkout_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.trim().is_empty())
-        .map_or_else(|| "local project".to_owned(), bounded_display)
-}
-
 fn bounded_display(value: &str) -> String {
     const MAX_DISPLAY_CHARS: usize = 64;
     let mut text = value.chars().take(MAX_DISPLAY_CHARS).collect::<String>();
@@ -368,6 +403,7 @@ struct CachedRemoteHost {
 
 struct RemotePollResult {
     alias: String,
+    host_id: HostId,
     outcome: Result<crate::protocol::SnapshotResponse, ()>,
 }
 
@@ -383,11 +419,11 @@ impl RemoteMonitor {
 
     fn refresh(
         &mut self,
-        catalog: &ClientCatalog,
+        catalog: &mut ClientCatalog,
         selected_host: Option<&str>,
     ) -> Result<(), NavigatorError> {
         let now = Instant::now();
-        self.collect(now);
+        self.collect(now, catalog)?;
         let registered = catalog.ssh_hosts()?;
         let aliases = registered
             .iter()
@@ -421,6 +457,7 @@ impl RemoteMonitor {
                 let outcome = fetch_remote_snapshot(&host);
                 let _ = sender.send(RemotePollResult {
                     alias: host.alias,
+                    host_id: host.host_id,
                     outcome,
                 });
             });
@@ -428,7 +465,7 @@ impl RemoteMonitor {
         Ok(())
     }
 
-    fn collect(&mut self, now: Instant) {
+    fn collect(&mut self, now: Instant, catalog: &mut ClientCatalog) -> Result<(), NavigatorError> {
         while let Ok(result) = self.receiver.try_recv() {
             let Some(host) = self.hosts.get_mut(&result.alias) else {
                 continue;
@@ -438,10 +475,16 @@ impl RemoteMonitor {
                 host.workstreams = snapshot
                     .workstreams
                     .iter()
-                    .filter_map(|workstream| {
-                        project_remote_workstream(&result.alias, workstream, true).ok()
+                    .map(|workstream| {
+                        project_remote_workstream(
+                            catalog,
+                            result.host_id,
+                            &result.alias,
+                            workstream,
+                            true,
+                        )
                     })
-                    .collect();
+                    .collect::<Result<Vec<_>, _>>()?;
                 host.unresolved_operation_count = usize::from(snapshot.unresolved_operation_count);
                 host.reachable = true;
                 host.backoff = REMOTE_INITIAL_BACKOFF;
@@ -452,6 +495,7 @@ impl RemoteMonitor {
                 host.backoff = host.backoff.saturating_mul(2).min(REMOTE_MAX_BACKOFF);
             }
         }
+        Ok(())
     }
 
     fn combine(&self, mut local: LocalNavigatorSnapshot) -> LocalNavigatorSnapshot {
@@ -512,8 +556,8 @@ fn combined_snapshot(
     selected_host: Option<&str>,
 ) -> Result<LocalNavigatorSnapshot, NavigatorError> {
     let local = local_snapshot(root)?;
-    let catalog = ClientCatalog::open(root)?;
-    remote.refresh(&catalog, selected_host)?;
+    let mut catalog = ClientCatalog::open(root)?;
+    remote.refresh(&mut catalog, selected_host)?;
     Ok(remote.combine(local))
 }
 
@@ -1467,19 +1511,17 @@ mod tests {
     }
 
     #[test]
-    fn project_labels_do_not_expose_full_paths() {
-        assert_eq!(
-            fallback_project_label(Path::new("/private/place/project")),
-            "project"
-        );
-    }
-
-    #[test]
     fn remote_projection_uses_the_host_project_display_name() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let registry = HostRegistry::open(&root).unwrap();
+        let host = registry.identity().unwrap();
+        let mut catalog = ClientCatalog::open(&root).unwrap();
         let remote = crate::protocol::SnapshotWorkstream {
             workstream_id: WorkstreamId::new(),
             location_id: crate::domain::LocationId::new(),
             project_display_name: "dms-power-status".to_owned(),
+            repository_fingerprint: None,
             display_name: "thread".to_owned(),
             runtime_id: None,
             runtime_status: RuntimeStatus::Idle,
@@ -1491,8 +1533,17 @@ mod tests {
             last_activity_at_millis: Some(1_000),
             revision: Revision::INITIAL.value(),
         };
+        catalog
+            .register_local_project_location(
+                &host,
+                remote.location_id,
+                Path::new("/bin/wsnav"),
+                "dms-power-status",
+            )
+            .unwrap();
 
-        let projected = project_remote_workstream("snap", &remote, true).unwrap();
+        let projected =
+            project_remote_workstream(&mut catalog, host.host_id, "snap", &remote, true).unwrap();
 
         assert_eq!(projected.project_label, "dms-power-status");
         assert_eq!(projected.last_activity_at_millis, Some(1_000));
@@ -1728,6 +1779,7 @@ mod tests {
     ) -> NavigatorWorkstream {
         NavigatorWorkstream {
             host: NavigatorHost::Local,
+            project_id: ProjectId::new(),
             workstream_id,
             project_label: "project".to_owned(),
             display_name: "thread".to_owned(),

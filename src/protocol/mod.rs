@@ -12,7 +12,7 @@ use crate::domain::{
     RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 7;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 8;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -355,6 +355,9 @@ pub struct SnapshotWorkstream {
     /// on the host. This is presentation metadata, never a repository or
     /// checkout path.
     pub project_display_name: String,
+    /// Opaque credential-free canonical fetch-remote identity. `None` keeps
+    /// this host location separate in the client Project catalog.
+    pub repository_fingerprint: Option<String>,
     pub display_name: String,
     pub runtime_id: Option<RuntimeId>,
     pub runtime_status: RuntimeStatus,
@@ -376,6 +379,9 @@ impl SnapshotWorkstream {
             &self.project_display_name,
             MAX_DISPLAY_NAME_BYTES,
         )?;
+        if let Some(fingerprint) = self.repository_fingerprint.as_deref() {
+            validate_repository_fingerprint(fingerprint)?;
+        }
         validate_bounded("display name", &self.display_name, MAX_DISPLAY_NAME_BYTES)?;
         if self.activity_sequence < 0 {
             return Err(ProtocolError::InvalidActivitySequence);
@@ -389,6 +395,16 @@ impl SnapshotWorkstream {
         }
         Ok(())
     }
+}
+
+fn validate_repository_fingerprint(value: &str) -> Result<(), ProtocolError> {
+    let Some(hash) = value.strip_prefix("git-remote-v1:") else {
+        return Err(ProtocolError::InvalidRepositoryFingerprint);
+    };
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ProtocolError::InvalidRepositoryFingerprint);
+    }
+    Ok(())
 }
 
 fn encode_frame<T: Serialize>(value: &T) -> Result<Vec<u8>, ProtocolError> {
@@ -436,6 +452,8 @@ pub enum ProtocolError {
     InvalidActivitySequence,
     #[error("activity timestamp must not be negative")]
     InvalidActivityTimestamp,
+    #[error("repository fingerprint is invalid")]
+    InvalidRepositoryFingerprint,
     #[error("snapshot has too many workstreams")]
     SnapshotTooLarge,
     #[error("protocol frame exceeds its maximum size")]
@@ -574,6 +592,7 @@ mod tests {
                 workstream_id: WorkstreamId::new(),
                 location_id: LocationId::new(),
                 project_display_name: "x".repeat(MAX_DISPLAY_NAME_BYTES + 1),
+                repository_fingerprint: None,
                 display_name: "thread".to_owned(),
                 runtime_id: None,
                 runtime_status: RuntimeStatus::Idle,
@@ -596,5 +615,37 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn repository_fingerprint_requires_the_versioned_hash_shape() {
+        let mut snapshot = SnapshotResponse {
+            workstreams: vec![SnapshotWorkstream {
+                workstream_id: WorkstreamId::new(),
+                location_id: LocationId::new(),
+                project_display_name: "project".to_owned(),
+                repository_fingerprint: Some("https://example.invalid/private.git".to_owned()),
+                display_name: "thread".to_owned(),
+                runtime_id: None,
+                runtime_status: RuntimeStatus::Idle,
+                lifecycle: WorkstreamLifecycle::Open,
+                result_ready: false,
+                recovery_required: false,
+                attention_revision: None,
+                activity_sequence: 0,
+                last_activity_at_millis: None,
+                revision: 1,
+            }],
+            unresolved_operation_count: 0,
+            next_cursor: None,
+        };
+        assert!(matches!(
+            snapshot.validate(),
+            Err(ProtocolError::InvalidRepositoryFingerprint)
+        ));
+
+        snapshot.workstreams[0].repository_fingerprint =
+            Some(format!("git-remote-v1:{}", "a".repeat(64)));
+        assert!(snapshot.validate().is_ok());
     }
 }

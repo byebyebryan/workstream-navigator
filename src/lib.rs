@@ -10,6 +10,7 @@ pub mod process;
 pub mod protocol;
 pub mod provider;
 pub mod remote;
+pub mod repository;
 pub mod runtime;
 pub mod state;
 pub mod transport;

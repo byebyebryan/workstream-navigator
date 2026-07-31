@@ -6,7 +6,6 @@
 
 use std::{
     io::{self, Read, Write},
-    path::Path,
     process::{Command, Stdio},
 };
 
@@ -389,6 +388,7 @@ fn snapshot(
     cursor: Option<u32>,
 ) -> Result<SnapshotResponse, StateError> {
     crate::actions::reconcile_lost_runtimes(root, registry)?;
+    crate::repository::refresh_pending_metadata(registry)?;
     let page = registry.workstream_overview_page(
         cursor.unwrap_or(0),
         crate::protocol::SNAPSHOT_PAGE_WORKSTREAMS,
@@ -434,7 +434,8 @@ fn snapshot_workstream(root: &StateRoot, overview: &WorkstreamOverview) -> Snaps
     SnapshotWorkstream {
         workstream_id: overview.workstream_id,
         location_id: overview.location_id,
-        project_display_name: project_display_name(&overview.project_repository_path),
+        project_display_name: bounded_display_name(&overview.project_display_name),
+        repository_fingerprint: overview.remote_identity_fingerprint.clone(),
         display_name: bounded_display_name(&display_name(overview, runtime_status)),
         runtime_id: overview.runtime.as_ref().map(|runtime| runtime.runtime_id),
         runtime_status: if recovery_required {
@@ -452,20 +453,6 @@ fn snapshot_workstream(root: &StateRoot, overview: &WorkstreamOverview) -> Snaps
         last_activity_at_millis: overview.last_activity_at_millis,
         revision: overview.revision.value(),
     }
-}
-
-/// Returns the sole repository-derived value allowed in a remote snapshot.
-///
-/// A project label makes the navigator useful across hosts, while preserving
-/// the transport boundary: only the registered `ProjectLocation` repository's
-/// final component may cross it, never an absolute or relative path and never
-/// a generated managed-checkout name.
-fn project_display_name(repository_path: &Path) -> String {
-    repository_path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.trim().is_empty())
-        .map_or_else(|| "remote project".to_owned(), bounded_display_name)
 }
 
 fn observed_runtime_status(root: &StateRoot, overview: &WorkstreamOverview) -> RuntimeStatus {
@@ -777,15 +764,6 @@ mod tests {
     }
 
     #[test]
-    fn project_display_name_exposes_only_the_repository_basename() {
-        assert_eq!(
-            project_display_name(Path::new("/private/place/dms-power-status")),
-            "dms-power-status"
-        );
-        assert_eq!(project_display_name(Path::new("/")), "remote project");
-    }
-
-    #[test]
     fn managed_remote_workstream_keeps_the_project_location_label() {
         let temporary = tempfile::tempdir().unwrap();
         let root = StateRoot::create(temporary.path()).unwrap();
@@ -793,6 +771,8 @@ mod tests {
             workstream_id: WorkstreamId::new(),
             location_id: crate::domain::LocationId::new(),
             project_repository_path: PathBuf::from("/private/place/dms-power-status"),
+            project_display_name: "dms-power-status".to_owned(),
+            remote_identity_fingerprint: None,
             checkout_path: PathBuf::from(
                 "/private/state/worktrees/location/00000000-0000-0000-0000-000000000001",
             ),

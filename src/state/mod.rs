@@ -21,8 +21,8 @@ use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 /// The newest host-registry schema this build can open or create.
 ///
 /// This is safe release-probe metadata; it is not a host-state observation.
-pub const HOST_SCHEMA_VERSION: i64 = 4;
-const CLIENT_SCHEMA_VERSION: i64 = 2;
+pub const HOST_SCHEMA_VERSION: i64 = 5;
+const CLIENT_SCHEMA_VERSION: i64 = 3;
 const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
 
@@ -48,6 +48,8 @@ const HOST_SCHEMA_SQL: &str = "
         location_id TEXT PRIMARY KEY,
         repository_identity TEXT NOT NULL,
         repository_path TEXT NOT NULL,
+        repository_display_name TEXT NOT NULL,
+        remote_identity_fingerprint TEXT,
         default_base_ref TEXT NOT NULL,
         managed_worktree_root TEXT NOT NULL,
         revision INTEGER NOT NULL CHECK (revision > 0)
@@ -132,6 +134,7 @@ const CLIENT_SCHEMA_SQL: &str = "
     CREATE TABLE projects (
         project_id TEXT PRIMARY KEY,
         display_name TEXT NOT NULL,
+        repository_fingerprint TEXT,
         revision INTEGER NOT NULL CHECK (revision > 0)
     );
     CREATE TABLE project_locations (
@@ -140,6 +143,11 @@ const CLIENT_SCHEMA_SQL: &str = "
         location_id TEXT NOT NULL,
         PRIMARY KEY(project_id, host_id, location_id)
     );
+    CREATE UNIQUE INDEX project_location_identity_idx
+        ON project_locations(host_id, location_id);
+    CREATE UNIQUE INDEX project_repository_fingerprint_idx
+        ON projects(repository_fingerprint)
+        WHERE repository_fingerprint IS NOT NULL;
     CREATE TABLE preferences (
         key TEXT PRIMARY KEY,
         value_json TEXT NOT NULL
@@ -203,6 +211,7 @@ pub struct HostIdentity {
 pub struct ClientProjectLocation {
     pub project_id: ProjectId,
     pub display_name: String,
+    pub repository_fingerprint: Option<String>,
 }
 
 /// The transport chosen through an explicit client-side host registration.
@@ -259,6 +268,14 @@ pub struct ExternalWorkstream {
     pub repository_identity: String,
     pub default_base_ref: String,
     pub managed_worktree_root: PathBuf,
+}
+
+/// One legacy `ProjectLocation` whose repository presentation metadata has not
+/// yet been inspected by a finite control path.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingRepositoryMetadata {
+    pub location_id: LocationId,
+    pub repository_path: PathBuf,
 }
 
 /// Private Git metadata for creating one sibling Workstream from a registered
@@ -435,6 +452,8 @@ pub struct WorkstreamOverview {
     pub workstream_id: WorkstreamId,
     pub location_id: LocationId,
     pub project_repository_path: PathBuf,
+    pub project_display_name: String,
+    pub remote_identity_fingerprint: Option<String>,
     pub checkout_path: PathBuf,
     pub lifecycle: WorkstreamLifecycle,
     pub last_activity_sequence: i64,
@@ -445,6 +464,19 @@ pub struct WorkstreamOverview {
     pub runtime: Option<RuntimeRecord>,
     pub binding: Option<ProviderBinding>,
     pub attention: Option<AttentionState>,
+}
+
+struct PersistedWorkstreamOverview {
+    workstream_id: String,
+    location_id: String,
+    project_repository_path: String,
+    project_display_name: String,
+    remote_identity_fingerprint: Option<String>,
+    checkout_path: String,
+    lifecycle: String,
+    activity_sequence: i64,
+    activity_at_millis: i64,
+    revision: i64,
 }
 
 /// One deterministic bounded page of navigator-safe host state.
@@ -718,8 +750,44 @@ impl HostRegistry {
         repository_identity: String,
         default_base_ref: String,
     ) -> Result<ExternalWorkstream, StateError> {
+        let display_name = checkout_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or("local project")
+            .to_owned();
+        let repository_path = checkout_path.clone();
+        self.register_external_workstream_with_metadata(
+            checkout_path,
+            &repository_path,
+            repository_identity,
+            default_base_ref,
+            &display_name,
+            None,
+        )
+    }
+
+    /// Registers an external checkout with separately discovered project-level
+    /// repository metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if an input field is unsafe, the checkout path already
+    /// exists in registry state, or the transaction cannot be committed.
+    #[allow(clippy::too_many_arguments)]
+    pub fn register_external_workstream_with_metadata(
+        &mut self,
+        checkout_path: PathBuf,
+        repository_path: &Path,
+        repository_identity: String,
+        default_base_ref: String,
+        repository_display_name: &str,
+        remote_identity_fingerprint: Option<&str>,
+    ) -> Result<ExternalWorkstream, StateError> {
         validate_registry_text("repository identity", &repository_identity)?;
         validate_registry_text("default base ref", &default_base_ref)?;
+        validate_project_display_name(repository_display_name)?;
+        validate_repository_fingerprint(remote_identity_fingerprint)?;
         let location_id = LocationId::new();
         let registration = ExternalWorkstream {
             location_id,
@@ -735,17 +803,19 @@ impl HostRegistry {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
         let activity_sequence = next_activity_sequence(&transaction)?;
-        let path = registration.checkout_path.to_string_lossy();
         transaction
             .execute(
                 "INSERT INTO project_locations (
-                    location_id, repository_identity, repository_path, default_base_ref,
-                    managed_worktree_root, revision
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+                    location_id, repository_identity, repository_path,
+                    repository_display_name, remote_identity_fingerprint,
+                    default_base_ref, managed_worktree_root, revision
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
                 params![
                     registration.location_id.to_string(),
                     registration.repository_identity,
-                    path,
+                    repository_path.to_string_lossy(),
+                    repository_display_name,
+                    remote_identity_fingerprint.unwrap_or(""),
                     registration.default_base_ref,
                     registration.managed_worktree_root.to_string_lossy(),
                 ],
@@ -782,6 +852,81 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?;
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(registration)
+    }
+
+    /// Returns legacy `ProjectLocations` that still need one bounded metadata
+    /// refresh after the D6.1 development-schema migration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed persisted identities or an unavailable
+    /// registry.
+    pub fn pending_repository_metadata(
+        &self,
+    ) -> Result<Vec<PendingRepositoryMetadata>, StateError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT location_id, repository_path FROM project_locations
+                 WHERE repository_display_name = '' OR remote_identity_fingerprint IS NULL
+                 ORDER BY location_id LIMIT ?1",
+            )
+            .map_err(StateError::Sqlite)?;
+        statement
+            .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(StateError::Sqlite)?
+            .map(|row| {
+                let (location_id, repository_path) = row.map_err(StateError::Sqlite)?;
+                Ok(PendingRepositoryMetadata {
+                    location_id: Uuid::parse_str(&location_id)
+                        .map(LocationId::from)
+                        .map_err(StateError::InvalidPersistedUuid)?,
+                    repository_path: PathBuf::from(repository_path),
+                })
+            })
+            .collect()
+    }
+
+    /// Records one bounded metadata observation for an existing location.
+    /// `None` is persisted as an explicit unavailable fingerprint so snapshots
+    /// do not repeatedly spawn Git for repositories without a canonical remote.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsafe metadata, a stale location, or a failed
+    /// atomic update.
+    pub fn record_repository_metadata(
+        &mut self,
+        location_id: LocationId,
+        repository_path: &Path,
+        display_name: &str,
+        remote_identity_fingerprint: Option<&str>,
+    ) -> Result<(), StateError> {
+        validate_project_display_name(display_name)?;
+        validate_repository_fingerprint(remote_identity_fingerprint)?;
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE project_locations
+                 SET repository_path = ?1, repository_display_name = ?2,
+                     remote_identity_fingerprint = ?3, revision = revision + 1
+                 WHERE location_id = ?4
+                   AND (repository_display_name = '' OR remote_identity_fingerprint IS NULL)",
+                params![
+                    repository_path.to_string_lossy(),
+                    display_name,
+                    remote_identity_fingerprint.unwrap_or(""),
+                    location_id.to_string(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(StateError::ConcurrentWrite)
+        }
     }
 
     /// Returns the exact host-private Git location configuration for an
@@ -1429,7 +1574,10 @@ impl HostRegistry {
             .connection
             .prepare(
                 "SELECT workstreams.workstream_id, workstreams.location_id,
-                        project_locations.repository_path, checkouts.path,
+                        project_locations.repository_path,
+                        project_locations.repository_display_name,
+                        project_locations.remote_identity_fingerprint,
+                        checkouts.path,
                         workstreams.lifecycle,
                         workstreams.last_activity_sequence,
                         workstreams.last_activity_at_millis, workstreams.revision
@@ -1444,16 +1592,18 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?;
         let mut bases = statement
             .query_map(params![query_limit, i64::from(cursor)], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, i64>(7)?,
-                ))
+                Ok(PersistedWorkstreamOverview {
+                    workstream_id: row.get(0)?,
+                    location_id: row.get(1)?,
+                    project_repository_path: row.get(2)?,
+                    project_display_name: row.get(3)?,
+                    remote_identity_fingerprint: row.get(4)?,
+                    checkout_path: row.get(5)?,
+                    lifecycle: row.get(6)?,
+                    activity_sequence: row.get(7)?,
+                    activity_at_millis: row.get(8)?,
+                    revision: row.get(9)?,
+                })
             })
             .map_err(StateError::Sqlite)?
             .collect::<Result<Vec<_>, _>>()
@@ -1471,52 +1621,50 @@ impl HostRegistry {
             .transpose()?;
         let workstreams = bases
             .into_iter()
-            .map(
-                |(
-                    workstream_id,
-                    location_id,
-                    project_repository_path,
-                    checkout_path,
-                    lifecycle,
-                    activity_sequence,
-                    activity_at_millis,
-                    revision,
-                )| {
-                    let workstream_id = Uuid::parse_str(&workstream_id)
-                        .map(WorkstreamId::from)
-                        .map_err(StateError::InvalidPersistedUuid)?;
-                    let location_id = Uuid::parse_str(&location_id)
-                        .map(LocationId::from)
-                        .map_err(StateError::InvalidPersistedUuid)?;
-                    let lifecycle = workstream_lifecycle_from_text(&lifecycle)?;
-                    let revision = Revision::try_from(revision)?;
-                    let runtime = self.runtime_for_workstream(workstream_id)?;
-                    let binding = runtime
-                        .as_ref()
-                        .map(|runtime| self.binding_for_runtime(runtime.runtime_id))
-                        .transpose()?
-                        .flatten();
-                    let attention = self.attention(workstream_id)?;
-                    Ok::<WorkstreamOverview, StateError>(WorkstreamOverview {
-                        workstream_id,
-                        location_id,
-                        project_repository_path: PathBuf::from(project_repository_path),
-                        checkout_path: PathBuf::from(checkout_path),
-                        lifecycle,
-                        last_activity_sequence: activity_sequence,
-                        last_activity_at_millis: (activity_at_millis != 0)
-                            .then_some(activity_at_millis),
-                        revision,
-                        runtime,
-                        binding,
-                        attention,
-                    })
-                },
-            )
+            .map(|base| self.hydrate_workstream_overview(base))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(WorkstreamOverviewPage {
             workstreams,
             next_cursor,
+        })
+    }
+
+    fn hydrate_workstream_overview(
+        &self,
+        base: PersistedWorkstreamOverview,
+    ) -> Result<WorkstreamOverview, StateError> {
+        let workstream_id = Uuid::parse_str(&base.workstream_id)
+            .map(WorkstreamId::from)
+            .map_err(StateError::InvalidPersistedUuid)?;
+        let location_id = Uuid::parse_str(&base.location_id)
+            .map(LocationId::from)
+            .map_err(StateError::InvalidPersistedUuid)?;
+        let lifecycle = workstream_lifecycle_from_text(&base.lifecycle)?;
+        let revision = Revision::try_from(base.revision)?;
+        let runtime = self.runtime_for_workstream(workstream_id)?;
+        let binding = runtime
+            .as_ref()
+            .map(|runtime| self.binding_for_runtime(runtime.runtime_id))
+            .transpose()?
+            .flatten();
+        let attention = self.attention(workstream_id)?;
+        Ok(WorkstreamOverview {
+            workstream_id,
+            location_id,
+            project_repository_path: PathBuf::from(base.project_repository_path),
+            project_display_name: base.project_display_name,
+            remote_identity_fingerprint: base
+                .remote_identity_fingerprint
+                .filter(|fingerprint| !fingerprint.is_empty()),
+            checkout_path: PathBuf::from(base.checkout_path),
+            lifecycle,
+            last_activity_sequence: base.activity_sequence,
+            last_activity_at_millis: (base.activity_at_millis != 0)
+                .then_some(base.activity_at_millis),
+            revision,
+            runtime,
+            binding,
+            attention,
         })
     }
 
@@ -2536,54 +2684,85 @@ impl ClientCatalog {
         executable_path: &Path,
         display_name: &str,
     ) -> Result<ClientProjectLocation, StateError> {
+        self.register_local_project_location_with_identity(
+            host,
+            location_id,
+            executable_path,
+            display_name,
+            None,
+        )
+    }
+
+    /// Associates one local host location with a presentation Project,
+    /// reusing an existing Project when the repository fingerprint matches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when local host trust changed, metadata is unsafe, or
+    /// the client catalog cannot commit atomically.
+    pub fn register_local_project_location_with_identity(
+        &mut self,
+        host: &HostIdentity,
+        location_id: LocationId,
+        executable_path: &Path,
+        display_name: &str,
+        repository_fingerprint: Option<&str>,
+    ) -> Result<ClientProjectLocation, StateError> {
         validate_project_display_name(display_name)?;
+        validate_repository_fingerprint(repository_fingerprint)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
         ensure_local_client_host(&transaction, host, executable_path)?;
-        let existing: Option<(String, String)> = transaction
-            .query_row(
-                "SELECT projects.project_id, projects.display_name
-                 FROM project_locations
-                 JOIN projects ON projects.project_id = project_locations.project_id
-                 WHERE project_locations.host_id = ?1 AND project_locations.location_id = ?2",
-                params![host.host_id.to_string(), location_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
+        let project = associate_project_location(
+            &transaction,
+            host.host_id,
+            location_id,
+            display_name,
+            repository_fingerprint,
+        )?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(project)
+    }
+
+    /// Associates a location on an already trusted host with a presentation
+    /// Project. This changes only the local client catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the host is unknown, metadata is unsafe, or the
+    /// client catalog cannot commit atomically.
+    pub fn register_host_project_location(
+        &mut self,
+        host_id: HostId,
+        location_id: LocationId,
+        display_name: &str,
+        repository_fingerprint: Option<&str>,
+    ) -> Result<ClientProjectLocation, StateError> {
+        validate_project_display_name(display_name)?;
+        validate_repository_fingerprint(repository_fingerprint)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
-        let project = if let Some((project_id, display_name)) = existing {
-            ClientProjectLocation {
-                project_id: Uuid::parse_str(&project_id)
-                    .map(ProjectId::from)
-                    .map_err(StateError::InvalidPersistedUuid)?,
-                display_name,
-            }
-        } else {
-            let project_id = ProjectId::new();
-            transaction
-                .execute(
-                    "INSERT INTO projects (project_id, display_name, revision) VALUES (?1, ?2, 1)",
-                    params![project_id.to_string(), display_name],
-                )
-                .map_err(StateError::Sqlite)?;
-            transaction
-                .execute(
-                    "INSERT INTO project_locations (project_id, host_id, location_id)
-                     VALUES (?1, ?2, ?3)",
-                    params![
-                        project_id.to_string(),
-                        host.host_id.to_string(),
-                        location_id.to_string()
-                    ],
-                )
-                .map_err(StateError::Sqlite)?;
-            ClientProjectLocation {
-                project_id,
-                display_name: display_name.to_owned(),
-            }
-        };
+        let known: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM hosts WHERE host_id = ?1)",
+                [host_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StateError::Sqlite)?;
+        if !known {
+            return Err(StateError::UnknownClientHost);
+        }
+        let project = associate_project_location(
+            &transaction,
+            host_id,
+            location_id,
+            display_name,
+            repository_fingerprint,
+        )?;
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(project)
     }
@@ -2771,29 +2950,255 @@ impl ClientCatalog {
     ) -> Result<Option<ClientProjectLocation>, StateError> {
         self.connection
             .query_row(
-                "SELECT projects.project_id, projects.display_name
+                "SELECT projects.project_id, projects.display_name,
+                        projects.repository_fingerprint
                  FROM project_locations
                  JOIN projects ON projects.project_id = project_locations.project_id
                  WHERE project_locations.host_id = ?1 AND project_locations.location_id = ?2",
                 params![host_id.to_string(), location_id.to_string()],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(StateError::Sqlite)
             .and_then(|row| {
-                row.map_or(Ok(None), |(project_id, display_name)| {
+                row.map_or(Ok(None), |(project_id, display_name, fingerprint)| {
                     Uuid::parse_str(&project_id)
                         .map(ProjectId::from)
                         .map(|project_id| {
                             Some(ClientProjectLocation {
                                 project_id,
                                 display_name,
+                                repository_fingerprint: fingerprint,
                             })
                         })
                         .map_err(StateError::InvalidPersistedUuid)
                 })
             })
     }
+}
+
+fn associate_project_location(
+    transaction: &rusqlite::Transaction<'_>,
+    host_id: HostId,
+    location_id: LocationId,
+    display_name: &str,
+    repository_fingerprint: Option<&str>,
+) -> Result<ClientProjectLocation, StateError> {
+    let existing: Option<(String, String, Option<String>)> = transaction
+        .query_row(
+            "SELECT projects.project_id, projects.display_name,
+                    projects.repository_fingerprint
+             FROM project_locations
+             JOIN projects ON projects.project_id = project_locations.project_id
+             WHERE project_locations.host_id = ?1 AND project_locations.location_id = ?2",
+            params![host_id.to_string(), location_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?;
+    let matching = repository_fingerprint
+        .map(|fingerprint| {
+            transaction
+                .query_row(
+                    "SELECT project_id, display_name FROM projects
+                     WHERE repository_fingerprint = ?1",
+                    [fingerprint],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .optional()
+                .map_err(StateError::Sqlite)
+        })
+        .transpose()?
+        .flatten();
+
+    if let Some(existing) = existing {
+        return reassociate_existing_project(
+            transaction,
+            host_id,
+            location_id,
+            display_name,
+            repository_fingerprint,
+            existing,
+            matching,
+        );
+    }
+
+    let project = if let Some((project_id, display_name)) = matching {
+        project_location(
+            &project_id,
+            display_name,
+            repository_fingerprint.map(str::to_owned),
+        )?
+    } else {
+        create_project(transaction, display_name, repository_fingerprint)?
+    };
+    transaction
+        .execute(
+            "INSERT INTO project_locations (project_id, host_id, location_id)
+             VALUES (?1, ?2, ?3)",
+            params![
+                project.project_id.to_string(),
+                host_id.to_string(),
+                location_id.to_string(),
+            ],
+        )
+        .map_err(StateError::Sqlite)?;
+    Ok(project)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn reassociate_existing_project(
+    transaction: &rusqlite::Transaction<'_>,
+    host_id: HostId,
+    location_id: LocationId,
+    display_name: &str,
+    repository_fingerprint: Option<&str>,
+    existing: (String, String, Option<String>),
+    matching: Option<(String, String)>,
+) -> Result<ClientProjectLocation, StateError> {
+    let (existing_id, existing_name, existing_fingerprint) = existing;
+    if let Some((matching_id, matching_name)) = matching {
+        if matching_id != existing_id {
+            transaction
+                .execute(
+                    "UPDATE project_locations SET project_id = ?1
+                     WHERE host_id = ?2 AND location_id = ?3 AND project_id = ?4",
+                    params![
+                        matching_id,
+                        host_id.to_string(),
+                        location_id.to_string(),
+                        existing_id,
+                    ],
+                )
+                .map_err(StateError::Sqlite)?;
+            delete_orphan_project(transaction, &existing_id)?;
+        }
+        return project_location(
+            &matching_id,
+            matching_name,
+            repository_fingerprint.map(str::to_owned),
+        );
+    }
+    if repository_fingerprint.is_none() {
+        if existing_fingerprint.is_none() && existing_name != display_name {
+            let location_count = project_location_count(transaction, &existing_id)?;
+            if location_count == 1 {
+                transaction
+                    .execute(
+                        "UPDATE projects SET display_name = ?1,
+                         revision = revision + 1 WHERE project_id = ?2",
+                        params![display_name, existing_id],
+                    )
+                    .map_err(StateError::Sqlite)?;
+                return project_location(&existing_id, display_name.to_owned(), None);
+            }
+        }
+        return project_location(&existing_id, existing_name, existing_fingerprint);
+    }
+    if existing_fingerprint.as_deref() == repository_fingerprint {
+        return project_location(&existing_id, existing_name, existing_fingerprint);
+    }
+
+    if project_location_count(transaction, &existing_id)? == 1 {
+        transaction
+            .execute(
+                "UPDATE projects SET repository_fingerprint = ?1,
+                     display_name = ?2, revision = revision + 1
+                 WHERE project_id = ?3",
+                params![repository_fingerprint, display_name, existing_id],
+            )
+            .map_err(StateError::Sqlite)?;
+        return project_location(
+            &existing_id,
+            display_name.to_owned(),
+            repository_fingerprint.map(str::to_owned),
+        );
+    }
+
+    let project = create_project(transaction, display_name, repository_fingerprint)?;
+    transaction
+        .execute(
+            "UPDATE project_locations SET project_id = ?1
+             WHERE host_id = ?2 AND location_id = ?3 AND project_id = ?4",
+            params![
+                project.project_id.to_string(),
+                host_id.to_string(),
+                location_id.to_string(),
+                existing_id,
+            ],
+        )
+        .map_err(StateError::Sqlite)?;
+    Ok(project)
+}
+
+fn project_location_count(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+) -> Result<i64, StateError> {
+    transaction
+        .query_row(
+            "SELECT COUNT(*) FROM project_locations WHERE project_id = ?1",
+            [project_id],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)
+}
+
+fn create_project(
+    transaction: &rusqlite::Transaction<'_>,
+    display_name: &str,
+    repository_fingerprint: Option<&str>,
+) -> Result<ClientProjectLocation, StateError> {
+    let project_id = ProjectId::new();
+    transaction
+        .execute(
+            "INSERT INTO projects (
+                project_id, display_name, repository_fingerprint, revision
+             ) VALUES (?1, ?2, ?3, 1)",
+            params![project_id.to_string(), display_name, repository_fingerprint],
+        )
+        .map_err(StateError::Sqlite)?;
+    Ok(ClientProjectLocation {
+        project_id,
+        display_name: display_name.to_owned(),
+        repository_fingerprint: repository_fingerprint.map(str::to_owned),
+    })
+}
+
+fn project_location(
+    project_id: &str,
+    display_name: String,
+    repository_fingerprint: Option<String>,
+) -> Result<ClientProjectLocation, StateError> {
+    Ok(ClientProjectLocation {
+        project_id: Uuid::parse_str(project_id)
+            .map(ProjectId::from)
+            .map_err(StateError::InvalidPersistedUuid)?,
+        display_name,
+        repository_fingerprint,
+    })
+}
+
+fn delete_orphan_project(
+    transaction: &rusqlite::Transaction<'_>,
+    project_id: &str,
+) -> Result<(), StateError> {
+    transaction
+        .execute(
+            "DELETE FROM projects WHERE project_id = ?1
+             AND NOT EXISTS (
+                SELECT 1 FROM project_locations WHERE project_id = ?1
+             )",
+            [project_id],
+        )
+        .map_err(StateError::Sqlite)?;
+    Ok(())
 }
 
 fn configure_connection(connection: &Connection) -> Result<(), StateError> {
@@ -2879,9 +3284,11 @@ fn migrate_host_schema(connection: &mut Connection, state_root: &Path) -> Result
                     .map_err(StateError::Sqlite)?;
             }
         }
+        4 => {}
         HOST_SCHEMA_VERSION => return Ok(()),
         _ => return Err(StateError::UnsupportedSchemaVersion(current)),
     }
+    ensure_host_repository_metadata_columns(&transaction)?;
     transaction
         .execute(&format!("PRAGMA user_version = {HOST_SCHEMA_VERSION}"), [])
         .map_err(StateError::Sqlite)?;
@@ -2892,6 +3299,61 @@ fn migrate_host_schema(connection: &mut Connection, state_root: &Path) -> Result
         )
         .map_err(StateError::Sqlite)?;
     transaction.commit().map_err(StateError::Sqlite)
+}
+
+fn ensure_host_repository_metadata_columns(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), StateError> {
+    let table_exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'project_locations'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)?;
+    if !table_exists {
+        return Ok(());
+    }
+    let display_exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('project_locations')
+                WHERE name = 'repository_display_name'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)?;
+    if !display_exists {
+        transaction
+            .execute_batch(
+                "ALTER TABLE project_locations
+                 ADD COLUMN repository_display_name TEXT NOT NULL DEFAULT '';",
+            )
+            .map_err(StateError::Sqlite)?;
+    }
+    let fingerprint_exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('project_locations')
+                WHERE name = 'remote_identity_fingerprint'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)?;
+    if !fingerprint_exists {
+        transaction
+            .execute_batch(
+                "ALTER TABLE project_locations
+                 ADD COLUMN remote_identity_fingerprint TEXT;",
+            )
+            .map_err(StateError::Sqlite)?;
+    }
+    Ok(())
 }
 
 fn migrate_client_schema(connection: &mut Connection) -> Result<(), StateError> {
@@ -2912,7 +3374,38 @@ fn migrate_client_schema(connection: &mut Connection) -> Result<(), StateError> 
                  ALTER TABLE hosts ADD COLUMN transport TEXT NOT NULL DEFAULT 'local';
                  ALTER TABLE hosts ADD COLUMN ssh_destination TEXT;
                  ALTER TABLE hosts ADD COLUMN capabilities_json TEXT NOT NULL
-                    DEFAULT '{\"codex\":false,\"git\":false,\"tmux\":false}';",
+                    DEFAULT '{\"codex\":false,\"git\":false,\"tmux\":false}';
+                 CREATE TABLE projects (
+                    project_id TEXT PRIMARY KEY,
+                    display_name TEXT NOT NULL,
+                    repository_fingerprint TEXT,
+                    revision INTEGER NOT NULL CHECK (revision > 0)
+                 );
+                 CREATE TABLE project_locations (
+                    project_id TEXT NOT NULL REFERENCES projects(project_id),
+                    host_id TEXT NOT NULL,
+                    location_id TEXT NOT NULL,
+                    PRIMARY KEY(project_id, host_id, location_id)
+                 );
+                 CREATE TABLE preferences (
+                    key TEXT PRIMARY KEY,
+                    value_json TEXT NOT NULL
+                 );
+                 CREATE UNIQUE INDEX project_location_identity_idx
+                    ON project_locations(host_id, location_id);
+                 CREATE UNIQUE INDEX project_repository_fingerprint_idx
+                    ON projects(repository_fingerprint)
+                    WHERE repository_fingerprint IS NOT NULL;",
+            )
+            .map_err(StateError::Sqlite)?,
+        2 => transaction
+            .execute_batch(
+                "ALTER TABLE projects ADD COLUMN repository_fingerprint TEXT;
+                 CREATE UNIQUE INDEX project_location_identity_idx
+                    ON project_locations(host_id, location_id);
+                 CREATE UNIQUE INDEX project_repository_fingerprint_idx
+                    ON projects(repository_fingerprint)
+                    WHERE repository_fingerprint IS NOT NULL;",
             )
             .map_err(StateError::Sqlite)?,
         CLIENT_SCHEMA_VERSION => return Ok(()),
@@ -3790,6 +4283,19 @@ fn validate_project_display_name(value: &str) -> Result<(), StateError> {
     Ok(())
 }
 
+fn validate_repository_fingerprint(value: Option<&str>) -> Result<(), StateError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    let Some(hash) = value.strip_prefix("git-remote-v1:") else {
+        return Err(StateError::InvalidRepositoryFingerprint);
+    };
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(StateError::InvalidRepositoryFingerprint);
+    }
+    Ok(())
+}
+
 fn validate_client_host_alias(value: &str) -> Result<(), StateError> {
     if value.is_empty()
         || value.len() > 64
@@ -3881,6 +4387,8 @@ pub enum StateError {
     NavigatorCursorOverflow,
     #[error("client project display name is invalid")]
     InvalidProjectDisplayName,
+    #[error("repository fingerprint is invalid")]
+    InvalidRepositoryFingerprint,
     #[error("invalid persisted UUID: {0}")]
     InvalidPersistedUuid(uuid::Error),
     #[error("I/O at {path}: {source}")]
@@ -4155,6 +4663,174 @@ mod tests {
     }
 
     #[test]
+    fn client_catalog_groups_matching_repository_fingerprints_across_hosts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let registry = HostRegistry::open(&root).unwrap();
+        let local_host = registry.identity().unwrap();
+        let remote_host = HostIdentity {
+            host_id: HostId::new(),
+            registry_generation: "remote-generation".to_owned(),
+        };
+        let local_location = LocationId::new();
+        let remote_location = LocationId::new();
+        let fingerprint = format!("git-remote-v1:{}", "a".repeat(64));
+        let mut catalog = ClientCatalog::open(&root).unwrap();
+        let local = catalog
+            .register_local_project_location_with_identity(
+                &local_host,
+                local_location,
+                Path::new("/workspace/wsnav"),
+                "cubey",
+                Some(&fingerprint),
+            )
+            .unwrap();
+        catalog
+            .register_ssh_host(
+                "snap",
+                &remote_host,
+                Path::new("/bin/wsnav"),
+                "snap",
+                Capabilities::default(),
+            )
+            .unwrap();
+
+        let remote = catalog
+            .register_host_project_location(
+                remote_host.host_id,
+                remote_location,
+                "different-checkout-name",
+                Some(&fingerprint),
+            )
+            .unwrap();
+
+        assert_eq!(remote.project_id, local.project_id);
+        assert_eq!(remote.display_name, "cubey");
+    }
+
+    #[test]
+    fn client_catalog_keeps_missing_and_distinct_fingerprints_separate() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let registry = HostRegistry::open(&root).unwrap();
+        let host = registry.identity().unwrap();
+        let mut catalog = ClientCatalog::open(&root).unwrap();
+        let first = catalog
+            .register_local_project_location_with_identity(
+                &host,
+                LocationId::new(),
+                Path::new("/workspace/wsnav"),
+                "first",
+                Some(&format!("git-remote-v1:{}", "a".repeat(64))),
+            )
+            .unwrap();
+        let second = catalog
+            .register_local_project_location_with_identity(
+                &host,
+                LocationId::new(),
+                Path::new("/workspace/wsnav"),
+                "second",
+                Some(&format!("git-remote-v1:{}", "b".repeat(64))),
+            )
+            .unwrap();
+        let absent = catalog
+            .register_local_project_location(
+                &host,
+                LocationId::new(),
+                Path::new("/workspace/wsnav"),
+                "absent",
+            )
+            .unwrap();
+
+        assert_ne!(first.project_id, second.project_id);
+        assert_ne!(first.project_id, absent.project_id);
+        assert_ne!(second.project_id, absent.project_id);
+    }
+
+    #[test]
+    fn repository_metadata_backfill_refreshes_a_single_location_label() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let registry = HostRegistry::open(&root).unwrap();
+        let host = registry.identity().unwrap();
+        let location_id = LocationId::new();
+        let mut catalog = ClientCatalog::open(&root).unwrap();
+        let legacy = catalog
+            .register_local_project_location(
+                &host,
+                location_id,
+                Path::new("/bin/wsnav"),
+                "cubey-worktree1",
+            )
+            .unwrap();
+        let fingerprint = format!("git-remote-v1:{}", "e".repeat(64));
+
+        let refreshed = catalog
+            .register_local_project_location_with_identity(
+                &host,
+                location_id,
+                Path::new("/bin/wsnav"),
+                "cubey",
+                Some(&fingerprint),
+            )
+            .unwrap();
+
+        assert_eq!(refreshed.project_id, legacy.project_id);
+        assert_eq!(refreshed.display_name, "cubey");
+    }
+
+    #[test]
+    fn host_registry_migrates_repository_metadata_as_pending() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let legacy_sql = HOST_SCHEMA_SQL
+            .replace("        repository_display_name TEXT NOT NULL,\n", "")
+            .replace("        remote_identity_fingerprint TEXT,\n", "");
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        connection.execute_batch(&legacy_sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO host_identity VALUES (1, ?1, 'generation', 4)",
+                [HostId::new().to_string()],
+            )
+            .unwrap();
+        let location_id = LocationId::new();
+        connection
+            .execute(
+                "INSERT INTO project_locations (
+                    location_id, repository_identity, repository_path,
+                    default_base_ref, managed_worktree_root, revision
+                 ) VALUES (?1, '/repo/.git', '/repo', ?2, '/state/worktrees/location', 1)",
+                params![location_id.to_string(), "a".repeat(40)],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA user_version = 4;")
+            .unwrap();
+        drop(connection);
+
+        let mut registry = HostRegistry::open(&root).unwrap();
+        assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
+        assert_eq!(
+            registry.pending_repository_metadata().unwrap(),
+            vec![PendingRepositoryMetadata {
+                location_id,
+                repository_path: PathBuf::from("/repo"),
+            }]
+        );
+        let fingerprint = format!("git-remote-v1:{}", "c".repeat(64));
+        registry
+            .record_repository_metadata(
+                location_id,
+                Path::new("/primary/repo"),
+                "repo",
+                Some(&fingerprint),
+            )
+            .unwrap();
+        assert!(registry.pending_repository_metadata().unwrap().is_empty());
+    }
+
+    #[test]
     fn client_catalog_migrates_legacy_local_host_records() {
         let temporary = tempfile::tempdir().unwrap();
         let root = StateRoot::create(temporary.path()).unwrap();
@@ -4180,6 +4856,74 @@ mod tests {
         assert_eq!(migrated.registry_generation, "");
         assert!(matches!(migrated.transport, ClientHostTransport::Local));
         assert_eq!(migrated.capabilities, Capabilities::default());
+    }
+
+    #[test]
+    fn client_catalog_migrates_d6_projects_without_losing_associations() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let legacy_sql = CLIENT_SCHEMA_SQL
+            .replace("        repository_fingerprint TEXT,\n", "")
+            .replace(
+                "    CREATE UNIQUE INDEX project_location_identity_idx\n        ON project_locations(host_id, location_id);\n",
+                "",
+            )
+            .replace(
+                "    CREATE UNIQUE INDEX project_repository_fingerprint_idx\n        ON projects(repository_fingerprint)\n        WHERE repository_fingerprint IS NOT NULL;\n",
+                "",
+            );
+        let connection = Connection::open(root.client_database_path()).unwrap();
+        connection.execute_batch(&legacy_sql).unwrap();
+        let host_id = HostId::new();
+        let location_id = LocationId::new();
+        let project_id = ProjectId::new();
+        connection
+            .execute(
+                "INSERT INTO hosts VALUES (
+                    'local', ?1, 'generation', '/bin/wsnav', 'local', NULL,
+                    '{\"codex\":false,\"git\":false,\"tmux\":false}', 1
+                 )",
+                [host_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects VALUES (?1, 'cubey', 1)",
+                [project_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO project_locations VALUES (?1, ?2, ?3)",
+                params![
+                    project_id.to_string(),
+                    host_id.to_string(),
+                    location_id.to_string(),
+                ],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA user_version = 2;")
+            .unwrap();
+        drop(connection);
+
+        let mut catalog = ClientCatalog::open(&root).unwrap();
+        let fingerprint = format!("git-remote-v1:{}", "d".repeat(64));
+        let grouped = catalog
+            .register_local_project_location_with_identity(
+                &HostIdentity {
+                    host_id,
+                    registry_generation: "generation".to_owned(),
+                },
+                location_id,
+                Path::new("/bin/wsnav"),
+                "cubey",
+                Some(&fingerprint),
+            )
+            .unwrap();
+
+        assert_eq!(catalog.schema_version().unwrap(), CLIENT_SCHEMA_VERSION);
+        assert_eq!(grouped.project_id, project_id);
     }
 
     #[test]

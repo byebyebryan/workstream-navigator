@@ -16,7 +16,6 @@ use crate::{
     domain::{OperationId, RuntimeId, WorkstreamId},
     navigator::run_local_navigator,
     presentation::{AttachmentPhase, Presentation},
-    process::output_bounded,
     provider::codex::app_server::EphemeralAppServer,
     provider::codex::hooks::drain_and_parse,
     provider::codex::profile::ObserverProfile,
@@ -909,14 +908,15 @@ fn provider_wait() -> Result<(), AppError> {
 }
 
 fn register(registry: &mut HostRegistry, checkout: &Path) -> Result<(), AppError> {
-    let checkout = checkout.canonicalize().map_err(AppError::Io)?;
-    let repository_identity = git_value(
-        &checkout,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    let repository = crate::repository::inspect(checkout)?;
+    let registered = registry.register_external_workstream_with_metadata(
+        repository.checkout_path,
+        &repository.repository_path,
+        repository.repository_identity,
+        repository.default_base_ref,
+        &repository.display_name,
+        repository.remote_identity_fingerprint.as_deref(),
     )?;
-    let default_base_ref = git_value(&checkout, &["rev-parse", "HEAD"])?;
-    let registered =
-        registry.register_external_workstream(checkout, repository_identity, default_base_ref)?;
     println!("registered workstream {}", registered.workstream_id);
     Ok(())
 }
@@ -1421,20 +1421,6 @@ fn default_state_root() -> PathBuf {
         .join("wsnav")
 }
 
-fn git_value(checkout: &Path, arguments: &[&str]) -> Result<String, AppError> {
-    let mut command = Command::new("git");
-    command.arg("-C").arg(checkout).args(arguments);
-    let output = output_bounded(&mut command, 4096, 4096).map_err(AppError::Process)?;
-    if !output.status.success() {
-        return Err(AppError::NotGitCheckout);
-    }
-    let value = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-    if value.is_empty() || value.len() > 4096 || value.contains('\n') {
-        return Err(AppError::NotGitCheckout);
-    }
-    Ok(value)
-}
-
 /// User-facing local-command failures.
 #[derive(Debug, Error)]
 enum AppError {
@@ -1465,10 +1451,6 @@ enum AppError {
     #[cfg(not(unix))]
     #[error("native provider exited during the internal launch handoff")]
     RuntimeExited,
-    #[error("could not execute bounded local control command")]
-    Process(crate::process::BoundedProcessError),
-    #[error("not a usable Git checkout")]
-    NotGitCheckout,
     #[error("workstream {0} has no runtime")]
     NoRuntime(WorkstreamId),
     #[error("workstream {0} has no exact native Codex binding")]
@@ -1485,6 +1467,8 @@ enum AppError {
     LiveRuntimePreventsRemoval,
     #[error("observer profile update is refused while a managed runtime is live")]
     LiveRuntimePreventsUpdate,
+    #[error(transparent)]
+    Repository(#[from] crate::repository::RepositoryError),
     #[error(transparent)]
     BuildInfo(#[from] crate::build_info::BuildInfoError),
     #[error(transparent)]

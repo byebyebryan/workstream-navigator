@@ -2,7 +2,8 @@
 
 Date: 2026-07-31
 
-Status: implemented V1 operator-beta contract; no compatibility contract
+Status: implemented V1 operator-beta contract with D6.1 project-identity polish;
+no compatibility contract
 
 ## Product thesis
 
@@ -99,7 +100,9 @@ its completed visible result.
   cherry-pick, or conflict resolution.
 - Copying uncommitted files or source-only commits into a forked workstream.
 - Claude or broad provider parity.
-- Multiple-controller catalog synchronization.
+- Multiple-controller catalog synchronization. Each navigator client may
+  independently reconstruct the same presentation grouping from host-supplied
+  repository fingerprints, but clients do not replicate their catalogs.
 
 Cross-host operation in V1 means that one navigator can see, start, attach to,
 and resume work at pre-registered project locations on several hosts. It does
@@ -624,23 +627,25 @@ V1 uses fresh SQLite schemas with no migration from Agent Switchboard.
 The local client catalog contains only:
 
 - configured host aliases and stable host IDs;
-- local ProjectLocation presentation names and client-generated opaque IDs;
+- client-generated opaque Project IDs, presentation names, and optional
+  credential-free repository fingerprints;
 - mappings from those local presentation records to exact host locations; and
 - local UI preferences.
 
 The client catalog is not authority for a remote runtime, worktree, provider
-binding, or mutation. Losing it does not stop local or remote work. V1 does not
-offer an explicit cross-host Project-grouping workflow: the readable host alias
-and one stable per-ProjectLocation label identify a row. A local label comes
-from the client presentation record; a remote label is derived by that host
-from its registered repository basename, never from a managed Workstream
-checkout. Repository identity remains host-private operation evidence and is
-not inferred from matching labels.
+binding, or mutation. Losing it does not stop local or remote work. A readable
+host alias and one stable Project label identify each row. The Project label is
+derived from repository registration metadata, never from a generated managed
+Workstream checkout.
 
 Host actions address opaque Location and Workstream IDs, not a replicated
-project catalog. Explicitly grouping several host locations under one
-client-generated Project ID is deferred with multiple-controller catalog
-coordination; V1 does not expose otherwise-unused grouping authority.
+project catalog. A host may expose a bounded opaque fingerprint of one
+credential-free canonical fetch remote. The client reuses one Project ID for
+locations with the same fingerprint; missing or ambiguous remote evidence
+keeps locations separate. This grouping is presentation only and never grants
+one host authority over another host's repository or Runtime. Raw remote URLs,
+filesystem paths, and repository common directories never cross the host
+protocol.
 
 ### Host registry
 
@@ -656,6 +661,7 @@ CodexIntegration
 
 ProjectLocation
   location_id, repository_identity, repository_path,
+  repository_display_name, remote_identity_fingerprint?,
   default_base_ref, managed_worktree_root, revision
 
 Workstream
@@ -688,9 +694,10 @@ CompoundOperation
 ```
 
 Paths and provider identifiers are private host fields. Public snapshots return
-bounded thread names, name provenance, statuses, capabilities, and opaque
-Workstream Navigator IDs. No prompt, preview, response, transcript, tool
-payload, terminal capture, credential, or environment dump is persisted.
+bounded Project and thread names, opaque repository fingerprints, name
+provenance, statuses, capabilities, and opaque Workstream Navigator IDs. No raw
+remote URL, prompt, preview, response, transcript, tool payload, terminal
+capture, credential, or environment dump is persisted.
 
 ### State relationships
 
@@ -756,7 +763,21 @@ starting | idle | working | attention | stopped | unknown | unreachable
 ## Git and worktree policy
 
 A ProjectLocation references one local, non-bare Git repository with a stable
-common-directory identity and a configured `default_base_ref`.
+common-directory identity and a configured `default_base_ref`. Registration
+normalizes the selected path to its containing worktree root. It separately
+records the primary worktree returned by bounded `git worktree list
+--porcelain` as the repository command path, so an externally created linked
+worktree can be the initial Workstream without becoming the Project identity.
+
+Registration also inspects local Git configuration without contacting a
+network. One unambiguous canonical fetch remote is normalized across common
+SSH and HTTP transport spellings, stripped of credentials and transport-only
+user information, and persisted only as a versioned SHA-256 fingerprint plus a
+bounded repository display name. `origin` is preferred; an unambiguous sole
+fetch remote is the fallback. Local paths, `file:` remotes, multiple conflicting
+URLs, or missing remotes produce no fingerprint and therefore no automatic
+cross-host grouping. A remote named `upstream` is not treated as stronger than
+`origin`, because a fork and its parent may intentionally be separate Projects.
 
 The first Workstream may use an existing checkout with `external` ownership.
 Additional V1 Workstreams use `managed` worktrees below the configured

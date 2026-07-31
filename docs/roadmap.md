@@ -2,7 +2,7 @@
 
 Date: 2026-07-31
 
-Status: D0 through D6 complete
+Status: D0 through D6.1 complete
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -37,6 +37,7 @@ This document owns sequencing, exit gates, and progress.
 | D5.1 | Operational closure for recovery, release diagnostics, and bounded I/O | Complete |
 | D5.2 | Correctness closure for release, identity, recovery, and presentation | Complete |
 | D6 | Source-installed operator-beta closure | Complete |
+| D6.1 | Repository identity and cross-host Project grouping polish | Complete |
 
 ## D0 - Contract kernel
 
@@ -428,6 +429,46 @@ Exit gate:
   and
 - the repository is clean, synchronized, and remains explicitly
   source-installed rather than presenting an unshipped release channel.
+
+## D6.1 - Repository identity and cross-host Project grouping polish
+
+Implementation status: complete. Linked-checkout normalization, canonical
+remote fingerprinting, client-side cross-host Project grouping, development
+schema migration, and the full repository gate passed. See the
+[D6.1 project-identity acceptance](acceptance-d6.1-project-identity.md).
+
+Refine the accepted operator beta without changing provider, Runtime, or
+worktree ownership. Make the existing client-side Project concept useful when
+the same repository is registered at different paths or on different hosts.
+
+Scope:
+
+- normalize new registrations to the selected Git worktree root while keeping
+  the primary worktree as a separate stable repository command path;
+- derive one credential-free, transport-normalized fetch-remote fingerprint
+  through bounded local Git inspection without network access;
+- expose only that opaque fingerprint and a bounded repository name through a
+  versioned host snapshot;
+- reuse a client Project ID when exact fingerprints match, while keeping
+  missing or ambiguous identities separate;
+- migrate current development schemas without importing the Python prototype
+  or weakening matching-build remote checks; and
+- retain per-host Location and Workstream authority beneath the presentation
+  grouping.
+
+Exit gate:
+
+- linked-worktree registration records the selected checkout and primary
+  repository path separately;
+- SSH and HTTPS spellings of the same fetch remote group across host locations;
+- forks with different `origin` remotes, ambiguous remotes, local-path remotes,
+  and repositories without remotes do not group automatically;
+- no URL, credential, repository path, common-directory path, provider payload,
+  or terminal content crosses the host protocol or enters committed evidence;
+- development-schema migration, protocol validation, full tests, lint,
+  packaging, and `git diff --check` pass; and
+- matching local and remote builds remain required after the protocol/schema
+  revision.
 
 ## Deferred beyond V1
 

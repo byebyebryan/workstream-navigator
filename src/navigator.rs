@@ -9,6 +9,7 @@ use std::{
     io::{self, stdout},
     path::{Path, PathBuf},
     process::Command,
+    str::FromStr,
     sync::mpsc::{self, Receiver, Sender},
     thread,
     time::{Duration, Instant},
@@ -582,6 +583,18 @@ impl NavigatorView {
         }
     }
 
+    fn select_workstream(&mut self, host_alias: &str, workstream_id: WorkstreamId) -> bool {
+        let Some(selected) =
+            self.snapshot.workstreams.iter().position(|row| {
+                row.host.alias() == host_alias && row.workstream_id == workstream_id
+            })
+        else {
+            return false;
+        };
+        self.selected = selected;
+        true
+    }
+
     fn is_attached_to(&self, workstream: &NavigatorWorkstream) -> bool {
         self.attached
             .as_ref()
@@ -675,10 +688,11 @@ impl NavigatorView {
         );
         let help = self.message.clone().unwrap_or_else(|| {
             if self.snapshot.unreachable_hosts.is_empty() {
-                "↑↓ select  Enter attach/start  a acknowledge  p park  q close".to_owned()
+                "↑↓ select  Enter attach/start  n new  f fork  a acknowledge  p park  q close"
+                    .to_owned()
             } else {
                 format!(
-                    "{} unavailable; showing cached state  ↑↓ select  Enter attach/start  q close",
+                    "{} unavailable; showing cached state  ↑↓ select  Enter attach/start  n new  f fork  q close",
                     self.snapshot.unreachable_hosts.join(", ")
                 )
             }
@@ -808,6 +822,8 @@ pub enum NavigatorError {
     ActionOutputTooLarge,
     #[error("the local navigator action failed")]
     ActionFailed,
+    #[error("the local navigator action did not return one Workstream ID")]
+    InvalidActionResult,
     #[error("remote host is unavailable")]
     RemoteHostUnavailable,
     #[error("remote host returned an invalid bounded snapshot")]
@@ -854,6 +870,24 @@ pub fn run_local_navigator(
                     }
                     KeyCode::Char('a') => acknowledge_selected(root, &mut remote, &mut view),
                     KeyCode::Char('p') => park_selected(root, &mut remote, &mut view),
+                    KeyCode::Char('n') => {
+                        create_workstream_selected(
+                            root,
+                            &presentation,
+                            &mut remote,
+                            &mut view,
+                            CreationAction::Independent,
+                        );
+                    }
+                    KeyCode::Char('f') => {
+                        create_workstream_selected(
+                            root,
+                            &presentation,
+                            &mut remote,
+                            &mut view,
+                            CreationAction::Fork,
+                        );
+                    }
                     _ => {}
                 },
                 Event::Mouse(mouse) => match mouse.kind {
@@ -983,6 +1017,73 @@ fn park_selected(root: &StateRoot, remote: &mut RemoteMonitor, view: &mut Naviga
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CreationAction {
+    Independent,
+    Fork,
+}
+
+impl CreationAction {
+    const fn local_command(self) -> &'static str {
+        match self {
+            Self::Independent => "new-workstream",
+            Self::Fork => "fork-workstream",
+        }
+    }
+
+    const fn remote_command(self) -> &'static str {
+        match self {
+            Self::Independent => "new",
+            Self::Fork => "fork",
+        }
+    }
+
+    const fn success_message(self) -> &'static str {
+        match self {
+            Self::Independent => "new Workstream started; use the native Codex UI directly",
+            Self::Fork => "forked Workstream started at the last completed native turn",
+        }
+    }
+}
+
+fn create_workstream_selected(
+    root: &StateRoot,
+    presentation: &Presentation,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+    action: CreationAction,
+) {
+    let Some(source) = view.selected().cloned() else {
+        view.set_message("no Workstream is registered; use wsnav register first");
+        return;
+    };
+    let destination = match run_creation_action(root, action, &source) {
+        Ok(workstream_id) => workstream_id,
+        Err(error) => {
+            view.set_message(action_message(&error));
+            return;
+        }
+    };
+    remote.request_soon(source.host.alias());
+    refresh_view(root, remote, view);
+    if view.select_workstream(source.host.alias(), destination) {
+        activate_selected(root, presentation, remote, view);
+        return;
+    }
+    // A remote poll is asynchronous. Its control action has already created
+    // and started the exact target, so attach it directly instead of making
+    // the user repeat an action while waiting for the next bounded snapshot.
+    let attachment = if source.host.is_remote() {
+        presentation.attach_remote_workstream(source.host.alias(), destination)
+    } else {
+        presentation.attach_workstream(destination)
+    };
+    match attachment.and_then(|()| presentation.focus_provider()) {
+        Ok(()) => view.set_message(action.success_message()),
+        Err(error) => view.set_message(action_message(&error)),
+    }
+}
+
 fn refresh_view(root: &StateRoot, remote: &mut RemoteMonitor, view: &mut NavigatorView) {
     let selected_host = view.selected_host_alias().map(str::to_owned);
     match combined_snapshot(root, remote, selected_host.as_deref()) {
@@ -1028,6 +1129,47 @@ fn run_action(
     } else {
         Err(NavigatorError::ActionFailed)
     }
+}
+
+fn run_creation_action(
+    root: &StateRoot,
+    action: CreationAction,
+    source: &NavigatorWorkstream,
+) -> Result<WorkstreamId, NavigatorError> {
+    if source.host.is_remote() && !source.host.is_reachable() {
+        return Err(NavigatorError::RemoteHostUnavailable);
+    }
+    let executable = std::env::current_exe().map_err(NavigatorError::ActionLaunch)?;
+    let mut command = Command::new(executable);
+    command.arg("--state-root").arg(root.base());
+    if source.host.is_remote() {
+        command
+            .arg("host")
+            .arg(action.remote_command())
+            .arg(source.host.alias())
+            .arg(source.workstream_id.to_string())
+            .arg(source.workstream_revision.value().to_string());
+    } else {
+        command
+            .arg(action.local_command())
+            .arg(source.workstream_id.to_string());
+    }
+    let output = command.output().map_err(NavigatorError::ActionLaunch)?;
+    if output.stdout.len() > 1024 || output.stderr.len() > 1024 {
+        return Err(NavigatorError::ActionOutputTooLarge);
+    }
+    if !output.status.success() {
+        return Err(NavigatorError::ActionFailed);
+    }
+    parse_created_workstream(&output.stdout)
+}
+
+fn parse_created_workstream(output: &[u8]) -> Result<WorkstreamId, NavigatorError> {
+    let output = std::str::from_utf8(output).map_err(|_| NavigatorError::InvalidActionResult)?;
+    let Some(identifier) = output.split_whitespace().last() else {
+        return Err(NavigatorError::InvalidActionResult);
+    };
+    WorkstreamId::from_str(identifier).map_err(|_| NavigatorError::InvalidActionResult)
 }
 
 fn action_message(error: &impl std::fmt::Display) -> String {
@@ -1332,6 +1474,46 @@ mod tests {
         });
 
         assert_eq!(view.selected().unwrap().host.alias(), "snap");
+    }
+
+    #[test]
+    fn creation_selects_the_exact_destination_on_the_same_host() {
+        let source = WorkstreamId::new();
+        let destination = WorkstreamId::new();
+        let remote_destination = NavigatorWorkstream {
+            host: NavigatorHost::Remote {
+                alias: "snap".to_owned(),
+                reachability: RemoteHostReachability::Reachable,
+            },
+            ..row(destination, NavigatorRuntimeStatus::Starting)
+        };
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![
+                row(source, NavigatorRuntimeStatus::Idle),
+                remote_destination,
+            ],
+            unreachable_hosts: Vec::new(),
+        });
+
+        assert!(view.select_workstream("snap", destination));
+        assert_eq!(view.selected().unwrap().workstream_id, destination);
+        assert_eq!(view.selected().unwrap().host.alias(), "snap");
+        assert!(!view.select_workstream("local", destination));
+    }
+
+    #[test]
+    fn creation_output_accepts_one_typed_destination_identifier() {
+        let destination = WorkstreamId::new();
+
+        assert_eq!(
+            parse_created_workstream(format!("forked workstream {destination}\n").as_bytes())
+                .unwrap(),
+            destination
+        );
+        assert!(matches!(
+            parse_created_workstream(b"forked workstream not-an-id\n"),
+            Err(NavigatorError::InvalidActionResult)
+        ));
     }
 
     fn row(

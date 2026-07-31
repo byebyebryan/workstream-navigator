@@ -6,12 +6,12 @@ native terminal UI and workflow intact.
 
 ## Status
 
-This repository is a clean-slate Rust reboot. D3 now provides registered SSH
-host control, cached multi-host navigation, and direct native terminal
-attachment. Its live remote-Codex acceptance remains pending an operator-owned
-remote `wsnav` installation; Workstream creation/forking and V1 recovery
-closure remain roadmap work. It does not preserve compatibility with the
-earlier Python prototype.
+This repository is a clean-slate Rust reboot. D3 provides registered SSH host
+control, cached multi-host navigation, and direct native terminal attachment;
+its bounded local/remote Codex acceptance passed. D4 now has disposable
+automated coverage for independent Workstreams and settled-prefix forks. Its
+real native-Codex fork acceptance and V1 recovery closure remain roadmap work.
+It does not preserve compatibility with the earlier Python prototype.
 
 The frozen prototype remains available as implementation evidence in
 [agent-switchboard-python-reference][].
@@ -57,9 +57,27 @@ acceptance][D2 acceptance]. It keeps the provider pane natively interactive
 and uses a disposable private tmux presentation for navigation only.
 
 The D3 control-plane implementation has local subprocess parity and fake-SSH
-coverage. It deliberately does not install or update any remote executable;
-live remote acceptance is pending a user-installed target. See [D3 control
-plane acceptance][D3 acceptance].
+coverage. It deliberately does not install or update any remote executable.
+Its recorded native-Codex acceptance used user-installed matching builds. See
+[D3 control plane acceptance][D3 acceptance].
+
+## Workstreams
+
+Select a registered Workstream in the navigator and press `n` to start a fresh
+managed Workstream from that project's recorded base, or press `f` to fork the
+selected live Codex Workstream at its last completed turn. The source is not
+interrupted; its current turn may continue while the destination opens in an
+independent worktree. The direct equivalents are:
+
+```console
+wsnav new-workstream <source-workstream-id>
+wsnav fork-workstream <source-workstream-id>
+```
+
+The remote equivalents are `wsnav host new` and `wsnav host fork`, each with
+the selected source revision. The normal navigator supplies that revision and
+the opaque request key automatically. Fork is unavailable until a managed
+source has an exact settled native turn; use `n` for an unrelated fresh start.
 
 ## SSH hosts
 

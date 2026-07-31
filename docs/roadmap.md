@@ -2,7 +2,7 @@
 
 Date: 2026-07-29
 
-Status: D0 through D5.1 complete
+Status: D0 through D5.1 complete; D5.2 in progress
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -35,6 +35,7 @@ This document owns sequencing, exit gates, and progress.
 | D4 | Independent and conversation-forked Workstreams | Complete |
 | D5 | Recovery, combined acceptance, and V1 closure | Complete |
 | D5.1 | Operational closure for recovery, release diagnostics, and bounded I/O | Complete |
+| D5.2 | Correctness closure for release, identity, recovery, and presentation | In progress |
 
 ## D0 - Contract kernel
 
@@ -333,6 +334,43 @@ Exit gate:
   guessed current directory;
 - the complete repository gate, package verification, disposable acceptance,
   and privacy audit pass.
+
+## D5.2 - Correctness closure
+
+Reopen V1 closure for the concrete contradictions found by the post-D5.1
+project-wide review. This is hardening of the approved product, not a new
+workflow layer.
+
+Scope:
+
+- declare and test an MSRV compatible with every locked production dependency;
+- derive remote project labels from the stable ProjectLocation repository
+  rather than a generated managed-checkout basename;
+- classify only a conclusively absent private tmux server as missing;
+- make provider attachment completion or failure observable outside the
+  provider pane, with an exact same-row retry path;
+- enforce wall-clock deadlines as well as retained-output bounds on finite
+  local control commands;
+- retain the rendered list offset for exact mouse targeting after scrolling;
+  and
+- page bounded host snapshots so retained Workstreams do not make the
+  navigator unusable at one fixed row count.
+
+Exit gate:
+
+- the pinned MSRV job is consistent with locked dependency metadata and passes;
+- local and remote independent/forked Workstreams retain one stable project
+  label;
+- unavailable or malformed tmux evidence remains `unknown` and cannot authorize
+  recovery cleanup;
+- a failed local or SSH attachment is reported only in the navigator and the
+  selected row can be retried without switching away;
+- stalled finite tmux, Git, capability, and child-CLI commands time out without
+  leaving their process group alive;
+- mouse activation selects the visible row after vertical scrolling;
+- multi-page snapshots preserve deterministic order and bounded frames; and
+- `scripts/check`, package verification, disposable acceptance, privacy audit,
+  and `git diff --check` pass.
 
 ## Deferred beyond V1
 

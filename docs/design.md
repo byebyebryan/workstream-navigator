@@ -606,25 +606,23 @@ V1 uses fresh SQLite schemas with no migration from Agent Switchboard.
 The local client catalog contains only:
 
 - configured host aliases and stable host IDs;
-- logical project names and client-generated opaque IDs;
-- mappings from a Project to registered ProjectLocations; and
+- local ProjectLocation presentation names and client-generated opaque IDs;
+- mappings from those local presentation records to exact host locations; and
 - local UI preferences.
 
 The client catalog is not authority for a remote runtime, worktree, provider
-binding, or mutation. Losing it does not stop remote work. Reconstructing a
-cross-host Project grouping is a manual re-registration action in V1.
+binding, or mutation. Losing it does not stop local or remote work. V1 does not
+offer an explicit cross-host Project-grouping workflow: the readable host alias
+and one stable per-ProjectLocation label identify a row. A local label comes
+from the client presentation record; a remote label is derived by that host
+from its registered repository basename, never from a managed Workstream
+checkout. Repository identity remains host-private operation evidence and is
+not inferred from matching labels.
 
-Project identity is explicit, not inferred from a repository URL, directory
-name, branch, or Git remote. Registering another host location against the same
-client-generated Project ID groups it in the navigator. Repository identity is
-still recorded at each location to prevent accidental cross-repository
-operations. If the client catalog is lost, host-local Workstreams remain
-usable, but the cross-host grouping must be registered again in V1.
-
-Projects are client-local presentation groups. A host does not store a Project
-ID and two clients may group the same ProjectLocations differently without
-changing host state. Host actions address opaque Location and Workstream IDs,
-not a replicated project catalog.
+Host actions address opaque Location and Workstream IDs, not a replicated
+project catalog. Explicitly grouping several host locations under one
+client-generated Project ID is deferred with multiple-controller catalog
+coordination; V1 does not expose otherwise-unused grouping authority.
 
 ### Host registry
 
@@ -1089,6 +1087,11 @@ Passing fixtures contain only provider/version fingerprints, assertion
 booleans, event relationships, timings, and cleanup proof. Assisted diagnostics
 cannot become passing fixtures.
 
+Finite host snapshots are cursor-paged in deterministic per-host activity
+order. Each frame and the aggregate client refresh have separate limits, so a
+large retained Workstream history cannot turn the first page or the whole
+navigator into one oversized response.
+
 ## V1 delivery checkpoints
 
 The checkpoint sequence and current implementation status are maintained in the
@@ -1159,6 +1162,16 @@ tmux/provider state during automated tests.
 D5.1 is hardening within the approved V1 product boundary. It adds no daemon,
 automatic deployment, session adoption, provider mutation beyond the existing
 Fork action, or replacement provider UI.
+
+### D5.2 — Correctness closure
+
+- Locked-dependency-compatible MSRV and pinned CI.
+- Stable ProjectLocation labels for external and managed remote Workstreams.
+- Conclusive-only tmux-loss classification and time-bounded finite child
+  process groups.
+- Navigator-owned attachment outcome evidence and retry without provider-pane
+  diagnostics.
+- Scroll-aware mouse targeting and bounded cursor-paged snapshots.
 
 ## Settled V1 design decisions
 

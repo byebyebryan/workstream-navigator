@@ -17,6 +17,7 @@ use thiserror::Error;
 
 use crate::{
     domain::{OperationKind, OperationPhase, Revision, RuntimeId, WorkstreamId},
+    provider::codex::app_server::{EphemeralAppServer, ForkReconciliation},
     provider::codex::profile::{ObserverProfile, ProfileError},
     runtime::{
         LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
@@ -72,6 +73,199 @@ pub fn start_independent_workstream(
     Ok(created.workstream_id)
 }
 
+/// Creates a managed checkout and forks an active Codex Workstream at its last
+/// completed turn, without interrupting or waiting for the source's current
+/// turn. The provider fork is recorded before it is sent and is never retried
+/// after an ambiguous result.
+///
+/// # Errors
+///
+/// Returns an error when the selected source lacks a live settled boundary,
+/// Git or provider evidence is not exact, observer setup prevents the
+/// destination launch, or recovery is required instead of a retry.
+pub fn fork_workstream(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    source_workstream_id: WorkstreamId,
+    expected_revision: Option<Revision>,
+    request_key: String,
+) -> Result<WorkstreamId, ActionError> {
+    let prepared = prepare_managed_worktree(
+        registry,
+        source_workstream_id,
+        expected_revision,
+        request_key,
+        OperationKind::Fork,
+        &SystemGitWorktree,
+    )?;
+    if prepared.plan.operation.phase == OperationPhase::Committed {
+        let _ = start(root, registry, prepared.plan.workstream_id, None)?;
+        return Ok(prepared.plan.workstream_id);
+    }
+    if prepared.plan.operation.phase == OperationPhase::RecoveryRequired {
+        return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+    }
+
+    let provider_fork_already_attempted = prepared.plan.fork_attempted_at_millis.is_some();
+    if provider_fork_already_attempted {
+        // A recorded provider attempt has already crossed the only fork-call
+        // boundary. The source may now legitimately be parked or replaced;
+        // reconcile only the destination after confirming its checkout.
+        ensure_managed_worktree_evidence(registry, &prepared, &SystemGitWorktree)?;
+    } else {
+        if ensure_live_fork_source(root, registry, &prepared.plan).is_err() {
+            let _ = registry.mark_managed_workstream_recovery(&prepared.plan);
+            return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+        }
+        ensure_managed_worktree_evidence(registry, &prepared, &SystemGitWorktree)?;
+        // The source can park, clear, or be replaced while Git creates the
+        // target; check the exact same Runtime/binding evidence again before
+        // the one permitted provider fork call.
+        if ensure_live_fork_source(root, registry, &prepared.plan).is_err() {
+            let _ = registry.mark_managed_workstream_recovery(&prepared.plan);
+            return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+        }
+    }
+    let prepared_plan = if provider_fork_already_attempted {
+        prepared.plan
+    } else {
+        registry.record_managed_fork_attempt(&prepared.plan)?
+    };
+    let source_session_id = prepared_plan
+        .source_native_session_id
+        .as_deref()
+        .ok_or(ActionError::ForkSourceUnavailable)?;
+    let settled_turn_id = prepared_plan
+        .last_settled_turn_id
+        .as_deref()
+        .ok_or(ActionError::ForkSourceUnavailable)?;
+    let app_server = EphemeralAppServer::default();
+    let destination_result = if provider_fork_already_attempted {
+        reconcile_fork(
+            &app_server,
+            &prepared_plan,
+            source_session_id,
+            settled_turn_id,
+        )
+    } else {
+        match app_server.fork_thread(
+            source_session_id,
+            settled_turn_id,
+            &prepared_plan.worktree_path,
+        ) {
+            Ok(destination) => Ok(destination),
+            Err(_) => reconcile_fork(
+                &app_server,
+                &prepared_plan,
+                source_session_id,
+                settled_turn_id,
+            ),
+        }
+    };
+    let destination = match destination_result {
+        Ok(destination) => destination,
+        Err(error) => {
+            let _ = registry.mark_managed_workstream_recovery(&prepared_plan);
+            return Err(error);
+        }
+    };
+    // A successful immediate fork is still before the destination TUI starts,
+    // so the optional native title has no user rename race. Reconciliation is
+    // intentionally different: do not overwrite an unknown later title.
+    if !provider_fork_already_attempted
+        && let Some(name) = provisional_fork_name(prepared_plan.source_native_name.as_deref())
+    {
+        let _ = app_server.set_thread_name(&destination.native_session_id, &name);
+    }
+    let created = registry
+        .commit_forked_managed_workstream(&prepared_plan, &destination.native_session_id)?;
+    let _ = start(
+        root,
+        registry,
+        created.workstream_id,
+        Some(created.revision),
+    )?;
+    Ok(created.workstream_id)
+}
+
+fn reconcile_fork(
+    app_server: &EphemeralAppServer,
+    prepared: &crate::state::ManagedWorkstreamPlan,
+    source_session_id: &str,
+    settled_turn_id: &str,
+) -> Result<crate::provider::codex::app_server::ForkedThread, ActionError> {
+    let attempted_at_millis = prepared
+        .fork_attempted_at_millis
+        .ok_or(ActionError::ManagedWorkstreamRecoveryRequired)?;
+    match app_server.reconcile_fork(source_session_id, settled_turn_id, attempted_at_millis) {
+        Ok(ForkReconciliation::Found(destination)) => Ok(destination),
+        Ok(ForkReconciliation::Absent | ForkReconciliation::Ambiguous) | Err(_) => {
+            // Do not invoke `thread/fork` again. This durable operation is now
+            // operator-recovery-only until exact provider evidence exists.
+            // The original plan has the operation revision, which remains
+            // current after `record_managed_fork_attempt` only through the
+            // updated `prepared` value passed here.
+            Err(ActionError::ManagedWorkstreamRecoveryRequired)
+        }
+    }
+}
+
+fn ensure_live_fork_source(
+    root: &crate::state::StateRoot,
+    registry: &HostRegistry,
+    prepared: &crate::state::ManagedWorkstreamPlan,
+) -> Result<(), ActionError> {
+    let runtime_id = prepared
+        .source_runtime_id
+        .ok_or(ActionError::ForkSourceUnavailable)?;
+    let source_session_id = prepared
+        .source_native_session_id
+        .as_deref()
+        .ok_or(ActionError::ForkSourceUnavailable)?;
+    let runtime = registry
+        .runtime_for_workstream(prepared.source_workstream_id)?
+        .filter(|runtime| runtime.runtime_id == runtime_id)
+        .filter(|runtime| {
+            matches!(
+                runtime.status,
+                crate::domain::RuntimeStatus::Idle
+                    | crate::domain::RuntimeStatus::Working
+                    | crate::domain::RuntimeStatus::Attention
+            )
+        })
+        .ok_or(ActionError::ForkSourceUnavailable)?;
+    let binding = registry
+        .binding_for_runtime(runtime_id)?
+        .filter(|binding| binding.native_session_id == source_session_id)
+        .ok_or(ActionError::ForkSourceUnavailable)?;
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let private_runtime = PrivateRuntime::new(
+        &tmux,
+        &process_probe,
+        RuntimePaths::for_runtime(root.base(), runtime.runtime_id),
+    );
+    match private_runtime.probe()? {
+        RuntimeProbe::Live { cwd, .. } if cwd == runtime.cwd => {
+            // The binding is deliberately read only as evidence. Its value
+            // cannot be mutated by this action.
+            let _ = binding;
+            Ok(())
+        }
+        RuntimeProbe::Live { .. } | RuntimeProbe::Missing | RuntimeProbe::Unknown { .. } => {
+            Err(ActionError::ForkSourceUnavailable)
+        }
+    }
+}
+
+fn provisional_fork_name(source_native_name: Option<&str>) -> Option<String> {
+    let source_native_name = source_native_name?.trim();
+    (!source_native_name.is_empty()
+        && source_native_name.len() <= 505
+        && !source_native_name.contains(['\n', '\r']))
+    .then(|| format!("{source_native_name} · fork"))
+}
+
 fn create_managed_workstream(
     registry: &mut HostRegistry,
     source_workstream_id: WorkstreamId,
@@ -83,24 +277,58 @@ fn create_managed_workstream(
     if kind != OperationKind::Start {
         return Err(ActionError::ManagedWorkstreamKindUnavailable);
     }
-    let location = registry.workstream_git_location(source_workstream_id)?;
-    if expected_revision.is_some_and(|expected| expected != location.source_revision) {
-        return Err(ActionError::WorkstreamRevisionConflict);
-    }
-    let base_commit = git.resolve_commit(&location.repository_path, &location.default_base_ref)?;
-    let prepared = registry.prepare_managed_workstream(
+    let prepared = prepare_managed_worktree(
+        registry,
+        source_workstream_id,
+        expected_revision,
         request_key,
         kind,
-        source_workstream_id,
-        location.source_revision,
-        base_commit,
+        git,
     )?;
     if prepared.plan.operation.phase == OperationPhase::Committed {
         return registry
             .commit_managed_workstream(&prepared.plan)
             .map_err(Into::into);
     }
+    ensure_managed_worktree_evidence(registry, &prepared, git)?;
+    registry
+        .commit_managed_workstream(&prepared.plan)
+        .map_err(Into::into)
+}
+
+fn prepare_managed_worktree(
+    registry: &mut HostRegistry,
+    source_workstream_id: WorkstreamId,
+    expected_revision: Option<Revision>,
+    request_key: String,
+    kind: OperationKind,
+    git: &dyn GitWorktree,
+) -> Result<crate::state::ManagedWorkstreamPreparation, ActionError> {
+    let location = registry.workstream_git_location(source_workstream_id)?;
+    if expected_revision.is_some_and(|expected| expected != location.source_revision) {
+        return Err(ActionError::WorkstreamRevisionConflict);
+    }
+    let base_commit = git.resolve_commit(&location.repository_path, &location.default_base_ref)?;
+    registry
+        .prepare_managed_workstream(
+            request_key,
+            kind,
+            source_workstream_id,
+            location.source_revision,
+            base_commit,
+        )
+        .map_err(Into::into)
+}
+
+fn ensure_managed_worktree_evidence(
+    registry: &mut HostRegistry,
+    prepared: &crate::state::ManagedWorkstreamPreparation,
+    git: &dyn GitWorktree,
+) -> Result<(), ActionError> {
     if prepared.plan.operation.phase == OperationPhase::RecoveryRequired {
+        return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+    }
+    if prepared.plan.operation.phase != OperationPhase::ExternalEffectStarted {
         return Err(ActionError::ManagedWorkstreamRecoveryRequired);
     }
     let worktree = ManagedWorktree {
@@ -116,9 +344,7 @@ fn create_managed_workstream(
     }
     let evidence = git.evidence(&worktree);
     match evidence {
-        Ok(WorktreeEvidence::Exact) => registry
-            .commit_managed_workstream(&prepared.plan)
-            .map_err(Into::into),
+        Ok(WorktreeEvidence::Exact) => Ok(()),
         Ok(WorktreeEvidence::Absent | WorktreeEvidence::Mismatch) | Err(_) => {
             let _ = registry.mark_managed_workstream_recovery(&prepared.plan);
             Err(ActionError::ManagedWorkstreamRecoveryRequired)
@@ -378,6 +604,8 @@ pub enum ActionError {
     WorkstreamRevisionConflict,
     #[error("managed Workstream operation requires recovery; Git was not retried")]
     ManagedWorkstreamRecoveryRequired,
+    #[error("fork source is no longer the exact live settled Workstream")]
+    ForkSourceUnavailable,
     #[error("requested managed Workstream action is not available")]
     ManagedWorkstreamKindUnavailable,
     #[error(transparent)]
@@ -396,7 +624,7 @@ mod tests {
         cell::Cell,
         fs,
         path::{Path, PathBuf},
-        process::Command,
+        process::{Command, Stdio},
     };
 
     use super::*;
@@ -452,6 +680,8 @@ mod tests {
                 .arg("-C")
                 .arg(repository)
                 .args(arguments)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
                 .unwrap()
                 .success()

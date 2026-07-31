@@ -288,6 +288,10 @@ pub struct ManagedWorkstreamPlan {
     pub source_runtime_id: Option<RuntimeId>,
     pub source_native_session_id: Option<String>,
     pub last_settled_turn_id: Option<String>,
+    pub source_native_name: Option<String>,
+    /// Recorded immediately before the one non-idempotent provider fork.
+    /// `None` proves this process has not crossed that external-effect point.
+    pub fork_attempted_at_millis: Option<i64>,
 }
 
 /// One committed managed Workstream record returned after an exact Git effect.
@@ -326,6 +330,10 @@ struct PersistedManagedWorktreePlan {
     source_runtime_id: Option<RuntimeId>,
     source_native_session_id: Option<String>,
     last_settled_turn_id: Option<String>,
+    #[serde(default)]
+    source_native_name: Option<String>,
+    #[serde(default)]
+    fork_attempted_at_millis: Option<i64>,
 }
 
 impl PersistedManagedWorktreePlan {
@@ -343,6 +351,11 @@ impl PersistedManagedWorktreePlan {
             || plan.repository_path.as_os_str().is_empty()
             || plan.worktree_path.as_os_str().is_empty()
             || plan.repository_identity.is_empty()
+            || plan
+                .source_native_name
+                .as_deref()
+                .is_some_and(|name| name.len() > 512 || name.contains(['\n', '\r']))
+            || plan.fork_attempted_at_millis.is_some_and(|time| time < 0)
         {
             return Err(StateError::InvalidManagedWorktreePlanShape);
         }
@@ -365,6 +378,8 @@ impl PersistedManagedWorktreePlan {
             source_runtime_id: self.source_runtime_id,
             source_native_session_id: self.source_native_session_id.clone(),
             last_settled_turn_id: self.last_settled_turn_id.clone(),
+            source_native_name: self.source_native_name.clone(),
+            fork_attempted_at_millis: self.fork_attempted_at_millis,
         }
     }
 }
@@ -878,6 +893,37 @@ impl HostRegistry {
         &mut self,
         prepared: &ManagedWorkstreamPlan,
     ) -> Result<ManagedWorkstream, StateError> {
+        self.commit_managed_workstream_with_destination(prepared, None)
+    }
+
+    /// Commits a confirmed provider fork together with its destination
+    /// Workstream and an exact stopped Runtime binding. The ordinary start
+    /// path then launches `codex resume` from that durable binding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not a fork, the provider identifier is
+    /// unsafe, or the combined durable commit cannot be completed exactly once.
+    pub fn commit_forked_managed_workstream(
+        &mut self,
+        prepared: &ManagedWorkstreamPlan,
+        destination_native_session_id: &str,
+    ) -> Result<ManagedWorkstream, StateError> {
+        if prepared.origin != WorkstreamOrigin::Fork {
+            return Err(StateError::ManagedWorktreePlanMismatch);
+        }
+        validate_provider_metadata(destination_native_session_id)?;
+        self.commit_managed_workstream_with_destination(
+            prepared,
+            Some(destination_native_session_id),
+        )
+    }
+
+    fn commit_managed_workstream_with_destination(
+        &mut self,
+        prepared: &ManagedWorkstreamPlan,
+        destination_native_session_id: Option<&str>,
+    ) -> Result<ManagedWorkstream, StateError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -893,80 +939,32 @@ impl HostRegistry {
             return Err(StateError::ManagedWorktreePlanMismatch);
         }
         if operation.phase == OperationPhase::Committed {
-            let created = managed_workstream_from_outcome(&transaction, &operation, &persisted)?;
+            let created = managed_workstream_from_outcome(
+                &transaction,
+                &operation,
+                &persisted,
+                destination_native_session_id,
+            )?;
             transaction.commit().map_err(StateError::Sqlite)?;
             return Ok(created);
         }
         if operation.phase != OperationPhase::ExternalEffectStarted {
             return Err(StateError::ManagedWorktreeOperationUnavailable);
         }
-        let activity_sequence = next_activity_sequence(&transaction)?;
-        transaction
-            .execute(
-                "INSERT INTO checkouts (
-                    checkout_id, path, ownership, branch, creation_commit,
-                    repository_identity, revision
-                 ) VALUES (?1, ?2, 'managed', ?3, ?4, ?5, 1)",
-                params![
-                    persisted.checkout_id.to_string(),
-                    persisted.worktree_path.to_string_lossy(),
-                    persisted.branch,
-                    persisted.base_commit,
-                    persisted.repository_identity,
-                ],
-            )
-            .map_err(StateError::Sqlite)?;
-        transaction
-            .execute(
-                "INSERT INTO workstreams (
-                    workstream_id, location_id, origin, source_workstream_id,
-                    checkout_id, lifecycle, last_activity_sequence,
-                    last_activity_at_millis, revision
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, 0, 1)",
-                params![
-                    persisted.workstream_id.to_string(),
-                    persisted.location_id.to_string(),
-                    workstream_origin_text(persisted.origin),
-                    persisted.source_workstream_id.to_string(),
-                    persisted.checkout_id.to_string(),
-                    activity_sequence,
-                ],
-            )
-            .map_err(StateError::Sqlite)?;
-        let outcome = serde_json::json!({"workstream_id": persisted.workstream_id}).to_string();
-        let prior_revision = operation.revision;
-        operation.transition(
-            OperationPhase::Committed,
-            operation.effect_watermark.clone(),
-            Some(outcome),
-        )?;
-        let updated = transaction
-            .execute(
-                "UPDATE compound_operations
-                 SET phase = ?1, effect_watermark = ?2, outcome_json = ?3, revision = ?4
-                 WHERE operation_id = ?5 AND revision = ?6",
-                params![
-                    operation_phase_text(operation.phase),
-                    operation.effect_watermark,
-                    operation.outcome_json,
-                    operation.revision.value(),
-                    operation.id.to_string(),
-                    prior_revision.value(),
-                ],
-            )
-            .map_err(StateError::Sqlite)?;
-        if updated != 1 {
-            return Err(StateError::ConcurrentWrite);
+        if matches!(persisted.origin, WorkstreamOrigin::Fork)
+            != destination_native_session_id.is_some()
+        {
+            return Err(StateError::ManagedWorktreePlanMismatch);
         }
+        insert_managed_workstream_records(&transaction, &persisted, destination_native_session_id)?;
+        commit_managed_operation(
+            &transaction,
+            &mut operation,
+            &persisted,
+            destination_native_session_id,
+        )?;
         transaction.commit().map_err(StateError::Sqlite)?;
-        Ok(ManagedWorkstream {
-            workstream_id: persisted.workstream_id,
-            checkout_id: persisted.checkout_id,
-            location_id: persisted.location_id,
-            origin: persisted.origin,
-            source_workstream_id: persisted.source_workstream_id,
-            revision: Revision::INITIAL,
-        })
+        Ok(managed_workstream_from_plan(&persisted))
     }
 
     /// Marks an unresolved managed Git operation as recovery-required without
@@ -991,6 +989,61 @@ impl HostRegistry {
             return Err(StateError::ManagedWorktreePlanMismatch);
         }
         Ok(())
+    }
+
+    /// Atomically records the exact instant at which a fork request may be
+    /// sent to Codex. Once this succeeds, callers must reconcile provider
+    /// evidence and must never issue another `thread/fork` request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the prepared plan is stale, not a pending fork,
+    /// already has a provider attempt marker, or cannot be updated exactly.
+    pub fn record_managed_fork_attempt(
+        &mut self,
+        prepared: &ManagedWorkstreamPlan,
+    ) -> Result<ManagedWorkstreamPlan, StateError> {
+        if prepared.origin != WorkstreamOrigin::Fork {
+            return Err(StateError::ManagedWorktreePlanMismatch);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let operation = load_operation_by_id(&transaction, prepared.operation.id)?
+            .ok_or(StateError::UnknownOperation(prepared.operation.id))?;
+        let mut persisted =
+            PersistedManagedWorktreePlan::decode(operation.effect_watermark.as_deref())?;
+        if operation != prepared.operation
+            || persisted.public_plan(operation.clone()) != *prepared
+            || operation.phase != OperationPhase::ExternalEffectStarted
+            || persisted.fork_attempted_at_millis.is_some()
+        {
+            return Err(StateError::ManagedWorktreeOperationUnavailable);
+        }
+        persisted.fork_attempted_at_millis = Some(SystemClock.now_millis()?);
+        let next_revision = operation.revision.next();
+        let updated = transaction
+            .execute(
+                "UPDATE compound_operations
+                 SET effect_watermark = ?1, revision = ?2
+                 WHERE operation_id = ?3 AND revision = ?4 AND phase = 'external_effect_started'",
+                params![
+                    persisted.encode()?,
+                    next_revision.value(),
+                    operation.id.to_string(),
+                    operation.revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if updated != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        transaction.commit().map_err(StateError::Sqlite)?;
+        let mut next_operation = operation;
+        next_operation.revision = next_revision;
+        next_operation.effect_watermark = Some(persisted.encode()?);
+        Ok(persisted.public_plan(next_operation))
     }
 
     /// Reserves the single Runtime record for an open workstream before launch.
@@ -1827,6 +1880,7 @@ struct ManagedWorkstreamSource {
     runtime_lifecycle: Option<String>,
     native_session_id: Option<String>,
     last_settled_turn_id: Option<String>,
+    native_name: Option<String>,
 }
 
 fn managed_worktree_plan_for_source(
@@ -1872,6 +1926,10 @@ fn managed_worktree_plan_for_source(
         source_runtime_id: source.runtime_id,
         source_native_session_id,
         last_settled_turn_id,
+        source_native_name: (kind == OperationKind::Fork)
+            .then_some(source.native_name)
+            .flatten(),
+        fork_attempted_at_millis: None,
     })
 }
 
@@ -1887,7 +1945,8 @@ fn load_managed_workstream_source(
                     project_locations.managed_worktree_root,
                     runtimes.runtime_id, runtimes.lifecycle,
                     provider_bindings.native_session_id,
-                    provider_bindings.last_settled_turn_id
+                    provider_bindings.last_settled_turn_id,
+                    provider_bindings.observed_thread_name
              FROM workstreams
              JOIN project_locations ON project_locations.location_id = workstreams.location_id
              LEFT JOIN runtimes ON runtimes.workstream_id = workstreams.workstream_id
@@ -1905,6 +1964,7 @@ fn load_managed_workstream_source(
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
                 ))
             },
         )
@@ -1929,6 +1989,7 @@ fn load_managed_workstream_source(
         runtime_lifecycle: source.6,
         native_session_id: source.7,
         last_settled_turn_id: source.8,
+        native_name: source.9,
     })
 }
 
@@ -1953,6 +2014,142 @@ fn fork_boundary(
     validate_provider_metadata(&session_id)?;
     validate_provider_metadata(&settled_turn_id)?;
     Ok((Some(session_id), Some(settled_turn_id)))
+}
+
+fn insert_managed_workstream_records(
+    transaction: &rusqlite::Transaction<'_>,
+    plan: &PersistedManagedWorktreePlan,
+    destination_native_session_id: Option<&str>,
+) -> Result<(), StateError> {
+    let activity_sequence = next_activity_sequence(transaction)?;
+    transaction
+        .execute(
+            "INSERT INTO checkouts (
+                checkout_id, path, ownership, branch, creation_commit,
+                repository_identity, revision
+             ) VALUES (?1, ?2, 'managed', ?3, ?4, ?5, 1)",
+            params![
+                plan.checkout_id.to_string(),
+                plan.worktree_path.to_string_lossy(),
+                plan.branch,
+                plan.base_commit,
+                plan.repository_identity,
+            ],
+        )
+        .map_err(StateError::Sqlite)?;
+    transaction
+        .execute(
+            "INSERT INTO workstreams (
+                workstream_id, location_id, origin, source_workstream_id,
+                checkout_id, lifecycle, last_activity_sequence,
+                last_activity_at_millis, revision
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, 0, 1)",
+            params![
+                plan.workstream_id.to_string(),
+                plan.location_id.to_string(),
+                workstream_origin_text(plan.origin),
+                plan.source_workstream_id.to_string(),
+                plan.checkout_id.to_string(),
+                activity_sequence,
+            ],
+        )
+        .map_err(StateError::Sqlite)?;
+    if let Some(destination_native_session_id) = destination_native_session_id {
+        insert_pending_fork_runtime(transaction, plan, destination_native_session_id)?;
+    }
+    Ok(())
+}
+
+fn insert_pending_fork_runtime(
+    transaction: &rusqlite::Transaction<'_>,
+    plan: &PersistedManagedWorktreePlan,
+    destination_native_session_id: &str,
+) -> Result<(), StateError> {
+    let runtime_id = RuntimeId::new();
+    let runtime_generation = format!("pending-fork-{}", Uuid::new_v4());
+    let tmux_session = format!("wsnav-{}", runtime_id.short());
+    transaction
+        .execute(
+            "INSERT INTO runtimes (
+                runtime_id, workstream_id, provider, tmux_generation, tmux_session,
+                cwd, process_birth, lifecycle, revision
+             ) VALUES (?1, ?2, 'codex', ?3, ?4, ?5, NULL, 'stopped', 1)",
+            params![
+                runtime_id.to_string(),
+                plan.workstream_id.to_string(),
+                runtime_generation,
+                tmux_session,
+                plan.worktree_path.to_string_lossy(),
+            ],
+        )
+        .map_err(StateError::Sqlite)?;
+    transaction
+        .execute(
+            "INSERT INTO provider_bindings (
+                binding_id, runtime_id, native_session_id, start_source,
+                last_settled_turn_id, observed_thread_name, name_state,
+                name_observed_at, predecessor_native_session_id,
+                predecessor_effective_name, runtime_generation, revision
+             ) VALUES (?1, ?2, ?3, 'resume', NULL, NULL, 'unavailable', NULL,
+                NULL, NULL, ?4, 1)",
+            params![
+                Uuid::new_v4().to_string(),
+                runtime_id.to_string(),
+                destination_native_session_id,
+                runtime_generation,
+            ],
+        )
+        .map_err(StateError::Sqlite)?;
+    Ok(())
+}
+
+fn commit_managed_operation(
+    transaction: &rusqlite::Transaction<'_>,
+    operation: &mut CompoundOperation,
+    plan: &PersistedManagedWorktreePlan,
+    destination_native_session_id: Option<&str>,
+) -> Result<(), StateError> {
+    let outcome = serde_json::json!({
+        "workstream_id": plan.workstream_id,
+        "destination_native_session_id": destination_native_session_id,
+    })
+    .to_string();
+    let prior_revision = operation.revision;
+    operation.transition(
+        OperationPhase::Committed,
+        operation.effect_watermark.clone(),
+        Some(outcome),
+    )?;
+    let updated = transaction
+        .execute(
+            "UPDATE compound_operations
+             SET phase = ?1, effect_watermark = ?2, outcome_json = ?3, revision = ?4
+             WHERE operation_id = ?5 AND revision = ?6",
+            params![
+                operation_phase_text(operation.phase),
+                operation.effect_watermark,
+                operation.outcome_json,
+                operation.revision.value(),
+                operation.id.to_string(),
+                prior_revision.value(),
+            ],
+        )
+        .map_err(StateError::Sqlite)?;
+    if updated != 1 {
+        return Err(StateError::ConcurrentWrite);
+    }
+    Ok(())
+}
+
+fn managed_workstream_from_plan(plan: &PersistedManagedWorktreePlan) -> ManagedWorkstream {
+    ManagedWorkstream {
+        workstream_id: plan.workstream_id,
+        checkout_id: plan.checkout_id,
+        location_id: plan.location_id,
+        origin: plan.origin,
+        source_workstream_id: plan.source_workstream_id,
+        revision: Revision::INITIAL,
+    }
 }
 
 #[derive(Debug)]
@@ -2569,12 +2766,14 @@ fn load_operation_by_id(
 #[derive(Deserialize)]
 struct ManagedWorkstreamOutcome {
     workstream_id: WorkstreamId,
+    destination_native_session_id: Option<String>,
 }
 
 fn managed_workstream_from_outcome(
     transaction: &rusqlite::Transaction<'_>,
     operation: &CompoundOperation,
     plan: &PersistedManagedWorktreePlan,
+    expected_destination_native_session_id: Option<&str>,
 ) -> Result<ManagedWorkstream, StateError> {
     let outcome = operation
         .outcome_json
@@ -2582,7 +2781,10 @@ fn managed_workstream_from_outcome(
         .ok_or(StateError::MissingManagedWorktreeOutcome)?;
     let outcome: ManagedWorkstreamOutcome =
         serde_json::from_str(outcome).map_err(StateError::InvalidManagedWorktreeOutcome)?;
-    if outcome.workstream_id != plan.workstream_id {
+    if outcome.workstream_id != plan.workstream_id
+        || outcome.destination_native_session_id.as_deref()
+            != expected_destination_native_session_id
+    {
         return Err(StateError::ManagedWorktreePlanMismatch);
     }
     let record = transaction
@@ -4012,6 +4214,21 @@ mod tests {
             prepared.plan.last_settled_turn_id.as_deref(),
             Some("settled-turn")
         );
+        let created = registry
+            .commit_forked_managed_workstream(&prepared.plan, "destination-session")
+            .unwrap();
+        let destination_runtime = registry
+            .runtime_for_workstream(created.workstream_id)
+            .unwrap()
+            .unwrap();
+        let destination_binding = registry
+            .binding_for_runtime(destination_runtime.runtime_id)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(destination_runtime.status, RuntimeStatus::Stopped);
+        assert_eq!(destination_binding.start_source, "resume");
+        assert_eq!(destination_binding.native_session_id, "destination-session");
     }
 
     #[test]
@@ -4052,6 +4269,71 @@ mod tests {
         );
         assert!(matches!(
             registry.commit_managed_workstream(&replay.plan),
+            Err(StateError::ManagedWorktreeOperationUnavailable)
+        ));
+    }
+
+    #[test]
+    fn fork_attempt_marker_is_atomic_and_prevents_a_second_provider_call() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        let cwd = runtime.cwd.to_string_lossy().into_owned();
+        registry
+            .apply_hook_observation(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                HookObservation {
+                    event: LifecycleEvent::SessionStart,
+                    cwd: cwd.clone(),
+                    native_session_id: "source-session".to_owned(),
+                    turn_id: None,
+                    source: Some("startup".to_owned()),
+                },
+            )
+            .unwrap();
+        registry
+            .apply_hook_observation(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                HookObservation {
+                    event: LifecycleEvent::Stop,
+                    cwd,
+                    native_session_id: "source-session".to_owned(),
+                    turn_id: Some("settled-turn".to_owned()),
+                    source: None,
+                },
+            )
+            .unwrap();
+        let source_revision = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == registered.workstream_id)
+            .unwrap()
+            .revision;
+        let prepared = registry
+            .prepare_managed_workstream(
+                "fork-attempt".to_owned(),
+                OperationKind::Fork,
+                registered.workstream_id,
+                source_revision,
+                "a".repeat(40),
+            )
+            .unwrap();
+
+        let marked = registry
+            .record_managed_fork_attempt(&prepared.plan)
+            .unwrap();
+        assert!(marked.fork_attempted_at_millis.is_some());
+        assert!(matches!(
+            registry.record_managed_fork_attempt(&marked),
             Err(StateError::ManagedWorktreeOperationUnavailable)
         ));
     }

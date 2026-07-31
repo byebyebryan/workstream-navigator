@@ -17,11 +17,13 @@ fn local_subprocess_uses_the_same_bounded_protocol_service_as_ssh() {
     };
     let client = HostClient::new(SystemCommandRunner);
 
+    let build = client.probe_local(&endpoint).unwrap();
     let hello = client.hello_local(&endpoint, "test-client").unwrap();
     let snapshot = client.snapshot_local(&endpoint).unwrap();
     let operations = client.operations_local(&endpoint).unwrap();
 
     assert_eq!(hello.wsnav_version, env!("CARGO_PKG_VERSION"));
+    assert!(build.ensure_compatible_with_local().is_ok());
     assert!(hello.registry_generation.len() <= 128);
     assert!(snapshot.workstreams.is_empty());
     assert!(operations.operations.is_empty());

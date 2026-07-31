@@ -495,6 +495,11 @@ fn fetch_remote_snapshot(host: &ClientHost) -> Result<crate::protocol::SnapshotR
         .and_then(|value| RemoteExecutable::parse(value).map_err(|_| ()))?;
     let endpoint = SshEndpoint::new(destination, executable);
     let client = HostClient::new(SystemCommandRunner);
+    client
+        .probe_ssh(&endpoint)
+        .map_err(|_| ())?
+        .ensure_compatible_with_local()
+        .map_err(|_| ())?;
     let hello = client.hello_ssh(&endpoint, "wsnav").map_err(|_| ())?;
     host.verify_hello(&hello).map_err(|_| ())?;
     client.snapshot_ssh(&endpoint).map_err(|_| ())

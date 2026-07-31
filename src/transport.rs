@@ -15,6 +15,7 @@ use std::{
 
 use thiserror::Error;
 
+use crate::build_info::BuildInfo;
 use crate::domain::{RuntimeId, WorkstreamId};
 use crate::protocol::{
     HelloResponse, HostAction, HostRequest, HostResponse, MAX_FRAME_BYTES, OperationsResponse,
@@ -202,6 +203,26 @@ impl<R> HostClient<R> {
 }
 
 impl<R: CommandRunner> HostClient<R> {
+    /// Reads state-free remote build compatibility metadata through SSH.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the executable is missing, does not expose the
+    /// required probe, or emits malformed/oversized probe metadata.
+    pub fn probe_ssh(&self, endpoint: &SshEndpoint) -> Result<BuildInfo, TransportError> {
+        self.probe(&ssh_probe_invocation(endpoint))
+    }
+
+    /// Reads state-free local build compatibility metadata through the same
+    /// subprocess seam used by SSH control tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error under the same bounds as [`Self::probe_ssh`].
+    pub fn probe_local(&self, endpoint: &LocalEndpoint) -> Result<BuildInfo, TransportError> {
+        self.probe(&local_probe_invocation(endpoint))
+    }
+
     /// Requests one remote host handshake.
     ///
     /// # Errors
@@ -346,6 +367,14 @@ impl<R: CommandRunner> HostClient<R> {
         }
     }
 
+    fn probe(&self, invocation: &CommandInvocation) -> Result<BuildInfo, TransportError> {
+        let result = self.runner.run(invocation.clone())?;
+        if !result.success {
+            return Err(TransportError::ReleaseProbeUnavailable);
+        }
+        serde_json::from_slice(&result.stdout).map_err(|_| TransportError::ReleaseProbeMalformed)
+    }
+
     fn snapshot(&self, invocation: &CommandInvocation) -> Result<SnapshotResponse, TransportError> {
         match self.request(invocation)? {
             HostResponse::Snapshot(response) => Ok(response),
@@ -472,6 +501,23 @@ fn ssh_invocation(endpoint: &SshEndpoint, request: &RequestEnvelope) -> CommandI
     }
 }
 
+fn ssh_probe_invocation(endpoint: &SshEndpoint) -> CommandInvocation {
+    CommandInvocation {
+        program: OsString::from("ssh"),
+        arguments: vec![
+            OsString::from("-T"),
+            OsString::from("-o"),
+            OsString::from("BatchMode=yes"),
+            OsString::from("-o"),
+            OsString::from("ConnectTimeout=8"),
+            OsString::from(endpoint.destination.as_str()),
+            OsString::from(endpoint.executable.as_str()),
+            OsString::from("_probe"),
+        ],
+        stdin: Vec::new(),
+    }
+}
+
 fn local_invocation(endpoint: &LocalEndpoint, request: &RequestEnvelope) -> CommandInvocation {
     CommandInvocation {
         program: endpoint.executable.clone().into_os_string(),
@@ -483,6 +529,14 @@ fn local_invocation(endpoint: &LocalEndpoint, request: &RequestEnvelope) -> Comm
         stdin: request
             .encode()
             .expect("validated fixed protocol requests always encode"),
+    }
+}
+
+fn local_probe_invocation(endpoint: &LocalEndpoint) -> CommandInvocation {
+    CommandInvocation {
+        program: endpoint.executable.clone().into_os_string(),
+        arguments: vec![OsString::from("_probe")],
+        stdin: Vec::new(),
     }
 }
 
@@ -566,6 +620,10 @@ pub enum TransportError {
     OutputTooLarge,
     #[error("host command failed without a usable protocol response")]
     RemoteCommandFailed,
+    #[error("remote executable does not expose the required state-free release probe")]
+    ReleaseProbeUnavailable,
+    #[error("remote executable returned malformed state-free release metadata")]
+    ReleaseProbeMalformed,
     #[error("remote native tmux attachment failed")]
     InteractiveAttachmentFailed,
     #[error("host returned an unexpected protocol response")]
@@ -637,6 +695,35 @@ mod tests {
             .collect::<Vec<_>>(),
         );
         assert!(RequestEnvelope::decode(&invocation.stdin).is_ok());
+    }
+
+    #[test]
+    fn ssh_release_probe_uses_fixed_arguments_and_no_stateful_input() {
+        let endpoint = SshEndpoint::new(
+            SshDestination::parse("snap").unwrap(),
+            RemoteExecutable::parse("/home/bryan/.local/bin/wsnav").unwrap(),
+        );
+
+        let invocation = ssh_probe_invocation(&endpoint);
+
+        assert_eq!(invocation.program, OsStr::new("ssh"));
+        assert_eq!(
+            invocation.arguments,
+            vec![
+                "-T",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=8",
+                "snap",
+                "/home/bryan/.local/bin/wsnav",
+                "_probe",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>(),
+        );
+        assert!(invocation.stdin.is_empty());
     }
 
     #[test]

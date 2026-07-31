@@ -95,6 +95,31 @@ wsnav register-remote snap
 wsnav
 ```
 
+Verify the remote's state-free release probe before using it:
+
+```console
+wsnav host doctor snap
+```
+
+If the probe is missing or reports an ABI, protocol, or host-schema mismatch,
+update the remote manually from its checked-out source or release artifact, then
+run the doctor command again. For a source checkout, the bounded V1 procedure
+is:
+
+```console
+# on the remote host, in the trusted workstream-navigator checkout
+git pull --ff-only
+cargo build --locked --release
+install -m 755 target/release/wsnav ~/.local/bin/wsnav
+
+# on the local host
+wsnav host doctor snap
+```
+
+WSNav never copies, bootstraps, or updates a remote binary itself. A failed
+probe leaves cached remote rows visible but disables their actions until the
+operator resolves the installation.
+
 For a nonstandard SSH destination or executable path, keep the same short
 command and supply only the difference:
 

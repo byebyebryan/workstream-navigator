@@ -94,8 +94,12 @@ fn dispatch(state_root: Option<std::path::PathBuf>, request: &RequestEnvelope) -
     let Ok(root) = StateRoot::create(state_root.unwrap_or_else(default_state_root)) else {
         return rejected("host state is unavailable");
     };
-    let Ok(mut registry) = HostRegistry::open(&root) else {
-        return rejected("host state is unavailable");
+    let mut registry = match HostRegistry::open(&root) {
+        Ok(registry) => registry,
+        Err(StateError::UnsupportedSchemaVersion(_)) => {
+            return rejected("host state schema requires a matching wsnav update");
+        }
+        Err(_) => return rejected("host state is unavailable"),
     };
     match &request.request {
         HostRequest::Hello { .. } => match registry.identity() {
@@ -715,6 +719,39 @@ mod tests {
             ResponseEnvelope::decode(&output).unwrap().response,
             HostResponse::Operations(OperationsResponse { operations })
                 if operations.len() == 1 && operations[0].operation_id == operation_id
+        ));
+    }
+
+    #[test]
+    fn future_host_schema_gets_a_safe_manual_upgrade_diagnostic() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        HostRegistry::open(&root).unwrap();
+        let connection = rusqlite::Connection::open(root.host_database_path()).unwrap();
+        connection
+            .execute_batch("PRAGMA user_version = 99;")
+            .unwrap();
+        let request = RequestEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            request: HostRequest::Hello {
+                client_alias: "client".to_owned(),
+            },
+        }
+        .encode()
+        .unwrap();
+        let mut output = Vec::new();
+
+        serve(
+            Some(root.base().to_path_buf()),
+            &mut Cursor::new(request),
+            &mut output,
+        )
+        .unwrap();
+
+        assert!(matches!(
+            ResponseEnvelope::decode(&output).unwrap().response,
+            HostResponse::Rejected { diagnostic }
+                if diagnostic == "host state schema requires a matching wsnav update"
         ));
     }
 

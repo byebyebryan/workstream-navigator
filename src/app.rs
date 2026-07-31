@@ -155,6 +155,9 @@ enum Commands {
     /// Internal one-shot local/SSH host control-protocol endpoint.
     #[command(name = "_remote", hide = true)]
     Remote,
+    /// Internal state-free compatibility endpoint used before remote control.
+    #[command(name = "_probe", hide = true)]
+    Probe,
     /// Internal native-terminal-only attachment endpoint used through ssh -tt.
     #[command(name = "_attach", hide = true)]
     RemoteAttach { runtime_id: String },
@@ -168,6 +171,8 @@ enum HostCommands {
     Snapshot { alias: String },
     /// List unresolved creation operations on one registered SSH host.
     Operations { alias: String },
+    /// Verify a remote executable's stateless release probe and registered host identity.
+    Doctor { alias: String },
     /// Start or cold-resume one remote Workstream at an observed revision.
     Start {
         alias: String,
@@ -243,6 +248,10 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             &mut std::io::stdout().lock(),
         )
         .map_err(AppError::Remote);
+    }
+    if matches!(&command, Commands::Probe) {
+        return crate::build_info::write_probe(&mut std::io::stdout().lock())
+            .map_err(AppError::BuildInfo);
     }
     let root = StateRoot::create(state_root.unwrap_or_else(default_state_root))?;
     let command = match command {
@@ -344,6 +353,7 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
         | Commands::ProviderRemoteAttach { .. }
         | Commands::Hook
         | Commands::Remote
+        | Commands::Probe
         | Commands::RemoteAttach { .. }
         | Commands::RegisterRemote { .. }
         | Commands::Host { .. } => {
@@ -381,6 +391,7 @@ fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError>
         HostCommands::List => list_ssh_hosts(&catalog),
         HostCommands::Snapshot { alias } => snapshot_ssh_host(&catalog, &alias),
         HostCommands::Operations { alias } => operations_ssh_host(&catalog, &alias),
+        HostCommands::Doctor { alias } => doctor_ssh_host(&catalog, &alias),
         HostCommands::Start {
             alias,
             workstream_id,
@@ -464,6 +475,9 @@ fn register_ssh_host(
 ) -> Result<(), AppError> {
     let endpoint = ssh_endpoint(destination, executable)?;
     let client = HostClient::new(SystemCommandRunner);
+    client
+        .probe_ssh(&endpoint)?
+        .ensure_compatible_with_local()?;
     let hello = client.hello_ssh(&endpoint, "wsnav")?;
     let identity = HostIdentity {
         host_id: hello.host_id,
@@ -516,6 +530,22 @@ fn operations_ssh_host(catalog: &ClientCatalog, alias: &str) -> Result<(), AppEr
             operation.revision,
         )
     }));
+    Ok(())
+}
+
+fn doctor_ssh_host(catalog: &ClientCatalog, alias: &str) -> Result<(), AppError> {
+    let endpoint = registered_ssh_endpoint(catalog, alias)?;
+    let client = HostClient::new(SystemCommandRunner);
+    let build = client.probe_ssh(&endpoint)?;
+    build.ensure_compatible_with_local()?;
+    let hello = client.hello_ssh(&endpoint, "wsnav")?;
+    catalog.verify_hello(alias, &hello)?;
+    println!("host: {alias}");
+    println!("build: {}", build.package_version);
+    println!("control ABI: {}", build.control_abi);
+    println!("protocol: {}", build.protocol_version);
+    println!("host schema: {}", build.host_schema_version);
+    println!("release compatibility: ready");
     Ok(())
 }
 
@@ -702,7 +732,11 @@ fn registered_ssh_endpoint(catalog: &ClientCatalog, alias: &str) -> Result<SshEn
 
 fn checked_ssh_endpoint(catalog: &ClientCatalog, alias: &str) -> Result<SshEndpoint, AppError> {
     let endpoint = registered_ssh_endpoint(catalog, alias)?;
-    let hello = HostClient::new(SystemCommandRunner).hello_ssh(&endpoint, "wsnav")?;
+    let client = HostClient::new(SystemCommandRunner);
+    client
+        .probe_ssh(&endpoint)?
+        .ensure_compatible_with_local()?;
+    let hello = client.hello_ssh(&endpoint, "wsnav")?;
     catalog.verify_hello(alias, &hello)?;
     Ok(endpoint)
 }
@@ -1333,6 +1367,8 @@ enum AppError {
     #[error("observer profile update is refused while a managed runtime is live")]
     LiveRuntimePreventsUpdate,
     #[error(transparent)]
+    BuildInfo(#[from] crate::build_info::BuildInfoError),
+    #[error(transparent)]
     Profile(#[from] crate::provider::codex::profile::ProfileError),
     #[error(transparent)]
     AppServer(#[from] crate::provider::codex::app_server::AppServerError),
@@ -1390,6 +1426,13 @@ mod tests {
         let parsed = Cli::try_parse_from(["wsnav", "_hook"]);
         assert!(matches!(parsed.unwrap().command, Some(Commands::Hook)));
         assert!(Cli::try_parse_from(["wsnav", "hook"]).is_err());
+    }
+
+    #[test]
+    fn release_probe_entrypoint_is_parseable_but_hidden() {
+        let parsed = Cli::try_parse_from(["wsnav", "_probe"]);
+        assert!(matches!(parsed.unwrap().command, Some(Commands::Probe)));
+        assert!(Cli::try_parse_from(["wsnav", "probe"]).is_err());
     }
 
     #[test]

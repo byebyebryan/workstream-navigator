@@ -447,6 +447,13 @@ pub struct WorkstreamOverview {
     pub attention: Option<AttentionState>,
 }
 
+/// One deterministic bounded page of navigator-safe host state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkstreamOverviewPage {
+    pub workstreams: Vec<WorkstreamOverview>,
+    pub next_cursor: Option<u32>,
+}
+
 /// Persisted ownership and native-trust state for the only managed Codex profile.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IntegrationLifecycle {
@@ -1389,47 +1396,80 @@ impl HostRegistry {
     /// Returns an error when a persisted identity, lifecycle, or revision is
     /// malformed, or when the registry cannot be queried.
     pub fn workstream_overviews(&self) -> Result<Vec<WorkstreamOverview>, StateError> {
-        let bases = {
-            let mut statement = self
-                .connection
-                .prepare(
-                    "SELECT workstreams.workstream_id, workstreams.location_id,
-                            project_locations.repository_path, checkouts.path,
-                            workstreams.lifecycle,
-                            workstreams.last_activity_sequence,
-                            workstreams.last_activity_at_millis, workstreams.revision
-                     FROM workstreams
-                     JOIN project_locations
-                       ON project_locations.location_id = workstreams.location_id
-                     JOIN checkouts ON checkouts.checkout_id = workstreams.checkout_id
-                     ORDER BY workstreams.last_activity_sequence DESC,
-                              checkouts.path, workstreams.workstream_id
-                     LIMIT ?1",
-                )
-                .map_err(StateError::Sqlite)?;
-            let bases = statement
-                .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, i64>(5)?,
-                        row.get::<_, i64>(6)?,
-                        row.get::<_, i64>(7)?,
-                    ))
-                })
-                .map_err(StateError::Sqlite)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(StateError::Sqlite)?;
-            if bases.len() > MAX_NAVIGATOR_WORKSTREAMS {
-                return Err(StateError::NavigatorSnapshotTooLarge);
-            }
-            bases
-        };
+        let mut workstreams = Vec::new();
+        let mut cursor = 0;
+        loop {
+            let page = self.workstream_overview_page(cursor, MAX_NAVIGATOR_WORKSTREAMS)?;
+            workstreams.extend(page.workstreams);
+            let Some(next_cursor) = page.next_cursor else {
+                return Ok(workstreams);
+            };
+            cursor = next_cursor;
+        }
+    }
 
-        bases
+    /// Returns one deterministic bounded Workstream page ordered by latest
+    /// activity, checkout, and opaque Workstream identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid page size, cursor overflow, malformed
+    /// persisted state, or an unavailable registry.
+    pub fn workstream_overview_page(
+        &self,
+        cursor: u32,
+        page_size: usize,
+    ) -> Result<WorkstreamOverviewPage, StateError> {
+        if page_size == 0 || page_size > MAX_NAVIGATOR_WORKSTREAMS {
+            return Err(StateError::InvalidNavigatorPageSize);
+        }
+        let query_limit =
+            i64::try_from(page_size + 1).map_err(|_| StateError::InvalidNavigatorPageSize)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT workstreams.workstream_id, workstreams.location_id,
+                        project_locations.repository_path, checkouts.path,
+                        workstreams.lifecycle,
+                        workstreams.last_activity_sequence,
+                        workstreams.last_activity_at_millis, workstreams.revision
+                 FROM workstreams
+                 JOIN project_locations
+                   ON project_locations.location_id = workstreams.location_id
+                 JOIN checkouts ON checkouts.checkout_id = workstreams.checkout_id
+                 ORDER BY workstreams.last_activity_sequence DESC,
+                          checkouts.path, workstreams.workstream_id
+                 LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(StateError::Sqlite)?;
+        let mut bases = statement
+            .query_map(params![query_limit, i64::from(cursor)], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            })
+            .map_err(StateError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::Sqlite)?;
+        let has_more = bases.len() > page_size;
+        bases.truncate(page_size);
+        let page_len =
+            u32::try_from(bases.len()).map_err(|_| StateError::NavigatorCursorOverflow)?;
+        let next_cursor = has_more
+            .then(|| {
+                cursor
+                    .checked_add(page_len)
+                    .ok_or(StateError::NavigatorCursorOverflow)
+            })
+            .transpose()?;
+        let workstreams = bases
             .into_iter()
             .map(
                 |(
@@ -1457,7 +1497,7 @@ impl HostRegistry {
                         .transpose()?
                         .flatten();
                     let attention = self.attention(workstream_id)?;
-                    Ok(WorkstreamOverview {
+                    Ok::<WorkstreamOverview, StateError>(WorkstreamOverview {
                         workstream_id,
                         location_id,
                         project_repository_path: PathBuf::from(project_repository_path),
@@ -1473,7 +1513,11 @@ impl HostRegistry {
                     })
                 },
             )
-            .collect()
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(WorkstreamOverviewPage {
+            workstreams,
+            next_cursor,
+        })
     }
 
     /// Lists only durable creation operations that still require an explicit
@@ -3831,6 +3875,10 @@ pub enum StateError {
     ForkBoundaryUnavailable,
     #[error("too many Workstreams for one bounded navigator snapshot")]
     NavigatorSnapshotTooLarge,
+    #[error("navigator Workstream page size is invalid")]
+    InvalidNavigatorPageSize,
+    #[error("navigator Workstream cursor overflowed")]
+    NavigatorCursorOverflow,
     #[error("client project display name is invalid")]
     InvalidProjectDisplayName,
     #[error("invalid persisted UUID: {0}")]
@@ -5170,7 +5218,7 @@ mod tests {
     }
 
     #[test]
-    fn navigator_snapshot_fails_closed_above_its_bounded_workstream_limit() {
+    fn navigator_snapshot_pages_past_its_per_page_workstream_limit() {
         let (_temporary, mut registry) = registry();
         for index in 0..=MAX_NAVIGATOR_WORKSTREAMS {
             registry
@@ -5182,10 +5230,23 @@ mod tests {
                 .unwrap();
         }
 
-        assert!(matches!(
-            registry.workstream_overviews(),
-            Err(StateError::NavigatorSnapshotTooLarge)
-        ));
+        let first = registry
+            .workstream_overview_page(0, MAX_NAVIGATOR_WORKSTREAMS)
+            .unwrap();
+        assert_eq!(first.workstreams.len(), MAX_NAVIGATOR_WORKSTREAMS);
+        assert_eq!(
+            first.next_cursor,
+            Some(u32::try_from(MAX_NAVIGATOR_WORKSTREAMS).unwrap())
+        );
+        let second = registry
+            .workstream_overview_page(first.next_cursor.unwrap(), MAX_NAVIGATOR_WORKSTREAMS)
+            .unwrap();
+        assert_eq!(second.workstreams.len(), 1);
+        assert_eq!(second.next_cursor, None);
+        assert_eq!(
+            registry.workstream_overviews().unwrap().len(),
+            MAX_NAVIGATOR_WORKSTREAMS + 1
+        );
     }
 
     #[test]

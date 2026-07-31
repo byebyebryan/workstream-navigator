@@ -27,7 +27,7 @@ fn local_subprocess_uses_the_same_bounded_protocol_service_as_ssh() {
     assert!(hello.registry_generation.len() <= 128);
     assert!(snapshot.workstreams.is_empty());
     assert!(operations.operations.is_empty());
-    assert_eq!(CURRENT_PROTOCOL_VERSION, 6);
+    assert_eq!(CURRENT_PROTOCOL_VERSION, 7);
 }
 
 #[test]
@@ -69,4 +69,40 @@ fn local_subprocess_apply_uses_the_same_revision_guard_as_an_ssh_host() {
             .result_unseen_since_revision,
         None
     );
+}
+
+#[test]
+fn local_subprocess_assembles_multiple_bounded_snapshot_pages() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_root = temporary.path().join("state");
+    let root = StateRoot::create(&state_root).unwrap();
+    {
+        let mut registry = HostRegistry::open(&root).unwrap();
+        for index in 0..33 {
+            registry
+                .register_external_workstream(
+                    PathBuf::from(format!("/disposable/repository-{index:02}")),
+                    format!("common-dir-{index:02}"),
+                    "deadbeef".to_owned(),
+                )
+                .unwrap();
+        }
+    }
+    let endpoint = LocalEndpoint {
+        executable: PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
+        state_root,
+    };
+
+    let snapshot = HostClient::new(SystemCommandRunner)
+        .snapshot_local(&endpoint)
+        .unwrap();
+
+    assert_eq!(snapshot.workstreams.len(), 33);
+    let identities = snapshot
+        .workstreams
+        .iter()
+        .map(|workstream| workstream.workstream_id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(identities.len(), 33);
+    assert_eq!(snapshot.next_cursor, None);
 }

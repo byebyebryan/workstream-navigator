@@ -12,10 +12,12 @@ use crate::domain::{
     RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 6;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 7;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
+pub const SNAPSHOT_PAGE_WORKSTREAMS: usize = 32;
+pub const MAX_SNAPSHOT_PAGES: usize = 256;
 
 const MAX_ALIAS_BYTES: usize = 128;
 const MAX_DISPLAY_NAME_BYTES: usize = 256;
@@ -70,7 +72,7 @@ impl RequestEnvelope {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostRequest {
     Hello { client_alias: String },
-    Snapshot,
+    Snapshot { cursor: Option<u32> },
     Operations,
     Attach { runtime_id: RuntimeId },
     Apply { action: HostAction },
@@ -82,7 +84,7 @@ impl HostRequest {
             Self::Hello { client_alias } => {
                 validate_bounded("client alias", client_alias, MAX_ALIAS_BYTES)
             }
-            Self::Snapshot | Self::Operations | Self::Attach { .. } => Ok(()),
+            Self::Snapshot { .. } | Self::Operations | Self::Attach { .. } => Ok(()),
             Self::Apply { action } => action.validate(),
         }
     }
@@ -293,6 +295,8 @@ pub struct Capabilities {
 pub struct SnapshotResponse {
     pub workstreams: Vec<SnapshotWorkstream>,
     pub unresolved_operation_count: u16,
+    /// Opaque row offset for the next deterministic bounded page.
+    pub next_cursor: Option<u32>,
 }
 
 impl SnapshotResponse {
@@ -347,8 +351,9 @@ impl OperationsResponse {
 pub struct SnapshotWorkstream {
     pub workstream_id: WorkstreamId,
     pub location_id: LocationId,
-    /// Bounded project label derived from the checkout basename on the host.
-    /// This is presentation metadata, never a checkout path.
+    /// Bounded project label derived from the registered repository basename
+    /// on the host. This is presentation metadata, never a repository or
+    /// checkout path.
     pub project_display_name: String,
     pub display_name: String,
     pub runtime_id: Option<RuntimeId>,
@@ -449,7 +454,7 @@ mod tests {
     fn unknown_versions_fail_closed() {
         let envelope = RequestEnvelope {
             version: CURRENT_PROTOCOL_VERSION + 1,
-            request: HostRequest::Snapshot,
+            request: HostRequest::Snapshot { cursor: None },
         };
 
         assert!(matches!(
@@ -581,6 +586,7 @@ mod tests {
                 revision: 1,
             }],
             unresolved_operation_count: 0,
+            next_cursor: None,
         };
 
         assert!(matches!(

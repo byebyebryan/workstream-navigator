@@ -180,6 +180,15 @@ Switching workstreams replaces only the provider pane's attachment helper. It
 does not stop, restart, type into, or resize an inactive provider process beyond
 the normal detach/attach terminal negotiation.
 
+Each replacement gets one presentation-private attempt ID and a mode-`0600`
+pending/running/completed/failed status file. The attachment helper updates
+that file, never the provider pane. The navigator clears its non-durable
+attachment marker when the helper completes or fails and permits an exact
+same-row retry; a helper pane that dies before reporting a terminal phase is
+also classified as failed. These files disappear with the disposable
+presentation and contain only the host alias, Workstream ID, attempt ID, and
+phase.
+
 Focus is local presentation state, not durable Workstream state. Two navigator
 clients may look at different workstreams without racing over a global
 `current` record. Durable state records activity and attention, never an
@@ -246,9 +255,12 @@ There is no remote daemon in V1. Control requests launch short-lived
 `wsnav _remote` commands through SSH. The one intentional long-lived path is an
 interactive `ssh -tt` attachment to a provider Runtime; it carries the native
 terminal and no management watch stream. A connected navigator refreshes hosts
-through bounded snapshots: focused or recently active hosts may be polled more
-frequently, while background and repeatedly unreachable hosts back off. Action
-responses update local state immediately; the next snapshot reconciles it.
+through cursor-paged bounded snapshots: each response contains at most one
+fixed-size page, cursors must advance, replayed Workstream identities are
+rejected, and the client enforces a finite page count. Focused or recently
+active hosts may be polled more frequently, while background and repeatedly
+unreachable hosts back off. Action responses update local state immediately;
+the next complete snapshot reconciles it.
 
 All mutation commands use host-local SQLite transactions and optimistic
 revisions. Start and Fork additionally use durable request keys and recovery
@@ -266,6 +278,12 @@ tmux or Codex. The launcher must match that exact prepared record, and another
 Resume is refused while the generation is `starting` or live. If the response
 is lost, a snapshot reconciles the prepared record with the exact private tmux
 socket and process evidence instead of starting a second Runtime.
+
+The private pane initially runs a silent one-shot WSNav launch barrier. Its
+process birth is recorded against the prepared Runtime before the owning action
+releases the barrier. The barrier then `exec`s Codex in place, preserving the
+same PID and birth token, so an immediate `SessionStart` cannot race ahead of
+its recorded hook authority.
 
 ### Host transport
 
@@ -952,10 +970,11 @@ creation effect before a destination Workstream can safely exist.
   never bare `tmux` or `tmux -L`. A native provider retains the private `TMUX`
   environment by design, so a bare `tmux ls` inside it sees at most that one
   Runtime. Spike 0005 accepted this terminal configuration.
-- Finite local control commands (tmux probes/actions, Git, and child WSNav
-  actions) drain stdout and stderr concurrently while retaining only their
-  explicit per-stream bounds. Direct provider attachment is a terminal stream,
-  not captured child output.
+- Finite local control commands (tmux probes/actions, Git, SSH control, and
+  child WSNav actions) drain stdout and stderr concurrently while retaining
+  only their explicit per-stream bounds. They also have wall-clock deadlines
+  and terminate their complete process group on timeout. Direct provider
+  attachment is a terminal stream, not captured child output.
 - Private tmux sockets are a namespace and accidental-discovery boundary, not
   a same-user security boundary. Workstream Navigator does not prevent a user
   who knows the socket path from attaching or stopping the Runtime.
@@ -973,8 +992,8 @@ creation effect before a destination Workstream can safely exist.
   shutdown fails.
 - Remote commands disable forwarding and use bounded fixed protocol entrypoints.
   Snapshot workstream metadata includes a bounded project display label derived
-  only from the checkout basename; it never includes an absolute or relative
-  checkout path.
+  only from the registered ProjectLocation repository basename; it never
+  includes an absolute or relative repository or checkout path.
 - Provider and Git commands are built as argument vectors. Thread names and
   paths never become shell fragments.
 - Hook stdin is fully drained even for unmanaged, stale, oversized, or malformed

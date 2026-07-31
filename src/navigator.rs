@@ -34,7 +34,7 @@ use thiserror::Error;
 
 use crate::{
     domain::{Clock, Revision, RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle},
-    presentation::{Presentation, PresentationError},
+    presentation::{AttachmentPhase, AttachmentStatus, Presentation, PresentationError},
     process::{BoundedProcessError, output_bounded},
     provider::codex::names::{NameContext, resolve_name},
     runtime::{
@@ -523,6 +523,8 @@ pub struct NavigatorView {
     snapshot: LocalNavigatorSnapshot,
     selected: usize,
     attached: Option<(String, WorkstreamId)>,
+    observed_attachment: Option<(uuid::Uuid, AttachmentPhase)>,
+    rendered_offset: usize,
     mouse_click: Option<MouseClickIntent>,
     message: Option<String>,
     spinner_frame: usize,
@@ -541,6 +543,8 @@ impl NavigatorView {
             snapshot,
             selected: 0,
             attached: None,
+            observed_attachment: None,
+            rendered_offset: 0,
             mouse_click: None,
             message: None,
             spinner_frame: 0,
@@ -615,8 +619,36 @@ impl NavigatorView {
             })
     }
 
-    fn mark_attached(&mut self, workstream: &NavigatorWorkstream) {
-        self.attached = Some((workstream.host.alias().to_owned(), workstream.workstream_id));
+    fn observe_attachment(&mut self, status: &AttachmentStatus) {
+        let observation = (status.attempt_id, status.phase);
+        let changed = self.observed_attachment != Some(observation);
+        self.observed_attachment = Some(observation);
+        match status.phase {
+            AttachmentPhase::Pending | AttachmentPhase::Running => {
+                self.attached = Some((status.host_alias.clone(), status.workstream_id));
+                if changed {
+                    self.set_message(if status.phase == AttachmentPhase::Pending {
+                        "provider attachment starting"
+                    } else {
+                        "provider attached; use the native Codex UI directly"
+                    });
+                }
+            }
+            AttachmentPhase::Completed => {
+                self.attached = None;
+                if changed {
+                    self.set_message(
+                        "provider detached; press Enter or click this row to reconnect",
+                    );
+                }
+            }
+            AttachmentPhase::Failed => {
+                self.attached = None;
+                if changed {
+                    self.set_message("attachment failed; press Enter or click row to retry");
+                }
+            }
+        }
     }
 
     fn clear_attached(&mut self, workstream: &NavigatorWorkstream) {
@@ -669,7 +701,7 @@ impl NavigatorView {
         self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
     }
 
-    pub fn render(&self, frame: &mut Frame<'_>) {
+    pub fn render(&mut self, frame: &mut Frame<'_>) {
         let areas = Layout::default()
             .direction(Direction::Vertical)
             .constraints([Constraint::Min(3), Constraint::Length(2)])
@@ -698,6 +730,7 @@ impl NavigatorView {
             areas[0],
             &mut state,
         );
+        self.rendered_offset = state.offset();
         let help = self.footer_help();
         frame.render_widget(
             Paragraph::new(help).style(Style::default().fg(Color::DarkGray)),
@@ -745,7 +778,7 @@ impl NavigatorView {
         // List content starts immediately after the one-line top border. Each
         // Workstream intentionally has a project line and a native-thread line.
         y.checked_sub(1)
-            .map(|offset| usize::from(offset / 2))
+            .map(|offset| self.rendered_offset + usize::from(offset / 2))
             .filter(|row| *row < self.snapshot.workstreams.len())
     }
 }
@@ -899,6 +932,7 @@ pub fn run_local_navigator(
     let mut terminal = TerminalSession::enter()?;
     let mut last_refresh = Instant::now();
     let mut last_animation = Instant::now();
+    refresh_attachment_status(&presentation, &mut view);
     let outcome: Result<(), NavigatorError> = loop {
         terminal.terminal.draw(|frame| view.render(frame))?;
         let timeout = Duration::from_millis(100);
@@ -966,6 +1000,7 @@ pub fn run_local_navigator(
                 Ok(snapshot) => view.replace_snapshot(snapshot),
                 Err(error) => view.set_message(action_message(&error)),
             }
+            refresh_attachment_status(&presentation, &mut view);
             last_refresh = Instant::now();
         }
         if last_animation.elapsed() >= Duration::from_millis(100) {
@@ -1026,15 +1061,16 @@ fn activate_selected(
     } else {
         presentation.attach_workstream(selected.workstream_id)
     };
-    if let Err(error) = attachment {
-        view.set_message(action_message(&error));
-        return;
-    }
-    view.mark_attached(&selected);
+    let attachment = match attachment {
+        Ok(attachment) => attachment,
+        Err(error) => {
+            view.set_message(action_message(&error));
+            return;
+        }
+    };
+    view.observe_attachment(&attachment);
     if let Err(error) = presentation.focus_provider() {
         view.set_message(action_message(&error));
-    } else {
-        view.set_message("provider attached; use the native Codex UI directly");
     }
 }
 
@@ -1132,8 +1168,19 @@ fn create_workstream_selected(
     } else {
         presentation.attach_workstream(destination)
     };
-    match attachment.and_then(|()| presentation.focus_provider()) {
+    match attachment.and_then(|status| {
+        view.observe_attachment(&status);
+        presentation.focus_provider()
+    }) {
         Ok(()) => view.set_message(action.success_message()),
+        Err(error) => view.set_message(action_message(&error)),
+    }
+}
+
+fn refresh_attachment_status(presentation: &Presentation, view: &mut NavigatorView) {
+    match presentation.attachment_status() {
+        Ok(Some(status)) => view.observe_attachment(&status),
+        Ok(None) => {}
         Err(error) => view.set_message(action_message(&error)),
     }
 }
@@ -1301,7 +1348,12 @@ mod tests {
         let first_row = view.selected().unwrap().clone();
         let second_row = view.snapshot.workstreams[1].clone();
 
-        view.mark_attached(&first_row);
+        view.observe_attachment(&AttachmentStatus {
+            attempt_id: uuid::Uuid::new_v4(),
+            host_alias: first_row.host.alias().to_owned(),
+            workstream_id: first_row.workstream_id,
+            phase: AttachmentPhase::Running,
+        });
         assert!(view.is_attached_to(&first_row));
         assert!(!view.is_attached_to(&second_row));
 
@@ -1315,6 +1367,47 @@ mod tests {
         });
 
         assert!(!view.is_attached_to(view.selected().unwrap()));
+    }
+
+    #[test]
+    fn terminal_attachment_outcome_allows_an_exact_same_row_retry() {
+        let workstream_id = WorkstreamId::new();
+        let workstream = row(workstream_id, NavigatorRuntimeStatus::Idle);
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![workstream.clone()],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+        });
+        let attempt_id = uuid::Uuid::new_v4();
+        let running = AttachmentStatus {
+            attempt_id,
+            host_alias: "local".to_owned(),
+            workstream_id,
+            phase: AttachmentPhase::Running,
+        };
+
+        view.observe_attachment(&running);
+        assert!(view.is_attached_to(&workstream));
+        view.replace_snapshot(LocalNavigatorSnapshot {
+            workstreams: vec![row(workstream_id, NavigatorRuntimeStatus::Unknown)],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+        });
+        assert!(!view.is_attached_to(&workstream));
+        view.observe_attachment(&running);
+        assert!(view.is_attached_to(&workstream));
+
+        view.observe_attachment(&AttachmentStatus {
+            attempt_id,
+            host_alias: "local".to_owned(),
+            workstream_id,
+            phase: AttachmentPhase::Failed,
+        });
+        assert!(!view.is_attached_to(&workstream));
+        assert_eq!(
+            view.message.as_deref(),
+            Some("attachment failed; press Enter or click row to retry")
+        );
     }
 
     #[test]
@@ -1349,6 +1442,28 @@ mod tests {
         assert_eq!(view.row_from_y(3), Some(1));
         assert_eq!(view.row_from_y(4), Some(1));
         assert_eq!(view.row_from_y(5), None);
+    }
+
+    #[test]
+    fn mouse_row_mapping_includes_the_rendered_scroll_offset() {
+        let workstreams = (0..6)
+            .map(|_| row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle))
+            .collect::<Vec<_>>();
+        let expected = workstreams[5].workstream_id;
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams,
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+        });
+        view.selected = 5;
+        let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+
+        terminal.draw(|frame| view.render(frame)).unwrap();
+
+        assert!(view.rendered_offset > 0);
+        let clicked = view.row_from_y(3).unwrap();
+        view.begin_mouse_click(Some(clicked));
+        assert_eq!(view.selected().map(|row| row.workstream_id), Some(expected));
     }
 
     #[test]
@@ -1408,7 +1523,7 @@ mod tests {
     #[test]
     fn renderer_shows_done_indicator_without_provider_content() {
         let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
-        let view = NavigatorView::new(LocalNavigatorSnapshot {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: vec![NavigatorWorkstream {
                 project_label: "project".to_owned(),
                 display_name: "native thread".to_owned(),
@@ -1453,7 +1568,7 @@ mod tests {
     #[test]
     fn renderer_makes_unresolved_operation_recovery_visible() {
         let mut terminal = Terminal::new(TestBackend::new(200, 8)).unwrap();
-        let view = NavigatorView::new(LocalNavigatorSnapshot {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             unresolved_operation_count: 1,
             ..LocalNavigatorSnapshot::default()
         });

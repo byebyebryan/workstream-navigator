@@ -5,6 +5,7 @@
 //! remote shell cannot reinterpret registered configuration as syntax.
 
 use std::{
+    collections::BTreeSet,
     ffi::OsString,
     io::{Read, Write},
     path::PathBuf,
@@ -18,8 +19,8 @@ use thiserror::Error;
 use crate::build_info::BuildInfo;
 use crate::domain::{RuntimeId, WorkstreamId};
 use crate::protocol::{
-    HelloResponse, HostAction, HostRequest, HostResponse, MAX_FRAME_BYTES, OperationsResponse,
-    RequestEnvelope, ResponseEnvelope, SnapshotResponse,
+    HelloResponse, HostAction, HostRequest, HostResponse, MAX_FRAME_BYTES, MAX_SNAPSHOT_PAGES,
+    OperationsResponse, RequestEnvelope, ResponseEnvelope, SnapshotResponse,
 };
 
 const MAX_STDERR_BYTES: usize = 4096;
@@ -152,16 +153,30 @@ pub struct SystemCommandRunner;
 
 impl CommandRunner for SystemCommandRunner {
     fn run(&self, invocation: CommandInvocation) -> Result<CommandResult, TransportError> {
+        Self::run_with_timeout(&invocation, CONTROL_TIMEOUT)
+    }
+}
+
+impl SystemCommandRunner {
+    fn run_with_timeout(
+        invocation: &CommandInvocation,
+        timeout: Duration,
+    ) -> Result<CommandResult, TransportError> {
         if invocation.stdin.len() > MAX_FRAME_BYTES {
             return Err(TransportError::RequestTooLarge);
         }
-        let mut child = Command::new(&invocation.program)
+        let mut command = Command::new(&invocation.program);
+        command
             .args(&invocation.arguments)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(TransportError::Launch)?;
+            .stderr(Stdio::piped());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn().map_err(TransportError::Launch)?;
         let stdout = child.stdout.take().ok_or(TransportError::MissingPipe)?;
         let stderr = child.stderr.take().ok_or(TransportError::MissingPipe)?;
         let stdout_reader = thread::spawn(move || read_bounded(stdout, MAX_FRAME_BYTES));
@@ -173,7 +188,7 @@ impl CommandRunner for SystemCommandRunner {
         } else {
             return Err(TransportError::MissingPipe);
         }
-        let status = wait_bounded(&mut child)?;
+        let status = wait_bounded(&mut child, timeout);
         let stdout = stdout_reader
             .join()
             .map_err(|_| TransportError::ReaderPanicked)??;
@@ -181,7 +196,7 @@ impl CommandRunner for SystemCommandRunner {
             .join()
             .map_err(|_| TransportError::ReaderPanicked)??;
         Ok(CommandResult {
-            success: status,
+            success: status?,
             stdout,
         })
     }
@@ -259,7 +274,9 @@ impl<R: CommandRunner> HostClient<R> {
     /// Returns an error for launch/transport/protocol failures or a response
     /// kind different from the requested snapshot.
     pub fn snapshot_ssh(&self, endpoint: &SshEndpoint) -> Result<SnapshotResponse, TransportError> {
-        self.snapshot(&ssh_invocation(endpoint, &snapshot_request()?))
+        Self::snapshot_pages(|cursor| {
+            self.snapshot_page(&ssh_invocation(endpoint, &snapshot_request(cursor)?))
+        })
     }
 
     /// Retrieves one bounded local subprocess snapshot.
@@ -272,7 +289,9 @@ impl<R: CommandRunner> HostClient<R> {
         &self,
         endpoint: &LocalEndpoint,
     ) -> Result<SnapshotResponse, TransportError> {
-        self.snapshot(&local_invocation(endpoint, &snapshot_request()?))
+        Self::snapshot_pages(|cursor| {
+            self.snapshot_page(&local_invocation(endpoint, &snapshot_request(cursor)?))
+        })
     }
 
     /// Lists unresolved remote creation operations through the same bounded
@@ -375,12 +394,52 @@ impl<R: CommandRunner> HostClient<R> {
         serde_json::from_slice(&result.stdout).map_err(|_| TransportError::ReleaseProbeMalformed)
     }
 
-    fn snapshot(&self, invocation: &CommandInvocation) -> Result<SnapshotResponse, TransportError> {
+    fn snapshot_page(
+        &self,
+        invocation: &CommandInvocation,
+    ) -> Result<SnapshotResponse, TransportError> {
         match self.request(invocation)? {
             HostResponse::Snapshot(response) => Ok(response),
             HostResponse::Rejected { diagnostic } => Err(TransportError::Rejected(diagnostic)),
             _ => Err(TransportError::UnexpectedResponse),
         }
+    }
+
+    fn snapshot_pages(
+        mut fetch: impl FnMut(Option<u32>) -> Result<SnapshotResponse, TransportError>,
+    ) -> Result<SnapshotResponse, TransportError> {
+        let mut cursor = None;
+        let mut workstreams = Vec::new();
+        let mut identities = BTreeSet::new();
+        let mut unresolved_operation_count = None;
+        for _ in 0..MAX_SNAPSHOT_PAGES {
+            let page = fetch(cursor)?;
+            if let Some(expected) = unresolved_operation_count {
+                if expected != page.unresolved_operation_count {
+                    return Err(TransportError::InconsistentSnapshotPage);
+                }
+            } else {
+                unresolved_operation_count = Some(page.unresolved_operation_count);
+            }
+            for workstream in page.workstreams {
+                if !identities.insert(workstream.workstream_id) {
+                    return Err(TransportError::InconsistentSnapshotPage);
+                }
+                workstreams.push(workstream);
+            }
+            let Some(next_cursor) = page.next_cursor else {
+                return Ok(SnapshotResponse {
+                    workstreams,
+                    unresolved_operation_count: unresolved_operation_count.unwrap_or(0),
+                    next_cursor: None,
+                });
+            };
+            if next_cursor <= cursor.unwrap_or(0) {
+                return Err(TransportError::InconsistentSnapshotPage);
+            }
+            cursor = Some(next_cursor);
+        }
+        Err(TransportError::SnapshotPageLimit)
     }
 
     fn operations(
@@ -431,10 +490,10 @@ fn hello_request(client_alias: &str) -> Result<RequestEnvelope, TransportError> 
     Ok(request)
 }
 
-fn snapshot_request() -> Result<RequestEnvelope, TransportError> {
+fn snapshot_request(cursor: Option<u32>) -> Result<RequestEnvelope, TransportError> {
     let request = RequestEnvelope {
         version: crate::protocol::CURRENT_PROTOCOL_VERSION,
-        request: HostRequest::Snapshot,
+        request: HostRequest::Snapshot { cursor },
     };
     request.validate()?;
     Ok(request)
@@ -554,22 +613,44 @@ fn ssh_attach_arguments(endpoint: &SshEndpoint, runtime_id: RuntimeId) -> Vec<Os
     ]
 }
 
-fn wait_bounded(child: &mut Child) -> Result<bool, TransportError> {
-    let deadline = Instant::now() + CONTROL_TIMEOUT;
+fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<bool, TransportError> {
+    let deadline = Instant::now() + timeout;
     loop {
         if let Some(status) = child.try_wait().map_err(TransportError::Wait)? {
             return Ok(status.success());
         }
         if Instant::now() >= deadline {
-            child.kill().map_err(TransportError::Kill)?;
-            let status = child.wait().map_err(TransportError::Wait)?;
-            if status.success() {
-                return Ok(true);
-            }
+            terminate_process_group(child)?;
             return Err(TransportError::TimedOut);
         }
         thread::sleep(POLL_INTERVAL);
     }
+}
+
+#[cfg(unix)]
+fn terminate_process_group(child: &mut Child) -> Result<(), TransportError> {
+    use nix::{
+        sys::signal::{Signal, killpg},
+        unistd::Pid,
+    };
+
+    let process_group = i32::try_from(child.id()).map_err(|_| TransportError::InvalidPid)?;
+    if killpg(Pid::from_raw(process_group), Signal::SIGKILL).is_err()
+        && child.try_wait().map_err(TransportError::Wait)?.is_none()
+    {
+        child.kill().map_err(TransportError::Kill)?;
+    }
+    child.wait().map_err(TransportError::Wait)?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(child: &mut Child) -> Result<(), TransportError> {
+    if child.try_wait().map_err(TransportError::Wait)?.is_none() {
+        child.kill().map_err(TransportError::Kill)?;
+    }
+    child.wait().map_err(TransportError::Wait)?;
+    Ok(())
 }
 
 fn read_bounded(mut reader: impl Read, maximum: usize) -> Result<Vec<u8>, TransportError> {
@@ -610,6 +691,8 @@ pub enum TransportError {
     Wait(std::io::Error),
     #[error("could not stop timed out host command")]
     Kill(std::io::Error),
+    #[error("host command exposed an invalid process ID")]
+    InvalidPid,
     #[error("host command did not expose an expected pipe")]
     MissingPipe,
     #[error("host output reader failed")]
@@ -628,6 +711,10 @@ pub enum TransportError {
     InteractiveAttachmentFailed,
     #[error("host returned an unexpected protocol response")]
     UnexpectedResponse,
+    #[error("host returned inconsistent snapshot pages")]
+    InconsistentSnapshotPage,
+    #[error("host snapshot exceeded the bounded page count")]
+    SnapshotPageLimit,
     #[error("host rejected the request: {0}")]
     Rejected(String),
     #[error(transparent)]
@@ -735,6 +822,23 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn stalled_host_command_group_is_terminated_at_the_deadline() {
+        let started = Instant::now();
+        let result = SystemCommandRunner::run_with_timeout(
+            &CommandInvocation {
+                program: "sh".into(),
+                arguments: vec!["-c".into(), "sleep 30 & wait".into()],
+                stdin: Vec::new(),
+            },
+            Duration::from_millis(100),
+        );
+
+        assert!(matches!(result, Err(TransportError::TimedOut)));
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
     fn rejected_frames_are_not_mistaken_for_a_snapshot() {
         let runner = RecordingRunner {
             response: ResponseEnvelope::rejected("host state is unavailable".to_owned()).unwrap(),
@@ -748,6 +852,67 @@ mod tests {
         assert!(matches!(
             HostClient::new(runner).snapshot_ssh(&endpoint),
             Err(TransportError::Rejected(_))
+        ));
+    }
+
+    #[test]
+    fn snapshot_pages_are_assembled_in_cursor_order() {
+        let first_id = WorkstreamId::new();
+        let second_id = WorkstreamId::new();
+        let mut pages = std::collections::VecDeque::from([
+            SnapshotResponse {
+                workstreams: vec![snapshot_workstream(first_id)],
+                unresolved_operation_count: 1,
+                next_cursor: Some(1),
+            },
+            SnapshotResponse {
+                workstreams: vec![snapshot_workstream(second_id)],
+                unresolved_operation_count: 1,
+                next_cursor: None,
+            },
+        ]);
+        let mut cursors = Vec::new();
+
+        let snapshot = HostClient::<RecordingRunner>::snapshot_pages(|cursor| {
+            cursors.push(cursor);
+            pages.pop_front().ok_or(TransportError::UnexpectedResponse)
+        })
+        .unwrap();
+
+        assert_eq!(cursors, vec![None, Some(1)]);
+        assert_eq!(
+            snapshot
+                .workstreams
+                .iter()
+                .map(|workstream| workstream.workstream_id)
+                .collect::<Vec<_>>(),
+            vec![first_id, second_id]
+        );
+        assert_eq!(snapshot.next_cursor, None);
+        assert_eq!(snapshot.unresolved_operation_count, 1);
+    }
+
+    #[test]
+    fn snapshot_pages_reject_replayed_workstream_identity() {
+        let workstream_id = WorkstreamId::new();
+        let mut pages = std::collections::VecDeque::from([
+            SnapshotResponse {
+                workstreams: vec![snapshot_workstream(workstream_id)],
+                unresolved_operation_count: 0,
+                next_cursor: Some(1),
+            },
+            SnapshotResponse {
+                workstreams: vec![snapshot_workstream(workstream_id)],
+                unresolved_operation_count: 0,
+                next_cursor: None,
+            },
+        ]);
+
+        assert!(matches!(
+            HostClient::<RecordingRunner>::snapshot_pages(|_| {
+                pages.pop_front().ok_or(TransportError::UnexpectedResponse)
+            }),
+            Err(TransportError::InconsistentSnapshotPage)
         ));
     }
 
@@ -782,6 +947,24 @@ mod tests {
                 .unwrap(),
             workstream_id
         );
+    }
+
+    fn snapshot_workstream(workstream_id: WorkstreamId) -> crate::protocol::SnapshotWorkstream {
+        crate::protocol::SnapshotWorkstream {
+            workstream_id,
+            location_id: crate::domain::LocationId::new(),
+            project_display_name: "project".to_owned(),
+            display_name: "thread".to_owned(),
+            runtime_id: None,
+            runtime_status: crate::domain::RuntimeStatus::Idle,
+            lifecycle: crate::domain::WorkstreamLifecycle::Open,
+            result_ready: false,
+            recovery_required: false,
+            attention_revision: None,
+            activity_sequence: 0,
+            last_activity_at_millis: None,
+            revision: 1,
+        }
     }
 
     #[test]

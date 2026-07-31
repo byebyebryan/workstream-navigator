@@ -119,7 +119,7 @@ fn dispatch(state_root: Option<std::path::PathBuf>, request: &RequestEnvelope) -
             },
             Err(_) => rejected("host identity is unavailable"),
         },
-        HostRequest::Snapshot => match snapshot(&root, &mut registry) {
+        HostRequest::Snapshot { cursor } => match snapshot(&root, &mut registry, *cursor) {
             Ok(snapshot) => ResponseEnvelope {
                 version: CURRENT_PROTOCOL_VERSION,
                 response: HostResponse::Snapshot(snapshot),
@@ -383,10 +383,18 @@ fn workstream_revision(
         .ok_or(StateError::UnknownOpenWorkstream(workstream_id))
 }
 
-fn snapshot(root: &StateRoot, registry: &mut HostRegistry) -> Result<SnapshotResponse, StateError> {
+fn snapshot(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+    cursor: Option<u32>,
+) -> Result<SnapshotResponse, StateError> {
     crate::actions::reconcile_lost_runtimes(root, registry)?;
-    let workstreams = registry
-        .workstream_overviews()?
+    let page = registry.workstream_overview_page(
+        cursor.unwrap_or(0),
+        crate::protocol::SNAPSHOT_PAGE_WORKSTREAMS,
+    )?;
+    let workstreams = page
+        .workstreams
         .iter()
         .map(|overview| snapshot_workstream(root, overview))
         .collect();
@@ -398,6 +406,7 @@ fn snapshot(root: &StateRoot, registry: &mut HostRegistry) -> Result<SnapshotRes
     Ok(SnapshotResponse {
         workstreams,
         unresolved_operation_count,
+        next_cursor: page.next_cursor,
     })
 }
 
@@ -659,7 +668,7 @@ mod tests {
 
         let snapshot = RequestEnvelope {
             version: CURRENT_PROTOCOL_VERSION,
-            request: HostRequest::Snapshot,
+            request: HostRequest::Snapshot { cursor: None },
         }
         .encode()
         .unwrap();

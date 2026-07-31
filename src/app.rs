@@ -15,7 +15,7 @@ use crate::{
     actions::{self, OBSERVER_AUTHORITY},
     domain::{OperationId, RuntimeId, WorkstreamId},
     navigator::run_local_navigator,
-    presentation::Presentation,
+    presentation::{AttachmentPhase, Presentation},
     process::output_bounded,
     provider::codex::app_server::EphemeralAppServer,
     provider::codex::hooks::drain_and_parse,
@@ -142,13 +142,27 @@ enum Commands {
     /// Internal local provider-pane attachment helper. It intentionally keeps
     /// all navigator diagnostics out of the native provider surface.
     #[command(name = "_provider_attach", hide = true)]
-    ProviderAttach { workstream_id: String },
+    ProviderAttach {
+        workstream_id: String,
+        #[arg(long)]
+        presentation_socket: PathBuf,
+        #[arg(long)]
+        presentation_session: String,
+        #[arg(long)]
+        attempt_id: String,
+    },
     /// Internal SSH provider-pane attachment helper. It intentionally keeps
     /// all navigator diagnostics out of the native provider surface.
     #[command(name = "_provider_remote_attach", hide = true)]
     ProviderRemoteAttach {
         host_alias: String,
         workstream_id: String,
+        #[arg(long)]
+        presentation_socket: PathBuf,
+        #[arg(long)]
+        presentation_session: String,
+        #[arg(long)]
+        attempt_id: String,
     },
     /// Internal passive Codex lifecycle hook entrypoint.
     #[command(name = "_hook", hide = true)]
@@ -273,13 +287,36 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 .map_err(AppError::Navigator);
         }
         Commands::ProviderWait => return provider_wait(),
-        Commands::ProviderAttach { workstream_id } => {
-            return provider_attach(&root, &workstream_id);
+        Commands::ProviderAttach {
+            workstream_id,
+            presentation_socket,
+            presentation_session,
+            attempt_id,
+        } => {
+            return provider_attach(
+                &root,
+                &workstream_id,
+                presentation_socket,
+                presentation_session,
+                &attempt_id,
+            );
         }
         Commands::ProviderRemoteAttach {
             host_alias,
             workstream_id,
-        } => return provider_remote_attach(&root, &host_alias, &workstream_id),
+            presentation_socket,
+            presentation_session,
+            attempt_id,
+        } => {
+            return provider_remote_attach(
+                &root,
+                &host_alias,
+                &workstream_id,
+                presentation_socket,
+                presentation_session,
+                &attempt_id,
+            );
+        }
         Commands::RemoteAttach { runtime_id } => {
             let Ok(runtime_id) = RuntimeId::from_str(&runtime_id) else {
                 return Ok(());
@@ -738,12 +775,29 @@ fn attach_remote_workstream(
 /// A provider pane is reserved for native Codex bytes. The navigator refreshes
 /// lifecycle state independently, so an unavailable or unexpectedly stopped
 /// Runtime must leave this pane blank rather than render a CLI diagnostic.
-fn provider_attach(root: &StateRoot, workstream_id: &str) -> Result<(), AppError> {
-    let _ = (|| -> Result<(), AppError> {
+fn provider_attach(
+    root: &StateRoot,
+    workstream_id: &str,
+    presentation_socket: PathBuf,
+    presentation_session: String,
+    attempt_id: &str,
+) -> Result<(), AppError> {
+    let presentation =
+        Presentation::from_control(root.base(), presentation_socket, presentation_session)?;
+    let attempt_id =
+        uuid::Uuid::parse_str(attempt_id).map_err(AppError::InvalidAttachmentAttempt)?;
+    presentation.report_attachment_phase(attempt_id, AttachmentPhase::Running)?;
+    let outcome = (|| -> Result<(), AppError> {
         let workstream_id = parse_workstream(workstream_id)?;
         let registry = HostRegistry::open(root)?;
         attach(root, &registry, workstream_id)
     })();
+    let phase = if outcome.is_ok() {
+        AttachmentPhase::Completed
+    } else {
+        AttachmentPhase::Failed
+    };
+    presentation.report_attachment_phase(attempt_id, phase)?;
     provider_wait()
 }
 
@@ -755,11 +809,25 @@ fn provider_remote_attach(
     root: &StateRoot,
     host_alias: &str,
     workstream_id: &str,
+    presentation_socket: PathBuf,
+    presentation_session: String,
+    attempt_id: &str,
 ) -> Result<(), AppError> {
-    let _ = (|| -> Result<(), AppError> {
+    let presentation =
+        Presentation::from_control(root.base(), presentation_socket, presentation_session)?;
+    let attempt_id =
+        uuid::Uuid::parse_str(attempt_id).map_err(AppError::InvalidAttachmentAttempt)?;
+    presentation.report_attachment_phase(attempt_id, AttachmentPhase::Running)?;
+    let outcome = (|| -> Result<(), AppError> {
         let catalog = ClientCatalog::open(root)?;
         attach_remote_workstream(&catalog, host_alias, workstream_id)
     })();
+    let phase = if outcome.is_ok() {
+        AttachmentPhase::Completed
+    } else {
+        AttachmentPhase::Failed
+    };
+    presentation.report_attachment_phase(attempt_id, phase)?;
     provider_wait()
 }
 
@@ -1380,6 +1448,8 @@ enum AppError {
     InvalidOperationId(uuid::Error),
     #[error("invalid runtime ID")]
     InvalidRuntimeId(uuid::Error),
+    #[error("invalid provider attachment attempt")]
+    InvalidAttachmentAttempt(uuid::Error),
     #[error("host alias is not registered")]
     UnknownHostAlias,
     #[error("host alias is not an SSH host")]
@@ -1522,6 +1592,12 @@ mod tests {
             "wsnav",
             "_provider_attach",
             "00000000-0000-0000-0000-000000000001",
+            "--presentation-socket",
+            "/state/presentation/presentation-0123456789ab/tmux.sock",
+            "--presentation-session",
+            "wsnav-presentation-0123456789ab",
+            "--attempt-id",
+            "00000000-0000-0000-0000-000000000002",
         ])
         .unwrap();
         assert!(is_provider_surface_command(local.command.as_ref()));
@@ -1531,6 +1607,12 @@ mod tests {
             "_provider_remote_attach",
             "snap",
             "00000000-0000-0000-0000-000000000001",
+            "--presentation-socket",
+            "/state/presentation/presentation-0123456789ab/tmux.sock",
+            "--presentation-session",
+            "wsnav-presentation-0123456789ab",
+            "--attempt-id",
+            "00000000-0000-0000-0000-000000000002",
         ])
         .unwrap();
         assert!(is_provider_surface_command(remote.command.as_ref()));

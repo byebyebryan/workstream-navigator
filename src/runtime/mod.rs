@@ -729,6 +729,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn launch_barrier_is_private_and_consumed_once() {
         use std::os::unix::fs::PermissionsExt;
 

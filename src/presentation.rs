@@ -2,11 +2,13 @@
 
 use std::{
     ffi::OsString,
-    fs,
+    fs::{self, OpenOptions},
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::Command,
 };
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
@@ -20,7 +22,28 @@ const NAVIGATOR_WINDOW: &str = "navigator";
 const NAVIGATOR_PANE: &str = "0.0";
 const PROVIDER_PANE: &str = "0.1";
 const MAX_TMUX_OUTPUT_BYTES: usize = 16 * 1024;
+const MAX_ATTACHMENT_STATUS_BYTES: u64 = 4 * 1024;
+const ATTACHMENT_STATUS_FILE: &str = "attachment.json";
 const PRESENTATION_TMUX_CONFIG: &str = "set -g status off\nset -g mouse on\nset -g remain-on-exit on\nset -g default-terminal tmux-256color\nset-environment -g COLORTERM truecolor\nbind-key -n MouseUp1Pane select-pane -t = \\; send-keys -M\n";
+
+/// Ephemeral provider-pane attempt metadata read only by the local navigator.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct AttachmentStatus {
+    pub attempt_id: uuid::Uuid,
+    pub host_alias: String,
+    pub workstream_id: WorkstreamId,
+    pub phase: AttachmentPhase,
+}
+
+/// Observable provider attachment phases. These never enter durable host state.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttachmentPhase {
+    Pending,
+    Running,
+    Completed,
+    Failed,
+}
 
 /// The exact private paths and tmux session owned by one navigator client.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -28,6 +51,7 @@ pub struct PresentationPaths {
     pub directory: PathBuf,
     pub socket: PathBuf,
     pub config: PathBuf,
+    pub attachment_status: PathBuf,
     pub session_name: String,
 }
 
@@ -44,6 +68,7 @@ impl PresentationPaths {
         Self {
             socket: directory.join("tmux.sock"),
             config: directory.join("tmux.conf"),
+            attachment_status: directory.join(ATTACHMENT_STATUS_FILE),
             session_name: format!("{PRESENTATION_PREFIX}{identifier}"),
             directory,
         }
@@ -74,6 +99,7 @@ impl PresentationPaths {
         }
         Ok(Self {
             config: parent.join("tmux.conf"),
+            attachment_status: parent.join(ATTACHMENT_STATUS_FILE),
             directory: parent.to_path_buf(),
             socket,
             session_name,
@@ -220,8 +246,16 @@ impl Presentation {
     /// # Errors
     ///
     /// Returns an error when tmux rejects replacement of the exact owned pane.
-    pub fn attach_workstream(&self, workstream_id: WorkstreamId) -> Result<(), PresentationError> {
-        self.invoke(None, self.provider_respawn_arguments(workstream_id))
+    pub fn attach_workstream(
+        &self,
+        workstream_id: WorkstreamId,
+    ) -> Result<AttachmentStatus, PresentationError> {
+        let status = self.prepare_attachment("local", workstream_id)?;
+        let result = self.invoke(
+            None,
+            self.provider_respawn_arguments(workstream_id, status.attempt_id),
+        );
+        self.finish_attachment_start(status, result)
     }
 
     /// Replaces only the outer provider attachment helper with an interactive
@@ -236,15 +270,21 @@ impl Presentation {
         &self,
         host_alias: &str,
         workstream_id: WorkstreamId,
-    ) -> Result<(), PresentationError> {
-        self.invoke(
+    ) -> Result<AttachmentStatus, PresentationError> {
+        let status = self.prepare_attachment(host_alias, workstream_id)?;
+        let result = self.invoke(
             None,
-            self.provider_remote_respawn_arguments(host_alias, workstream_id),
-        )
+            self.provider_remote_respawn_arguments(host_alias, workstream_id, status.attempt_id),
+        );
+        self.finish_attachment_start(status, result)
     }
 
-    fn provider_respawn_arguments(&self, workstream_id: WorkstreamId) -> Vec<OsString> {
-        let command = self.provider_attach_command(workstream_id);
+    fn provider_respawn_arguments(
+        &self,
+        workstream_id: WorkstreamId,
+        attempt_id: uuid::Uuid,
+    ) -> Vec<OsString> {
+        let command = self.provider_attach_command(workstream_id, attempt_id);
         self.provider_respawn_for_command(command)
     }
 
@@ -252,6 +292,7 @@ impl Presentation {
         &self,
         host_alias: &str,
         workstream_id: WorkstreamId,
+        attempt_id: uuid::Uuid,
     ) -> Vec<OsString> {
         let command = vec![
             self.executable.clone().into_os_string(),
@@ -260,6 +301,12 @@ impl Presentation {
             "_provider_remote_attach".into(),
             host_alias.into(),
             workstream_id.to_string().into(),
+            "--presentation-socket".into(),
+            self.paths.socket.clone().into_os_string(),
+            "--presentation-session".into(),
+            self.paths.session_name.clone().into(),
+            "--attempt-id".into(),
+            attempt_id.to_string().into(),
         ];
         self.provider_respawn_for_command(command)
     }
@@ -306,6 +353,61 @@ impl Presentation {
                 format!("{}:{NAVIGATOR_PANE}", self.paths.session_name).into(),
             ],
         )
+    }
+
+    /// Returns the current exact provider attachment attempt. If its helper
+    /// pane died before reporting a terminal phase, the attempt is atomically
+    /// converted to `Failed` for an exact same-row retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed private status or ambiguous tmux pane
+    /// evidence.
+    pub fn attachment_status(&self) -> Result<Option<AttachmentStatus>, PresentationError> {
+        let Some(mut status) = self.read_attachment_status()? else {
+            return Ok(None);
+        };
+        if matches!(
+            status.phase,
+            AttachmentPhase::Pending | AttachmentPhase::Running
+        ) && self.provider_pane_is_dead()?
+        {
+            status.phase = AttachmentPhase::Failed;
+            self.write_attachment_status(&status)?;
+        }
+        Ok(Some(status))
+    }
+
+    /// Advances only the currently recorded exact attachment attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for a stale attempt, invalid transition, or private
+    /// status I/O failure.
+    pub fn report_attachment_phase(
+        &self,
+        attempt_id: uuid::Uuid,
+        phase: AttachmentPhase,
+    ) -> Result<(), PresentationError> {
+        let Some(mut status) = self.read_attachment_status()? else {
+            return Err(PresentationError::StaleAttachmentAttempt);
+        };
+        if status.attempt_id != attempt_id
+            || !matches!(
+                (status.phase, phase),
+                (
+                    AttachmentPhase::Pending,
+                    AttachmentPhase::Running | AttachmentPhase::Failed
+                ) | (
+                    AttachmentPhase::Running,
+                    AttachmentPhase::Completed | AttachmentPhase::Failed
+                )
+            )
+        {
+            return Err(PresentationError::StaleAttachmentAttempt);
+        }
+        status.phase = phase;
+        self.write_attachment_status(&status)
     }
 
     /// Stops only this private presentation server and removes its exact
@@ -401,14 +503,128 @@ impl Presentation {
         ]
     }
 
-    fn provider_attach_command(&self, workstream_id: WorkstreamId) -> Vec<OsString> {
+    fn provider_attach_command(
+        &self,
+        workstream_id: WorkstreamId,
+        attempt_id: uuid::Uuid,
+    ) -> Vec<OsString> {
         vec![
             self.executable.clone().into_os_string(),
             "--state-root".into(),
             self.state_root.clone().into_os_string(),
             "_provider_attach".into(),
             workstream_id.to_string().into(),
+            "--presentation-socket".into(),
+            self.paths.socket.clone().into_os_string(),
+            "--presentation-session".into(),
+            self.paths.session_name.clone().into(),
+            "--attempt-id".into(),
+            attempt_id.to_string().into(),
         ]
+    }
+
+    fn prepare_attachment(
+        &self,
+        host_alias: &str,
+        workstream_id: WorkstreamId,
+    ) -> Result<AttachmentStatus, PresentationError> {
+        validate_host_alias(host_alias)?;
+        let status = AttachmentStatus {
+            attempt_id: uuid::Uuid::new_v4(),
+            host_alias: host_alias.to_owned(),
+            workstream_id,
+            phase: AttachmentPhase::Pending,
+        };
+        self.write_attachment_status(&status)?;
+        Ok(status)
+    }
+
+    fn finish_attachment_start(
+        &self,
+        mut status: AttachmentStatus,
+        result: Result<(), PresentationError>,
+    ) -> Result<AttachmentStatus, PresentationError> {
+        if let Err(error) = result {
+            status.phase = AttachmentPhase::Failed;
+            let _ = self.write_attachment_status(&status);
+            return Err(error);
+        }
+        Ok(status)
+    }
+
+    fn read_attachment_status(&self) -> Result<Option<AttachmentStatus>, PresentationError> {
+        let metadata = match fs::symlink_metadata(&self.paths.attachment_status) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(PresentationError::Io(error)),
+        };
+        if !metadata.file_type().is_file() || metadata.len() > MAX_ATTACHMENT_STATUS_BYTES {
+            return Err(PresentationError::InvalidAttachmentStatus);
+        }
+        let file = fs::File::open(&self.paths.attachment_status).map_err(PresentationError::Io)?;
+        let mut bytes = Vec::new();
+        file.take(MAX_ATTACHMENT_STATUS_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(PresentationError::Io)?;
+        if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_ATTACHMENT_STATUS_BYTES {
+            return Err(PresentationError::InvalidAttachmentStatus);
+        }
+        let status: AttachmentStatus = serde_json::from_slice(&bytes)
+            .map_err(|_| PresentationError::InvalidAttachmentStatus)?;
+        validate_host_alias(&status.host_alias)?;
+        Ok(Some(status))
+    }
+
+    fn write_attachment_status(&self, status: &AttachmentStatus) -> Result<(), PresentationError> {
+        validate_host_alias(&status.host_alias)?;
+        let bytes =
+            serde_json::to_vec(status).map_err(|_| PresentationError::InvalidAttachmentStatus)?;
+        if bytes.len() > usize::try_from(MAX_ATTACHMENT_STATUS_BYTES).unwrap_or(usize::MAX) {
+            return Err(PresentationError::InvalidAttachmentStatus);
+        }
+        let temporary = self
+            .paths
+            .directory
+            .join(format!(".attachment-{}.tmp", uuid::Uuid::new_v4().simple()));
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&temporary).map_err(PresentationError::Io)?;
+        file.write_all(&bytes).map_err(PresentationError::Io)?;
+        file.sync_all().map_err(PresentationError::Io)?;
+        set_mode(&temporary, 0o600)?;
+        fs::rename(&temporary, &self.paths.attachment_status).map_err(PresentationError::Io)
+    }
+
+    fn provider_pane_is_dead(&self) -> Result<bool, PresentationError> {
+        let mut command = Command::new("tmux");
+        command
+            .env_remove("TMUX")
+            .arg("-S")
+            .arg(&self.paths.socket)
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                &format!("{}:{PROVIDER_PANE}", self.paths.session_name),
+                "#{pane_dead}",
+            ]);
+        let output = output_bounded(&mut command, 16, MAX_TMUX_OUTPUT_BYTES)
+            .map_err(PresentationError::from_bounded_tmux)?;
+        if !output.status.success() {
+            return Err(PresentationError::TmuxRejected(sanitize_diagnostic(
+                &String::from_utf8_lossy(&output.stderr),
+            )));
+        }
+        match output.stdout.as_slice() {
+            b"0\n" | b"0\r\n" => Ok(false),
+            b"1\n" | b"1\r\n" => Ok(true),
+            _ => Err(PresentationError::InvalidAttachmentStatus),
+        }
     }
 
     fn invoke(
@@ -457,6 +673,13 @@ fn sanitize_diagnostic(diagnostic: &str) -> String {
         .collect()
 }
 
+fn validate_host_alias(host_alias: &str) -> Result<(), PresentationError> {
+    if host_alias.is_empty() || host_alias.len() > 128 || host_alias.chars().any(char::is_control) {
+        return Err(PresentationError::InvalidAttachmentStatus);
+    }
+    Ok(())
+}
+
 fn create_paths(paths: &PresentationPaths) -> Result<(), PresentationError> {
     let parent = paths
         .directory
@@ -490,6 +713,10 @@ pub enum PresentationError {
     AmbiguousPresentations,
     #[error("invalid private presentation control path {0}")]
     InvalidControlPath(PathBuf),
+    #[error("invalid private provider attachment status")]
+    InvalidAttachmentStatus,
+    #[error("provider attachment attempt is stale or already complete")]
+    StaleAttachmentAttempt,
     #[error("I/O: {0}")]
     Io(std::io::Error),
     #[error("private tmux output exceeded the diagnostic limit")]
@@ -523,6 +750,73 @@ mod tests {
     }
 
     #[test]
+    fn attachment_status_advances_only_the_exact_ephemeral_attempt() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        fs::create_dir_all(&paths.directory).unwrap();
+        let presentation = Presentation {
+            paths,
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        let workstream_id = WorkstreamId::new();
+        let pending = presentation
+            .prepare_attachment("snap", workstream_id)
+            .unwrap();
+
+        assert_eq!(
+            presentation.read_attachment_status().unwrap(),
+            Some(pending.clone())
+        );
+        assert!(matches!(
+            presentation.report_attachment_phase(uuid::Uuid::new_v4(), AttachmentPhase::Running),
+            Err(PresentationError::StaleAttachmentAttempt)
+        ));
+
+        presentation
+            .report_attachment_phase(pending.attempt_id, AttachmentPhase::Running)
+            .unwrap();
+        presentation
+            .report_attachment_phase(pending.attempt_id, AttachmentPhase::Failed)
+            .unwrap();
+        let failed = presentation.read_attachment_status().unwrap().unwrap();
+        assert_eq!(failed.phase, AttachmentPhase::Failed);
+        assert_eq!(failed.host_alias, "snap");
+        assert_eq!(failed.workstream_id, workstream_id);
+        assert!(matches!(
+            presentation.report_attachment_phase(pending.attempt_id, AttachmentPhase::Running),
+            Err(PresentationError::StaleAttachmentAttempt)
+        ));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn attachment_status_file_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        fs::create_dir_all(&paths.directory).unwrap();
+        let presentation = Presentation {
+            paths,
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        presentation
+            .prepare_attachment("local", WorkstreamId::new())
+            .unwrap();
+
+        assert_eq!(
+            fs::metadata(&presentation.paths.attachment_status)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+
+    #[test]
     fn provider_attachment_uses_direct_arguments_not_a_shell() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = PresentationPaths::fresh(temporary.path());
@@ -531,7 +825,8 @@ mod tests {
             executable: PathBuf::from("/workspace/wsnav"),
             state_root: temporary.path().to_path_buf(),
         };
-        let command = presentation.provider_attach_command(WorkstreamId::new());
+        let command =
+            presentation.provider_attach_command(WorkstreamId::new(), uuid::Uuid::new_v4());
         assert!(
             command
                 .iter()
@@ -542,7 +837,7 @@ mod tests {
                 .iter()
                 .any(|argument| argument == "_provider_attach")
         );
-        assert_eq!(command.len(), 5);
+        assert_eq!(command.len(), 11);
     }
 
     #[test]
@@ -555,13 +850,16 @@ mod tests {
             state_root: temporary.path().to_path_buf(),
         };
         let workstream_id = WorkstreamId::new();
-        let arguments = presentation.provider_respawn_arguments(workstream_id);
+        let arguments =
+            presentation.provider_respawn_arguments(workstream_id, uuid::Uuid::new_v4());
 
-        assert_eq!(arguments.len(), 9);
+        assert_eq!(arguments.len(), 15);
         assert_eq!(arguments[0], "respawn-pane");
         assert_eq!(arguments[4], "/workspace/wsnav");
         assert_eq!(arguments[7], "_provider_attach");
         assert_eq!(arguments[8], OsString::from(workstream_id.to_string()));
+        assert_eq!(arguments[9], "--presentation-socket");
+        assert_eq!(arguments[13], "--attempt-id");
     }
 
     #[test]
@@ -575,13 +873,19 @@ mod tests {
         };
         let workstream_id = WorkstreamId::new();
 
-        let arguments = presentation.provider_remote_respawn_arguments("snap", workstream_id);
+        let arguments = presentation.provider_remote_respawn_arguments(
+            "snap",
+            workstream_id,
+            uuid::Uuid::new_v4(),
+        );
 
         assert_eq!(arguments[4], "/workspace/wsnav");
         assert_eq!(arguments[5], "--state-root");
         assert_eq!(arguments[7], "_provider_remote_attach");
         assert_eq!(arguments[8], "snap");
         assert_eq!(arguments[9], OsString::from(workstream_id.to_string()));
+        assert_eq!(arguments[10], "--presentation-socket");
+        assert_eq!(arguments[14], "--attempt-id");
     }
 
     #[test]

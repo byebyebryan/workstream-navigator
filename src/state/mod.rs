@@ -258,6 +258,15 @@ pub struct ExternalWorkstream {
     pub managed_worktree_root: PathBuf,
 }
 
+/// Private Git metadata for creating one sibling Workstream from a registered
+/// `ProjectLocation`. It is never returned by snapshots or the SSH protocol.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkstreamGitLocation {
+    pub repository_path: PathBuf,
+    pub default_base_ref: String,
+    pub source_revision: Revision,
+}
+
 /// The persisted target of one non-destructive Git-backed Workstream creation.
 ///
 /// The fields are host-private: they are never placed into a remote snapshot or
@@ -734,6 +743,42 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?;
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(registration)
+    }
+
+    /// Returns the exact host-private Git location configuration for an
+    /// existing Workstream. The source revision lets callers resolve the
+    /// configured ref first, then fail closed if a concurrent lifecycle update
+    /// changes the source before durable preparation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Workstream or its registered location is
+    /// missing, malformed, or cannot be queried.
+    pub fn workstream_git_location(
+        &self,
+        workstream_id: WorkstreamId,
+    ) -> Result<WorkstreamGitLocation, StateError> {
+        self.connection
+            .query_row(
+                "SELECT project_locations.repository_path,
+                        project_locations.default_base_ref,
+                        workstreams.revision
+                 FROM workstreams
+                 JOIN project_locations ON project_locations.location_id = workstreams.location_id
+                 WHERE workstreams.workstream_id = ?1",
+                [workstream_id.to_string()],
+                |row| {
+                    Ok(WorkstreamGitLocation {
+                        repository_path: PathBuf::from(row.get::<_, String>(0)?),
+                        default_base_ref: row.get(1)?,
+                        source_revision: Revision::try_from(row.get::<_, i64>(2)?)
+                            .map_err(to_from_sql_error)?,
+                    })
+                },
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::UnknownOpenWorkstream(workstream_id))
     }
 
     /// Atomically records the exact managed worktree plan before any Git

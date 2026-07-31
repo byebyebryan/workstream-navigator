@@ -86,6 +86,8 @@ enum Commands {
     RemoveObserver,
     /// Register one existing Git checkout as the initial external workstream.
     Register { checkout: PathBuf },
+    /// Create and start an independent managed Workstream from one registered project location.
+    NewWorkstream { source_workstream_id: String },
     /// Start native Codex in a private tmux server for one registered workstream.
     Start { workstream_id: String },
     /// Attach this terminal directly to a live native Codex runtime.
@@ -248,25 +250,36 @@ fn execute(cli: Cli) -> Result<(), AppError> {
         Commands::Host { command } => return host_command(&root, command),
         command => command,
     };
-    let mut registry = HostRegistry::open(&root)?;
+    execute_state_command(&root, command)
+}
+
+fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppError> {
+    let mut registry = HostRegistry::open(root)?;
     match command {
-        Commands::Setup { skip_review } => setup(&root, &mut registry, skip_review),
+        Commands::Setup { skip_review } => setup(root, &mut registry, skip_review),
         Commands::TrustObserver => trust_observer(&mut registry),
         Commands::Doctor => doctor(&registry),
         Commands::UpdateObserver => update_observer(&mut registry),
         Commands::RemoveObserver => remove_observer(&mut registry),
         Commands::Register { checkout } => register(&mut registry, &checkout),
+        Commands::NewWorkstream {
+            source_workstream_id,
+        } => new_workstream(
+            root,
+            &mut registry,
+            parse_workstream(&source_workstream_id)?,
+        ),
         Commands::Start { workstream_id } => {
-            start(&root, &mut registry, parse_workstream(&workstream_id)?)
+            start(root, &mut registry, parse_workstream(&workstream_id)?)
         }
         Commands::Attach { workstream_id } => {
-            attach(&root, &registry, parse_workstream(&workstream_id)?)
+            attach(root, &registry, parse_workstream(&workstream_id)?)
         }
         Commands::Park { workstream_id } => {
-            park(&root, &mut registry, parse_workstream(&workstream_id)?)
+            park(root, &mut registry, parse_workstream(&workstream_id)?)
         }
         Commands::Status { workstream_id } => {
-            status(&root, &registry, parse_workstream(&workstream_id)?)
+            status(root, &registry, parse_workstream(&workstream_id)?)
         }
         Commands::Rename {
             workstream_id,
@@ -604,6 +617,22 @@ fn register(registry: &mut HostRegistry, checkout: &Path) -> Result<(), AppError
     let registered =
         registry.register_external_workstream(checkout, repository_identity, default_base_ref)?;
     println!("registered workstream {}", registered.workstream_id);
+    Ok(())
+}
+
+fn new_workstream(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+    source_workstream_id: WorkstreamId,
+) -> Result<(), AppError> {
+    let workstream_id = actions::start_independent_workstream(
+        root,
+        registry,
+        source_workstream_id,
+        None,
+        uuid::Uuid::new_v4().to_string(),
+    )?;
+    println!("started independent workstream {workstream_id}");
     Ok(())
 }
 

@@ -879,11 +879,7 @@ impl NavigatorView {
                         .borders(Borders::ALL)
                         .title(format!(" Workstreams · {} ", self.view_mode().label())),
                 )
-                .highlight_style(
-                    Style::default()
-                        .bg(Color::DarkGray)
-                        .add_modifier(Modifier::BOLD),
-                ),
+                .highlight_style(selected_row_style()),
             areas[0],
             &mut state,
         );
@@ -1122,6 +1118,17 @@ fn help_lines() -> Vec<Line<'static>> {
 }
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+/// Keep selection distinct from every semantic row foreground. In particular,
+/// `DarkGray` is reserved for secondary activity text and the parked marker,
+/// so it must never become the selected-row background.
+const SELECTED_ROW_BACKGROUND: Color = Color::Indexed(236);
+
+fn selected_row_style() -> Style {
+    Style::default()
+        .bg(SELECTED_ROW_BACKGROUND)
+        .add_modifier(Modifier::BOLD)
+}
 
 fn navigator_list_item(
     entry: &NavigatorListEntry,
@@ -2208,6 +2215,30 @@ mod tests {
         for host_color in HOST_LABEL_PALETTE {
             assert!(!PROJECT_MARKER_PALETTE.contains(&host_color));
         }
+    }
+
+    #[test]
+    fn selected_row_background_never_masks_semantic_row_foregrounds() {
+        let semantic_colors = [
+            Color::White,
+            Color::Gray,
+            Color::DarkGray,
+            Color::Indexed(250),
+            Color::Indexed(180),
+            Color::Red,
+            Color::Yellow,
+            Color::Cyan,
+            Color::Green,
+        ];
+
+        assert!(!semantic_colors.contains(&SELECTED_ROW_BACKGROUND));
+        assert!(!HOST_LABEL_PALETTE.contains(&SELECTED_ROW_BACKGROUND));
+        assert!(!PROJECT_MARKER_PALETTE.contains(&SELECTED_ROW_BACKGROUND));
+        assert_eq!(
+            selected_row_style().bg,
+            Some(SELECTED_ROW_BACKGROUND),
+            "selection must preserve the parked marker and quiet activity age"
+        );
     }
 
     #[test]

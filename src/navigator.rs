@@ -1216,8 +1216,6 @@ fn workstream_context_line(
             Span::raw("   "),
             host(),
             Span::styled(" · ", Style::default().fg(Color::Gray)),
-            project_marker(row.project_id, project_colors),
-            Span::raw(" "),
             project(),
         ]),
         WorkstreamRowContext::Host => Line::from(vec![
@@ -1248,26 +1246,39 @@ fn project_accent(project_id: ProjectId, project_colors: &BTreeMap<ProjectId, Co
 
 fn host_color(alias: &str) -> Color {
     if alias == "local" {
-        Color::LightBlue
+        HOST_LABEL_PALETTE[0]
     } else {
-        let palette = [Color::LightCyan, Color::LightMagenta, Color::Cyan];
-        palette[stable_color_index(alias.as_bytes(), palette.len())]
+        let remote_palette_len = HOST_LABEL_PALETTE.len() - 1;
+        let index = stable_color_index(alias.as_bytes(), remote_palette_len);
+        HOST_LABEL_PALETTE[index + 1]
     }
 }
 
+/// Host labels use a single cool blue family. Project labels deliberately use
+/// a separate muted violet family below, so the compact context line reads as
+/// `host · project`, not as a string of unrelated colors.
+const HOST_LABEL_PALETTE: [Color; 4] = [
+    Color::LightBlue,
+    Color::Indexed(75),
+    Color::Indexed(111),
+    Color::Indexed(117),
+];
+
+/// Projects use a muted violet family that stays distinct from the cool host
+/// axis and the green/yellow/red lifecycle-state colors.
 const PROJECT_MARKER_PALETTE: [Color; 12] = [
-    Color::Indexed(67),
-    Color::Indexed(68),
-    Color::Indexed(73),
-    Color::Indexed(74),
     Color::Indexed(96),
     Color::Indexed(97),
     Color::Indexed(98),
-    Color::Indexed(103),
-    Color::Indexed(104),
-    Color::Indexed(109),
-    Color::Indexed(110),
+    Color::Indexed(133),
+    Color::Indexed(134),
+    Color::Indexed(139),
     Color::Indexed(140),
+    Color::Indexed(141),
+    Color::Indexed(146),
+    Color::Indexed(147),
+    Color::Indexed(176),
+    Color::Indexed(177),
 ];
 
 /// Allocates distinct muted accents to concurrently visible Projects. The
@@ -2067,14 +2078,7 @@ mod tests {
         assert!(rendered.contains('✓'));
         assert!(!rendered.contains("done"));
         assert!(!rendered.contains("prompt"));
-        let project_marker_cell = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .find(|cell| cell.symbol() == "•")
-            .unwrap();
-        assert_eq!(project_marker_cell.fg, expected_project_color);
+        assert!(!rendered.contains('•'));
         let project_name_cell = terminal
             .backend()
             .buffer()
@@ -2091,6 +2095,39 @@ mod tests {
             .find(|cell| cell.symbol() == "l")
             .unwrap();
         assert_eq!(host_cell.fg, Color::LightBlue);
+    }
+
+    #[test]
+    fn recent_context_uses_one_neutral_separator_between_color_axes() {
+        let snapshot = LocalNavigatorSnapshot {
+            workstreams: vec![NavigatorWorkstream {
+                project_label: "project".to_owned(),
+                ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
+            }],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+        };
+        let row = &snapshot.workstreams[0];
+        let project_colors = visible_project_colors(&snapshot);
+
+        let line = workstream_context_line(row, WorkstreamRowContext::Recent, &project_colors);
+
+        assert_eq!(
+            line.spans
+                .iter()
+                .filter(|span| span.content.as_ref() == " · ")
+                .count(),
+            1
+        );
+        assert!(!line.spans.iter().any(|span| span.content.as_ref() == "•"));
+    }
+
+    #[test]
+    fn host_and_project_accents_use_separate_color_families() {
+        assert_eq!(host_color("local"), HOST_LABEL_PALETTE[0]);
+        for host_color in HOST_LABEL_PALETTE {
+            assert!(!PROJECT_MARKER_PALETTE.contains(&host_color));
+        }
     }
 
     #[test]

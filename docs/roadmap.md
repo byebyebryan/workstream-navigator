@@ -618,6 +618,33 @@ Exit gate:
 - no durable state, control path, Runtime, or provider behavior changes; and
 - formatting, tests, lint, package checks, and `git diff --check` pass.
 
+## D6.7 - Compact context hierarchy refinement
+
+Implementation status: complete. The flat recent view now uses one neutral
+separator between colored host and Project labels; host accents are cool blue
+and Project accents are muted violet.
+
+Reduce visual noise in the compact context line without changing its identity
+or control semantics. Preserve readable host/Project names while making their
+separate identity axes immediately apparent.
+
+Scope:
+
+- remove the redundant Project marker from the flat `host · Project` context
+  line, retaining one neutral separator;
+- use a bounded cool-blue palette for local and remote host labels; and
+- use a separate collision-resolved muted-violet palette for Project marker,
+  compact label, and Project-group header.
+
+Exit gate:
+
+- deterministic tests prove the recent context has exactly one neutral
+  separator and no redundant marker, and that host and Project palettes do not
+  overlap;
+- Workstream titles, selected-row treatment, lifecycle colors, navigation,
+  Runtime state, and protocol contracts remain unchanged; and
+- formatting, tests, lint, package checks, and `git diff --check` pass.
+
 ## Deferred beyond V1
 
 The roadmap does not include arbitrary existing-session adoption, worktree or

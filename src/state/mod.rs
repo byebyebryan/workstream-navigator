@@ -24,7 +24,7 @@ use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 ///
 /// This is safe release-probe metadata; it is not a host-state observation.
 pub const HOST_SCHEMA_VERSION: i64 = 6;
-const CLIENT_SCHEMA_VERSION: i64 = 3;
+const CLIENT_SCHEMA_VERSION: i64 = 4;
 const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
 
@@ -151,6 +151,11 @@ const CLIENT_SCHEMA_SQL: &str = "
     CREATE UNIQUE INDEX project_repository_fingerprint_idx
         ON projects(repository_fingerprint)
         WHERE repository_fingerprint IS NOT NULL;
+    CREATE TABLE ignored_project_locations (
+        host_id TEXT NOT NULL,
+        location_id TEXT NOT NULL,
+        PRIMARY KEY(host_id, location_id)
+    );
     CREATE TABLE preferences (
         key TEXT PRIMARY KEY,
         value_json TEXT NOT NULL
@@ -3144,6 +3149,12 @@ impl ClientCatalog {
                 [host.host_id.to_string()],
             )
             .map_err(StateError::Sqlite)?;
+        transaction
+            .execute(
+                "DELETE FROM ignored_project_locations WHERE host_id = ?1",
+                [host.host_id.to_string()],
+            )
+            .map_err(StateError::Sqlite)?;
         let deleted = transaction
             .execute("DELETE FROM hosts WHERE host_alias = ?1", [alias])
             .map_err(StateError::Sqlite)?;
@@ -3197,6 +3208,52 @@ impl ClientCatalog {
                         .map_err(StateError::InvalidPersistedUuid)
                 })
             })
+    }
+
+    /// Returns whether this host-owned location was explicitly forgotten from
+    /// the client navigator without mutating its host registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the client catalog cannot be queried.
+    pub fn project_location_is_ignored(
+        &self,
+        host_id: HostId,
+        location_id: LocationId,
+    ) -> Result<bool, StateError> {
+        self.connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM ignored_project_locations
+                    WHERE host_id = ?1 AND location_id = ?2
+                 )",
+                params![host_id.to_string(), location_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StateError::Sqlite)
+    }
+
+    /// Hides every client-visible location in one Project. Host registries,
+    /// checkouts, runtimes, and provider sessions remain untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the client catalog cannot commit the exact
+    /// client-only visibility change atomically.
+    pub fn ignore_project_locations(&mut self, project_id: ProjectId) -> Result<usize, StateError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let hidden = transaction
+            .execute(
+                "INSERT OR IGNORE INTO ignored_project_locations (host_id, location_id)
+                 SELECT host_id, location_id FROM project_locations WHERE project_id = ?1",
+                [project_id.to_string()],
+            )
+            .map_err(StateError::Sqlite)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(hidden)
     }
 }
 
@@ -3658,6 +3715,15 @@ fn migrate_client_schema(connection: &mut Connection) -> Result<(), StateError> 
                  CREATE UNIQUE INDEX project_repository_fingerprint_idx
                     ON projects(repository_fingerprint)
                     WHERE repository_fingerprint IS NOT NULL;",
+            )
+            .map_err(StateError::Sqlite)?,
+        3 => transaction
+            .execute_batch(
+                "CREATE TABLE ignored_project_locations (
+                    host_id TEXT NOT NULL,
+                    location_id TEXT NOT NULL,
+                    PRIMARY KEY(host_id, location_id)
+                 );",
             )
             .map_err(StateError::Sqlite)?,
         CLIENT_SCHEMA_VERSION => return Ok(()),
@@ -5053,6 +5119,47 @@ mod tests {
             .unwrap();
 
         assert_eq!(loaded, recorded);
+    }
+
+    #[test]
+    fn client_catalog_can_forget_project_locations_without_touching_host_state() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let registry = HostRegistry::open(&root).unwrap();
+        let host = registry.identity().unwrap();
+        let location_id = LocationId::new();
+        let mut catalog = ClientCatalog::open(&root).unwrap();
+        let project = catalog
+            .register_local_project_location(
+                &host,
+                location_id,
+                Path::new("/workspace/wsnav"),
+                "wsnav",
+            )
+            .unwrap();
+
+        assert_eq!(
+            catalog
+                .ignore_project_locations(project.project_id)
+                .unwrap(),
+            1
+        );
+        assert!(
+            catalog
+                .project_location_is_ignored(host.host_id, location_id)
+                .unwrap()
+        );
+        assert!(
+            !catalog
+                .project_location_is_ignored(host.host_id, LocationId::new())
+                .unwrap()
+        );
+        assert!(
+            catalog
+                .local_project_location(host.host_id, location_id)
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]

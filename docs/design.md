@@ -229,7 +229,8 @@ Workstreams
 ├── Projects
 │   ├── Project list with inline locations
 │   ├── Register location
-│   └── Start Workstream at marked location
+│   ├── Start Workstream
+│   └── Remove archived Project from navigator
 └── Hosts
     ├── Host list with inline health / observer state
     └── Register / verify / activate / remove observer / forget
@@ -242,8 +243,8 @@ returns from either management list to the ordinary Workstreams page. Project
 locations, Host health, and observer state render inline in their respective
 lists, so those pages have no detail drill-down. A thin `Workstreams` parent frame above the
 bordered Projects or Hosts child block makes that hierarchy visible without a
-dashboard or a global tab row. On Projects, `Enter` starts a Workstream at the
-marked ProjectLocation; Host actions remain explicit page-local keys.
+dashboard or a global tab row. Project actions remain explicit page-local keys,
+as do Host actions.
 No page creates a tmux popup, overlays the provider pane, or replaces the
 native TUI.
 
@@ -1157,15 +1158,22 @@ local Git inspection; paths are never interpolated into SSH shell syntax or
 returned in public snapshots. Permanent Project deletion, manual repository
 cleanup, and automatic cross-host merge/split remain outside D7.
 
-Projects render every host-owned location inline with bounded labels and
-active/archived counts. `←`/`→` (or `h`/`l`) marks a location; `Enter` or `n`
-starts a Workstream there, including when every source row is archived. `a`
-opens the navigator-local host picker followed by a bounded checkout-path
-entry; on an empty Projects list, `Enter` or `n` opens that same registration
-flow. The selected host alone receives that path for local Git inspection; no
-path is written into provider panes, returned by the SSH control response, or
-shown in Workstream snapshots. Matching credential-free repository fingerprints
-associate locations into one logical Project.
+Projects render every host-owned location as a bounded tree under its logical
+Project, with active/archived counts. `n` starts a Workstream from the selected
+Project. When it has more than one host location, a navigator-local picker asks
+where to start; a single-location Project starts directly. `a` adds an existing
+checkout through the navigator-local host picker and bounded checkout-path
+entry. On an empty Projects list, `n` opens that same add flow. The selected
+host alone receives that path for local Git inspection; no path is written into
+provider panes, returned by the SSH control response, or shown in Workstream
+snapshots. Matching credential-free repository fingerprints associate locations
+into one logical Project.
+
+`x` removes an archived Project from this navigator only after confirmation. It
+records the selected locations as hidden client inventory and refuses while any
+of the Project's Workstreams are active. It never deletes or mutates the host
+registry, Git checkout, worktree, or Codex history; this is intentional
+visibility cleanup, not permanent Project deletion.
 
 The Hosts page renders each host's reachability, retained Workstream and
 location counts, and observer state inline. Its direct keys can register,

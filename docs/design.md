@@ -227,30 +227,30 @@ Workstreams
 ├── Recent / By project / By host
 ├── Recovery
 ├── Projects
-│   ├── Project list / detail
-│   ├── Locations / register location
-│   └── Start Workstream
+│   ├── Project list with inline locations
+│   ├── Register location
+│   └── Start Workstream at marked location
 └── Hosts
-    ├── Host list / detail
-    ├── Health / observer
-    └── Remove observer / forget
+    ├── Host list with inline health / observer state
+    └── Register / verify / activate / remove observer / forget
 ```
 
 Workstreams is the default page and retains the product's ordinary switching
 workflow. Projects and Hosts are inventory/configuration pages, reached by
 their contextual `,` and `.` keys rather than a persistent tab bar. `Esc`
-returns from either management list to the ordinary Workstreams page, and
-returns from a detail to its list. Opening Project or Host detail replaces
-only the navigator content. A thin `Workstreams` parent frame above the
+returns from either management list to the ordinary Workstreams page. Project
+locations, Host health, and observer state render inline in their respective
+lists, so those pages have no detail drill-down. A thin `Workstreams` parent frame above the
 bordered Projects or Hosts child block makes that hierarchy visible without a
-dashboard or a global tab row. `Enter` consistently opens the selected entity.
+dashboard or a global tab row. On Projects, `Enter` starts a Workstream at the
+marked ProjectLocation; Host actions remain explicit page-local keys.
 No page creates a tmux popup, overlays the provider pane, or replaces the
 native TUI.
 
 Direct page-local keys are the canonical control path. The compact footer
 shows the most relevant bindings for the current page and state; `?` reveals
-the complete list. Detail pages provide bounded status and context, but D7
-does not require a menu-driven action system. A later clickable action menu may
+the complete list. The management lists provide bounded status and context
+inline, but D7 does not require a menu-driven action system. A later clickable action menu may
 augment the same operations without replacing or delaying the direct keys.
 Each stateful action introduces its own bounded text entry, confirmation, and
 progress state with the authority that consumes it; the navigator does not keep
@@ -1157,22 +1157,21 @@ local Git inspection; paths are never interpolated into SSH shell syntax or
 returned in public snapshots. Permanent Project deletion, manual repository
 cleanup, and automatic cross-host merge/split remain outside D7.
 
-`n` from the Projects list opens a navigator-local host picker followed by a
-bounded checkout-path entry. `a` in a Project detail uses the same flow for an
-additional location. The selected host alone receives that path for local Git
-inspection; no path is written into provider panes, returned by the SSH
-control response, or shown in Workstream snapshots. Matching credential-free
-repository fingerprints associate locations into one logical Project. The
-Project detail lists host and bounded location label plus active/archived
-counts; `n` there starts from the selected retained location, including when
-every source row is archived.
-An empty navigator opens this same registration flow. From Project detail, the
-user can start a Workstream at a selected ProjectLocation even when the Project
-has no active Workstream to use as a source row.
+Projects render every host-owned location inline with bounded labels and
+active/archived counts. `←`/`→` (or `h`/`l`) marks a location; `Enter` or `n`
+starts a Workstream there, including when every source row is archived. `a`
+opens the navigator-local host picker followed by a bounded checkout-path
+entry; on an empty Projects list, `Enter` or `n` opens that same registration
+flow. The selected host alone receives that path for local Git inspection; no
+path is written into provider panes, returned by the SSH control response, or
+shown in Workstream snapshots. Matching credential-free repository fingerprints
+associate locations into one logical Project.
 
-The Hosts page can register, verify, activate, remove the exact owned observer
-from, and forget an SSH host. Observer removal retains the existing fail-closed
-profile ownership and live-Runtime guards. Forget is client-catalog-only: it
+The Hosts page renders each host's reachability, retained Workstream and
+location counts, and observer state inline. Its direct keys can register,
+verify, activate, remove the exact owned observer from, and forget an SSH host.
+Observer removal retains the existing fail-closed profile ownership and
+live-Runtime guards. Forget is client-catalog-only: it
 removes the alias and local Project associations but does not contact the host,
 stop a Runtime, delete remote state, or uninstall anything. Its confirmation
 shows retained Workstream, ProjectLocation, and unresolved-operation counts so

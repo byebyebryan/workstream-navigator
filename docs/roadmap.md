@@ -725,7 +725,7 @@ D7.3 now exposes bounded host-owned ProjectLocations with active/archived
 counts, supports starting at a selected retained location, and registers
 existing local or SSH checkouts through navigator-local forms. D7.4 now adds
 host registration, health verification, observer lifecycle status, explicit
-activation/review, exact removal, and client-only forget through Hosts detail.
+activation/review, exact removal, and client-only forget from the Hosts list.
 D7 makes ordinary WSNav administration available through the navigator without
 turning it into a task manager or replacing the provider surface.
 
@@ -737,7 +737,7 @@ Scope:
   parity;
 - retain Workstreams as the default page and add sibling Projects and Hosts
   pages inside the existing navigator pane, with mouse and keyboard switching,
-  nested detail, and page-specific help;
+  inline inventory detail, and page-specific help;
 - retain page-local single-key actions as the canonical terminal control path,
   with a separate status line, a compact action-boundary-wrapped key strip, and
   a `?`-toggled single-column expanded reference at the bottom of the pane;
@@ -766,7 +766,7 @@ Delivery slices:
    a disposable cwd in the right pane, verifies trust only after the TUI exits,
    and fails closed on foreign profiles, failed review, or ambiguous state.
 2. **D7.1 - Management navigation foundation.** Add the Workstreams home and
-   its Projects and Hosts child pages, list/detail navigation, mouse behavior,
+   its Projects and Hosts child pages, inline inventory rows, mouse behavior,
    and direct page-local keys without changing provider state. Refine the
    narrow Workstreams pane with two-line
    Recent rows, explicit two-line tree children in grouped views, the `Recent`
@@ -792,7 +792,7 @@ Delivery slices:
 5. **D7.4 - Host management.** Register, verify, activate, remove the exact
    observer from, and forget SSH hosts through the navigator while preserving
    client/host ownership boundaries. Carry the native review boundary proven
-   in D7.0 through the remote Host detail flow.
+   in D7.0 through the remote Hosts-page flow.
 6. **D7.5 - Integrated acceptance.** Exercise fresh local and remote setup,
    Project registration, Workstream lifecycle/recovery, observer removal, and
    host forget/re-register using only the two-pane TUI after installation,

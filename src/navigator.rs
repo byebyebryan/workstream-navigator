@@ -743,7 +743,7 @@ pub struct NavigatorView {
     observed_attachment: Option<(uuid::Uuid, AttachmentPhase)>,
     rendered_offset: usize,
     rendered_mouse_rows: Vec<(u16, usize)>,
-    rendered_project_rows: Vec<(u16, ProjectId)>,
+    rendered_project_rows: Vec<(u16, ProjectId, Option<usize>)>,
     rendered_host_rows: Vec<(u16, String)>,
     mouse_click: Option<MouseClickIntent>,
     message: Option<String>,
@@ -757,8 +757,7 @@ pub struct NavigatorView {
 enum MouseClickIntent {
     Blank,
     Row,
-    Project,
-    Host,
+    Management,
 }
 
 /// The active navigator page. This remains process-local presentation state.
@@ -787,8 +786,6 @@ enum NavigatorDetail {
         host_alias: String,
         workstream_id: WorkstreamId,
     },
-    Project(ProjectId),
-    Host(String),
 }
 
 /// Active and archived Workstreams are separate navigator visibility scopes.
@@ -1071,20 +1068,14 @@ impl NavigatorView {
     }
 
     fn open_selected_detail(&mut self) {
-        self.detail = match self.page {
-            NavigatorPage::Workstreams => {
-                self.selected()
-                    .map(|workstream| NavigatorDetail::Workstream {
-                        host_alias: workstream.host.alias().to_owned(),
-                        workstream_id: workstream.workstream_id,
-                    })
-            }
-            NavigatorPage::Projects => {
-                self.selected_project_location = 0;
-                self.selected_project.map(NavigatorDetail::Project)
-            }
-            NavigatorPage::Hosts => self.selected_host.clone().map(NavigatorDetail::Host),
-        };
+        if self.page == NavigatorPage::Workstreams {
+            self.detail = self
+                .selected()
+                .map(|workstream| NavigatorDetail::Workstream {
+                    host_alias: workstream.host.alias().to_owned(),
+                    workstream_id: workstream.workstream_id,
+                });
+        }
     }
 
     fn open_recovery(&mut self) {
@@ -1179,13 +1170,11 @@ impl NavigatorView {
     }
 
     fn selected_project_location_source(&self) -> Option<NavigatorWorkstream> {
-        let NavigatorDetail::Project(project_id) = self.detail.as_ref()? else {
-            return None;
-        };
+        let project_id = self.selected_project?;
         let location = self
             .projects()
             .into_iter()
-            .find(|project| project.project_id == *project_id)?
+            .find(|project| project.project_id == project_id)?
             .locations
             .get(self.selected_project_location)?
             .clone();
@@ -1193,7 +1182,7 @@ impl NavigatorView {
             .workstreams
             .iter()
             .find(|workstream| {
-                workstream.project_id == *project_id
+                workstream.project_id == project_id
                     && workstream.location_id == location.location_id
                     && workstream.host.alias() == location.host.alias()
             })
@@ -1221,6 +1210,7 @@ impl NavigatorView {
         self.detail = None;
         self.selected = index;
         self.selected_project = Some(project_id);
+        self.selected_project_location = 0;
         true
     }
 
@@ -1295,15 +1285,18 @@ impl NavigatorView {
         {
             self.selected_project = projects.first().map(|project| project.project_id);
         }
-        if let Some(NavigatorDetail::Project(project_id)) = self.detail.as_ref() {
-            self.selected_project_location = projects
-                .iter()
-                .find(|project| project.project_id == *project_id)
-                .map_or(0, |project| {
-                    self.selected_project_location
-                        .min(project.locations.len().saturating_sub(1))
-                });
-        }
+        self.selected_project_location = self
+            .selected_project
+            .and_then(|project_id| {
+                projects
+                    .iter()
+                    .find(|project| project.project_id == project_id)
+                    .map(|project| {
+                        self.selected_project_location
+                            .min(project.locations.len().saturating_sub(1))
+                    })
+            })
+            .unwrap_or(0);
         let hosts = self.hosts();
         if !hosts
             .iter()
@@ -1324,18 +1317,6 @@ impl NavigatorView {
             {
                 self.detail = None;
             }
-            Some(NavigatorDetail::Project(project_id))
-                if !projects
-                    .iter()
-                    .any(|project| project.project_id == *project_id) =>
-            {
-                self.detail = None;
-            }
-            Some(NavigatorDetail::Host(alias))
-                if !hosts.iter().any(|host| host.alias == *alias) =>
-            {
-                self.detail = None;
-            }
             Some(_) | None => {}
         }
     }
@@ -1345,18 +1326,6 @@ impl NavigatorView {
             if !self.snapshot.unresolved_operations.is_empty() {
                 self.selected_operation =
                     (self.selected_operation + 1) % self.snapshot.unresolved_operations.len();
-            }
-            return;
-        }
-        if let Some(NavigatorDetail::Project(project_id)) = self.detail.as_ref() {
-            if let Some(project) = self
-                .projects()
-                .into_iter()
-                .find(|project| project.project_id == *project_id)
-                && !project.locations.is_empty()
-            {
-                self.selected_project_location =
-                    (self.selected_project_location + 1) % project.locations.len();
             }
             return;
         }
@@ -1382,6 +1351,7 @@ impl NavigatorView {
                 } else {
                     self.selected_project = projects.first().map(|project| project.project_id);
                 }
+                self.selected_project_location = 0;
             }
             NavigatorPage::Hosts => {
                 let hosts = self.hosts();
@@ -1404,20 +1374,6 @@ impl NavigatorView {
                     .selected_operation
                     .checked_sub(1)
                     .unwrap_or(self.snapshot.unresolved_operations.len() - 1);
-            }
-            return;
-        }
-        if let Some(NavigatorDetail::Project(project_id)) = self.detail.as_ref() {
-            if let Some(project) = self
-                .projects()
-                .into_iter()
-                .find(|project| project.project_id == *project_id)
-                && !project.locations.is_empty()
-            {
-                self.selected_project_location = self
-                    .selected_project_location
-                    .checked_sub(1)
-                    .unwrap_or(project.locations.len() - 1);
             }
             return;
         }
@@ -1444,6 +1400,7 @@ impl NavigatorView {
                 } else {
                     self.selected_project = projects.first().map(|project| project.project_id);
                 }
+                self.selected_project_location = 0;
             }
             NavigatorPage::Hosts => {
                 let hosts = self.hosts();
@@ -1463,6 +1420,42 @@ impl NavigatorView {
     pub fn select_row(&mut self, row: usize) {
         if self.workstream_is_visible(row) {
             self.selected = row;
+        }
+    }
+
+    fn select_project_location_next(&mut self) {
+        let Some(project_id) = self.selected_project else {
+            return;
+        };
+        let Some(project) = self
+            .projects()
+            .into_iter()
+            .find(|project| project.project_id == project_id)
+        else {
+            return;
+        };
+        if !project.locations.is_empty() {
+            self.selected_project_location =
+                (self.selected_project_location + 1) % project.locations.len();
+        }
+    }
+
+    fn select_project_location_previous(&mut self) {
+        let Some(project_id) = self.selected_project else {
+            return;
+        };
+        let Some(project) = self
+            .projects()
+            .into_iter()
+            .find(|project| project.project_id == project_id)
+        else {
+            return;
+        };
+        if !project.locations.is_empty() {
+            self.selected_project_location = self
+                .selected_project_location
+                .checked_sub(1)
+                .unwrap_or(project.locations.len() - 1);
         }
     }
 
@@ -1704,7 +1697,6 @@ impl NavigatorView {
             self.page,
             self.detail.is_some(),
             matches!(self.detail, Some(NavigatorDetail::Recovery)),
-            matches!(self.detail, Some(NavigatorDetail::Project(_))),
             self.workstream_scope,
         )
         .len()
@@ -1767,12 +1759,6 @@ impl NavigatorView {
                 host_alias,
                 workstream_id,
             }) => self.render_workstream_detail(frame, content_area, &host_alias, workstream_id),
-            Some(NavigatorDetail::Project(project_id)) => {
-                self.render_project_detail(frame, content_area, project_id);
-            }
-            Some(NavigatorDetail::Host(alias)) => {
-                self.render_host_detail(frame, content_area, &alias);
-            }
             None => match self.page {
                 NavigatorPage::Workstreams => self.render_workstreams(frame, content_area),
                 NavigatorPage::Projects => self.render_projects(frame, content_area),
@@ -1863,7 +1849,14 @@ impl NavigatorView {
         let projects = self.projects();
         let items = projects
             .iter()
-            .map(|project| project_overview_item(project, area.width.saturating_sub(2)))
+            .map(|project| {
+                project_overview_item(
+                    project,
+                    Some(project.project_id) == self.selected_project,
+                    self.selected_project_location,
+                    area.width.saturating_sub(2),
+                )
+            })
             .collect::<Vec<_>>();
         let mut state = ListState::default();
         state.select(
@@ -1883,7 +1876,10 @@ impl NavigatorView {
 
     fn render_hosts(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let hosts = self.hosts();
-        let items = hosts.iter().map(host_overview_item).collect::<Vec<_>>();
+        let items = hosts
+            .iter()
+            .map(|host| host_overview_item(host, area.width.saturating_sub(2)))
+            .collect::<Vec<_>>();
         let mut state = ListState::default();
         state.select(
             hosts
@@ -1984,100 +1980,6 @@ impl NavigatorView {
                     .borders(Borders::ALL)
                     .title(" Recovery · Enter reconcile · Esc back "),
             ),
-            area,
-        );
-    }
-
-    fn render_project_detail(&self, frame: &mut Frame<'_>, area: Rect, project_id: ProjectId) {
-        let Some(project) = self
-            .projects()
-            .into_iter()
-            .find(|project| project.project_id == project_id)
-        else {
-            return;
-        };
-        let mut lines = vec![
-            Line::from(Span::styled(
-                project.label.clone(),
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::raw(project_activity_summary(&project)),
-            Line::raw("Locations"),
-        ];
-        lines.extend(
-            project
-                .locations
-                .iter()
-                .enumerate()
-                .map(|(index, location)| {
-                    let marker = if index == self.selected_project_location {
-                        "> "
-                    } else {
-                        "  "
-                    };
-                    let activity = location_activity_summary(location);
-                    Line::from(Span::styled(
-                        format!(
-                            "{marker}{} · {} · {activity}",
-                            location.host.alias(),
-                            location.label,
-                        ),
-                        if index == self.selected_project_location {
-                            Style::default()
-                                .fg(Color::White)
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(Color::Gray)
-                        },
-                    ))
-                }),
-        );
-        lines.push(Line::raw(
-            "↑/↓ selects · n starts at location · Enter/Esc returns",
-        ));
-        frame.render_widget(
-            Paragraph::new(lines).block(
-                Block::default()
-                    .borders(Borders::ALL)
-                    .title(" Project · n start selected location "),
-            ),
-            area,
-        );
-    }
-
-    fn render_host_detail(&self, frame: &mut Frame<'_>, area: Rect, alias: &str) {
-        let Some(host) = self.hosts().into_iter().find(|host| host.alias == alias) else {
-            return;
-        };
-        let reachability = match host.reachability {
-            RemoteHostReachability::Reachable => "reachable",
-            RemoteHostReachability::Unreachable => "unreachable; showing cached state",
-        };
-        let workstream_label = if host.workstream_count == 1 {
-            "1 Workstream".to_owned()
-        } else {
-            format!("{} Workstreams", host.workstream_count)
-        };
-        frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(
-                    host.alias.clone(),
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Line::raw(reachability),
-                Line::raw(workstream_label),
-                Line::raw(format!(
-                    "Observer: {}",
-                    observer_status_label(host.observer_status)
-                )),
-                Line::raw("v verify · a activate/review · r remove observer"),
-                Line::raw(if host.alias == "local" {
-                    "Enter or Esc returns to the Host list"
-                } else {
-                    "x forget client registration · Enter/Esc returns"
-                }),
-            ])
-            .block(Block::default().borders(Borders::ALL).title(" Host ")),
             area,
         );
     }
@@ -2203,9 +2105,16 @@ impl NavigatorView {
             if y >= content_bottom {
                 break;
             }
-            let next_y = y.saturating_add(2).min(content_bottom);
-            self.rendered_project_rows
-                .extend((y..next_y).map(|row_y| (row_y, project.project_id)));
+            let next_y = y
+                .saturating_add(project_overview_height(project))
+                .min(content_bottom);
+            self.rendered_project_rows.extend((y..next_y).map(|row_y| {
+                let location_index = row_y
+                    .checked_sub(y)
+                    .and_then(|offset| offset.checked_sub(2))
+                    .map(|offset| usize::from(offset / 2));
+                (row_y, project.project_id, location_index)
+            }));
             y = next_y;
         }
     }
@@ -2224,17 +2133,19 @@ impl NavigatorView {
             if y >= content_bottom {
                 break;
             }
-            let next_y = y.saturating_add(2).min(content_bottom);
+            let next_y = y.saturating_add(host_overview_height()).min(content_bottom);
             self.rendered_host_rows
                 .extend((y..next_y).map(|row_y| (row_y, host.alias.clone())));
             y = next_y;
         }
     }
 
-    fn project_from_y(&self, y: u16) -> Option<ProjectId> {
+    fn project_from_y(&self, y: u16) -> Option<(ProjectId, Option<usize>)> {
         self.rendered_project_rows
             .iter()
-            .find_map(|(row_y, project_id)| (*row_y == y).then_some(*project_id))
+            .find_map(|(row_y, project_id, location_index)| {
+                (*row_y == y).then_some((*project_id, *location_index))
+            })
     }
 
     fn host_from_y(&self, y: u16) -> Option<String> {
@@ -2243,20 +2154,21 @@ impl NavigatorView {
             .find_map(|(row_y, alias)| (*row_y == y).then_some(alias.clone()))
     }
 
-    fn begin_project_click(&mut self, project_id: Option<ProjectId>) {
-        self.mouse_click = Some(if project_id.is_some() {
-            MouseClickIntent::Project
+    fn begin_project_click(&mut self, target: Option<(ProjectId, Option<usize>)>) {
+        self.mouse_click = Some(if target.is_some() {
+            MouseClickIntent::Management
         } else {
             MouseClickIntent::Blank
         });
-        if let Some(project_id) = project_id {
+        if let Some((project_id, location_index)) = target {
             self.selected_project = Some(project_id);
+            self.selected_project_location = location_index.unwrap_or(0);
         }
     }
 
     fn begin_host_click(&mut self, alias: Option<String>) {
         self.mouse_click = Some(if alias.is_some() {
-            MouseClickIntent::Host
+            MouseClickIntent::Management
         } else {
             MouseClickIntent::Blank
         });
@@ -2346,18 +2258,6 @@ impl NavigatorView {
                 "back"
             };
             let mut bindings = vec![("Enter", enter), ("Esc", "back")];
-            if matches!(detail, NavigatorDetail::Project(_)) {
-                bindings.push(("n", "start location"));
-                bindings.push(("a", "add checkout"));
-            }
-            if matches!(detail, NavigatorDetail::Host(_)) {
-                bindings.extend([
-                    ("v", "verify"),
-                    ("a", "activate"),
-                    ("r", "remove observer"),
-                    ("x", "forget remote"),
-                ]);
-            }
             bindings.push(("?", "keys"));
             return bindings;
         }
@@ -2387,15 +2287,20 @@ impl NavigatorView {
                 bindings
             }
             NavigatorPage::Projects => vec![
-                ("Enter", "details"),
-                ("n", "register checkout"),
+                ("Enter", "start"),
+                ("n", "start"),
+                ("a", "checkout"),
+                ("←/→", "location"),
                 ("Esc", "workstreams"),
                 (".", "hosts"),
                 ("?", "keys"),
             ],
             NavigatorPage::Hosts => vec![
-                ("Enter", "details"),
                 ("n", "register remote"),
+                ("v", "verify"),
+                ("a", "activate"),
+                ("r", "remove"),
+                ("x", "forget"),
                 ("Esc", "workstreams"),
                 (",", "projects"),
                 ("?", "keys"),
@@ -2437,7 +2342,6 @@ impl NavigatorView {
                 self.page,
                 self.detail.is_some(),
                 matches!(self.detail, Some(NavigatorDetail::Recovery)),
-                matches!(self.detail, Some(NavigatorDetail::Project(_))),
                 self.workstream_scope,
             ))
             .block(
@@ -2717,7 +2621,6 @@ fn help_lines(
     page: NavigatorPage,
     showing_detail: bool,
     showing_recovery: bool,
-    showing_project: bool,
     workstream_scope: WorkstreamScope,
 ) -> Vec<Line<'static>> {
     let heading = Style::default()
@@ -2753,48 +2656,41 @@ fn help_lines(
                 Span::raw("        return to the list"),
             ]),
         ]);
-        if showing_project {
-            lines.extend([
-                Line::from(vec![
-                    Span::styled("n", key),
-                    Span::raw("          start a new Workstream at the selected location"),
-                ]),
-                Line::from(vec![
-                    Span::styled("a", key),
-                    Span::raw("          register another existing checkout"),
-                ]),
-            ]);
-        } else if page == NavigatorPage::Hosts {
-            lines.extend(host_detail_help_lines(key));
-        }
     } else if page == NavigatorPage::Workstreams {
         lines.extend(workstream_help_lines(workstream_scope, heading, key));
     } else {
         let mut page_lines = vec![
             Line::raw(""),
             Line::from(Span::styled(page.label(), heading)),
-            Line::from(vec![
-                Span::styled("Enter", key),
-                Span::raw("      show bounded details"),
-            ]),
         ];
         if page == NavigatorPage::Projects {
-            page_lines.push(Line::from(vec![
-                Span::styled("n", key),
-                Span::raw("          register an existing checkout"),
-            ]));
+            page_lines.extend([
+                Line::from(vec![
+                    Span::styled("Enter / n", key),
+                    Span::raw("  start at the marked ProjectLocation"),
+                ]),
+                Line::from(vec![
+                    Span::styled("←/→ or h/l", key),
+                    Span::raw("  mark a visible ProjectLocation"),
+                ]),
+                Line::from(vec![
+                    Span::styled("a", key),
+                    Span::raw("          register an existing checkout"),
+                ]),
+            ]);
         } else if page == NavigatorPage::Hosts {
             page_lines.push(Line::from(vec![
                 Span::styled("n", key),
                 Span::raw("          verify and register a remote SSH host"),
             ]));
+            page_lines.extend(host_detail_help_lines(key));
         }
         lines.extend(page_lines);
     }
     lines.extend([
         Line::raw(""),
         Line::from(Span::styled("Mouse", heading)),
-        Line::raw("click a row to select; release to open or focus"),
+        Line::raw("click a row to select and focus the navigator"),
         Line::raw("click empty navigator space to focus it"),
         Line::raw(""),
         Line::from(vec![
@@ -2962,11 +2858,13 @@ fn host_header_item(alias: &str) -> ListItem<'static> {
 
 fn project_overview_item(
     project: &NavigatorProjectOverview,
+    selected: bool,
+    selected_location: usize,
     available_width: u16,
 ) -> ListItem<'static> {
-    ListItem::new(vec![
+    let mut lines = vec![
         Line::from(Span::styled(
-            project.label.clone(),
+            truncate_display(&project.label, usize::from(available_width)),
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
@@ -2975,7 +2873,57 @@ fn project_overview_item(
             project_overview_summary(project, available_width),
             Style::default().fg(Color::Gray),
         )]),
-    ])
+    ];
+    lines.extend(
+        project
+            .locations
+            .iter()
+            .enumerate()
+            .flat_map(|(index, location)| {
+                let marker = if selected && index == selected_location {
+                    "> "
+                } else {
+                    "  "
+                };
+                let location_label_width = usize::from(
+                    available_width.saturating_sub(
+                        u16::try_from(location.host.alias().chars().count().saturating_add(5))
+                            .unwrap_or(u16::MAX),
+                    ),
+                );
+                [
+                    Line::from(vec![
+                        Span::styled(
+                            marker,
+                            Style::default().fg(if selected && index == selected_location {
+                                Color::Cyan
+                            } else {
+                                Color::DarkGray
+                            }),
+                        ),
+                        Span::styled(
+                            location.host.alias().to_owned(),
+                            Style::default().fg(host_color(location.host.alias())),
+                        ),
+                        Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            truncate_display(&location.label, location_label_width),
+                            Style::default().fg(Color::Gray),
+                        ),
+                    ]),
+                    Line::from(Span::styled(
+                        format!("    {}", location_activity_summary(location)),
+                        Style::default().fg(Color::DarkGray),
+                    )),
+                ]
+            }),
+    );
+    ListItem::new(lines)
+}
+
+fn project_overview_height(project: &NavigatorProjectOverview) -> u16 {
+    u16::try_from(2_usize.saturating_add(project.locations.len().saturating_mul(2)))
+        .unwrap_or(u16::MAX)
 }
 
 fn project_overview_summary(project: &NavigatorProjectOverview, available_width: u16) -> String {
@@ -3012,7 +2960,11 @@ fn location_activity_summary(location: &NavigatorProjectLocation) -> String {
     )
 }
 
-fn host_overview_item(host: &NavigatorHostSummary) -> ListItem<'static> {
+const fn host_overview_height() -> u16 {
+    3
+}
+
+fn host_overview_item(host: &NavigatorHostSummary, available_width: u16) -> ListItem<'static> {
     let reachability = match host.reachability {
         RemoteHostReachability::Reachable => "available",
         RemoteHostReachability::Unreachable => "unavailable; cached",
@@ -3024,14 +2976,23 @@ fn host_overview_item(host: &NavigatorHostSummary) -> ListItem<'static> {
     };
     ListItem::new(vec![
         Line::from(Span::styled(
-            host.alias.clone(),
+            truncate_display(&host.alias, usize::from(available_width)),
             Style::default()
                 .fg(host_color(&host.alias))
                 .add_modifier(Modifier::BOLD),
         )),
+        Line::from(Span::styled(
+            truncate_display(
+                &format!(
+                    "{workstream_label} · {} location{}",
+                    host.location_count,
+                    if host.location_count == 1 { "" } else { "s" }
+                ),
+                usize::from(available_width),
+            ),
+            Style::default().fg(Color::Gray),
+        )),
         Line::from(vec![
-            Span::styled(workstream_label, Style::default().fg(Color::Gray)),
-            Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
             Span::styled(
                 reachability,
                 Style::default().fg(match host.reachability {
@@ -3039,9 +3000,15 @@ fn host_overview_item(host: &NavigatorHostSummary) -> ListItem<'static> {
                     RemoteHostReachability::Unreachable => Color::Yellow,
                 }),
             ),
-            Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" · ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                observer_status_label(host.observer_status),
+                truncate_display(
+                    observer_status_label(host.observer_status),
+                    usize::from(
+                        available_width
+                            .saturating_sub(u16::try_from(reachability.len() + 3).unwrap_or(0)),
+                    ),
+                ),
                 Style::default().fg(observer_status_color(host.observer_status)),
             ),
         ]),
@@ -3494,11 +3461,14 @@ fn handle_navigator_key(
         recover_selected_operation(root, remote, view);
         return false;
     }
-    if handle_detail_key(key.code, root, presentation, remote, view) {
-        return false;
-    }
     let workstreams = view.page() == NavigatorPage::Workstreams && view.detail.is_none();
     if workstreams && handle_workstream_action_key(key.code, root, presentation, remote, view) {
+        return false;
+    }
+    if !workstreams
+        && view.detail.is_none()
+        && handle_management_page_key(key.code, root, presentation, remote, view)
+    {
         return false;
     }
     match key.code {
@@ -3537,14 +3507,6 @@ fn handle_navigator_key(
             view.open_recovery();
             false
         }
-        KeyCode::Char('n') if view.page() == NavigatorPage::Projects && view.detail.is_none() => {
-            view.begin_checkout_registration();
-            false
-        }
-        KeyCode::Char('n') if view.page() == NavigatorPage::Hosts && view.detail.is_none() => {
-            view.begin_host_registration();
-            false
-        }
         KeyCode::Down | KeyCode::Char('j') => {
             view.select_next();
             false
@@ -3559,7 +3521,6 @@ fn handle_navigator_key(
             }
             false
         }
-        KeyCode::Enter if view.dismiss_detail() => false,
         KeyCode::Enter if workstreams => {
             activate_selected(root, presentation, remote, view);
             false
@@ -3568,34 +3529,39 @@ fn handle_navigator_key(
             view.open_selected_detail();
             false
         }
-        KeyCode::Enter => {
-            view.open_selected_detail();
-            false
-        }
         _ => false,
     }
 }
 
-fn handle_detail_key(
+fn handle_management_page_key(
     key: KeyCode,
     root: &StateRoot,
     presentation: &Presentation,
     remote: &mut RemoteMonitor,
     view: &mut NavigatorView,
 ) -> bool {
-    match (&view.detail, key) {
-        (Some(NavigatorDetail::Project(_)), KeyCode::Char('n')) => {
-            create_workstream_from_selected_project_location(root, presentation, remote, view);
+    match (view.page(), key) {
+        (NavigatorPage::Projects, KeyCode::Char('n') | KeyCode::Enter) => {
+            if view.projects().is_empty() {
+                view.begin_checkout_registration();
+            } else {
+                create_workstream_from_selected_project_location(root, presentation, remote, view);
+            }
         }
-        (Some(NavigatorDetail::Project(_)), KeyCode::Char('a')) => {
-            view.begin_checkout_registration();
+        (NavigatorPage::Projects, KeyCode::Char('a')) => view.begin_checkout_registration(),
+        (NavigatorPage::Projects, KeyCode::Right | KeyCode::Char('l')) => {
+            view.select_project_location_next();
         }
-        (Some(NavigatorDetail::Host(_)), KeyCode::Char('v')) => verify_selected_host(root, view),
-        (Some(NavigatorDetail::Host(_)), KeyCode::Char('a')) => {
+        (NavigatorPage::Projects, KeyCode::Left | KeyCode::Char('h')) => {
+            view.select_project_location_previous();
+        }
+        (NavigatorPage::Hosts, KeyCode::Char('n')) => view.begin_host_registration(),
+        (NavigatorPage::Hosts, KeyCode::Char('v')) => verify_selected_host(root, view),
+        (NavigatorPage::Hosts, KeyCode::Char('a')) => {
             activate_selected_host(root, presentation, remote, view);
         }
-        (Some(NavigatorDetail::Host(_)), KeyCode::Char('r')) => remove_selected_host_observer(view),
-        (Some(NavigatorDetail::Host(_)), KeyCode::Char('x')) => forget_selected_host(view),
+        (NavigatorPage::Hosts, KeyCode::Char('r')) => remove_selected_host_observer(view),
+        (NavigatorPage::Hosts, KeyCode::Char('x')) => forget_selected_host(view),
         _ => return false,
     }
     true
@@ -3808,8 +3774,7 @@ fn handle_navigator_mouse(
         }
         MouseEventKind::Up(MouseButton::Left) => match view.take_mouse_click() {
             Some(MouseClickIntent::Row) => activate_selected(root, presentation, remote, view),
-            Some(MouseClickIntent::Project | MouseClickIntent::Host) => view.open_selected_detail(),
-            Some(MouseClickIntent::Blank) => {
+            Some(MouseClickIntent::Management | MouseClickIntent::Blank) => {
                 if let Err(error) = presentation.focus_navigator() {
                     view.set_message(action_message(&error));
                 }
@@ -5467,7 +5432,6 @@ mod tests {
             NavigatorPage::Workstreams,
             false,
             false,
-            false,
             WorkstreamScope::Active,
         )
         .into_iter()
@@ -5543,9 +5507,9 @@ mod tests {
             Some(attached_id)
         );
 
+        assert_eq!(view.selected_project, Some(project_id));
         view.open_selected_detail();
-        assert_eq!(view.detail, Some(NavigatorDetail::Project(project_id)));
-        assert!(view.dismiss_detail());
+        assert!(view.detail.is_none());
 
         view.select_page(NavigatorPage::Hosts);
         assert_eq!(
@@ -5560,7 +5524,7 @@ mod tests {
         view.select_next();
         assert_eq!(view.selected_host_alias(), Some("spare"));
         view.open_selected_detail();
-        assert_eq!(view.detail, Some(NavigatorDetail::Host("spare".to_owned())));
+        assert!(view.detail.is_none());
         assert!(view.is_attached_to(&view.snapshot.workstreams[0]));
     }
 
@@ -5594,7 +5558,6 @@ mod tests {
         });
         view.select_page(NavigatorPage::Hosts);
         view.select_next();
-        view.open_selected_detail();
         let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
 
         terminal.draw(|frame| view.render(frame)).unwrap();
@@ -5606,9 +5569,9 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
-        assert!(rendered.contains("Observer: observer review needed"));
-        assert!(rendered.contains("activate/review"));
-        assert!(rendered.contains("forget client registration"));
+        assert!(rendered.contains("observer review needed"));
+        assert!(rendered.contains("available"));
+        assert!(rendered.contains("1 Workstream"));
         assert!(!rendered.contains(&workstream_id.to_string()));
         assert!(!rendered.contains(&location_id.to_string()));
     }
@@ -5646,7 +5609,7 @@ mod tests {
     }
 
     #[test]
-    fn project_detail_selects_host_owned_locations_without_rendering_opaque_ids() {
+    fn project_list_exposes_and_selects_host_owned_locations_without_opaque_ids() {
         let project_id = ProjectId::new();
         let local_location = LocationId::new();
         let remote_location = LocationId::new();
@@ -5695,7 +5658,6 @@ mod tests {
             unresolved_operations: Vec::new(),
         });
         view.select_page(NavigatorPage::Projects);
-        view.open_selected_detail();
 
         let project = view.projects().pop().unwrap();
         assert_eq!(project.active_workstream_count, 1);
@@ -5706,7 +5668,7 @@ mod tests {
                 .map(|source| source.workstream_id),
             Some(local_active)
         );
-        view.select_next();
+        view.select_project_location_next();
         assert_eq!(
             view.selected_project_location_source()
                 .map(|source| source.workstream_id),
@@ -5725,13 +5687,13 @@ mod tests {
         assert!(rendered.contains("1 active · 2 archived"));
         assert!(rendered.contains("local · main checkout"));
         assert!(rendered.contains("snap · remote checkout"));
-        assert!(rendered.contains("n start selected location"));
+        assert!(rendered.contains("Enter start"));
         assert!(!rendered.contains(&local_location.to_string()));
         assert!(!rendered.contains(&remote_location.to_string()));
     }
 
     #[test]
-    fn management_page_mouse_targets_cover_two_line_rows_without_page_tabs() {
+    fn management_page_mouse_targets_cover_inline_rows_without_page_tabs() {
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: vec![row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)],
             hosts: vec![
@@ -5764,17 +5726,25 @@ mod tests {
             .collect::<String>();
         assert!(rendered.contains("Workstreams"));
         assert!(rendered.contains("Projects"));
-        assert_eq!(view.project_from_y(2), view.selected_project);
-        assert_eq!(view.project_from_y(3), view.selected_project);
-        view.begin_project_click(view.project_from_y(3));
-        assert_eq!(view.take_mouse_click(), Some(MouseClickIntent::Project));
+        assert_eq!(
+            view.project_from_y(2),
+            view.selected_project.map(|project_id| (project_id, None))
+        );
+        assert_eq!(
+            view.project_from_y(4),
+            view.selected_project
+                .map(|project_id| (project_id, Some(0)))
+        );
+        view.begin_project_click(view.project_from_y(4));
+        assert_eq!(view.take_mouse_click(), Some(MouseClickIntent::Management));
 
         view.select_page(NavigatorPage::Hosts);
         terminal.draw(|frame| view.render(frame)).unwrap();
         assert_eq!(view.host_from_y(2).as_deref(), Some("local"));
         assert_eq!(view.host_from_y(3).as_deref(), Some("local"));
+        assert_eq!(view.host_from_y(4).as_deref(), Some("local"));
         view.begin_host_click(view.host_from_y(3));
-        assert_eq!(view.take_mouse_click(), Some(MouseClickIntent::Host));
+        assert_eq!(view.take_mouse_click(), Some(MouseClickIntent::Management));
     }
 
     #[test]
@@ -5804,14 +5774,14 @@ mod tests {
             .into_iter()
             .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
             .collect::<String>();
-        assert!(project_compact.contains("Enter details"));
+        assert!(project_compact.contains("Enter start"));
+        assert!(project_compact.contains("a checkout"));
         assert!(project_compact.contains("Esc workstreams"));
         assert!(project_compact.contains(". hosts"));
         assert!(!project_compact.contains("n new"));
 
         let workstream_help = help_lines(
             NavigatorPage::Workstreams,
-            false,
             false,
             false,
             WorkstreamScope::Active,
@@ -5840,7 +5810,6 @@ mod tests {
 
         let expanded = help_lines(
             NavigatorPage::Workstreams,
-            false,
             false,
             false,
             WorkstreamScope::Active,

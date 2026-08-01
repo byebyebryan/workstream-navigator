@@ -237,6 +237,10 @@ shows the most relevant bindings for the current page and state; `?` reveals
 the complete list. Detail pages provide bounded status and context, but D7
 does not require a menu-driven action system. A later clickable action menu may
 augment the same operations without replacing or delaying the direct keys.
+Each stateful action introduces its own bounded text entry, confirmation, and
+progress state with the authority that consumes it; the navigator does not keep
+an unconnected generic modal that could imply an action is available before its
+host contract exists.
 Mouse support in D7 covers page switching, selection, primary row activation,
 forms, and confirmation. Full mouse parity for every management action is not
 an acceptance requirement.

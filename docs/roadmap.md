@@ -4,8 +4,9 @@ Date: 2026-08-01
 
 Status: D0 through D6.9 complete. D7 is expanded into navigator workflow and
 lifecycle management; its observer-activation slice is implemented and ready
-for bounded native acceptance, while its management slices are not yet
-implemented.
+for bounded native acceptance. D7.1's navigator page, grouping, key-reference,
+and mouse foundation is implemented; its stateful management slices remain
+pending.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -715,8 +716,9 @@ Exit gate:
 
 ## D7 - Navigator workflow and lifecycle management
 
-Implementation status: observer activation is ready for native acceptance;
-the approved Workstream, Project, and Host management pages remain planned.
+Implementation status: observer activation is ready for native acceptance.
+D7.1 supplies the Workstreams, Projects, and Hosts navigation foundation;
+stateful Workstream, Project, and Host management remains planned.
 D7 makes ordinary WSNav administration available through the navigator without
 turning it into a task manager or replacing the provider surface.
 
@@ -757,12 +759,14 @@ Delivery slices:
    a disposable cwd in the right pane, verifies trust only after the TUI exits,
    and fails closed on foreign profiles, failed review, or ambiguous state.
 2. **D7.1 - Management navigation foundation.** Add the three top-level pages,
-   list/detail navigation, bounded text entry, confirmation, non-blocking action
-   state, mouse behavior, and direct page-local keys without changing provider
-   state. Refine the narrow Workstreams pane with two-line Recent rows, explicit
-   two-line tree children in grouped views, the `Recent` / `By project` /
-   `By host` cycle, compact bottom key hints, and a single-column expanded
-   reference while retaining the accepted Workstreams bindings.
+   list/detail navigation, mouse behavior, and direct page-local keys without
+   changing provider state. Refine the narrow Workstreams pane with two-line
+   Recent rows, explicit two-line tree children in grouped views, the `Recent`
+   / `By project` / `By host` cycle, compact bottom key hints, and a
+   single-column expanded reference while retaining the accepted Workstreams
+   bindings. Each later stateful action owns its bounded text entry,
+   confirmation, and non-blocking progress path; D7.1 deliberately does not
+   ship an unused generic modal.
 3. **D7.2 - Workstream lifecycle and recovery.** Add bounded status and
    canonical rename, preserve existing open/new/fork/park/acknowledge keys, add
    revision-guarded local/remote archive visibility and restore-without-start,

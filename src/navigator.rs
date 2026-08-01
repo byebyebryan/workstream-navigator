@@ -29,7 +29,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph},
 };
 use thiserror::Error;
 
@@ -139,8 +139,18 @@ impl NavigatorRuntimeStatus {
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LocalNavigatorSnapshot {
     pub workstreams: Vec<NavigatorWorkstream>,
+    pub hosts: Vec<NavigatorHostOverview>,
     pub unreachable_hosts: Vec<String>,
     pub unresolved_operation_count: usize,
+}
+
+/// Bounded host presentation metadata independent of whether the host currently
+/// has a visible Workstream. The client catalog and host handshake remain the
+/// authority; this is only enough to render the Hosts page safely.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NavigatorHostOverview {
+    pub alias: String,
+    pub reachability: RemoteHostReachability,
 }
 
 /// Reads a fresh local-only navigator projection from the durable host state.
@@ -165,6 +175,10 @@ pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, Naviga
         .collect::<Result<Vec<_>, _>>()?;
     Ok(LocalNavigatorSnapshot {
         workstreams,
+        hosts: vec![NavigatorHostOverview {
+            alias: "local".to_owned(),
+            reachability: RemoteHostReachability::Reachable,
+        }],
         unreachable_hosts: Vec::new(),
         unresolved_operation_count: registry.unresolved_operation_overviews()?.len(),
     })
@@ -501,6 +515,14 @@ impl RemoteMonitor {
 
     fn combine(&self, mut local: LocalNavigatorSnapshot) -> LocalNavigatorSnapshot {
         for (alias, host) in &self.hosts {
+            local.hosts.push(NavigatorHostOverview {
+                alias: alias.clone(),
+                reachability: if host.reachable {
+                    RemoteHostReachability::Reachable
+                } else {
+                    RemoteHostReachability::Unreachable
+                },
+            });
             local
                 .workstreams
                 .extend(host.workstreams.iter().cloned().map(|mut workstream| {
@@ -519,6 +541,12 @@ impl RemoteMonitor {
             }
             local.unresolved_operation_count += host.unresolved_operation_count;
         }
+        local
+            .hosts
+            .sort_by(|left, right| left.alias.cmp(&right.alias));
+        local
+            .hosts
+            .dedup_by(|left, right| left.alias == right.alias);
         local.workstreams.sort_by(compare_workstream_activity);
         local
     }
@@ -583,14 +611,22 @@ fn combined_snapshot(
 pub struct NavigatorView {
     snapshot: LocalNavigatorSnapshot,
     selected: usize,
+    page: NavigatorPage,
+    detail: Option<NavigatorDetail>,
+    selected_project: Option<ProjectId>,
+    selected_host: Option<String>,
     view_mode: NavigatorViewMode,
     attached: Option<(String, WorkstreamId)>,
     observed_attachment: Option<(uuid::Uuid, AttachmentPhase)>,
     rendered_offset: usize,
     rendered_mouse_rows: Vec<(u16, usize)>,
+    rendered_project_rows: Vec<(u16, ProjectId)>,
+    rendered_host_rows: Vec<(u16, String)>,
+    rendered_page_tabs: Vec<(Rect, NavigatorPage)>,
     mouse_click: Option<MouseClickIntent>,
     message: Option<String>,
     help_visible: bool,
+    help_scroll: u16,
     spinner_frame: usize,
 }
 
@@ -598,6 +634,59 @@ pub struct NavigatorView {
 enum MouseClickIntent {
     Blank,
     Row,
+    Project,
+    Host,
+    Page(NavigatorPage),
+}
+
+/// The active navigator page. This remains process-local presentation state.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum NavigatorPage {
+    #[default]
+    Workstreams,
+    Projects,
+    Hosts,
+}
+
+impl NavigatorPage {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Workstreams => "Workstreams",
+            Self::Projects => "Projects",
+            Self::Hosts => "Hosts",
+        }
+    }
+
+    const fn shortcut(self) -> char {
+        match self {
+            Self::Workstreams => '1',
+            Self::Projects => '2',
+            Self::Hosts => '3',
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum NavigatorDetail {
+    Project(ProjectId),
+    Host(String),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NavigatorProjectOverview {
+    project_id: ProjectId,
+    label: String,
+    host_aliases: Vec<String>,
+    workstream_count: usize,
+    latest_activity_at_millis: Option<i64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NavigatorHostSummary {
+    alias: String,
+    reachability: RemoteHostReachability,
+    workstream_count: usize,
+    latest_activity_at_millis: Option<i64>,
 }
 
 /// Local presentation grouping only. It is deliberately not durable state.
@@ -612,9 +701,9 @@ enum NavigatorViewMode {
 impl NavigatorViewMode {
     const fn next(self) -> Self {
         match self {
-            Self::Recent => Self::Host,
-            Self::Host => Self::Project,
-            Self::Project => Self::Recent,
+            Self::Recent => Self::Project,
+            Self::Project => Self::Host,
+            Self::Host => Self::Recent,
         }
     }
 
@@ -646,7 +735,13 @@ enum NavigatorListEntry {
     Workstream {
         snapshot_index: usize,
         context: WorkstreamRowContext,
+        tree_branch: Option<TreeBranch>,
     },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct TreeBranch {
+    is_last: bool,
 }
 
 impl NavigatorListEntry {
@@ -668,19 +763,29 @@ impl NavigatorListEntry {
 impl NavigatorView {
     #[must_use]
     pub fn new(snapshot: LocalNavigatorSnapshot) -> Self {
-        Self {
+        let mut view = Self {
             snapshot,
             selected: 0,
+            page: NavigatorPage::Workstreams,
+            detail: None,
+            selected_project: None,
+            selected_host: Some("local".to_owned()),
             view_mode: NavigatorViewMode::Recent,
             attached: None,
             observed_attachment: None,
             rendered_offset: 0,
             rendered_mouse_rows: Vec::new(),
+            rendered_project_rows: Vec::new(),
+            rendered_host_rows: Vec::new(),
+            rendered_page_tabs: Vec::new(),
             mouse_click: None,
             message: None,
             help_visible: false,
+            help_scroll: 0,
             spinner_frame: 0,
-        }
+        };
+        view.normalize_page_selection();
+        view
     }
 
     pub fn replace_snapshot(&mut self, snapshot: LocalNavigatorSnapshot) {
@@ -699,6 +804,7 @@ impl NavigatorView {
                     .min(self.snapshot.workstreams.len().saturating_sub(1))
             });
         self.clear_inactive_attachment();
+        self.normalize_page_selection();
     }
 
     #[must_use]
@@ -707,21 +813,224 @@ impl NavigatorView {
     }
 
     fn selected_host_alias(&self) -> Option<&str> {
-        self.selected().map(|row| row.host.alias())
+        if self.page == NavigatorPage::Hosts {
+            self.selected_host.as_deref()
+        } else {
+            self.selected().map(|row| row.host.alias())
+        }
+    }
+
+    const fn page(&self) -> NavigatorPage {
+        self.page
+    }
+
+    fn select_page(&mut self, page: NavigatorPage) {
+        if self.page != page {
+            self.page = page;
+            self.detail = None;
+            self.clear_message();
+        }
+    }
+
+    fn open_selected_detail(&mut self) {
+        self.detail = match self.page {
+            NavigatorPage::Workstreams => None,
+            NavigatorPage::Projects => self.selected_project.map(NavigatorDetail::Project),
+            NavigatorPage::Hosts => self.selected_host.clone().map(NavigatorDetail::Host),
+        };
+    }
+
+    fn dismiss_detail(&mut self) -> bool {
+        self.detail.take().is_some()
+    }
+
+    fn projects(&self) -> Vec<NavigatorProjectOverview> {
+        let mut projects = Vec::<NavigatorProjectOverview>::new();
+        for workstream in &self.snapshot.workstreams {
+            if let Some(project) = projects
+                .iter_mut()
+                .find(|project| project.project_id == workstream.project_id)
+            {
+                project.workstream_count += 1;
+                if !project
+                    .host_aliases
+                    .iter()
+                    .any(|host| host == workstream.host.alias())
+                {
+                    project
+                        .host_aliases
+                        .push(workstream.host.alias().to_owned());
+                    project.host_aliases.sort();
+                }
+                project.latest_activity_at_millis = project
+                    .latest_activity_at_millis
+                    .max(workstream.last_activity_at_millis);
+            } else {
+                projects.push(NavigatorProjectOverview {
+                    project_id: workstream.project_id,
+                    label: workstream.project_label.clone(),
+                    host_aliases: vec![workstream.host.alias().to_owned()],
+                    workstream_count: 1,
+                    latest_activity_at_millis: workstream.last_activity_at_millis,
+                });
+            }
+        }
+        projects.sort_by(|left, right| {
+            right
+                .latest_activity_at_millis
+                .cmp(&left.latest_activity_at_millis)
+                .then_with(|| left.label.cmp(&right.label))
+                .then_with(|| left.project_id.cmp(&right.project_id))
+        });
+        projects
+    }
+
+    fn hosts(&self) -> Vec<NavigatorHostSummary> {
+        let mut hosts = self
+            .snapshot
+            .hosts
+            .iter()
+            .map(|host| NavigatorHostSummary {
+                alias: host.alias.clone(),
+                reachability: host.reachability,
+                workstream_count: 0,
+                latest_activity_at_millis: None,
+            })
+            .collect::<Vec<_>>();
+        for workstream in &self.snapshot.workstreams {
+            if let Some(host) = hosts
+                .iter_mut()
+                .find(|host| host.alias == workstream.host.alias())
+            {
+                host.workstream_count += 1;
+                host.latest_activity_at_millis = host
+                    .latest_activity_at_millis
+                    .max(workstream.last_activity_at_millis);
+            } else {
+                hosts.push(NavigatorHostSummary {
+                    alias: workstream.host.alias().to_owned(),
+                    reachability: if workstream.host.is_reachable() {
+                        RemoteHostReachability::Reachable
+                    } else {
+                        RemoteHostReachability::Unreachable
+                    },
+                    workstream_count: 1,
+                    latest_activity_at_millis: workstream.last_activity_at_millis,
+                });
+            }
+        }
+        hosts.sort_by(|left, right| {
+            (left.alias != "local")
+                .cmp(&(right.alias != "local"))
+                .then_with(|| left.alias.cmp(&right.alias))
+        });
+        hosts
+    }
+
+    fn normalize_page_selection(&mut self) {
+        let projects = self.projects();
+        if !projects
+            .iter()
+            .any(|project| Some(project.project_id) == self.selected_project)
+        {
+            self.selected_project = projects.first().map(|project| project.project_id);
+        }
+        let hosts = self.hosts();
+        if !hosts
+            .iter()
+            .any(|host| Some(host.alias.as_str()) == self.selected_host.as_deref())
+        {
+            self.selected_host = hosts.first().map(|host| host.alias.clone());
+        }
+        match &self.detail {
+            Some(NavigatorDetail::Project(project_id))
+                if !projects
+                    .iter()
+                    .any(|project| project.project_id == *project_id) =>
+            {
+                self.detail = None;
+            }
+            Some(NavigatorDetail::Host(alias))
+                if !hosts.iter().any(|host| host.alias == *alias) =>
+            {
+                self.detail = None;
+            }
+            Some(_) | None => {}
+        }
     }
 
     pub fn select_next(&mut self) {
-        if !self.snapshot.workstreams.is_empty() {
-            self.selected = (self.selected + 1) % self.snapshot.workstreams.len();
+        if self.detail.is_some() {
+            return;
+        }
+        match self.page {
+            NavigatorPage::Workstreams => {
+                if !self.snapshot.workstreams.is_empty() {
+                    self.selected = (self.selected + 1) % self.snapshot.workstreams.len();
+                }
+            }
+            NavigatorPage::Projects => {
+                let projects = self.projects();
+                if let Some(index) = projects
+                    .iter()
+                    .position(|project| Some(project.project_id) == self.selected_project)
+                {
+                    self.selected_project = Some(projects[(index + 1) % projects.len()].project_id);
+                } else {
+                    self.selected_project = projects.first().map(|project| project.project_id);
+                }
+            }
+            NavigatorPage::Hosts => {
+                let hosts = self.hosts();
+                if let Some(index) = hosts
+                    .iter()
+                    .position(|host| Some(host.alias.as_str()) == self.selected_host.as_deref())
+                {
+                    self.selected_host = Some(hosts[(index + 1) % hosts.len()].alias.clone());
+                } else {
+                    self.selected_host = hosts.first().map(|host| host.alias.clone());
+                }
+            }
         }
     }
 
     pub fn select_previous(&mut self) {
-        if !self.snapshot.workstreams.is_empty() {
-            self.selected = self
-                .selected
-                .checked_sub(1)
-                .unwrap_or(self.snapshot.workstreams.len() - 1);
+        if self.detail.is_some() {
+            return;
+        }
+        match self.page {
+            NavigatorPage::Workstreams => {
+                if !self.snapshot.workstreams.is_empty() {
+                    self.selected = self
+                        .selected
+                        .checked_sub(1)
+                        .unwrap_or(self.snapshot.workstreams.len() - 1);
+                }
+            }
+            NavigatorPage::Projects => {
+                let projects = self.projects();
+                if let Some(index) = projects
+                    .iter()
+                    .position(|project| Some(project.project_id) == self.selected_project)
+                {
+                    self.selected_project =
+                        Some(projects[(index + projects.len() - 1) % projects.len()].project_id);
+                } else {
+                    self.selected_project = projects.first().map(|project| project.project_id);
+                }
+            }
+            NavigatorPage::Hosts => {
+                let hosts = self.hosts();
+                if let Some(index) = hosts
+                    .iter()
+                    .position(|host| Some(host.alias.as_str()) == self.selected_host.as_deref())
+                {
+                    self.selected_host =
+                        Some(hosts[(index + hosts.len() - 1) % hosts.len()].alias.clone());
+                } else {
+                    self.selected_host = hosts.first().map(|host| host.alias.clone());
+                }
+            }
         }
     }
 
@@ -831,14 +1140,30 @@ impl NavigatorView {
 
     fn toggle_help(&mut self) {
         self.help_visible = !self.help_visible;
+        self.help_scroll = 0;
     }
 
     fn dismiss_help(&mut self) {
         self.help_visible = false;
+        self.help_scroll = 0;
     }
 
     const fn help_visible(&self) -> bool {
         self.help_visible
+    }
+
+    fn scroll_help_next(&mut self) {
+        let last = help_lines(self.page, self.detail.is_some())
+            .len()
+            .saturating_sub(1);
+        self.help_scroll = self
+            .help_scroll
+            .saturating_add(1)
+            .min(u16::try_from(last).unwrap_or(u16::MAX));
+    }
+
+    fn scroll_help_previous(&mut self) {
+        self.help_scroll = self.help_scroll.saturating_sub(1);
     }
 
     fn cycle_view_mode(&mut self) {
@@ -854,16 +1179,97 @@ impl NavigatorView {
     }
 
     pub fn render(&mut self, frame: &mut Frame<'_>) {
+        let help_height = if self.help_visible {
+            frame.area().height.saturating_sub(4).clamp(3, 12)
+        } else {
+            2
+        };
         let areas = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Min(3), Constraint::Length(2)])
+            .constraints([
+                Constraint::Min(3),
+                Constraint::Length(1),
+                Constraint::Length(help_height),
+            ])
             .split(frame.area());
+        let content = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Length(1), Constraint::Min(2)])
+            .split(areas[0]);
+        self.render_page_tabs(frame, content[0]);
+        match self.detail.clone() {
+            Some(NavigatorDetail::Project(project_id)) => {
+                self.render_project_detail(frame, content[1], project_id);
+            }
+            Some(NavigatorDetail::Host(alias)) => {
+                self.render_host_detail(frame, content[1], &alias);
+            }
+            None => match self.page {
+                NavigatorPage::Workstreams => self.render_workstreams(frame, content[1]),
+                NavigatorPage::Projects => self.render_projects(frame, content[1]),
+                NavigatorPage::Hosts => self.render_hosts(frame, content[1]),
+            },
+        }
+        frame.render_widget(
+            Paragraph::new(self.footer_status()).style(self.footer_style()),
+            areas[1],
+        );
+        if self.help_visible {
+            self.render_help_reference(frame, areas[2]);
+        } else {
+            frame.render_widget(
+                Paragraph::new(self.compact_key_lines(areas[2].width))
+                    .style(Style::default().fg(Color::Gray)),
+                areas[2],
+            );
+        }
+    }
+
+    fn render_page_tabs(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        self.rendered_page_tabs.clear();
+        let pages = [
+            NavigatorPage::Workstreams,
+            NavigatorPage::Projects,
+            NavigatorPage::Hosts,
+        ];
+        let mut spans = Vec::new();
+        let mut x = area.x;
+        for page in pages {
+            let label = format!(" {} {} ", page.shortcut(), page.label());
+            let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
+            if x >= area.right() {
+                break;
+            }
+            let visible_width = width.min(area.right().saturating_sub(x));
+            self.rendered_page_tabs
+                .push((Rect::new(x, area.y, visible_width, area.height), page));
+            let style = if self.page == page {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(SELECTED_ROW_BACKGROUND)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            spans.push(Span::styled(label, style));
+            x = x.saturating_add(width);
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    }
+
+    fn render_workstreams(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let entries = self.list_entries();
         let project_colors = visible_project_colors(&self.snapshot);
         let items = entries
             .iter()
             .map(|entry| {
-                navigator_list_item(entry, &self.snapshot, &project_colors, self.spinner_frame)
+                navigator_list_item(
+                    entry,
+                    &self.snapshot,
+                    &project_colors,
+                    self.spinner_frame,
+                    area.width.saturating_sub(2),
+                )
             })
             .collect::<Vec<_>>();
         let mut state = ListState::default();
@@ -880,16 +1286,108 @@ impl NavigatorView {
                         .title(format!(" Workstreams · {} ", self.view_mode().label())),
                 )
                 .highlight_style(selected_row_style()),
-            areas[0],
+            area,
             &mut state,
         );
         self.rendered_offset = state.offset();
-        self.update_rendered_mouse_rows(&entries, areas[0]);
-        let help = self.footer_help();
-        frame.render_widget(Paragraph::new(help).style(self.footer_style()), areas[1]);
-        if self.help_visible {
-            Self::render_help_overlay(frame, areas[0]);
-        }
+        self.update_rendered_mouse_rows(&entries, area);
+    }
+
+    fn render_projects(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let projects = self.projects();
+        let items = projects
+            .iter()
+            .map(project_overview_item)
+            .collect::<Vec<_>>();
+        let mut state = ListState::default();
+        state.select(
+            projects
+                .iter()
+                .position(|project| Some(project.project_id) == self.selected_project),
+        );
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(Block::default().borders(Borders::ALL).title(" Projects "))
+                .highlight_style(selected_row_style()),
+            area,
+            &mut state,
+        );
+        self.update_rendered_project_rows(&projects, state.offset(), area);
+    }
+
+    fn render_hosts(&mut self, frame: &mut Frame<'_>, area: Rect) {
+        let hosts = self.hosts();
+        let items = hosts.iter().map(host_overview_item).collect::<Vec<_>>();
+        let mut state = ListState::default();
+        state.select(
+            hosts
+                .iter()
+                .position(|host| Some(host.alias.as_str()) == self.selected_host.as_deref()),
+        );
+        frame.render_stateful_widget(
+            List::new(items)
+                .block(Block::default().borders(Borders::ALL).title(" Hosts "))
+                .highlight_style(selected_row_style()),
+            area,
+            &mut state,
+        );
+        self.update_rendered_host_rows(&hosts, state.offset(), area);
+    }
+
+    fn render_project_detail(&self, frame: &mut Frame<'_>, area: Rect, project_id: ProjectId) {
+        let Some(project) = self
+            .projects()
+            .into_iter()
+            .find(|project| project.project_id == project_id)
+        else {
+            return;
+        };
+        let workstream_label = if project.workstream_count == 1 {
+            "1 Workstream".to_owned()
+        } else {
+            format!("{} Workstreams", project.workstream_count)
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    project.label,
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::raw(workstream_label),
+                Line::raw(format!("Locations: {}", project.host_aliases.join(" · "))),
+                Line::raw("Enter or Esc returns to the Project list"),
+            ])
+            .block(Block::default().borders(Borders::ALL).title(" Project ")),
+            area,
+        );
+    }
+
+    fn render_host_detail(&self, frame: &mut Frame<'_>, area: Rect, alias: &str) {
+        let Some(host) = self.hosts().into_iter().find(|host| host.alias == alias) else {
+            return;
+        };
+        let reachability = match host.reachability {
+            RemoteHostReachability::Reachable => "reachable",
+            RemoteHostReachability::Unreachable => "unreachable; showing cached state",
+        };
+        let workstream_label = if host.workstream_count == 1 {
+            "1 Workstream".to_owned()
+        } else {
+            format!("{} Workstreams", host.workstream_count)
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    host.alias,
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::raw(reachability),
+                Line::raw(workstream_label),
+                Line::raw("Enter or Esc returns to the Host list"),
+            ])
+            .block(Block::default().borders(Borders::ALL).title(" Host ")),
+            area,
+        );
     }
 
     fn list_entries(&self) -> Vec<NavigatorListEntry> {
@@ -902,6 +1400,7 @@ impl NavigatorView {
                 .map(|(snapshot_index, _)| NavigatorListEntry::Workstream {
                     snapshot_index,
                     context: WorkstreamRowContext::Recent,
+                    tree_branch: None,
                 })
                 .collect(),
             NavigatorViewMode::Host => {
@@ -919,13 +1418,20 @@ impl NavigatorView {
                 groups
                     .into_iter()
                     .flat_map(|(alias, indexes)| {
+                        let count = indexes.len();
                         std::iter::once(NavigatorListEntry::HostHeader { alias }).chain(
-                            indexes.into_iter().map(|snapshot_index| {
-                                NavigatorListEntry::Workstream {
-                                    snapshot_index,
-                                    context: WorkstreamRowContext::Host,
-                                }
-                            }),
+                            indexes
+                                .into_iter()
+                                .enumerate()
+                                .map(move |(index, snapshot_index)| {
+                                    NavigatorListEntry::Workstream {
+                                        snapshot_index,
+                                        context: WorkstreamRowContext::Host,
+                                        tree_branch: Some(TreeBranch {
+                                            is_last: index + 1 == count,
+                                        }),
+                                    }
+                                }),
                         )
                     })
                     .collect()
@@ -949,13 +1455,17 @@ impl NavigatorView {
                 groups
                     .into_iter()
                     .flat_map(|(project_id, label, indexes)| {
+                        let count = indexes.len();
                         std::iter::once(NavigatorListEntry::ProjectHeader { project_id, label })
-                            .chain(indexes.into_iter().map(|snapshot_index| {
-                                NavigatorListEntry::Workstream {
+                            .chain(indexes.into_iter().enumerate().map(
+                                move |(index, snapshot_index)| NavigatorListEntry::Workstream {
                                     snapshot_index,
                                     context: WorkstreamRowContext::Project,
-                                }
-                            }))
+                                    tree_branch: Some(TreeBranch {
+                                        is_last: index + 1 == count,
+                                    }),
+                                },
+                            ))
                     })
                     .collect()
             }
@@ -980,16 +1490,100 @@ impl NavigatorView {
         }
     }
 
-    fn footer_help(&self) -> String {
-        if self.help_visible {
-            return "? or Esc closes help".to_owned();
+    fn update_rendered_project_rows(
+        &mut self,
+        projects: &[NavigatorProjectOverview],
+        offset: usize,
+        area: Rect,
+    ) {
+        self.rendered_project_rows.clear();
+        let content_top = area.y.saturating_add(1);
+        let content_bottom = area.y.saturating_add(area.height.saturating_sub(1));
+        let mut y = content_top;
+        for project in projects.iter().skip(offset) {
+            if y >= content_bottom {
+                break;
+            }
+            let next_y = y.saturating_add(2).min(content_bottom);
+            self.rendered_project_rows
+                .extend((y..next_y).map(|row_y| (row_y, project.project_id)));
+            y = next_y;
         }
+    }
+
+    fn update_rendered_host_rows(
+        &mut self,
+        hosts: &[NavigatorHostSummary],
+        offset: usize,
+        area: Rect,
+    ) {
+        self.rendered_host_rows.clear();
+        let content_top = area.y.saturating_add(1);
+        let content_bottom = area.y.saturating_add(area.height.saturating_sub(1));
+        let mut y = content_top;
+        for host in hosts.iter().skip(offset) {
+            if y >= content_bottom {
+                break;
+            }
+            let next_y = y.saturating_add(2).min(content_bottom);
+            self.rendered_host_rows
+                .extend((y..next_y).map(|row_y| (row_y, host.alias.clone())));
+            y = next_y;
+        }
+    }
+
+    fn page_from_position(&self, column: u16, row: u16) -> Option<NavigatorPage> {
+        self.rendered_page_tabs.iter().find_map(|(area, page)| {
+            (column >= area.x && column < area.right() && row >= area.y && row < area.bottom())
+                .then_some(*page)
+        })
+    }
+
+    fn project_from_y(&self, y: u16) -> Option<ProjectId> {
+        self.rendered_project_rows
+            .iter()
+            .find_map(|(row_y, project_id)| (*row_y == y).then_some(*project_id))
+    }
+
+    fn host_from_y(&self, y: u16) -> Option<String> {
+        self.rendered_host_rows
+            .iter()
+            .find_map(|(row_y, alias)| (*row_y == y).then_some(alias.clone()))
+    }
+
+    fn begin_page_click(&mut self, page: NavigatorPage) {
+        self.mouse_click = Some(MouseClickIntent::Page(page));
+    }
+
+    fn begin_project_click(&mut self, project_id: Option<ProjectId>) {
+        self.mouse_click = Some(if project_id.is_some() {
+            MouseClickIntent::Project
+        } else {
+            MouseClickIntent::Blank
+        });
+        if let Some(project_id) = project_id {
+            self.selected_project = Some(project_id);
+        }
+    }
+
+    fn begin_host_click(&mut self, alias: Option<String>) {
+        self.mouse_click = Some(if alias.is_some() {
+            MouseClickIntent::Host
+        } else {
+            MouseClickIntent::Blank
+        });
+        if let Some(alias) = alias {
+            self.selected_host = Some(alias);
+        }
+    }
+
+    fn footer_status(&self) -> String {
         if let Some(message) = &self.message {
             return message.clone();
         }
         let operation_hint = (self.snapshot.unresolved_operation_count > 0).then(|| {
             format!(
-                "! {} operation{} needs recovery; use wsnav operations",
+                "! {} operation{} needs recovery",
                 self.snapshot.unresolved_operation_count,
                 if self.snapshot.unresolved_operation_count == 1 {
                     ""
@@ -1000,13 +1594,21 @@ impl NavigatorView {
         });
         if self.snapshot.workstreams.is_empty() {
             return format!(
-                "No Workstreams yet; run wsnav register /path/to/git-checkout  ·  ? help{}",
+                "No Workstreams yet{}",
                 operation_hint.map_or_else(String::new, |hint| format!("  ·  {hint}"))
             );
         }
-        let view_hint = format!("v view: {}  ·  ? help", self.view_mode().label());
+        let view_hint = if self.page == NavigatorPage::Workstreams {
+            format!("view: {}", self.view_mode().label())
+        } else {
+            String::new()
+        };
         if let Some(operation_hint) = operation_hint {
-            return format!("{operation_hint}  ·  {view_hint}");
+            return if view_hint.is_empty() {
+                operation_hint
+            } else {
+                format!("{operation_hint}  ·  {view_hint}")
+            };
         }
         if self.snapshot.unreachable_hosts.is_empty() {
             view_hint
@@ -1015,6 +1617,65 @@ impl NavigatorView {
                 "{} unavailable; showing cached state  ·  {view_hint}",
                 self.snapshot.unreachable_hosts.join(", "),
             )
+        }
+    }
+
+    fn compact_key_lines(&self, width: u16) -> Vec<Line<'static>> {
+        if width < 16 {
+            return vec![binding_line(&[("?", "keys")])];
+        }
+        let bindings = self.compact_bindings();
+        let mut rows = vec![Vec::<(&str, &str)>::new()];
+        let mut row_width = 0_usize;
+        let maximum = usize::from(width);
+        for binding in bindings {
+            let binding_width = binding.0.len() + 1 + binding.1.len();
+            let separator_width = usize::from(!rows.last().unwrap().is_empty()) * 2;
+            if row_width + separator_width + binding_width > maximum {
+                if rows.len() == 2 {
+                    break;
+                }
+                rows.push(Vec::new());
+                row_width = 0;
+            }
+            if !rows.last().unwrap().is_empty() {
+                row_width += 2;
+            }
+            row_width += binding_width;
+            rows.last_mut().unwrap().push(binding);
+        }
+        rows.into_iter()
+            .filter(|row| !row.is_empty())
+            .map(|row| binding_line(&row))
+            .collect()
+    }
+
+    fn compact_bindings(&self) -> Vec<(&'static str, &'static str)> {
+        if self.detail.is_some() {
+            return vec![("Enter", "back"), ("Esc", "back"), ("?", "keys")];
+        }
+        match self.page {
+            NavigatorPage::Workstreams => vec![
+                ("Enter", "open"),
+                ("n", "new"),
+                ("f", "fork"),
+                ("p", "park"),
+                ("a", "ack"),
+                ("v", "view"),
+                ("?", "keys"),
+            ],
+            NavigatorPage::Projects => vec![
+                ("Enter", "details"),
+                ("1", "workstreams"),
+                ("3", "hosts"),
+                ("?", "keys"),
+            ],
+            NavigatorPage::Hosts => vec![
+                ("Enter", "details"),
+                ("1", "workstreams"),
+                ("2", "projects"),
+                ("?", "keys"),
+            ],
         }
     }
 
@@ -1031,19 +1692,17 @@ impl NavigatorView {
         }
     }
 
-    fn render_help_overlay(frame: &mut Frame<'_>, area: Rect) {
-        let overlay = centered_help_area(area);
-        frame.render_widget(Clear, overlay);
+    fn render_help_reference(&self, frame: &mut Frame<'_>, area: Rect) {
         frame.render_widget(
-            Paragraph::new(help_lines())
+            Paragraph::new(help_lines(self.page, self.detail.is_some()))
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
-                        .title(" Keyboard shortcuts ")
+                        .title(format!(" Keys · {} ", self.page.label()))
                         .border_style(Style::default().fg(Color::Cyan)),
                 )
-                .wrap(Wrap { trim: true }),
-            overlay,
+                .scroll((self.help_scroll, 0)),
+            area,
         );
     }
 
@@ -1055,66 +1714,116 @@ impl NavigatorView {
     }
 }
 
-fn centered_help_area(area: Rect) -> Rect {
-    const MAX_WIDTH: u16 = 52;
-    const MAX_HEIGHT: u16 = 16;
-    let width = area.width.saturating_sub(2).min(MAX_WIDTH);
-    let height = area.height.saturating_sub(2).min(MAX_HEIGHT);
-    Rect::new(
-        area.x + area.width.saturating_sub(width) / 2,
-        area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    )
+fn binding_line(bindings: &[(&str, &str)]) -> Line<'static> {
+    let key = Style::default().fg(Color::Yellow);
+    let label = Style::default().fg(Color::Gray);
+    let mut spans = Vec::new();
+    for (index, (shortcut, description)) in bindings.iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw("  "));
+        }
+        spans.push(Span::styled((*shortcut).to_owned(), key));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled((*description).to_owned(), label));
+    }
+    Line::from(spans)
 }
 
-fn help_lines() -> Vec<Line<'static>> {
+fn help_lines(page: NavigatorPage, showing_detail: bool) -> Vec<Line<'static>> {
     let heading = Style::default()
         .fg(Color::Cyan)
         .add_modifier(Modifier::BOLD);
     let key = Style::default().fg(Color::Yellow);
-    vec![
+    let mut lines = vec![
         Line::from(Span::styled("Navigation", heading)),
+        Line::from(vec![Span::styled("↑/↓ or j/k", key), Span::raw("  select")]),
         Line::from(vec![
-            Span::styled("↑/↓ or j/k", key),
-            Span::raw("  select a Workstream"),
+            Span::styled("1", key),
+            Span::raw("          Workstreams page"),
         ]),
         Line::from(vec![
-            Span::styled("Enter", key),
-            Span::raw("       open, start, or recover"),
+            Span::styled("2", key),
+            Span::raw("          Projects page"),
         ]),
         Line::from(vec![
-            Span::styled("Tab", key),
-            Span::raw(" focus native agent   "),
-            Span::styled("v", key),
-            Span::raw(" change view"),
+            Span::styled("3", key),
+            Span::raw("          Hosts page"),
         ]),
-        Line::raw(""),
-        Line::from(Span::styled("Workstreams", heading)),
-        Line::from(vec![
-            Span::styled("n", key),
-            Span::raw(" new Workstream     "),
-            Span::styled("f", key),
-            Span::raw(" fork at last settled turn"),
-        ]),
-        Line::from(vec![
-            Span::styled("p", key),
-            Span::raw(" park               "),
-            Span::styled("a", key),
-            Span::raw(" acknowledge attention"),
-        ]),
+    ];
+    if showing_detail {
+        lines.extend([
+            Line::raw(""),
+            Line::from(Span::styled("Details", heading)),
+            Line::from(vec![
+                Span::styled("Enter", key),
+                Span::raw("      return to the list"),
+            ]),
+            Line::from(vec![
+                Span::styled("Esc", key),
+                Span::raw("        return to the list"),
+            ]),
+        ]);
+    } else if page == NavigatorPage::Workstreams {
+        lines.extend([
+            Line::raw(""),
+            Line::from(Span::styled("Workstreams", heading)),
+            Line::from(vec![
+                Span::styled("Enter", key),
+                Span::raw("      open, start, or recover"),
+            ]),
+            Line::from(vec![
+                Span::styled("Tab", key),
+                Span::raw("        focus native agent"),
+            ]),
+            Line::from(vec![
+                Span::styled("v", key),
+                Span::raw("          cycle recent/project/host"),
+            ]),
+            Line::from(vec![
+                Span::styled("n", key),
+                Span::raw("          new Workstream"),
+            ]),
+            Line::from(vec![
+                Span::styled("f", key),
+                Span::raw("          fork at last settled turn"),
+            ]),
+            Line::from(vec![Span::styled("p", key), Span::raw("          park")]),
+            Line::from(vec![
+                Span::styled("a", key),
+                Span::raw("          acknowledge attention"),
+            ]),
+        ]);
+    } else {
+        lines.extend([
+            Line::raw(""),
+            Line::from(Span::styled(page.label(), heading)),
+            Line::from(vec![
+                Span::styled("Enter", key),
+                Span::raw("      show bounded details"),
+            ]),
+        ]);
+    }
+    lines.extend([
         Line::raw(""),
         Line::from(Span::styled("Mouse", heading)),
-        Line::raw("click row: open/focus   scroll: select"),
-        Line::raw("click empty navigator space: focus navigator"),
+        Line::raw("click a tab to switch pages"),
+        Line::raw("click a row to select; release to open or focus"),
+        Line::raw("click empty navigator space to focus it"),
         Line::raw(""),
         Line::from(vec![
-            Span::styled("? / Esc", key),
-            Span::raw(" close help; then "),
-            Span::styled("q", key),
-            Span::raw(" close navigator"),
+            Span::styled("?", key),
+            Span::raw("          close keys"),
         ]),
-    ]
+        Line::from(vec![
+            Span::styled("Esc", key),
+            Span::raw("        close keys"),
+        ]),
+        Line::from(vec![
+            Span::styled("q", key),
+            Span::raw("          close keys"),
+        ]),
+    ]);
+    lines
 }
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -1146,6 +1855,7 @@ fn navigator_list_item(
     snapshot: &LocalNavigatorSnapshot,
     project_colors: &BTreeMap<ProjectId, Color>,
     spinner_frame: usize,
+    available_width: u16,
 ) -> ListItem<'static> {
     match entry {
         NavigatorListEntry::HostHeader { alias } => host_header_item(alias),
@@ -1155,11 +1865,14 @@ fn navigator_list_item(
         NavigatorListEntry::Workstream {
             snapshot_index,
             context,
+            tree_branch,
         } => workstream_item(
             &snapshot.workstreams[*snapshot_index],
             *context,
+            *tree_branch,
             project_colors,
             spinner_frame,
+            available_width,
         ),
     }
 }
@@ -1174,6 +1887,61 @@ fn host_header_item(alias: &str) -> ListItem<'static> {
                 .add_modifier(Modifier::BOLD),
         ),
     ]))
+}
+
+fn project_overview_item(project: &NavigatorProjectOverview) -> ListItem<'static> {
+    let workstream_label = if project.workstream_count == 1 {
+        "1 Workstream".to_owned()
+    } else {
+        format!("{} Workstreams", project.workstream_count)
+    };
+    ListItem::new(vec![
+        Line::from(Span::styled(
+            project.label.clone(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled(workstream_label, Style::default().fg(Color::Gray)),
+            Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                project.host_aliases.join(" · "),
+                Style::default().fg(Color::LightBlue),
+            ),
+        ]),
+    ])
+}
+
+fn host_overview_item(host: &NavigatorHostSummary) -> ListItem<'static> {
+    let reachability = match host.reachability {
+        RemoteHostReachability::Reachable => "available",
+        RemoteHostReachability::Unreachable => "unavailable; cached",
+    };
+    let workstream_label = if host.workstream_count == 1 {
+        "1 Workstream".to_owned()
+    } else {
+        format!("{} Workstreams", host.workstream_count)
+    };
+    ListItem::new(vec![
+        Line::from(Span::styled(
+            host.alias.clone(),
+            Style::default()
+                .fg(host_color(&host.alias))
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled(workstream_label, Style::default().fg(Color::Gray)),
+            Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                reachability,
+                Style::default().fg(match host.reachability {
+                    RemoteHostReachability::Reachable => Color::Gray,
+                    RemoteHostReachability::Unreachable => Color::Yellow,
+                }),
+            ),
+        ]),
+    ])
 }
 
 fn project_header_item(
@@ -1197,20 +1965,39 @@ fn project_header_item(
 fn workstream_item(
     row: &NavigatorWorkstream,
     context: WorkstreamRowContext,
+    tree_branch: Option<TreeBranch>,
     project_colors: &BTreeMap<ProjectId, Color>,
     spinner_frame: usize,
+    available_width: u16,
 ) -> ListItem<'static> {
     let (indicator, indicator_style) = status_indicator(row, spinner_frame);
     let thread_style = Style::default().fg(Color::White);
+    let (context_prefix, thread_prefix) = tree_prefix(tree_branch);
     ListItem::new(vec![
-        workstream_context_line(row, context, project_colors),
-        Line::from(thread_line(row, indicator, indicator_style, thread_style)),
+        workstream_context_line(row, context, context_prefix, project_colors),
+        Line::from(thread_line(
+            row,
+            indicator,
+            indicator_style,
+            thread_style,
+            thread_prefix,
+            available_width,
+        )),
     ])
+}
+
+fn tree_prefix(tree_branch: Option<TreeBranch>) -> (&'static str, &'static str) {
+    match tree_branch {
+        None => ("   ", " "),
+        Some(TreeBranch { is_last: true }) => (" └─ ", "    "),
+        Some(TreeBranch { is_last: false }) => (" ├─ ", " │  "),
+    }
 }
 
 fn workstream_context_line(
     row: &NavigatorWorkstream,
     context: WorkstreamRowContext,
+    prefix: &str,
     project_colors: &BTreeMap<ProjectId, Color>,
 ) -> Line<'static> {
     let host = || {
@@ -1231,18 +2018,18 @@ fn workstream_context_line(
     };
     match context {
         WorkstreamRowContext::Recent => Line::from(vec![
-            Span::raw("   "),
+            Span::raw(prefix.to_owned()),
             host(),
             Span::styled(" · ", Style::default().fg(Color::Gray)),
             project(),
         ]),
         WorkstreamRowContext::Host => Line::from(vec![
-            Span::raw("   "),
+            Span::raw(prefix.to_owned()),
             project_marker(row.project_id, project_colors),
             Span::raw(" "),
             project(),
         ]),
-        WorkstreamRowContext::Project => Line::from(vec![Span::raw("   "), host()]),
+        WorkstreamRowContext::Project => Line::from(vec![Span::raw(prefix.to_owned()), host()]),
     }
 }
 
@@ -1338,20 +2125,50 @@ fn thread_line(
     indicator: &'static str,
     indicator_style: Style,
     thread_style: Style,
+    prefix: &str,
+    available_width: u16,
 ) -> Vec<Span<'static>> {
     let now_millis = SystemClock.now_millis().ok();
+    let age = activity_label(row.last_activity_at_millis, now_millis);
+    let minimum_title_width = 4;
+    let fixed_width = prefix.chars().count() + indicator.chars().count() + 2 + age.chars().count();
+    let title_budget = usize::from(available_width)
+        .saturating_sub(fixed_width.saturating_add(1))
+        .max(minimum_title_width);
+    let title = truncate_display(&row.display_name, title_budget);
+    let used_width = prefix.chars().count()
+        + indicator.chars().count()
+        + 1
+        + title.chars().count()
+        + 1
+        + age.chars().count();
+    let padding = usize::from(available_width)
+        .saturating_sub(used_width)
+        .max(1);
     let mut line = vec![
-        Span::raw(" "),
+        Span::raw(prefix.to_owned()),
         Span::styled(indicator, indicator_style),
         Span::raw(" "),
-        Span::styled(row.display_name.clone(), thread_style),
+        Span::styled(title, thread_style),
     ];
-    line.push(Span::styled(" · ", Style::default().fg(Color::Gray)));
+    line.push(Span::raw(" ".repeat(padding)));
     line.push(Span::styled(
-        activity_label(row.last_activity_at_millis, now_millis),
+        age,
         Style::default().fg(activity_age_color(row.last_activity_at_millis, now_millis)),
     ));
     line
+}
+
+fn truncate_display(value: &str, maximum: usize) -> String {
+    if maximum == 0 {
+        return String::new();
+    }
+    let mut result = value.chars().take(maximum).collect::<String>();
+    if value.chars().nth(maximum).is_some() && maximum > 1 {
+        result.pop();
+        result.push('…');
+    }
+    result
 }
 
 fn activity_label(last_activity_at_millis: Option<i64>, now_millis: Option<i64>) -> String {
@@ -1489,69 +2306,18 @@ pub fn run_local_navigator(
         terminal.terminal.draw(|frame| view.render(frame))?;
         let timeout = Duration::from_millis(100);
         if event::poll(timeout)? {
-            match event::read()? {
-                Event::Key(key) if view.help_visible() => match key.code {
-                    KeyCode::Char('?' | 'q') | KeyCode::Esc => {
-                        view.dismiss_help();
-                    }
-                    _ => {}
-                },
-                Event::Key(key) => match key.code {
-                    KeyCode::Char('q') | KeyCode::Esc => break Ok(()),
-                    KeyCode::Char('?') => view.toggle_help(),
-                    KeyCode::Char('v') => view.cycle_view_mode(),
-                    KeyCode::Down | KeyCode::Char('j') => view.select_next(),
-                    KeyCode::Up | KeyCode::Char('k') => view.select_previous(),
-                    KeyCode::Tab => {
-                        if let Err(error) = presentation.focus_provider() {
-                            view.set_message(action_message(&error));
-                        }
-                    }
-                    KeyCode::Enter => {
-                        activate_selected(root, &presentation, &mut remote, &mut view);
-                    }
-                    KeyCode::Char('a') => acknowledge_selected(root, &mut remote, &mut view),
-                    KeyCode::Char('p') => park_selected(root, &mut remote, &mut view),
-                    KeyCode::Char('n') => {
-                        create_workstream_selected(
-                            root,
-                            &presentation,
-                            &mut remote,
-                            &mut view,
-                            CreationAction::Independent,
-                        );
-                    }
-                    KeyCode::Char('f') => {
-                        create_workstream_selected(
-                            root,
-                            &presentation,
-                            &mut remote,
-                            &mut view,
-                            CreationAction::Fork,
-                        );
-                    }
-                    _ => {}
-                },
-                Event::Mouse(mouse) if !view.help_visible() => match mouse.kind {
-                    MouseEventKind::ScrollDown => view.select_next(),
-                    MouseEventKind::ScrollUp => view.select_previous(),
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        view.begin_mouse_click(view.row_from_y(mouse.row));
-                    }
-                    MouseEventKind::Up(MouseButton::Left) => match view.take_mouse_click() {
-                        Some(MouseClickIntent::Row) => {
-                            activate_selected(root, &presentation, &mut remote, &mut view);
-                        }
-                        Some(MouseClickIntent::Blank) => {
-                            if let Err(error) = presentation.focus_navigator() {
-                                view.set_message(action_message(&error));
-                            }
-                        }
-                        None => {}
-                    },
-                    _ => {}
-                },
-                _ => {}
+            let exit = match event::read()? {
+                Event::Key(key) => {
+                    handle_navigator_key(key, root, &presentation, &mut remote, &mut view)
+                }
+                Event::Mouse(mouse) if !view.help_visible() => {
+                    handle_navigator_mouse(mouse, root, &presentation, &mut remote, &mut view);
+                    false
+                }
+                _ => false,
+            };
+            if exit {
+                break Ok(());
             }
         }
         if last_refresh.elapsed() >= Duration::from_millis(500) {
@@ -1574,6 +2340,137 @@ pub fn run_local_navigator(
     outcome?;
     close?;
     Ok(())
+}
+
+fn handle_navigator_key(
+    key: crossterm::event::KeyEvent,
+    root: &StateRoot,
+    presentation: &Presentation,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+) -> bool {
+    if view.help_visible() {
+        match key.code {
+            KeyCode::Char('?' | 'q') | KeyCode::Esc => view.dismiss_help(),
+            KeyCode::Down | KeyCode::Char('j') => view.scroll_help_next(),
+            KeyCode::Up | KeyCode::Char('k') => view.scroll_help_previous(),
+            _ => {}
+        }
+        return false;
+    }
+    let workstreams = view.page() == NavigatorPage::Workstreams && view.detail.is_none();
+    match key.code {
+        KeyCode::Char('q') => true,
+        KeyCode::Esc => !view.dismiss_detail(),
+        KeyCode::Char('?') => {
+            view.toggle_help();
+            false
+        }
+        KeyCode::Char('1') => {
+            view.select_page(NavigatorPage::Workstreams);
+            false
+        }
+        KeyCode::Char('2') => {
+            view.select_page(NavigatorPage::Projects);
+            false
+        }
+        KeyCode::Char('3') => {
+            view.select_page(NavigatorPage::Hosts);
+            false
+        }
+        KeyCode::Char('v') if workstreams => {
+            view.cycle_view_mode();
+            false
+        }
+        KeyCode::Down | KeyCode::Char('j') => {
+            view.select_next();
+            false
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            view.select_previous();
+            false
+        }
+        KeyCode::Tab if workstreams => {
+            if let Err(error) = presentation.focus_provider() {
+                view.set_message(action_message(&error));
+            }
+            false
+        }
+        KeyCode::Enter if view.dismiss_detail() => false,
+        KeyCode::Enter if workstreams => {
+            activate_selected(root, presentation, remote, view);
+            false
+        }
+        KeyCode::Enter => {
+            view.open_selected_detail();
+            false
+        }
+        KeyCode::Char('a') if workstreams => {
+            acknowledge_selected(root, remote, view);
+            false
+        }
+        KeyCode::Char('p') if workstreams => {
+            park_selected(root, remote, view);
+            false
+        }
+        KeyCode::Char('n') if workstreams => {
+            create_workstream_selected(
+                root,
+                presentation,
+                remote,
+                view,
+                CreationAction::Independent,
+            );
+            false
+        }
+        KeyCode::Char('f') if workstreams => {
+            create_workstream_selected(root, presentation, remote, view, CreationAction::Fork);
+            false
+        }
+        _ => false,
+    }
+}
+
+fn handle_navigator_mouse(
+    mouse: crossterm::event::MouseEvent,
+    root: &StateRoot,
+    presentation: &Presentation,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+) {
+    match mouse.kind {
+        MouseEventKind::ScrollDown => view.select_next(),
+        MouseEventKind::ScrollUp => view.select_previous(),
+        MouseEventKind::Down(MouseButton::Left) => {
+            if let Some(page) = view.page_from_position(mouse.column, mouse.row) {
+                view.begin_page_click(page);
+            } else if view.detail.is_some() {
+                view.begin_mouse_click(None);
+            } else {
+                match view.page() {
+                    NavigatorPage::Workstreams => {
+                        view.begin_mouse_click(view.row_from_y(mouse.row));
+                    }
+                    NavigatorPage::Projects => {
+                        view.begin_project_click(view.project_from_y(mouse.row));
+                    }
+                    NavigatorPage::Hosts => view.begin_host_click(view.host_from_y(mouse.row)),
+                }
+            }
+        }
+        MouseEventKind::Up(MouseButton::Left) => match view.take_mouse_click() {
+            Some(MouseClickIntent::Row) => activate_selected(root, presentation, remote, view),
+            Some(MouseClickIntent::Project | MouseClickIntent::Host) => view.open_selected_detail(),
+            Some(MouseClickIntent::Page(page)) => view.select_page(page),
+            Some(MouseClickIntent::Blank) => {
+                if let Err(error) = presentation.focus_navigator() {
+                    view.set_message(action_message(&error));
+                }
+            }
+            None => {}
+        },
+        _ => {}
+    }
 }
 
 fn initialize_observer_activation_message(root: &StateRoot, view: &mut NavigatorView) -> bool {
@@ -1921,6 +2818,7 @@ mod tests {
                 row(first, NavigatorRuntimeStatus::Idle),
                 row(second, NavigatorRuntimeStatus::Parked),
             ],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         };
@@ -1940,6 +2838,7 @@ mod tests {
                 row(first, NavigatorRuntimeStatus::Idle),
                 row(second, NavigatorRuntimeStatus::Idle),
             ],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
@@ -1960,6 +2859,7 @@ mod tests {
                 row(first, NavigatorRuntimeStatus::Parked),
                 row(second, NavigatorRuntimeStatus::Idle),
             ],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
@@ -1973,6 +2873,7 @@ mod tests {
         let workstream = row(workstream_id, NavigatorRuntimeStatus::Idle);
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: vec![workstream.clone()],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
@@ -1988,6 +2889,7 @@ mod tests {
         assert!(view.is_attached_to(&workstream));
         view.replace_snapshot(LocalNavigatorSnapshot {
             workstreams: vec![row(workstream_id, NavigatorRuntimeStatus::Unknown)],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
@@ -2012,6 +2914,7 @@ mod tests {
     fn mouse_click_retains_blank_focus_and_row_activation_intent() {
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: vec![row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
@@ -2031,19 +2934,21 @@ mod tests {
                 row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle),
                 row(WorkstreamId::new(), NavigatorRuntimeStatus::Parked),
             ],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
-        let mut terminal = Terminal::new(TestBackend::new(80, 8)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
 
         terminal.draw(|frame| view.render(frame)).unwrap();
 
         assert_eq!(view.row_from_y(0), None);
-        assert_eq!(view.row_from_y(1), Some(0));
+        assert_eq!(view.row_from_y(1), None);
         assert_eq!(view.row_from_y(2), Some(0));
-        assert_eq!(view.row_from_y(3), Some(1));
+        assert_eq!(view.row_from_y(3), Some(0));
         assert_eq!(view.row_from_y(4), Some(1));
-        assert_eq!(view.row_from_y(5), None);
+        assert_eq!(view.row_from_y(5), Some(1));
+        assert_eq!(view.row_from_y(6), None);
     }
 
     #[test]
@@ -2054,6 +2959,7 @@ mod tests {
         let expected = workstreams[5].workstream_id;
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams,
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
@@ -2185,6 +3091,7 @@ mod tests {
                 result_ready: true,
                 ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
             }],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
@@ -2231,13 +3138,15 @@ mod tests {
                 project_label: "project".to_owned(),
                 ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
             }],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         };
         let row = &snapshot.workstreams[0];
         let project_colors = visible_project_colors(&snapshot);
 
-        let line = workstream_context_line(row, WorkstreamRowContext::Recent, &project_colors);
+        let line =
+            workstream_context_line(row, WorkstreamRowContext::Recent, "   ", &project_colors);
 
         assert_eq!(
             line.spans
@@ -2300,6 +3209,7 @@ mod tests {
             .collect::<Vec<_>>();
         let snapshot = LocalNavigatorSnapshot {
             workstreams,
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         };
@@ -2335,18 +3245,15 @@ mod tests {
             .collect::<String>();
 
         assert!(rendered.contains("operation needs recovery"));
-        assert!(rendered.contains("wsnav operations"));
-        assert!(rendered.contains("? help"));
+        assert!(rendered.contains("No Workstreams yet"));
+        assert!(rendered.contains("? keys"));
     }
 
     #[test]
     fn empty_navigator_requires_an_explicit_checkout_registration() {
         let view = NavigatorView::new(LocalNavigatorSnapshot::default());
 
-        assert_eq!(
-            view.footer_help(),
-            "No Workstreams yet; run wsnav register /path/to/git-checkout  ·  ? help"
-        );
+        assert_eq!(view.footer_status(), "No Workstreams yet");
     }
 
     #[test]
@@ -2356,7 +3263,7 @@ mod tests {
         assert!(!view.help_visible());
         view.toggle_help();
         assert!(view.help_visible());
-        assert_eq!(view.footer_help(), "? or Esc closes help");
+        assert_eq!(view.help_scroll, 0);
 
         view.dismiss_help();
         assert!(!view.help_visible());
@@ -2367,16 +3274,17 @@ mod tests {
         let workstream_id = WorkstreamId::new();
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: vec![row(workstream_id, NavigatorRuntimeStatus::Idle)],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
 
         assert_eq!(view.view_mode(), NavigatorViewMode::Recent);
         view.cycle_view_mode();
-        assert_eq!(view.view_mode(), NavigatorViewMode::Host);
-        assert!(view.footer_help().contains("v view: By host"));
-        view.cycle_view_mode();
         assert_eq!(view.view_mode(), NavigatorViewMode::Project);
+        assert!(view.footer_status().contains("view: By project"));
+        view.cycle_view_mode();
+        assert_eq!(view.view_mode(), NavigatorViewMode::Host);
         view.cycle_view_mode();
 
         assert_eq!(view.view_mode(), NavigatorViewMode::Recent);
@@ -2415,39 +3323,10 @@ mod tests {
                     ..row(local_other, NavigatorRuntimeStatus::Parked)
                 },
             ],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
-
-        view.cycle_view_mode();
-        assert_eq!(
-            view.list_entries(),
-            vec![
-                NavigatorListEntry::HostHeader {
-                    alias: "snap".to_owned(),
-                },
-                NavigatorListEntry::Workstream {
-                    snapshot_index: 0,
-                    context: WorkstreamRowContext::Host,
-                },
-                NavigatorListEntry::HostHeader {
-                    alias: "local".to_owned(),
-                },
-                NavigatorListEntry::Workstream {
-                    snapshot_index: 1,
-                    context: WorkstreamRowContext::Host,
-                },
-                NavigatorListEntry::Workstream {
-                    snapshot_index: 2,
-                    context: WorkstreamRowContext::Host,
-                },
-            ]
-        );
-        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
-        terminal.draw(|frame| view.render(frame)).unwrap();
-        assert_eq!(view.row_from_y(1), None);
-        assert_eq!(view.row_from_y(2), Some(0));
-        assert_eq!(view.row_from_y(3), Some(0));
 
         view.cycle_view_mode();
         assert_eq!(
@@ -2460,10 +3339,12 @@ mod tests {
                 NavigatorListEntry::Workstream {
                     snapshot_index: 0,
                     context: WorkstreamRowContext::Project,
+                    tree_branch: Some(TreeBranch { is_last: false }),
                 },
                 NavigatorListEntry::Workstream {
                     snapshot_index: 1,
                     context: WorkstreamRowContext::Project,
+                    tree_branch: Some(TreeBranch { is_last: true }),
                 },
                 NavigatorListEntry::ProjectHeader {
                     project_id: other_project,
@@ -2472,16 +3353,36 @@ mod tests {
                 NavigatorListEntry::Workstream {
                     snapshot_index: 2,
                     context: WorkstreamRowContext::Project,
+                    tree_branch: Some(TreeBranch { is_last: true }),
                 },
             ]
         );
-        let project_colors = visible_project_colors(&view.snapshot);
-        terminal.draw(|frame| view.render(frame)).unwrap();
-        let project_header_label = &terminal.backend().buffer().content()[80 + 5];
-        assert_eq!(project_header_label.symbol(), "s");
+        view.cycle_view_mode();
         assert_eq!(
-            project_header_label.fg,
-            project_accent(shared_project, &project_colors)
+            view.list_entries(),
+            vec![
+                NavigatorListEntry::HostHeader {
+                    alias: "snap".to_owned(),
+                },
+                NavigatorListEntry::Workstream {
+                    snapshot_index: 0,
+                    context: WorkstreamRowContext::Host,
+                    tree_branch: Some(TreeBranch { is_last: true }),
+                },
+                NavigatorListEntry::HostHeader {
+                    alias: "local".to_owned(),
+                },
+                NavigatorListEntry::Workstream {
+                    snapshot_index: 1,
+                    context: WorkstreamRowContext::Host,
+                    tree_branch: Some(TreeBranch { is_last: false }),
+                },
+                NavigatorListEntry::Workstream {
+                    snapshot_index: 2,
+                    context: WorkstreamRowContext::Host,
+                    tree_branch: Some(TreeBranch { is_last: true }),
+                },
+            ]
         );
     }
 
@@ -2494,6 +3395,7 @@ mod tests {
                 display_name: "native thread".to_owned(),
                 ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
             }],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
@@ -2508,13 +3410,229 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
-        assert!(rendered.contains("Keyboard shortcuts"));
+        assert!(rendered.contains("Keys · Workstreams"));
         assert!(rendered.contains("Navigation"));
         assert!(rendered.contains("Workstreams"));
-        assert!(rendered.contains("click row: open/focus"));
-        assert!(rendered.contains("change view"));
-        assert!(rendered.contains("? or Esc closes help"));
+        let full_help = help_lines(NavigatorPage::Workstreams, false)
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect::<String>();
+        assert!(full_help.contains("click a row to select"));
+        assert!(full_help.contains("cycle recent/project/host"));
+        assert!(full_help.contains("close keys"));
         assert!(!rendered.contains("provider pane"));
+    }
+
+    #[test]
+    fn management_pages_preserve_workstream_attachment_and_expose_bounded_summaries() {
+        let attached_id = WorkstreamId::new();
+        let project_id = ProjectId::new();
+        let remote_id = WorkstreamId::new();
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![
+                NavigatorWorkstream {
+                    project_id,
+                    project_label: "alpha".to_owned(),
+                    last_activity_at_millis: Some(2_000),
+                    ..row(attached_id, NavigatorRuntimeStatus::Idle)
+                },
+                NavigatorWorkstream {
+                    host: NavigatorHost::Remote {
+                        alias: "snap".to_owned(),
+                        reachability: RemoteHostReachability::Reachable,
+                    },
+                    project_id,
+                    project_label: "alpha".to_owned(),
+                    last_activity_at_millis: Some(3_000),
+                    ..row(remote_id, NavigatorRuntimeStatus::Parked)
+                },
+            ],
+            hosts: vec![
+                NavigatorHostOverview {
+                    alias: "local".to_owned(),
+                    reachability: RemoteHostReachability::Reachable,
+                },
+                NavigatorHostOverview {
+                    alias: "snap".to_owned(),
+                    reachability: RemoteHostReachability::Reachable,
+                },
+                NavigatorHostOverview {
+                    alias: "spare".to_owned(),
+                    reachability: RemoteHostReachability::Unreachable,
+                },
+            ],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+        });
+        view.observe_attachment(&AttachmentStatus {
+            attempt_id: uuid::Uuid::new_v4(),
+            host_alias: "local".to_owned(),
+            workstream_id: attached_id,
+            phase: AttachmentPhase::Running,
+        });
+
+        view.select_page(NavigatorPage::Projects);
+        assert_eq!(view.page(), NavigatorPage::Projects);
+        assert_eq!(view.projects().len(), 1);
+        assert_eq!(view.projects()[0].label, "alpha");
+        assert_eq!(view.projects()[0].workstream_count, 2);
+        assert!(view.is_attached_to(&view.snapshot.workstreams[0]));
+        assert_eq!(
+            view.selected().map(|row| row.workstream_id),
+            Some(attached_id)
+        );
+
+        view.open_selected_detail();
+        assert_eq!(view.detail, Some(NavigatorDetail::Project(project_id)));
+        assert!(view.dismiss_detail());
+
+        view.select_page(NavigatorPage::Hosts);
+        assert_eq!(
+            view.hosts()
+                .iter()
+                .map(|host| (host.alias.as_str(), host.workstream_count))
+                .collect::<Vec<_>>(),
+            vec![("local", 1), ("snap", 1), ("spare", 0)]
+        );
+        view.select_next();
+        assert_eq!(view.selected_host_alias(), Some("snap"));
+        view.select_next();
+        assert_eq!(view.selected_host_alias(), Some("spare"));
+        view.open_selected_detail();
+        assert_eq!(view.detail, Some(NavigatorDetail::Host("spare".to_owned())));
+        assert!(view.is_attached_to(&view.snapshot.workstreams[0]));
+    }
+
+    #[test]
+    fn management_page_mouse_targets_cover_tabs_and_two_line_rows() {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)],
+            hosts: vec![
+                NavigatorHostOverview {
+                    alias: "local".to_owned(),
+                    reachability: RemoteHostReachability::Reachable,
+                },
+                NavigatorHostOverview {
+                    alias: "snap".to_owned(),
+                    reachability: RemoteHostReachability::Reachable,
+                },
+            ],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+
+        terminal.draw(|frame| view.render(frame)).unwrap();
+        let projects_tab = view
+            .rendered_page_tabs
+            .iter()
+            .find(|(_, page)| *page == NavigatorPage::Projects)
+            .map(|(area, _)| *area)
+            .unwrap();
+        assert_eq!(
+            view.page_from_position(projects_tab.x, projects_tab.y),
+            Some(NavigatorPage::Projects)
+        );
+
+        view.select_page(NavigatorPage::Projects);
+        terminal.draw(|frame| view.render(frame)).unwrap();
+        assert_eq!(view.project_from_y(2), view.selected_project);
+        assert_eq!(view.project_from_y(3), view.selected_project);
+        view.begin_project_click(view.project_from_y(3));
+        assert_eq!(view.take_mouse_click(), Some(MouseClickIntent::Project));
+
+        view.select_page(NavigatorPage::Hosts);
+        terminal.draw(|frame| view.render(frame)).unwrap();
+        assert_eq!(view.host_from_y(2).as_deref(), Some("local"));
+        assert_eq!(view.host_from_y(3).as_deref(), Some("local"));
+        view.begin_host_click(view.host_from_y(3));
+        assert_eq!(view.take_mouse_click(), Some(MouseClickIntent::Host));
+    }
+
+    #[test]
+    fn compact_and_expanded_controls_preserve_terminal_key_memory() {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
+        let compact = view
+            .compact_key_lines(80)
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect::<String>();
+        assert!(compact.contains("Enter open"));
+        assert!(compact.contains("n new"));
+        assert!(compact.contains("? keys"));
+        assert!(!compact.contains("No Workstreams"));
+        assert_eq!(view.footer_status(), "No Workstreams yet");
+
+        view.select_page(NavigatorPage::Projects);
+        let project_compact = view
+            .compact_key_lines(80)
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect::<String>();
+        assert!(project_compact.contains("Enter details"));
+        assert!(project_compact.contains("1 workstreams"));
+        assert!(!project_compact.contains("n new"));
+
+        let expanded = help_lines(NavigatorPage::Workstreams, false);
+        assert!(expanded.iter().all(|line| {
+            line.spans
+                .iter()
+                .filter(|span| span.style.fg == Some(Color::Yellow))
+                .count()
+                <= 1
+        }));
+    }
+
+    #[test]
+    fn grouped_rows_render_explicit_two_line_tree_and_bound_title_width() {
+        let first = WorkstreamId::new();
+        let second = WorkstreamId::new();
+        let project_id = ProjectId::new();
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![
+                NavigatorWorkstream {
+                    project_id,
+                    display_name: "a deliberately long native thread title".to_owned(),
+                    ..row(first, NavigatorRuntimeStatus::Idle)
+                },
+                NavigatorWorkstream {
+                    project_id,
+                    ..row(second, NavigatorRuntimeStatus::Parked)
+                },
+            ],
+            hosts: Vec::new(),
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+        });
+        view.view_mode = NavigatorViewMode::Project;
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+        terminal.draw(|frame| view.render(frame)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("├─"));
+        assert!(rendered.contains("└─"));
+        assert!(rendered.contains("│"));
+
+        let spans = thread_line(
+            &view.snapshot.workstreams[0],
+            "✓",
+            Style::default(),
+            Style::default(),
+            " │  ",
+            40,
+        );
+        let line = spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(line.contains('…'));
+        assert!(line.ends_with("activity unknown"));
+        assert!(line.chars().count() <= 40);
     }
 
     #[test]
@@ -2611,6 +3729,7 @@ mod tests {
                 },
                 row(local_unknown, NavigatorRuntimeStatus::Parked),
             ],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
@@ -2676,6 +3795,7 @@ mod tests {
         };
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: vec![local.clone(), remote.clone()],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
@@ -2683,6 +3803,7 @@ mod tests {
 
         view.replace_snapshot(LocalNavigatorSnapshot {
             workstreams: vec![remote, local],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });
@@ -2706,6 +3827,7 @@ mod tests {
                 row(source, NavigatorRuntimeStatus::Idle),
                 remote_destination,
             ],
+            hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
         });

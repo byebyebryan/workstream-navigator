@@ -1750,22 +1750,27 @@ impl NavigatorView {
                 Constraint::Length(help_height),
             ])
             .split(frame.area());
+        let content_area = if self.page == NavigatorPage::Workstreams {
+            areas[0]
+        } else {
+            Self::render_workstreams_parent(frame, areas[0])
+        };
         match self.detail.clone() {
-            Some(NavigatorDetail::Recovery) => self.render_recovery_detail(frame, areas[0]),
+            Some(NavigatorDetail::Recovery) => self.render_recovery_detail(frame, content_area),
             Some(NavigatorDetail::Workstream {
                 host_alias,
                 workstream_id,
-            }) => self.render_workstream_detail(frame, areas[0], &host_alias, workstream_id),
+            }) => self.render_workstream_detail(frame, content_area, &host_alias, workstream_id),
             Some(NavigatorDetail::Project(project_id)) => {
-                self.render_project_detail(frame, areas[0], project_id);
+                self.render_project_detail(frame, content_area, project_id);
             }
             Some(NavigatorDetail::Host(alias)) => {
-                self.render_host_detail(frame, areas[0], &alias);
+                self.render_host_detail(frame, content_area, &alias);
             }
             None => match self.page {
-                NavigatorPage::Workstreams => self.render_workstreams(frame, areas[0]),
-                NavigatorPage::Projects => self.render_projects(frame, areas[0]),
-                NavigatorPage::Hosts => self.render_hosts(frame, areas[0]),
+                NavigatorPage::Workstreams => self.render_workstreams(frame, content_area),
+                NavigatorPage::Projects => self.render_projects(frame, content_area),
+                NavigatorPage::Hosts => self.render_hosts(frame, content_area),
             },
         }
         frame.render_widget(
@@ -1784,6 +1789,33 @@ impl NavigatorView {
         if let Some(modal) = self.modal.clone() {
             Self::render_modal(frame, modal);
         }
+    }
+
+    /// Renders the structural parent for infrequent management surfaces without
+    /// turning the navigator into a tabbed dashboard. The child block starts
+    /// on the next row, so it reads as a temporary page floating over the
+    /// Workstreams home rather than a sibling view.
+    fn render_workstreams_parent(frame: &mut Frame<'_>, area: Rect) -> Rect {
+        if area.height < 4 {
+            return area;
+        }
+        let parent = Rect::new(area.x, area.y, area.width, 1);
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::TOP)
+                .title(Line::from(Span::styled(
+                    " Workstreams ",
+                    Style::default().fg(Color::Gray),
+                )))
+                .border_style(Style::default().fg(Color::Gray)),
+            parent,
+        );
+        Rect::new(
+            area.x,
+            area.y.saturating_add(1),
+            area.width,
+            area.height.saturating_sub(1),
+        )
     }
 
     fn render_workstreams(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -5695,16 +5727,25 @@ mod tests {
         terminal.draw(|frame| view.render(frame)).unwrap();
         view.select_page(NavigatorPage::Projects);
         terminal.draw(|frame| view.render(frame)).unwrap();
-        assert_eq!(view.project_from_y(1), view.selected_project);
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("Workstreams"));
+        assert!(rendered.contains("Projects"));
         assert_eq!(view.project_from_y(2), view.selected_project);
-        view.begin_project_click(view.project_from_y(2));
+        assert_eq!(view.project_from_y(3), view.selected_project);
+        view.begin_project_click(view.project_from_y(3));
         assert_eq!(view.take_mouse_click(), Some(MouseClickIntent::Project));
 
         view.select_page(NavigatorPage::Hosts);
         terminal.draw(|frame| view.render(frame)).unwrap();
-        assert_eq!(view.host_from_y(1).as_deref(), Some("local"));
         assert_eq!(view.host_from_y(2).as_deref(), Some("local"));
-        view.begin_host_click(view.host_from_y(2));
+        assert_eq!(view.host_from_y(3).as_deref(), Some("local"));
+        view.begin_host_click(view.host_from_y(3));
         assert_eq!(view.take_mouse_click(), Some(MouseClickIntent::Host));
     }
 

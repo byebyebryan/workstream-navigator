@@ -210,17 +210,22 @@ it. This is not a tmux popup, window, centered overlay, or provider overlay.
 While expanded, all other navigator keyboard and mouse actions are inert, so
 help cannot accidentally activate or mutate a Workstream.
 
-The navigator pane has three sibling top-level pages rather than a generic
-management landing page:
+The navigator pane has one Workstreams home page and two infrequent child
+management pages rather than a generic management landing page:
 
 ```text
-Workstreams                 Projects                    Hosts
-├── Active / Archived       ├── Project list            ├── Host list
-├── Recent                  └── Project detail          └── Host detail
-├── By project                  ├── Locations               ├── Health
-├── By host                     ├── Workstreams             ├── Observer
-└── Recovery                    ├── Register location       ├── Remove observer
-                                └── Start Workstream        └── Forget
+Workstreams
+├── Active / Archived
+├── Recent / By project / By host
+├── Recovery
+├── Projects
+│   ├── Project list / detail
+│   ├── Locations / register location
+│   └── Start Workstream
+└── Hosts
+    ├── Host list / detail
+    ├── Health / observer
+    └── Remove observer / forget
 ```
 
 Workstreams is the default page and retains the product's ordinary switching
@@ -228,7 +233,9 @@ workflow. Projects and Hosts are inventory/configuration pages, reached by
 their contextual `m` and `h` keys rather than a persistent tab bar. `Esc`
 returns from either management list to the ordinary Workstreams page, and
 returns from a detail to its list. Opening Project or Host detail replaces
-only the navigator content. `Enter` consistently opens the selected entity.
+only the navigator content. A thin `Workstreams` parent frame above the
+bordered Projects or Hosts child block makes that hierarchy visible without a
+dashboard or a global tab row. `Enter` consistently opens the selected entity.
 No page creates a tmux popup, overlays the provider pane, or replaces the
 native TUI.
 

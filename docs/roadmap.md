@@ -765,9 +765,10 @@ Delivery slices:
    remains restricted to hosts with no live managed Runtime; native review uses
    a disposable cwd in the right pane, verifies trust only after the TUI exits,
    and fails closed on foreign profiles, failed review, or ambiguous state.
-2. **D7.1 - Management navigation foundation.** Add the three top-level pages,
-   list/detail navigation, mouse behavior, and direct page-local keys without
-   changing provider state. Refine the narrow Workstreams pane with two-line
+2. **D7.1 - Management navigation foundation.** Add the Workstreams home and
+   its Projects and Hosts child pages, list/detail navigation, mouse behavior,
+   and direct page-local keys without changing provider state. Refine the
+   narrow Workstreams pane with two-line
    Recent rows, explicit two-line tree children in grouped views, the `Recent`
    / `By project` / `By host` cycle, compact bottom key hints, and a
    single-column expanded reference while retaining the accepted Workstreams

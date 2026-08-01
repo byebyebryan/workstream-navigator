@@ -35,8 +35,8 @@ use thiserror::Error;
 
 use crate::{
     domain::{
-        Clock, HostId, LocationId, OperationId, OperationKind, OperationPhase, ProjectId, Revision,
-        RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle,
+        AttentionState, Clock, HostId, LocationId, OperationId, OperationKind, OperationPhase,
+        ProjectId, Revision, RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle,
     },
     presentation::{AttachmentPhase, AttachmentStatus, Presentation, PresentationError},
     process::{BoundedProcessError, output_bounded},
@@ -269,16 +269,7 @@ fn project_workstream(
         .as_ref()
         .and_then(|attention| attention.result_unseen_since_revision)
         .is_some();
-    let attention_revision = overview
-        .attention
-        .as_ref()
-        .and_then(|attention| attention.result_unseen_since_revision)
-        .or_else(|| {
-            overview
-                .attention
-                .as_ref()
-                .and_then(|attention| attention.recovery_unseen_since_revision)
-        });
+    let attention_revision = acknowledgement_revision(overview.attention.as_ref());
     let runtime_status = if recovery_required {
         NavigatorRuntimeStatus::RecoveryRequired
     } else {
@@ -319,6 +310,18 @@ fn project_workstream(
         last_activity_at_millis: overview.last_activity_at_millis,
         workstream_revision: overview.revision,
     })
+}
+
+/// Returns the current optimistic-lock revision only while an acknowledgement
+/// is meaningful. The first unseen-result revision is display metadata; it is
+/// deliberately not the mutation authority after newer lifecycle evidence.
+fn acknowledgement_revision(attention: Option<&AttentionState>) -> Option<Revision> {
+    attention
+        .filter(|attention| {
+            attention.result_unseen_since_revision.is_some()
+                || attention.recovery_unseen_since_revision.is_some()
+        })
+        .map(|attention| attention.revision)
 }
 
 fn project_remote_workstream(
@@ -6086,6 +6089,24 @@ mod tests {
             parse_created_workstream(b"forked workstream not-an-id\n"),
             Err(NavigatorError::InvalidActionResult)
         ));
+    }
+
+    #[test]
+    fn acknowledgement_uses_the_current_attention_revision_not_first_result() {
+        let mut attention = AttentionState::new(WorkstreamId::new());
+        attention
+            .mark_result("session-a".to_owned(), "turn-a".to_owned())
+            .unwrap();
+        let first_result_revision = attention.result_unseen_since_revision.unwrap();
+        attention
+            .mark_result("session-a".to_owned(), "turn-b".to_owned())
+            .unwrap();
+
+        assert_ne!(attention.revision, first_result_revision);
+        assert_eq!(
+            acknowledgement_revision(Some(&attention)),
+            Some(attention.revision)
+        );
     }
 
     fn row(

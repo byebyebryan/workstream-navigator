@@ -811,8 +811,9 @@ V1 uses fresh SQLite schemas with no migration from Agent Switchboard.
 The local client catalog contains only:
 
 - configured host aliases and stable host IDs;
-- client-generated opaque Project IDs, presentation names, and optional
-  credential-free repository fingerprints;
+- client-generated opaque Project IDs, presentation names, optional
+  credential-free repository fingerprints, and optional normalized remote
+  display labels;
 - mappings from those local presentation records to exact host locations; and
 - local UI preferences.
 
@@ -823,13 +824,15 @@ derived from repository registration metadata, never from a generated managed
 Workstream checkout.
 
 Host actions address opaque Location and Workstream IDs, not a replicated
-project catalog. A host may expose a bounded opaque fingerprint of one
-credential-free canonical fetch remote. The client reuses one Project ID for
-locations with the same fingerprint; missing or ambiguous remote evidence
-keeps locations separate. This grouping is presentation only and never grants
-one host authority over another host's repository or Runtime. Raw remote URLs,
-filesystem paths, and repository common directories never cross the host
-protocol.
+project catalog. A host may expose a bounded opaque fingerprint and a
+credential-free normalized `host/path` display label for one unambiguous
+canonical fetch remote. The client reuses one Project ID only for locations
+with the same fingerprint; the display label never grants authority. Missing
+or ambiguous remote evidence keeps locations separate. This grouping is
+presentation only and never grants one host authority over another host's
+repository or Runtime. Raw remote URLs, schemes, user information, query
+strings, fragments, filesystem paths, and repository common directories never
+cross the host protocol.
 
 ### Host registry
 
@@ -845,7 +848,7 @@ CodexIntegration
 
 ProjectLocation
   location_id, repository_identity, repository_path,
-  repository_display_name, remote_identity_fingerprint?,
+  repository_display_name, remote_identity_fingerprint?, remote_identity_display?,
   default_base_ref, managed_worktree_root, revision
 
 Workstream
@@ -878,10 +881,11 @@ CompoundOperation
 ```
 
 Paths and provider identifiers are private host fields. Public snapshots return
-bounded Project and thread names, opaque repository fingerprints, name
-provenance, statuses, capabilities, and opaque Workstream Navigator IDs. No raw
-remote URL, prompt, preview, response, transcript, tool payload, terminal
-capture, credential, or environment dump is persisted.
+bounded Project and thread names, opaque repository fingerprints, optional
+credential-free normalized remote labels, name provenance, statuses,
+capabilities, and opaque Workstream Navigator IDs. No raw remote URL, prompt,
+preview, response, transcript, tool payload, terminal capture, credential, or
+environment dump is persisted.
 
 ### State relationships
 
@@ -961,11 +965,12 @@ Registration also inspects local Git configuration without contacting a
 network. One unambiguous canonical fetch remote is normalized across common
 SSH and HTTP transport spellings, stripped of credentials and transport-only
 user information, and persisted only as a versioned SHA-256 fingerprint plus a
-bounded repository display name. `origin` is preferred; an unambiguous sole
-fetch remote is the fallback. Local paths, `file:` remotes, multiple conflicting
-URLs, or missing remotes produce no fingerprint and therefore no automatic
-cross-host grouping. A remote named `upstream` is not treated as stronger than
-`origin`, because a fork and its parent may intentionally be separate Projects.
+bounded `host/path` display label and repository display name. `origin` is
+preferred; an unambiguous sole fetch remote is the fallback. Local paths,
+`file:` remotes, multiple conflicting URLs, or missing remotes produce neither
+label nor fingerprint and therefore no automatic cross-host grouping. A remote
+named `upstream` is not treated as stronger than `origin`, because a fork and
+its parent may intentionally be separate Projects.
 
 The first Workstream may use an existing checkout with `external` ownership.
 Additional V1 Workstreams use `managed` worktrees below the configured
@@ -1158,7 +1163,9 @@ returned in public snapshots. Permanent Project deletion, manual repository
 cleanup, and automatic cross-host merge/split remain outside D7.
 
 Projects render every host-owned location as a bounded tree under its logical
-Project, with active/archived counts. `n` starts a Workstream from the selected
+Project, with active/archived counts. When available, it renders the muted
+display-only `origin · host/org/repo` label beneath the Project name; the
+fingerprint remains hidden and grouping-only. `n` starts a Workstream from the selected
 Project. When it has more than one host location, a navigator-local picker asks
 where to start; a single-location Project starts directly. `a` adds an existing
 checkout through the navigator-local host picker and bounded checkout-path

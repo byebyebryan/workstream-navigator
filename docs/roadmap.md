@@ -451,8 +451,8 @@ Exit gate:
 ## D6.1 - Repository identity and cross-host Project grouping polish
 
 Implementation status: complete. Linked-checkout normalization, canonical
-remote fingerprinting, client-side cross-host Project grouping, development
-schema migration, and the full repository gate passed. See the
+remote fingerprinting and safe origin labels, client-side cross-host Project
+grouping, development schema migration, and the full repository gate passed. See the
 [D6.1 project-identity acceptance](acceptance-d6.1-project-identity.md).
 
 Refine the accepted operator beta without changing provider, Runtime, or
@@ -464,9 +464,10 @@ Scope:
 - normalize new registrations to the selected Git worktree root while keeping
   the primary worktree as a separate stable repository command path;
 - derive one credential-free, transport-normalized fetch-remote fingerprint
-  through bounded local Git inspection without network access;
-- expose only that opaque fingerprint and a bounded repository name through a
-  versioned host snapshot;
+  and safe `host/path` display label through bounded local Git inspection
+  without network access;
+- expose only that opaque fingerprint, safe origin label, and bounded
+  repository name through a versioned host snapshot;
 - reuse a client Project ID when exact fingerprints match, while keeping
   missing or ambiguous identities separate;
 - migrate current development schemas without importing the Python prototype

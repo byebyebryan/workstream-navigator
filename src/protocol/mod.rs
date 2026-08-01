@@ -13,7 +13,7 @@ use crate::domain::{
     RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 13;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 14;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -427,6 +427,9 @@ pub struct SnapshotWorkstream {
     /// Opaque credential-free canonical fetch-remote identity. `None` keeps
     /// this host location separate in the client Project catalog.
     pub repository_fingerprint: Option<String>,
+    /// Credential-free normalized remote label. This is display-only and is
+    /// absent when the fetch remote is missing or ambiguous.
+    pub remote_identity_display: Option<String>,
     pub display_name: String,
     pub runtime_id: Option<RuntimeId>,
     pub runtime_status: RuntimeStatus,
@@ -452,6 +455,9 @@ impl SnapshotWorkstream {
         if let Some(fingerprint) = self.repository_fingerprint.as_deref() {
             validate_repository_fingerprint(fingerprint)?;
         }
+        if let Some(display) = self.remote_identity_display.as_deref() {
+            validate_remote_identity_display(display)?;
+        }
         validate_bounded("display name", &self.display_name, MAX_DISPLAY_NAME_BYTES)?;
         if self.activity_sequence < 0 {
             return Err(ProtocolError::InvalidActivitySequence);
@@ -473,6 +479,18 @@ fn validate_repository_fingerprint(value: &str) -> Result<(), ProtocolError> {
     };
     if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(ProtocolError::InvalidRepositoryFingerprint);
+    }
+    Ok(())
+}
+
+fn validate_remote_identity_display(value: &str) -> Result<(), ProtocolError> {
+    validate_bounded("remote identity display", value, MAX_DISPLAY_NAME_BYTES)?;
+    if value.chars().any(char::is_control)
+        || value.contains(['\\', '@', '?', '#'])
+        || value.contains("//")
+        || value.starts_with('/')
+    {
+        return Err(ProtocolError::InvalidRemoteIdentityDisplay);
     }
     Ok(())
 }
@@ -526,6 +544,8 @@ pub enum ProtocolError {
     InvalidActivityTimestamp,
     #[error("repository fingerprint is invalid")]
     InvalidRepositoryFingerprint,
+    #[error("remote identity display is invalid")]
+    InvalidRemoteIdentityDisplay,
     #[error("snapshot has too many workstreams")]
     SnapshotTooLarge,
     #[error("protocol frame exceeds its maximum size")]
@@ -691,6 +711,7 @@ mod tests {
                 location_id: LocationId::new(),
                 project_display_name: "x".repeat(MAX_DISPLAY_NAME_BYTES + 1),
                 repository_fingerprint: None,
+                remote_identity_display: None,
                 display_name: "thread".to_owned(),
                 runtime_id: None,
                 runtime_status: RuntimeStatus::Idle,
@@ -740,6 +761,7 @@ mod tests {
                 location_id: LocationId::new(),
                 project_display_name: "project".to_owned(),
                 repository_fingerprint: Some("https://example.invalid/private.git".to_owned()),
+                remote_identity_display: None,
                 display_name: "thread".to_owned(),
                 runtime_id: None,
                 runtime_status: RuntimeStatus::Idle,
@@ -764,5 +786,40 @@ mod tests {
         snapshot.workstreams[0].repository_fingerprint =
             Some(format!("git-remote-v1:{}", "a".repeat(64)));
         assert!(snapshot.validate().is_ok());
+    }
+
+    #[test]
+    fn remote_identity_display_rejects_raw_remote_forms() {
+        let mut snapshot = SnapshotResponse {
+            workstreams: vec![SnapshotWorkstream {
+                workstream_id: WorkstreamId::new(),
+                location_id: LocationId::new(),
+                project_display_name: "project".to_owned(),
+                repository_fingerprint: Some(format!("git-remote-v1:{}", "a".repeat(64))),
+                remote_identity_display: Some("github.com/owner/repo".to_owned()),
+                display_name: "thread".to_owned(),
+                runtime_id: None,
+                runtime_status: RuntimeStatus::Idle,
+                lifecycle: WorkstreamLifecycle::Open,
+                archived: false,
+                result_ready: false,
+                recovery_required: false,
+                attention_revision: None,
+                activity_sequence: 0,
+                last_activity_at_millis: None,
+                revision: 1,
+            }],
+            unresolved_operation_count: 0,
+            observer_status: ObserverStatus::NotInstalled,
+            next_cursor: None,
+        };
+        assert!(snapshot.validate().is_ok());
+
+        snapshot.workstreams[0].remote_identity_display =
+            Some("https://token@github.com/owner/repo?secret=yes".to_owned());
+        assert!(matches!(
+            snapshot.validate(),
+            Err(ProtocolError::InvalidRemoteIdentityDisplay)
+        ));
     }
 }

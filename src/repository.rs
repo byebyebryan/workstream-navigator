@@ -2,8 +2,8 @@
 //!
 //! A selected checkout, its shared repository command path, and its optional
 //! cross-host presentation identity are deliberately separate. Remote URLs are
-//! normalized in memory and discarded; only a versioned SHA-256 fingerprint is
-//! returned to callers.
+//! normalized in memory and discarded; only a versioned SHA-256 fingerprint
+//! and credential-free canonical display label are returned to callers.
 
 use std::{
     collections::BTreeSet,
@@ -21,6 +21,7 @@ use crate::state::{HostRegistry, StateError};
 const MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_REMOTES: usize = 32;
 const MAX_REMOTE_URL_BYTES: usize = 4096;
+const MAX_REMOTE_DISPLAY_BYTES: usize = 256;
 const FINGERPRINT_VERSION: &str = "git-remote-v1";
 
 /// Exact host-private metadata for one external Workstream registration.
@@ -38,6 +39,8 @@ pub struct RepositoryRegistration {
     pub display_name: String,
     /// Opaque identity of one unambiguous canonical fetch remote.
     pub remote_identity_fingerprint: Option<String>,
+    /// Credential-free normalized fetch-remote label for display only.
+    pub remote_identity_display: Option<String>,
 }
 
 /// Inspects a local non-bare Git checkout without contacting a network.
@@ -99,7 +102,7 @@ pub fn inspect(checkout: &Path) -> Result<RepositoryRegistration, RepositoryErro
         .chars()
         .take(64)
         .collect::<String>();
-    let remote_identity_fingerprint = discover_remote_fingerprint(&checkout_path)?;
+    let remote_identity = discover_remote_identity(&checkout_path)?;
 
     Ok(RepositoryRegistration {
         checkout_path,
@@ -107,7 +110,10 @@ pub fn inspect(checkout: &Path) -> Result<RepositoryRegistration, RepositoryErro
         repository_identity: common_dir.to_string_lossy().into_owned(),
         default_base_ref,
         display_name,
-        remote_identity_fingerprint,
+        remote_identity_fingerprint: remote_identity
+            .as_ref()
+            .map(|identity| identity.fingerprint.clone()),
+        remote_identity_display: remote_identity.map(|identity| identity.display),
     })
 }
 
@@ -126,6 +132,7 @@ pub fn refresh_pending_metadata(registry: &mut HostRegistry) -> Result<(), State
                 &metadata.repository_path,
                 &metadata.display_name,
                 metadata.remote_identity_fingerprint.as_deref(),
+                metadata.remote_identity_display.as_deref(),
             )?;
             continue;
         }
@@ -140,15 +147,22 @@ pub fn refresh_pending_metadata(registry: &mut HostRegistry) -> Result<(), State
             &pending.repository_path,
             display_name,
             None,
+            None,
         )?;
     }
     Ok(())
 }
 
-fn discover_remote_fingerprint(repository: &Path) -> Result<Option<String>, RepositoryError> {
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RemoteIdentity {
+    fingerprint: String,
+    display: String,
+}
+
+fn discover_remote_identity(repository: &Path) -> Result<Option<RemoteIdentity>, RepositoryError> {
     let origin = remote_urls(repository, "origin")?;
     if !origin.is_empty() {
-        return fingerprint_unambiguous(origin.iter().map(String::as_str));
+        return remote_identity_unambiguous(origin.iter().map(String::as_str));
     }
 
     let output = run_git(repository, [OsString::from("remote")])?;
@@ -166,7 +180,7 @@ fn discover_remote_fingerprint(repository: &Path) -> Result<Option<String>, Repo
         }
         urls.extend(remote_urls(repository, name)?);
     }
-    fingerprint_unambiguous(urls.iter().map(String::as_str))
+    remote_identity_unambiguous(urls.iter().map(String::as_str))
 }
 
 fn remote_urls(repository: &Path, remote: &str) -> Result<Vec<String>, RepositoryError> {
@@ -187,9 +201,9 @@ fn remote_urls(repository: &Path, remote: &str) -> Result<Vec<String>, Repositor
     bounded_lines(&output.stdout).map(|lines| lines.into_iter().map(str::to_owned).collect())
 }
 
-fn fingerprint_unambiguous<'a>(
+fn remote_identity_unambiguous<'a>(
     urls: impl IntoIterator<Item = &'a str>,
-) -> Result<Option<String>, RepositoryError> {
+) -> Result<Option<RemoteIdentity>, RepositoryError> {
     let mut identities = BTreeSet::new();
     for url in urls {
         let Some(identity) = normalize_remote_identity(url) else {
@@ -200,28 +214,34 @@ fn fingerprint_unambiguous<'a>(
     if identities.len() != 1 {
         return Ok(None);
     }
-    let identity = identities
+    let display = identities
         .into_iter()
         .next()
         .ok_or(RepositoryError::InvalidGitOutput)?;
+    if display.len() > MAX_REMOTE_DISPLAY_BYTES {
+        return Ok(None);
+    }
     let mut hash = Sha256::new();
     hash.update(FINGERPRINT_VERSION.as_bytes());
     hash.update([0]);
-    hash.update(identity.as_bytes());
-    Ok(Some(format!(
-        "{FINGERPRINT_VERSION}:{}",
-        hex(&hash.finalize())
-    )))
+    hash.update(display.as_bytes());
+    Ok(Some(RemoteIdentity {
+        fingerprint: format!("{FINGERPRINT_VERSION}:{}", hex(&hash.finalize())),
+        display,
+    }))
 }
 
 fn normalize_remote_identity(value: &str) -> Option<String> {
     let value = value.trim();
     if value.is_empty()
         || value.len() > MAX_REMOTE_URL_BYTES
-        || value.contains(['\0', '\n', '\r'])
+        || value.chars().any(char::is_control)
         || value.starts_with('/')
         || value.starts_with("./")
         || value.starts_with("../")
+        || value
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("file:"))
     {
         return None;
     }
@@ -267,7 +287,7 @@ fn normalize_remote_identity(value: &str) -> Option<String> {
         });
     if host.is_empty()
         || path.is_empty()
-        || path.contains('\\')
+        || path.contains(['\\', '@'])
         || path
             .split('/')
             .any(|component| component.is_empty() || matches!(component, "." | ".."))
@@ -408,35 +428,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn transport_variants_have_one_remote_fingerprint() {
-        let ssh = fingerprint_unambiguous(["git@GitHub.com:Owner/Cubey.git"]).unwrap();
-        let https = fingerprint_unambiguous(["https://github.com/owner/cubey.git"]).unwrap();
-        let ssh_url = fingerprint_unambiguous(["ssh://git@github.com:22/OWNER/CUBEY.git"]).unwrap();
+    fn transport_variants_have_one_safe_remote_identity() {
+        let ssh = remote_identity_unambiguous(["git@GitHub.com:Owner/Cubey.git"])
+            .unwrap()
+            .unwrap();
+        let https = remote_identity_unambiguous(["https://github.com/owner/cubey.git"])
+            .unwrap()
+            .unwrap();
+        let ssh_url = remote_identity_unambiguous(["ssh://git@github.com:22/OWNER/CUBEY.git"])
+            .unwrap()
+            .unwrap();
 
         assert_eq!(ssh, https);
         assert_eq!(https, ssh_url);
+        assert_eq!(ssh.display, "github.com/owner/cubey");
     }
 
     #[test]
-    fn credentials_queries_and_fragments_do_not_affect_identity() {
-        let credentialed = fingerprint_unambiguous([
+    fn credentials_queries_and_fragments_do_not_affect_or_leak_from_identity() {
+        let credentialed = remote_identity_unambiguous([
             "https://token:secret@github.com/owner/cubey.git?access_token=other#fragment",
         ])
+        .unwrap()
         .unwrap();
-        let clean = fingerprint_unambiguous(["https://github.com/owner/cubey"]).unwrap();
+        let clean = remote_identity_unambiguous(["https://github.com/owner/cubey"])
+            .unwrap()
+            .unwrap();
 
         assert_eq!(credentialed, clean);
+        assert_eq!(credentialed.display, "github.com/owner/cubey");
+        assert!(!credentialed.display.contains("token"));
+        assert!(!credentialed.display.contains("secret"));
+        assert!(!credentialed.display.contains('?'));
+        assert!(!credentialed.display.contains('#'));
     }
 
     #[test]
     fn local_and_ambiguous_remotes_do_not_produce_identity() {
-        assert_eq!(fingerprint_unambiguous(["../cubey.git"]).unwrap(), None);
+        assert_eq!(remote_identity_unambiguous(["../cubey.git"]).unwrap(), None);
         assert_eq!(
-            fingerprint_unambiguous(["file:///srv/cubey.git"]).unwrap(),
+            remote_identity_unambiguous(["file:///srv/cubey.git"]).unwrap(),
             None
         );
         assert_eq!(
-            fingerprint_unambiguous([
+            remote_identity_unambiguous(["file:/srv/cubey.git"]).unwrap(),
+            None
+        );
+        assert_eq!(
+            remote_identity_unambiguous([
                 "git@github.com:owner/cubey.git",
                 "git@github.com:owner/other.git",
             ])
@@ -444,8 +483,11 @@ mod tests {
             None
         );
         assert_eq!(
-            fingerprint_unambiguous(["git@github.com:owner/cubey.git", "../private-mirror.git",])
-                .unwrap(),
+            remote_identity_unambiguous([
+                "git@github.com:owner/cubey.git",
+                "../private-mirror.git",
+            ])
+            .unwrap(),
             None
         );
     }
@@ -491,6 +533,10 @@ mod tests {
         assert_eq!(registration.display_name, "cubey");
         assert!(registration.repository_identity.ends_with("cubey/.git"));
         assert!(registration.remote_identity_fingerprint.is_some());
+        assert_eq!(
+            registration.remote_identity_display.as_deref(),
+            Some("github.com/owner/cubey")
+        );
     }
 
     fn run<'a>(repository: &Path, arguments: impl IntoIterator<Item = &'a str>) {

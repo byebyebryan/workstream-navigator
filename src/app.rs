@@ -1132,6 +1132,7 @@ fn register(registry: &mut HostRegistry, checkout: &Path) -> Result<(), AppError
         repository.default_base_ref,
         &repository.display_name,
         repository.remote_identity_fingerprint.as_deref(),
+        repository.remote_identity_display.as_deref(),
     )?;
     println!("registered workstream {}", registered.workstream_id);
     Ok(())

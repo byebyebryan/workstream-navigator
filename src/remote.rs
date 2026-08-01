@@ -251,6 +251,7 @@ fn apply_register_checkout(registry: &mut HostRegistry, checkout_path: &str) -> 
         repository.default_base_ref,
         &repository.display_name,
         repository.remote_identity_fingerprint.as_deref(),
+        repository.remote_identity_display.as_deref(),
     ) {
         Ok(registered) => ResponseEnvelope {
             version: CURRENT_PROTOCOL_VERSION,
@@ -582,6 +583,10 @@ fn snapshot_workstream(root: &StateRoot, overview: &WorkstreamOverview) -> Snaps
         location_id: overview.location_id,
         project_display_name: bounded_display_name(&overview.project_display_name),
         repository_fingerprint: overview.remote_identity_fingerprint.clone(),
+        remote_identity_display: overview
+            .remote_identity_display
+            .as_deref()
+            .map(bounded_display_name),
         display_name: bounded_display_name(&display_name(overview, runtime_status)),
         runtime_id: overview.runtime.as_ref().map(|runtime| runtime.runtime_id),
         runtime_status: if recovery_required {
@@ -952,7 +957,8 @@ mod tests {
             location_id: crate::domain::LocationId::new(),
             project_repository_path: PathBuf::from("/private/place/dms-power-status"),
             project_display_name: "dms-power-status".to_owned(),
-            remote_identity_fingerprint: None,
+            remote_identity_fingerprint: Some(format!("git-remote-v1:{}", "a".repeat(64))),
+            remote_identity_display: Some("github.com/owner/dms-power-status".to_owned()),
             checkout_path: PathBuf::from(
                 "/private/state/worktrees/location/00000000-0000-0000-0000-000000000001",
             ),
@@ -968,6 +974,10 @@ mod tests {
 
         let snapshot = snapshot_workstream(&root, &overview);
         assert_eq!(snapshot.project_display_name, "dms-power-status");
+        assert_eq!(
+            snapshot.remote_identity_display.as_deref(),
+            Some("github.com/owner/dms-power-status")
+        );
         assert!(snapshot.archived);
     }
 

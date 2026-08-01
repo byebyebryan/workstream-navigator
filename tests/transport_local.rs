@@ -27,7 +27,7 @@ fn local_subprocess_uses_the_same_bounded_protocol_service_as_ssh() {
     assert!(hello.registry_generation.len() <= 128);
     assert!(snapshot.workstreams.is_empty());
     assert!(operations.operations.is_empty());
-    assert_eq!(CURRENT_PROTOCOL_VERSION, 13);
+    assert_eq!(CURRENT_PROTOCOL_VERSION, 14);
 }
 
 #[test]

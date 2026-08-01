@@ -1003,6 +1003,7 @@ mod tests {
             location_id: crate::domain::LocationId::new(),
             project_display_name: "project".to_owned(),
             repository_fingerprint: None,
+            remote_identity_display: None,
             display_name: "thread".to_owned(),
             runtime_id: None,
             runtime_status: crate::domain::RuntimeStatus::Idle,

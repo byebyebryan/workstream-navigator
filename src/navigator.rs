@@ -61,6 +61,8 @@ pub struct NavigatorWorkstream {
     pub location_id: LocationId,
     pub workstream_id: WorkstreamId,
     pub project_label: String,
+    /// Credential-free normalized fetch-remote label for display only.
+    pub remote_identity_display: Option<String>,
     /// Bounded host-supplied location label; never a filesystem path.
     pub location_label: String,
     pub display_name: String,
@@ -306,6 +308,10 @@ fn project_workstream(
         location_id: overview.location_id,
         workstream_id: overview.workstream_id,
         project_label: bounded_display(&project.display_name),
+        remote_identity_display: overview
+            .remote_identity_display
+            .as_deref()
+            .map(bounded_display),
         location_label: bounded_display(&overview.project_display_name),
         display_name,
         runtime_status,
@@ -382,6 +388,10 @@ fn project_remote_workstream(
         location_id: workstream.location_id,
         workstream_id: workstream.workstream_id,
         project_label: bounded_display(&project.display_name),
+        remote_identity_display: workstream
+            .remote_identity_display
+            .as_deref()
+            .map(bounded_display),
         location_label: bounded_display(&workstream.project_display_name),
         display_name: bounded_display(&workstream.display_name),
         runtime_status,
@@ -880,6 +890,7 @@ enum NavigatorModal {
 struct NavigatorProjectOverview {
     project_id: ProjectId,
     label: String,
+    remote_identity_display: Option<String>,
     workstream_count: usize,
     active_workstream_count: usize,
     archived_workstream_count: usize,
@@ -1133,6 +1144,11 @@ impl NavigatorView {
                 .iter_mut()
                 .find(|project| project.project_id == workstream.project_id)
             {
+                if project.remote_identity_display.is_none() {
+                    project
+                        .remote_identity_display
+                        .clone_from(&workstream.remote_identity_display);
+                }
                 project.workstream_count += 1;
                 if workstream.archived {
                     project.archived_workstream_count += 1;
@@ -1168,6 +1184,7 @@ impl NavigatorView {
                 projects.push(NavigatorProjectOverview {
                     project_id: workstream.project_id,
                     label: workstream.project_label.clone(),
+                    remote_identity_display: workstream.remote_identity_display.clone(),
                     workstream_count: 1,
                     active_workstream_count: usize::from(!workstream.archived),
                     archived_workstream_count: usize::from(workstream.archived),
@@ -2992,18 +3009,28 @@ fn project_overview_item(
     project: &NavigatorProjectOverview,
     available_width: u16,
 ) -> ListItem<'static> {
-    let mut lines = vec![
-        Line::from(Span::styled(
-            truncate_display(&project.label, usize::from(available_width)),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![Span::styled(
-            project_overview_summary(project, available_width),
-            Style::default().fg(Color::Gray),
-        )]),
-    ];
+    let mut lines = vec![Line::from(Span::styled(
+        truncate_display(&project.label, usize::from(available_width)),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))];
+    if let Some(remote_identity_display) = project.remote_identity_display.as_deref() {
+        lines.push(Line::from(vec![
+            Span::styled("origin · ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                truncate_display(
+                    remote_identity_display,
+                    usize::from(available_width.saturating_sub(9)),
+                ),
+                Style::default().fg(Color::Gray),
+            ),
+        ]));
+    }
+    lines.push(Line::from(vec![Span::styled(
+        project_overview_summary(project, available_width),
+        Style::default().fg(Color::Gray),
+    )]));
     lines.extend(
         project
             .locations
@@ -3050,8 +3077,12 @@ fn project_overview_item(
 }
 
 fn project_overview_height(project: &NavigatorProjectOverview) -> u16 {
-    u16::try_from(2_usize.saturating_add(project.locations.len().saturating_mul(2)))
-        .unwrap_or(u16::MAX)
+    u16::try_from(
+        2_usize
+            .saturating_add(usize::from(project.remote_identity_display.is_some()))
+            .saturating_add(project.locations.len().saturating_mul(2)),
+    )
+    .unwrap_or(u16::MAX)
 }
 
 fn project_overview_summary(project: &NavigatorProjectOverview, available_width: u16) -> String {
@@ -5211,6 +5242,7 @@ mod tests {
             location_id: crate::domain::LocationId::new(),
             project_display_name: "dms-power-status".to_owned(),
             repository_fingerprint: None,
+            remote_identity_display: None,
             display_name: "thread".to_owned(),
             runtime_id: None,
             runtime_status: RuntimeStatus::Idle,
@@ -6003,6 +6035,7 @@ mod tests {
             project_id,
             location_id: local_location,
             location_label: "main checkout".to_owned(),
+            remote_identity_display: Some("github.com/owner/repo".to_owned()),
             last_activity_at_millis: Some(2_000),
             ..row(local_archived, NavigatorRuntimeStatus::Parked)
         };
@@ -6079,6 +6112,7 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(rendered.contains("1 active · 2 archived"));
+        assert!(rendered.contains("origin · github.com/owner/repo"));
         assert!(rendered.contains("local · main checkout"));
         assert!(rendered.contains("snap · remote checkout"));
         assert!(rendered.contains("├─"));
@@ -6257,6 +6291,7 @@ mod tests {
         let project = NavigatorProjectOverview {
             project_id: ProjectId::new(),
             label: "project".to_owned(),
+            remote_identity_display: None,
             workstream_count: 1,
             active_workstream_count: 1,
             archived_workstream_count: 0,
@@ -6588,6 +6623,7 @@ mod tests {
             location_id: LocationId::new(),
             workstream_id,
             project_label: "project".to_owned(),
+            remote_identity_display: None,
             location_label: "project".to_owned(),
             display_name: "thread".to_owned(),
             runtime_status,

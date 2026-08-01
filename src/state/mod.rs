@@ -23,7 +23,7 @@ use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 /// The newest host-registry schema this build can open or create.
 ///
 /// This is safe release-probe metadata; it is not a host-state observation.
-pub const HOST_SCHEMA_VERSION: i64 = 6;
+pub const HOST_SCHEMA_VERSION: i64 = 7;
 const CLIENT_SCHEMA_VERSION: i64 = 4;
 const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
@@ -52,6 +52,7 @@ const HOST_SCHEMA_SQL: &str = "
         repository_path TEXT NOT NULL,
         repository_display_name TEXT NOT NULL,
         remote_identity_fingerprint TEXT,
+        remote_identity_display TEXT,
         default_base_ref TEXT NOT NULL,
         managed_worktree_root TEXT NOT NULL,
         revision INTEGER NOT NULL CHECK (revision > 0)
@@ -462,6 +463,7 @@ pub struct WorkstreamOverview {
     pub project_repository_path: PathBuf,
     pub project_display_name: String,
     pub remote_identity_fingerprint: Option<String>,
+    pub remote_identity_display: Option<String>,
     pub checkout_path: PathBuf,
     pub lifecycle: WorkstreamLifecycle,
     /// Archive is an independent visibility state. It preserves all lifecycle,
@@ -483,6 +485,7 @@ struct PersistedWorkstreamOverview {
     project_repository_path: String,
     project_display_name: String,
     remote_identity_fingerprint: Option<String>,
+    remote_identity_display: Option<String>,
     checkout_path: String,
     lifecycle: String,
     archived_at_millis: Option<i64>,
@@ -779,6 +782,7 @@ impl HostRegistry {
             default_base_ref,
             &display_name,
             None,
+            None,
         )
     }
 
@@ -798,11 +802,13 @@ impl HostRegistry {
         default_base_ref: String,
         repository_display_name: &str,
         remote_identity_fingerprint: Option<&str>,
+        remote_identity_display: Option<&str>,
     ) -> Result<ExternalWorkstream, StateError> {
         validate_registry_text("repository identity", &repository_identity)?;
         validate_registry_text("default base ref", &default_base_ref)?;
         validate_project_display_name(repository_display_name)?;
         validate_repository_fingerprint(remote_identity_fingerprint)?;
+        validate_remote_identity_display(remote_identity_display)?;
         let location_id = LocationId::new();
         let registration = ExternalWorkstream {
             location_id,
@@ -823,14 +829,16 @@ impl HostRegistry {
                 "INSERT INTO project_locations (
                     location_id, repository_identity, repository_path,
                     repository_display_name, remote_identity_fingerprint,
-                    default_base_ref, managed_worktree_root, revision
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 1)",
+                    remote_identity_display, default_base_ref,
+                    managed_worktree_root, revision
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
                 params![
                     registration.location_id.to_string(),
                     registration.repository_identity,
                     repository_path.to_string_lossy(),
                     repository_display_name,
                     remote_identity_fingerprint.unwrap_or(""),
+                    remote_identity_display.unwrap_or(""),
                     registration.default_base_ref,
                     registration.managed_worktree_root.to_string_lossy(),
                 ],
@@ -884,6 +892,7 @@ impl HostRegistry {
             .prepare(
                 "SELECT location_id, repository_path FROM project_locations
                  WHERE repository_display_name = '' OR remote_identity_fingerprint IS NULL
+                    OR remote_identity_display IS NULL
                  ORDER BY location_id LIMIT ?1",
             )
             .map_err(StateError::Sqlite)?;
@@ -918,21 +927,26 @@ impl HostRegistry {
         repository_path: &Path,
         display_name: &str,
         remote_identity_fingerprint: Option<&str>,
+        remote_identity_display: Option<&str>,
     ) -> Result<(), StateError> {
         validate_project_display_name(display_name)?;
         validate_repository_fingerprint(remote_identity_fingerprint)?;
+        validate_remote_identity_display(remote_identity_display)?;
         let changed = self
             .connection
             .execute(
                 "UPDATE project_locations
                  SET repository_path = ?1, repository_display_name = ?2,
-                     remote_identity_fingerprint = ?3, revision = revision + 1
-                 WHERE location_id = ?4
-                   AND (repository_display_name = '' OR remote_identity_fingerprint IS NULL)",
+                     remote_identity_fingerprint = ?3, remote_identity_display = ?4,
+                     revision = revision + 1
+                 WHERE location_id = ?5
+                   AND (repository_display_name = '' OR remote_identity_fingerprint IS NULL
+                        OR remote_identity_display IS NULL)",
                 params![
                     repository_path.to_string_lossy(),
                     display_name,
                     remote_identity_fingerprint.unwrap_or(""),
+                    remote_identity_display.unwrap_or(""),
                     location_id.to_string(),
                 ],
             )
@@ -1786,6 +1800,7 @@ impl HostRegistry {
                         project_locations.repository_path,
                         project_locations.repository_display_name,
                         project_locations.remote_identity_fingerprint,
+                        project_locations.remote_identity_display,
                         checkouts.path,
                         workstreams.lifecycle,
                         workstreams.archived_at_millis,
@@ -1808,12 +1823,13 @@ impl HostRegistry {
                     project_repository_path: row.get(2)?,
                     project_display_name: row.get(3)?,
                     remote_identity_fingerprint: row.get(4)?,
-                    checkout_path: row.get(5)?,
-                    lifecycle: row.get(6)?,
-                    archived_at_millis: row.get(7)?,
-                    activity_sequence: row.get(8)?,
-                    activity_at_millis: row.get(9)?,
-                    revision: row.get(10)?,
+                    remote_identity_display: row.get(5)?,
+                    checkout_path: row.get(6)?,
+                    lifecycle: row.get(7)?,
+                    archived_at_millis: row.get(8)?,
+                    activity_sequence: row.get(9)?,
+                    activity_at_millis: row.get(10)?,
+                    revision: row.get(11)?,
                 })
             })
             .map_err(StateError::Sqlite)?
@@ -1867,6 +1883,9 @@ impl HostRegistry {
             remote_identity_fingerprint: base
                 .remote_identity_fingerprint
                 .filter(|fingerprint| !fingerprint.is_empty()),
+            remote_identity_display: base
+                .remote_identity_display
+                .filter(|display| !display.is_empty()),
             checkout_path: PathBuf::from(base.checkout_path),
             lifecycle,
             archived_at_millis: base.archived_at_millis,
@@ -3558,7 +3577,7 @@ fn migrate_host_schema(connection: &mut Connection, state_root: &Path) -> Result
                     .map_err(StateError::Sqlite)?;
             }
         }
-        4 | 5 => {}
+        4..=6 => {}
         HOST_SCHEMA_VERSION => return Ok(()),
         _ => return Err(StateError::UnsupportedSchemaVersion(current)),
     }
@@ -3659,6 +3678,24 @@ fn ensure_host_repository_metadata_columns(
             .execute_batch(
                 "ALTER TABLE project_locations
                  ADD COLUMN remote_identity_fingerprint TEXT;",
+            )
+            .map_err(StateError::Sqlite)?;
+    }
+    let remote_display_exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('project_locations')
+                WHERE name = 'remote_identity_display'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)?;
+    if !remote_display_exists {
+        transaction
+            .execute_batch(
+                "ALTER TABLE project_locations
+                 ADD COLUMN remote_identity_display TEXT;",
             )
             .map_err(StateError::Sqlite)?;
     }
@@ -4603,6 +4640,24 @@ fn validate_project_display_name(value: &str) -> Result<(), StateError> {
     Ok(())
 }
 
+fn validate_remote_identity_display(value: Option<&str>) -> Result<(), StateError> {
+    let Some(value) = value else {
+        return Ok(());
+    };
+    if value.trim().is_empty()
+        || value.len() > 256
+        || value.chars().any(char::is_control)
+        || value.contains('\\')
+        || value.contains('@')
+        || value.contains("//")
+        || value.contains(['?', '#'])
+        || value.starts_with('/')
+    {
+        return Err(StateError::InvalidRegistryField("remote identity display"));
+    }
+    Ok(())
+}
+
 fn validate_repository_fingerprint(value: Option<&str>) -> Result<(), StateError> {
     let Some(value) = value else {
         return Ok(());
@@ -5325,6 +5380,59 @@ mod tests {
                 Path::new("/primary/repo"),
                 "repo",
                 Some(&fingerprint),
+                Some("github.com/owner/repo"),
+            )
+            .unwrap();
+        assert!(registry.pending_repository_metadata().unwrap().is_empty());
+    }
+
+    #[test]
+    fn host_registry_migrates_v6_remote_display_as_pending() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let legacy_sql = HOST_SCHEMA_SQL.replace("        remote_identity_display TEXT,\n", "");
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        connection.execute_batch(&legacy_sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO host_identity VALUES (1, ?1, 'generation', 6)",
+                [HostId::new().to_string()],
+            )
+            .unwrap();
+        let location_id = LocationId::new();
+        let fingerprint = format!("git-remote-v1:{}", "d".repeat(64));
+        connection
+            .execute(
+                "INSERT INTO project_locations (
+                    location_id, repository_identity, repository_path,
+                    repository_display_name, remote_identity_fingerprint,
+                    default_base_ref, managed_worktree_root, revision
+                 ) VALUES (?1, '/repo/.git', '/repo', 'repo', ?2, ?3,
+                           '/state/worktrees/location', 1)",
+                params![location_id.to_string(), fingerprint, "a".repeat(40)],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA user_version = 6;")
+            .unwrap();
+        drop(connection);
+
+        let mut registry = HostRegistry::open(&root).unwrap();
+        assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
+        assert_eq!(
+            registry.pending_repository_metadata().unwrap(),
+            vec![PendingRepositoryMetadata {
+                location_id,
+                repository_path: PathBuf::from("/repo"),
+            }]
+        );
+        registry
+            .record_repository_metadata(
+                location_id,
+                Path::new("/repo"),
+                "repo",
+                Some(&format!("git-remote-v1:{}", "d".repeat(64))),
+                Some("github.com/owner/repo"),
             )
             .unwrap();
         assert!(registry.pending_repository_metadata().unwrap().is_empty());
@@ -6255,11 +6363,16 @@ mod tests {
     #[test]
     fn navigator_overview_joins_only_bounded_workstream_metadata() {
         let (_temporary, mut registry) = registry();
+        let fingerprint = format!("git-remote-v1:{}", "a".repeat(64));
         let registered = registry
-            .register_external_workstream(
+            .register_external_workstream_with_metadata(
                 PathBuf::from("/disposable/repository"),
+                Path::new("/disposable/repository"),
                 "common-dir-identity".to_owned(),
                 "deadbeef".to_owned(),
+                "repository",
+                Some(&fingerprint),
+                Some("github.com/owner/repository"),
             )
             .unwrap();
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
@@ -6284,6 +6397,10 @@ mod tests {
         assert_eq!(overview.len(), 1);
         assert_eq!(overview[0].workstream_id, registered.workstream_id);
         assert_eq!(overview[0].lifecycle, WorkstreamLifecycle::Open);
+        assert_eq!(
+            overview[0].remote_identity_display.as_deref(),
+            Some("github.com/owner/repository")
+        );
         assert_eq!(
             overview[0]
                 .binding

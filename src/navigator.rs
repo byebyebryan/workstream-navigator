@@ -3400,9 +3400,9 @@ fn workstream_context_line(
     match context {
         WorkstreamRowContext::Recent => Line::from(vec![
             Span::raw(prefix.to_owned()),
-            host(),
-            Span::styled(" · ", Style::default().fg(Color::Gray)),
             project(),
+            Span::styled(" · ", Style::default().fg(Color::Gray)),
+            host(),
         ]),
         WorkstreamRowContext::Host => Line::from(vec![
             Span::raw(prefix.to_owned()),
@@ -5532,6 +5532,13 @@ mod tests {
                 .filter(|span| span.content.as_ref() == " · ")
                 .count(),
             1
+        );
+        assert_eq!(
+            line.spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>(),
+            "   project · local"
         );
         assert!(!line.spans.iter().any(|span| span.content.as_ref() == "•"));
     }

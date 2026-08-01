@@ -952,6 +952,30 @@ impl HostRegistry {
         &self,
         workstream_id: WorkstreamId,
     ) -> Result<WorkstreamGitLocation, StateError> {
+        self.workstream_git_location_with_archived(workstream_id, false)
+    }
+
+    /// Returns the configured Git location for an independent Workstream
+    /// start. An archived source remains a retained `ProjectLocation` and is
+    /// therefore a valid base for this one operation; it is not reopened,
+    /// resumed, or otherwise made active by the lookup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Workstream or its registered location is
+    /// missing or malformed.
+    pub fn workstream_git_location_for_start(
+        &self,
+        workstream_id: WorkstreamId,
+    ) -> Result<WorkstreamGitLocation, StateError> {
+        self.workstream_git_location_with_archived(workstream_id, true)
+    }
+
+    fn workstream_git_location_with_archived(
+        &self,
+        workstream_id: WorkstreamId,
+        include_archived: bool,
+    ) -> Result<WorkstreamGitLocation, StateError> {
         let location: (String, String, i64, Option<i64>) = self
             .connection
             .query_row(
@@ -968,7 +992,7 @@ impl HostRegistry {
             .optional()
             .map_err(StateError::Sqlite)?
             .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
-        if location.3.is_some() {
+        if location.3.is_some() && !include_archived {
             return Err(StateError::WorkstreamArchived(workstream_id));
         }
         Ok(WorkstreamGitLocation {
@@ -2558,7 +2582,11 @@ fn managed_worktree_plan_for_source(
     expected_source_revision: Revision,
     base_commit: String,
 ) -> Result<PersistedManagedWorktreePlan, StateError> {
-    let source = load_managed_workstream_source(transaction, source_workstream_id)?;
+    let source = load_managed_workstream_source(
+        transaction,
+        source_workstream_id,
+        kind == OperationKind::Start,
+    )?;
     if source.revision != expected_source_revision {
         return Err(StateError::Domain(DomainError::RevisionConflict {
             expected: expected_source_revision,
@@ -2604,6 +2632,7 @@ fn managed_worktree_plan_for_source(
 fn load_managed_workstream_source(
     transaction: &rusqlite::Transaction<'_>,
     workstream_id: WorkstreamId,
+    include_archived: bool,
 ) -> Result<ManagedWorkstreamSource, StateError> {
     let source = transaction
         .query_row(
@@ -2641,7 +2670,7 @@ fn load_managed_workstream_source(
         .optional()
         .map_err(StateError::Sqlite)?
         .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
-    if source.5.is_some() {
+    if source.5.is_some() && !include_archived {
         return Err(StateError::WorkstreamArchived(workstream_id));
     }
     Ok(ManagedWorkstreamSource {
@@ -4917,13 +4946,30 @@ mod tests {
             registry.workstream_git_location(registered.workstream_id),
             Err(StateError::WorkstreamArchived(id)) if id == registered.workstream_id
         ));
-        assert!(matches!(
-            registry.prepare_managed_workstream(
-                "archived-source".to_owned(),
+        assert_eq!(
+            registry
+                .workstream_git_location_for_start(registered.workstream_id)
+                .unwrap()
+                .repository_path,
+            PathBuf::from("/disposable/repository")
+        );
+        let prepared = registry
+            .prepare_managed_workstream(
+                "archived-location-start".to_owned(),
                 OperationKind::Start,
                 registered.workstream_id,
                 archived_revision,
                 "a".repeat(40),
+            )
+            .unwrap();
+        assert_eq!(prepared.plan.source_workstream_id, registered.workstream_id);
+        assert!(matches!(
+            registry.prepare_managed_workstream(
+                "archived-location-fork".to_owned(),
+                OperationKind::Fork,
+                registered.workstream_id,
+                archived_revision,
+                "b".repeat(40),
             ),
             Err(StateError::WorkstreamArchived(id)) if id == registered.workstream_id
         ));

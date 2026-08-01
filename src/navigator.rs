@@ -35,7 +35,7 @@ use thiserror::Error;
 
 use crate::{
     domain::{
-        Clock, HostId, OperationId, OperationKind, OperationPhase, ProjectId, Revision,
+        Clock, HostId, LocationId, OperationId, OperationKind, OperationPhase, ProjectId, Revision,
         RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle,
     },
     presentation::{AttachmentPhase, AttachmentStatus, Presentation, PresentationError},
@@ -56,8 +56,12 @@ use crate::{
 pub struct NavigatorWorkstream {
     pub host: NavigatorHost,
     pub project_id: ProjectId,
+    /// Opaque host-owned location identity used only for Project actions.
+    pub location_id: LocationId,
     pub workstream_id: WorkstreamId,
     pub project_label: String,
+    /// Bounded host-supplied location label; never a filesystem path.
+    pub location_label: String,
     pub display_name: String,
     pub runtime_status: NavigatorRuntimeStatus,
     pub archived: bool,
@@ -283,8 +287,10 @@ fn project_workstream(
     Ok(NavigatorWorkstream {
         host: NavigatorHost::Local,
         project_id: project.project_id,
+        location_id: overview.location_id,
         workstream_id: overview.workstream_id,
         project_label: bounded_display(&project.display_name),
+        location_label: bounded_display(&overview.project_display_name),
         display_name,
         runtime_status,
         archived: overview.archived_at_millis.is_some(),
@@ -342,8 +348,10 @@ fn project_remote_workstream(
             },
         },
         project_id: project.project_id,
+        location_id: workstream.location_id,
         workstream_id: workstream.workstream_id,
         project_label: bounded_display(&project.display_name),
+        location_label: bounded_display(&workstream.project_display_name),
         display_name: bounded_display(&workstream.display_name),
         runtime_status,
         archived: workstream.archived,
@@ -699,6 +707,7 @@ pub struct NavigatorView {
     page: NavigatorPage,
     detail: Option<NavigatorDetail>,
     selected_project: Option<ProjectId>,
+    selected_project_location: usize,
     selected_host: Option<String>,
     selected_operation: usize,
     view_mode: NavigatorViewMode,
@@ -811,8 +820,23 @@ enum NavigatorModal {
 struct NavigatorProjectOverview {
     project_id: ProjectId,
     label: String,
-    host_aliases: Vec<String>,
     workstream_count: usize,
+    active_workstream_count: usize,
+    archived_workstream_count: usize,
+    locations: Vec<NavigatorProjectLocation>,
+    latest_activity_at_millis: Option<i64>,
+}
+
+/// One host-owned `ProjectLocation` summarized without a repository path or
+/// durable provider identifier. The opaque location ID remains presentation
+/// action identity only.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NavigatorProjectLocation {
+    host: NavigatorHost,
+    location_id: LocationId,
+    label: String,
+    active_workstream_count: usize,
+    archived_workstream_count: usize,
     latest_activity_at_millis: Option<i64>,
 }
 
@@ -904,6 +928,7 @@ impl NavigatorView {
             page: NavigatorPage::Workstreams,
             detail: None,
             selected_project: None,
+            selected_project_location: 0,
             selected_host: Some("local".to_owned()),
             selected_operation: 0,
             view_mode: NavigatorViewMode::Recent,
@@ -1015,7 +1040,10 @@ impl NavigatorView {
                         workstream_id: workstream.workstream_id,
                     })
             }
-            NavigatorPage::Projects => self.selected_project.map(NavigatorDetail::Project),
+            NavigatorPage::Projects => {
+                self.selected_project_location = 0;
+                self.selected_project.map(NavigatorDetail::Project)
+            }
             NavigatorPage::Hosts => self.selected_host.clone().map(NavigatorDetail::Host),
         };
     }
@@ -1043,28 +1071,63 @@ impl NavigatorView {
                 .find(|project| project.project_id == workstream.project_id)
             {
                 project.workstream_count += 1;
-                if !project
-                    .host_aliases
-                    .iter()
-                    .any(|host| host == workstream.host.alias())
-                {
-                    project
-                        .host_aliases
-                        .push(workstream.host.alias().to_owned());
-                    project.host_aliases.sort();
+                if workstream.archived {
+                    project.archived_workstream_count += 1;
+                } else {
+                    project.active_workstream_count += 1;
                 }
                 project.latest_activity_at_millis = project
                     .latest_activity_at_millis
                     .max(workstream.last_activity_at_millis);
+                if let Some(location) = project.locations.iter_mut().find(|location| {
+                    location.host.alias() == workstream.host.alias()
+                        && location.location_id == workstream.location_id
+                }) {
+                    if workstream.archived {
+                        location.archived_workstream_count += 1;
+                    } else {
+                        location.active_workstream_count += 1;
+                    }
+                    location.latest_activity_at_millis = location
+                        .latest_activity_at_millis
+                        .max(workstream.last_activity_at_millis);
+                } else {
+                    project.locations.push(NavigatorProjectLocation {
+                        host: workstream.host.clone(),
+                        location_id: workstream.location_id,
+                        label: workstream.location_label.clone(),
+                        active_workstream_count: usize::from(!workstream.archived),
+                        archived_workstream_count: usize::from(workstream.archived),
+                        latest_activity_at_millis: workstream.last_activity_at_millis,
+                    });
+                }
             } else {
                 projects.push(NavigatorProjectOverview {
                     project_id: workstream.project_id,
                     label: workstream.project_label.clone(),
-                    host_aliases: vec![workstream.host.alias().to_owned()],
                     workstream_count: 1,
+                    active_workstream_count: usize::from(!workstream.archived),
+                    archived_workstream_count: usize::from(workstream.archived),
+                    locations: vec![NavigatorProjectLocation {
+                        host: workstream.host.clone(),
+                        location_id: workstream.location_id,
+                        label: workstream.location_label.clone(),
+                        active_workstream_count: usize::from(!workstream.archived),
+                        archived_workstream_count: usize::from(workstream.archived),
+                        latest_activity_at_millis: workstream.last_activity_at_millis,
+                    }],
                     latest_activity_at_millis: workstream.last_activity_at_millis,
                 });
             }
+        }
+        for project in &mut projects {
+            project.locations.sort_by(|left, right| {
+                left.host
+                    .alias()
+                    .cmp(right.host.alias())
+                    .then_with(|| left.label.cmp(&right.label))
+                    .then_with(|| left.location_id.cmp(&right.location_id))
+            });
         }
         projects.sort_by(|left, right| {
             right
@@ -1074,6 +1137,28 @@ impl NavigatorView {
                 .then_with(|| left.project_id.cmp(&right.project_id))
         });
         projects
+    }
+
+    fn selected_project_location_source(&self) -> Option<NavigatorWorkstream> {
+        let NavigatorDetail::Project(project_id) = self.detail.as_ref()? else {
+            return None;
+        };
+        let location = self
+            .projects()
+            .into_iter()
+            .find(|project| project.project_id == *project_id)?
+            .locations
+            .get(self.selected_project_location)?
+            .clone();
+        self.snapshot
+            .workstreams
+            .iter()
+            .find(|workstream| {
+                workstream.project_id == *project_id
+                    && workstream.location_id == location.location_id
+                    && workstream.host.alias() == location.host.alias()
+            })
+            .cloned()
     }
 
     fn hosts(&self) -> Vec<NavigatorHostSummary> {
@@ -1129,6 +1214,15 @@ impl NavigatorView {
         {
             self.selected_project = projects.first().map(|project| project.project_id);
         }
+        if let Some(NavigatorDetail::Project(project_id)) = self.detail.as_ref() {
+            self.selected_project_location = projects
+                .iter()
+                .find(|project| project.project_id == *project_id)
+                .map_or(0, |project| {
+                    self.selected_project_location
+                        .min(project.locations.len().saturating_sub(1))
+                });
+        }
         let hosts = self.hosts();
         if !hosts
             .iter()
@@ -1170,6 +1264,18 @@ impl NavigatorView {
             if !self.snapshot.unresolved_operations.is_empty() {
                 self.selected_operation =
                     (self.selected_operation + 1) % self.snapshot.unresolved_operations.len();
+            }
+            return;
+        }
+        if let Some(NavigatorDetail::Project(project_id)) = self.detail.as_ref() {
+            if let Some(project) = self
+                .projects()
+                .into_iter()
+                .find(|project| project.project_id == *project_id)
+                && !project.locations.is_empty()
+            {
+                self.selected_project_location =
+                    (self.selected_project_location + 1) % project.locations.len();
             }
             return;
         }
@@ -1217,6 +1323,20 @@ impl NavigatorView {
                     .selected_operation
                     .checked_sub(1)
                     .unwrap_or(self.snapshot.unresolved_operations.len() - 1);
+            }
+            return;
+        }
+        if let Some(NavigatorDetail::Project(project_id)) = self.detail.as_ref() {
+            if let Some(project) = self
+                .projects()
+                .into_iter()
+                .find(|project| project.project_id == *project_id)
+                && !project.locations.is_empty()
+            {
+                self.selected_project_location = self
+                    .selected_project_location
+                    .checked_sub(1)
+                    .unwrap_or(project.locations.len() - 1);
             }
             return;
         }
@@ -1408,6 +1528,7 @@ impl NavigatorView {
             self.page,
             self.detail.is_some(),
             matches!(self.detail, Some(NavigatorDetail::Recovery)),
+            matches!(self.detail, Some(NavigatorDetail::Project(_))),
             self.workstream_scope,
         )
         .len()
@@ -1699,22 +1820,51 @@ impl NavigatorView {
         else {
             return;
         };
-        let workstream_label = if project.workstream_count == 1 {
-            "1 Workstream".to_owned()
-        } else {
-            format!("{} Workstreams", project.workstream_count)
-        };
+        let mut lines = vec![
+            Line::from(Span::styled(
+                project.label.clone(),
+                Style::default().add_modifier(Modifier::BOLD),
+            )),
+            Line::raw(project_activity_summary(&project)),
+            Line::raw("Locations"),
+        ];
+        lines.extend(
+            project
+                .locations
+                .iter()
+                .enumerate()
+                .map(|(index, location)| {
+                    let marker = if index == self.selected_project_location {
+                        "> "
+                    } else {
+                        "  "
+                    };
+                    let activity = location_activity_summary(location);
+                    Line::from(Span::styled(
+                        format!(
+                            "{marker}{} · {} · {activity}",
+                            location.host.alias(),
+                            location.label,
+                        ),
+                        if index == self.selected_project_location {
+                            Style::default()
+                                .fg(Color::White)
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::Gray)
+                        },
+                    ))
+                }),
+        );
+        lines.push(Line::raw(
+            "↑/↓ selects · n starts at location · Enter/Esc returns",
+        ));
         frame.render_widget(
-            Paragraph::new(vec![
-                Line::from(Span::styled(
-                    project.label,
-                    Style::default().add_modifier(Modifier::BOLD),
-                )),
-                Line::raw(workstream_label),
-                Line::raw(format!("Locations: {}", project.host_aliases.join(" · "))),
-                Line::raw("Enter or Esc returns to the Project list"),
-            ])
-            .block(Block::default().borders(Borders::ALL).title(" Project ")),
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Project · n start selected location "),
+            ),
             area,
         );
     }
@@ -2029,7 +2179,12 @@ impl NavigatorView {
             } else {
                 "back"
             };
-            return vec![("Enter", enter), ("Esc", "back"), ("?", "keys")];
+            let mut bindings = vec![("Enter", enter), ("Esc", "back")];
+            if matches!(detail, NavigatorDetail::Project(_)) {
+                bindings.push(("n", "start location"));
+            }
+            bindings.push(("?", "keys"));
+            return bindings;
         }
         match self.page {
             NavigatorPage::Workstreams => {
@@ -2083,6 +2238,7 @@ impl NavigatorView {
                 self.page,
                 self.detail.is_some(),
                 matches!(self.detail, Some(NavigatorDetail::Recovery)),
+                matches!(self.detail, Some(NavigatorDetail::Project(_))),
                 self.workstream_scope,
             ))
             .block(
@@ -2185,6 +2341,7 @@ fn help_lines(
     page: NavigatorPage,
     showing_detail: bool,
     showing_recovery: bool,
+    showing_project: bool,
     workstream_scope: WorkstreamScope,
 ) -> Vec<Line<'static>> {
     let heading = Style::default()
@@ -2224,6 +2381,12 @@ fn help_lines(
                 Span::raw("        return to the list"),
             ]),
         ]);
+        if showing_project {
+            lines.push(Line::from(vec![
+                Span::styled("n", key),
+                Span::raw("          start a new Workstream at the selected location"),
+            ]));
+        }
     } else if page == NavigatorPage::Workstreams {
         lines.extend(workstream_help_lines(workstream_scope, heading, key));
     } else {
@@ -2385,11 +2548,6 @@ fn host_header_item(alias: &str) -> ListItem<'static> {
 }
 
 fn project_overview_item(project: &NavigatorProjectOverview) -> ListItem<'static> {
-    let workstream_label = if project.workstream_count == 1 {
-        "1 Workstream".to_owned()
-    } else {
-        format!("{} Workstreams", project.workstream_count)
-    };
     ListItem::new(vec![
         Line::from(Span::styled(
             project.label.clone(),
@@ -2398,14 +2556,39 @@ fn project_overview_item(project: &NavigatorProjectOverview) -> ListItem<'static
                 .add_modifier(Modifier::BOLD),
         )),
         Line::from(vec![
-            Span::styled(workstream_label, Style::default().fg(Color::Gray)),
+            Span::styled(
+                project_activity_summary(project),
+                Style::default().fg(Color::Gray),
+            ),
             Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
             Span::styled(
-                project.host_aliases.join(" · "),
+                format!(
+                    "{} location{}",
+                    project.locations.len(),
+                    if project.locations.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    }
+                ),
                 Style::default().fg(Color::LightBlue),
             ),
         ]),
     ])
+}
+
+fn project_activity_summary(project: &NavigatorProjectOverview) -> String {
+    format!(
+        "{} active · {} archived",
+        project.active_workstream_count, project.archived_workstream_count
+    )
+}
+
+fn location_activity_summary(location: &NavigatorProjectLocation) -> String {
+    format!(
+        "{} active · {} archived",
+        location.active_workstream_count, location.archived_workstream_count
+    )
 }
 
 fn host_overview_item(host: &NavigatorHostSummary) -> ListItem<'static> {
@@ -2859,6 +3042,12 @@ fn handle_navigator_key(
     if matches!(view.detail, Some(NavigatorDetail::Recovery)) && matches!(key.code, KeyCode::Enter)
     {
         recover_selected_operation(root, remote, view);
+        return false;
+    }
+    if matches!(view.detail, Some(NavigatorDetail::Project(_)))
+        && matches!(key.code, KeyCode::Char('n'))
+    {
+        create_workstream_from_selected_project_location(root, presentation, remote, view);
         return false;
     }
     let workstreams = view.page() == NavigatorPage::Workstreams && view.detail.is_none();
@@ -3367,7 +3556,38 @@ fn create_workstream_selected(
         view.set_message("no Workstream is registered; run wsnav register /path/to/git-checkout");
         return;
     };
-    let destination = match run_creation_action(root, action, &source) {
+    create_workstream_from_source(root, presentation, remote, view, &source, action);
+}
+
+fn create_workstream_from_selected_project_location(
+    root: &StateRoot,
+    presentation: &Presentation,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+) {
+    let Some(source) = view.selected_project_location_source() else {
+        view.set_message("the selected ProjectLocation is unavailable; refresh this host");
+        return;
+    };
+    create_workstream_from_source(
+        root,
+        presentation,
+        remote,
+        view,
+        &source,
+        CreationAction::Independent,
+    );
+}
+
+fn create_workstream_from_source(
+    root: &StateRoot,
+    presentation: &Presentation,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+    source: &NavigatorWorkstream,
+    action: CreationAction,
+) {
+    let destination = match run_creation_action(root, action, source) {
         Ok(workstream_id) => workstream_id,
         Err(error) => {
             view.set_message(action_message(&error));
@@ -4386,6 +4606,7 @@ mod tests {
             NavigatorPage::Workstreams,
             false,
             false,
+            false,
             WorkstreamScope::Active,
         )
         .into_iter()
@@ -4480,6 +4701,90 @@ mod tests {
     }
 
     #[test]
+    fn project_detail_selects_host_owned_locations_without_rendering_opaque_ids() {
+        let project_id = ProjectId::new();
+        let local_location = LocationId::new();
+        let remote_location = LocationId::new();
+        let local_active = WorkstreamId::new();
+        let local_archived = WorkstreamId::new();
+        let remote_archived = WorkstreamId::new();
+        let mut local_archived_row = NavigatorWorkstream {
+            project_id,
+            location_id: local_location,
+            location_label: "main checkout".to_owned(),
+            last_activity_at_millis: Some(2_000),
+            ..row(local_archived, NavigatorRuntimeStatus::Parked)
+        };
+        local_archived_row.archived = true;
+        let mut remote_archived_row = NavigatorWorkstream {
+            host: NavigatorHost::Remote {
+                alias: "snap".to_owned(),
+                reachability: RemoteHostReachability::Reachable,
+            },
+            project_id,
+            location_id: remote_location,
+            location_label: "remote checkout".to_owned(),
+            last_activity_at_millis: Some(1_000),
+            ..row(remote_archived, NavigatorRuntimeStatus::Parked)
+        };
+        remote_archived_row.archived = true;
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![
+                NavigatorWorkstream {
+                    project_id,
+                    location_id: local_location,
+                    location_label: "main checkout".to_owned(),
+                    last_activity_at_millis: Some(3_000),
+                    ..row(local_active, NavigatorRuntimeStatus::Idle)
+                },
+                local_archived_row,
+                remote_archived_row,
+            ],
+            hosts: vec![NavigatorHostOverview {
+                alias: "snap".to_owned(),
+                reachability: RemoteHostReachability::Reachable,
+            }],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
+        });
+        view.select_page(NavigatorPage::Projects);
+        view.open_selected_detail();
+
+        let project = view.projects().pop().unwrap();
+        assert_eq!(project.active_workstream_count, 1);
+        assert_eq!(project.archived_workstream_count, 2);
+        assert_eq!(project.locations.len(), 2);
+        assert_eq!(
+            view.selected_project_location_source()
+                .map(|source| source.workstream_id),
+            Some(local_active)
+        );
+        view.select_next();
+        assert_eq!(
+            view.selected_project_location_source()
+                .map(|source| source.workstream_id),
+            Some(remote_archived)
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
+        terminal.draw(|frame| view.render(frame)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("1 active · 2 archived"));
+        assert!(rendered.contains("local · main checkout"));
+        assert!(rendered.contains("snap · remote checkout"));
+        assert!(rendered.contains("n start selected location"));
+        assert!(!rendered.contains(&local_location.to_string()));
+        assert!(!rendered.contains(&remote_location.to_string()));
+    }
+
+    #[test]
     fn management_page_mouse_targets_cover_tabs_and_two_line_rows() {
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: vec![row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)],
@@ -4552,6 +4857,7 @@ mod tests {
 
         let expanded = help_lines(
             NavigatorPage::Workstreams,
+            false,
             false,
             false,
             WorkstreamScope::Active,
@@ -4849,8 +5155,10 @@ mod tests {
         NavigatorWorkstream {
             host: NavigatorHost::Local,
             project_id: ProjectId::new(),
+            location_id: LocationId::new(),
             workstream_id,
             project_label: "project".to_owned(),
+            location_label: "project".to_owned(),
             display_name: "thread".to_owned(),
             runtime_status,
             archived: false,

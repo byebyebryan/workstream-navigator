@@ -721,7 +721,9 @@ D7.1 supplies the Workstreams, Projects, and Hosts navigation foundation;
 D7.2 now supplies revision-guarded archive/restore through local and SSH host
 contracts, Active/Archived navigator scopes, bounded Workstream status,
 canonical rename, and exact local/remote unresolved-operation reconciliation.
-Project and Host management remain planned.
+D7.3 now exposes bounded host-owned ProjectLocations with active/archived
+counts and supports starting at a selected retained location; checkout
+registration remains planned. Host management remains planned.
 D7 makes ordinary WSNav administration available through the navigator without
 turning it into a task manager or replacing the provider surface.
 
@@ -781,7 +783,9 @@ Delivery slices:
 4. **D7.3 - Project management.** List logical Projects and their host-owned
    locations, show active/archived counts, register the first or an additional
    existing checkout on a selected local or SSH host, and start a Workstream at
-   a selected location without requiring an existing active row.
+   a selected location without requiring an existing active row. Location
+   inventory, counts, and starting from a retained archived source are
+   implemented; navigator checkout registration follows as a separate commit.
 5. **D7.4 - Host management.** Register, verify, activate, remove the exact
    observer from, and forget SSH hosts through the navigator while preserving
    client/host ownership boundaries. Carry the native review boundary proven

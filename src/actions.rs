@@ -40,7 +40,9 @@ pub enum StartOutcome {
 }
 
 /// Creates an independent managed Checkout from a Workstream's configured
-/// project base, then starts its first native Codex Runtime.
+/// project base, then starts its first native Codex Runtime. The retained
+/// source may be archived: archive changes navigator visibility only and does
+/// not revoke the host-owned `ProjectLocation` used as this exact Git base.
 ///
 /// The source identifies only a `ProjectLocation` and expected revision. No
 /// source checkout files, branch, provider conversation, or prompt data is
@@ -412,11 +414,19 @@ fn prepare_managed_worktree(
     kind: OperationKind,
     git: &dyn GitWorktree,
 ) -> Result<crate::state::ManagedWorkstreamPreparation, ActionError> {
-    let overview = active_workstream_overview(registry, source_workstream_id)?;
+    let overview = if kind == OperationKind::Start {
+        workstream_overview(registry, source_workstream_id)?
+    } else {
+        active_workstream_overview(registry, source_workstream_id)?
+    };
     if expected_revision.is_some_and(|expected| expected != overview.revision) {
         return Err(ActionError::WorkstreamRevisionConflict);
     }
-    let location = registry.workstream_git_location(source_workstream_id)?;
+    let location = if kind == OperationKind::Start {
+        registry.workstream_git_location_for_start(source_workstream_id)?
+    } else {
+        registry.workstream_git_location(source_workstream_id)?
+    };
     if expected_revision.is_some_and(|expected| expected != location.source_revision) {
         return Err(ActionError::WorkstreamRevisionConflict);
     }

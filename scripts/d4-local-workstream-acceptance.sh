@@ -60,13 +60,13 @@ if [[ " $* " == *" resume "* ]]; then
     session_id="destination-session"
     source_value="resume"
 fi
-printf '{"hook_event_name":"SessionStart","cwd":"%s","session_id":"%s","source":"%s"}' "$PWD" "$session_id" "$source_value" | wsnav _hook
+printf '{"hook_event_name":"SessionStart","cwd":"%s","session_id":"%s","source":"%s"}' "$PWD" "$session_id" "$source_value" | wsnav --state-root "$FAKE_STATE_ROOT" _hook
 if [[ "$session_id" == "source-session" ]]; then
-    printf '{"hook_event_name":"UserPromptSubmit","cwd":"%s","session_id":"source-session","turn_id":"settled-turn"}' "$PWD" | wsnav _hook
-    printf '{"hook_event_name":"Stop","cwd":"%s","session_id":"source-session","turn_id":"settled-turn"}' "$PWD" | wsnav _hook
+    printf '{"hook_event_name":"UserPromptSubmit","cwd":"%s","session_id":"source-session","turn_id":"settled-turn"}' "$PWD" | wsnav --state-root "$FAKE_STATE_ROOT" _hook
+    printf '{"hook_event_name":"Stop","cwd":"%s","session_id":"source-session","turn_id":"settled-turn"}' "$PWD" | wsnav --state-root "$FAKE_STATE_ROOT" _hook
     # This is the source's next in-progress turn. The D4 provider fork must
     # use only the preceding settled-turn boundary.
-    printf '{"hook_event_name":"UserPromptSubmit","cwd":"%s","session_id":"source-session","turn_id":"running-turn"}' "$PWD" | wsnav _hook
+    printf '{"hook_event_name":"UserPromptSubmit","cwd":"%s","session_id":"source-session","turn_id":"running-turn"}' "$PWD" | wsnav --state-root "$FAKE_STATE_ROOT" _hook
 fi
 sleep 60
 EOF
@@ -82,6 +82,7 @@ printf 'source-only\n' >"$repository/source-only.txt"
 
 export CODEX_HOME="$codex_home"
 export FAKE_CODEX_FORK_REQUEST="$fork_request"
+export FAKE_STATE_ROOT="$state_root"
 export PATH="$fake_bin:$workspace_root/target/debug:$PATH"
 
 "$wsnav_bin" --state-root "$state_root" setup --skip-review

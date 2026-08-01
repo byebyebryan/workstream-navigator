@@ -38,9 +38,9 @@ source_value="startup"
 if [[ " $* " == *" resume "* ]]; then
     source_value="resume"
 fi
-printf '{"hook_event_name":"SessionStart","cwd":"%s","session_id":"fake-session","source":"%s"}' "$PWD" "$source_value" | wsnav _hook
-printf '{"hook_event_name":"UserPromptSubmit","cwd":"%s","session_id":"fake-session","turn_id":"fake-turn"}' "$PWD" | wsnav _hook
-printf '{"hook_event_name":"Stop","cwd":"%s","session_id":"fake-session","turn_id":"fake-turn"}' "$PWD" | wsnav _hook
+printf '{"hook_event_name":"SessionStart","cwd":"%s","session_id":"fake-session","source":"%s"}' "$PWD" "$source_value" | wsnav --state-root "$FAKE_STATE_ROOT" _hook
+printf '{"hook_event_name":"UserPromptSubmit","cwd":"%s","session_id":"fake-session","turn_id":"fake-turn"}' "$PWD" | wsnav --state-root "$FAKE_STATE_ROOT" _hook
+printf '{"hook_event_name":"Stop","cwd":"%s","session_id":"fake-session","turn_id":"fake-turn"}' "$PWD" | wsnav --state-root "$FAKE_STATE_ROOT" _hook
 sleep 60
 EOF
 chmod 700 "$fake_bin/codex"
@@ -53,6 +53,7 @@ git -C "$repository" add README
 git -C "$repository" commit -qm initial
 
 export CODEX_HOME="$codex_home"
+export FAKE_STATE_ROOT="$state_root"
 export PATH="$fake_bin:$workspace_root/target/debug:$PATH"
 
 "$wsnav_bin" --state-root "$state_root" setup --skip-review

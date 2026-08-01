@@ -645,6 +645,29 @@ Exit gate:
   Runtime state, and protocol contracts remain unchanged; and
 - formatting, tests, lint, package checks, and `git diff --check` pass.
 
+## D6.8 - Activity-age hierarchy refinement
+
+Implementation status: complete. The age beside each neutral Workstream title
+now uses a quiet staleness scale: dim for fresh work, neutral gray through the
+same day, light neutral through the week, and a muted warm accent thereafter.
+
+Make the numerical activity age legible as a secondary time signal without
+competing with the title, host/Project identity, or lifecycle indicator.
+
+Scope:
+
+- keep the age separator neutral and the Workstream title white;
+- derive age styling from the bounded observed activity timestamp, treating a
+  missing timestamp as dim rather than inventing recency; and
+- reserve saturated green, yellow, and red exclusively for lifecycle state.
+
+Exit gate:
+
+- deterministic tests cover the fresh, same-day, same-week, stale, and
+  missing-timestamp age-style boundaries;
+- no age color becomes durable state, action authority, or protocol data; and
+- formatting, tests, lint, package checks, and `git diff --check` pass.
+
 ## Deferred beyond V1
 
 The roadmap does not include arbitrary existing-session adoption, worktree or

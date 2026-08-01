@@ -1321,6 +1321,7 @@ fn thread_line(
     indicator_style: Style,
     thread_style: Style,
 ) -> Vec<Span<'static>> {
+    let now_millis = SystemClock.now_millis().ok();
     let mut line = vec![
         Span::raw(" "),
         Span::styled(indicator, indicator_style),
@@ -1329,8 +1330,8 @@ fn thread_line(
     ];
     line.push(Span::styled(" · ", Style::default().fg(Color::Gray)));
     line.push(Span::styled(
-        activity_label(row.last_activity_at_millis, SystemClock.now_millis().ok()),
-        Style::default().fg(Color::Gray),
+        activity_label(row.last_activity_at_millis, now_millis),
+        Style::default().fg(activity_age_color(row.last_activity_at_millis, now_millis)),
     ));
     line
 }
@@ -1344,16 +1345,38 @@ fn relative_activity_age(
     last_activity_at_millis: Option<i64>,
     now_millis: Option<i64>,
 ) -> Option<String> {
-    let elapsed_seconds = now_millis?
-        .saturating_sub(last_activity_at_millis?)
-        .max(0)
-        .saturating_div(1_000);
+    let elapsed_seconds = activity_elapsed_seconds(last_activity_at_millis, now_millis)?;
     Some(match elapsed_seconds {
         0..=59 => "now".to_owned(),
         60..=3_599 => format!("{}m ago", elapsed_seconds / 60),
         3_600..=86_399 => format!("{}h ago", elapsed_seconds / 3_600),
         _ => format!("{}d ago", elapsed_seconds / 86_400),
     })
+}
+
+fn activity_elapsed_seconds(
+    last_activity_at_millis: Option<i64>,
+    now_millis: Option<i64>,
+) -> Option<i64> {
+    Some(
+        now_millis?
+            .saturating_sub(last_activity_at_millis?)
+            .max(0)
+            .saturating_div(1_000),
+    )
+}
+
+/// Keeps age secondary to the Workstream title and lifecycle indicator. The
+/// normal range stays neutral; only old unattended work receives a quiet warm
+/// accent. This deliberately avoids green, yellow, and red, which belong to
+/// lifecycle state.
+fn activity_age_color(last_activity_at_millis: Option<i64>, now_millis: Option<i64>) -> Color {
+    match activity_elapsed_seconds(last_activity_at_millis, now_millis) {
+        None | Some(0..=3_599) => Color::DarkGray,
+        Some(3_600..=86_399) => Color::Gray,
+        Some(86_400..=604_799) => Color::Indexed(250),
+        Some(_) => Color::Indexed(180),
+    }
 }
 
 /// Returns a compact user-facing state from bounded lifecycle and attention
@@ -2046,6 +2069,24 @@ mod tests {
         );
         assert_eq!(relative_activity_age(None, Some(60_000)), None);
         assert_eq!(activity_label(None, Some(60_000)), "activity unknown");
+    }
+
+    #[test]
+    fn activity_age_color_is_quiet_until_a_workstream_is_stale() {
+        assert_eq!(activity_age_color(None, Some(60_000)), Color::DarkGray);
+        assert_eq!(
+            activity_age_color(Some(0), Some(3_599_000)),
+            Color::DarkGray
+        );
+        assert_eq!(activity_age_color(Some(0), Some(3_600_000)), Color::Gray);
+        assert_eq!(
+            activity_age_color(Some(0), Some(86_400_000)),
+            Color::Indexed(250)
+        );
+        assert_eq!(
+            activity_age_color(Some(0), Some(604_800_000)),
+            Color::Indexed(180)
+        );
     }
 
     #[test]

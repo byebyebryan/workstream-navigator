@@ -12,7 +12,7 @@ use crate::domain::{
     RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 9;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 10;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -21,6 +21,7 @@ pub const MAX_SNAPSHOT_PAGES: usize = 256;
 
 const MAX_ALIAS_BYTES: usize = 128;
 const MAX_DISPLAY_NAME_BYTES: usize = 256;
+const MAX_THREAD_NAME_BYTES: usize = 512;
 const MAX_VERSION_BYTES: usize = 64;
 const MAX_REGISTRY_GENERATION_BYTES: usize = 128;
 const MAX_REQUEST_KEY_BYTES: usize = 128;
@@ -112,6 +113,12 @@ pub enum HostAction {
         workstream_id: WorkstreamId,
         expected_revision: i64,
     },
+    /// Set the canonical provider-owned title for one exact active Workstream.
+    Rename {
+        workstream_id: WorkstreamId,
+        expected_revision: i64,
+        name: String,
+    },
     Start {
         workstream_id: WorkstreamId,
         expected_revision: i64,
@@ -152,6 +159,9 @@ impl HostAction {
             | Self::Restore {
                 expected_revision, ..
             }
+            | Self::Rename {
+                expected_revision, ..
+            }
             | Self::Start {
                 expected_revision, ..
             }
@@ -172,6 +182,12 @@ impl HostAction {
         match self {
             Self::NewWorkstream { request_key, .. } | Self::ForkWorkstream { request_key, .. } => {
                 validate_bounded("request key", request_key, MAX_REQUEST_KEY_BYTES)?;
+            }
+            Self::Rename { name, .. } => {
+                validate_bounded("thread name", name, MAX_THREAD_NAME_BYTES)?;
+                if name.trim().is_empty() {
+                    return Err(ProtocolError::InvalidThreadName);
+                }
             }
             Self::AcknowledgeAttention { .. }
             | Self::Park { .. }
@@ -468,6 +484,8 @@ pub enum ProtocolError {
     UnsupportedVersion(u16),
     #[error("revision must be positive")]
     InvalidRevision,
+    #[error("thread name is invalid")]
+    InvalidThreadName,
     #[error("activity sequence must not be negative")]
     InvalidActivitySequence,
     #[error("activity timestamp must not be negative")]

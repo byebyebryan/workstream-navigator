@@ -719,9 +719,9 @@ Exit gate:
 Implementation status: observer activation is ready for native acceptance.
 D7.1 supplies the Workstreams, Projects, and Hosts navigation foundation;
 D7.2 now supplies revision-guarded archive/restore through local and SSH host
-contracts plus Active/Archived navigator scopes. Remaining Workstream status,
-rename, and unresolved-operation management, along with Project and Host
-management, remains planned.
+contracts, Active/Archived navigator scopes, bounded Workstream status, and
+canonical rename. Exact unresolved-operation management, along with Project
+and Host management, remains planned.
 D7 makes ordinary WSNav administration available through the navigator without
 turning it into a task manager or replacing the provider surface.
 
@@ -774,8 +774,9 @@ Delivery slices:
    canonical rename, preserve existing open/new/fork/park/acknowledge keys, add
    revision-guarded local/remote archive visibility and restore-without-start,
    and make exact unresolved Start/Fork reconciliation available through the
-   Workstreams Recovery page. Archive/restore contract and scope selection are
-   implemented; the remaining controls follow as separate coherent commits.
+   Workstreams Recovery page. Archive/restore, scope selection, bounded status,
+   and canonical rename are implemented; the recovery controls follow as a
+   separate coherent commit.
 4. **D7.3 - Project management.** List logical Projects and their host-owned
    locations, show active/archived counts, register the first or an additional
    existing checkout on a selected local or SSH host, and start a Workstream at

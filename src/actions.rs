@@ -20,7 +20,7 @@ use crate::{
         Clock, OperationId, OperationKind, OperationPhase, Revision, RuntimeId, SystemClock,
         WorkstreamId, WorkstreamLifecycle,
     },
-    provider::codex::app_server::{EphemeralAppServer, ForkReconciliation},
+    provider::codex::app_server::{AppServerError, EphemeralAppServer, ForkReconciliation},
     provider::codex::profile::{ObserverProfile, ProfileError},
     runtime::{
         LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
@@ -893,6 +893,34 @@ pub fn restore(
         .map_err(Into::into)
 }
 
+/// Renames the exact current Codex conversation through Codex's canonical
+/// name field, then refreshes only `WSNav`'s bounded name cache.
+///
+/// # Errors
+///
+/// Returns an error when the Workstream is archived, stale, unbound, or the
+/// provider rejects the bounded canonical name change.
+pub fn rename(
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: Revision,
+    name: &str,
+) -> Result<(), ActionError> {
+    let overview = active_workstream_overview(registry, workstream_id)?;
+    if overview.revision != expected_revision {
+        return Err(ActionError::WorkstreamRevisionConflict);
+    }
+    let runtime = registry
+        .runtime_for_workstream(workstream_id)?
+        .ok_or(ActionError::NoRuntime(workstream_id))?;
+    let binding = registry
+        .binding_for_runtime(runtime.runtime_id)?
+        .ok_or(ActionError::NoProviderBinding(workstream_id))?;
+    EphemeralAppServer::default().set_thread_name(&binding.native_session_id, name)?;
+    registry.record_thread_name(runtime.runtime_id, &binding.native_session_id, name)?;
+    Ok(())
+}
+
 /// Waits briefly for the durable outcome of a concurrently requested park.
 ///
 /// Parking first stops the private tmux server, which makes an already
@@ -1088,6 +1116,8 @@ pub enum ActionError {
     Io(std::io::Error),
     #[error("workstream {0} has no runtime")]
     NoRuntime(WorkstreamId),
+    #[error("workstream {0} has no current provider conversation")]
+    NoProviderBinding(WorkstreamId),
     #[error("observer profile is not installed; open wsnav to activate it")]
     ObserverNotInstalled,
     #[error(
@@ -1116,6 +1146,8 @@ pub enum ActionError {
     ManagedWorkstreamKindUnavailable,
     #[error(transparent)]
     Profile(#[from] ProfileError),
+    #[error(transparent)]
+    AppServer(#[from] AppServerError),
     #[error(transparent)]
     Runtime(#[from] crate::runtime::RuntimeError),
     #[error(transparent)]

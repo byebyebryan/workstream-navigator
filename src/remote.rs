@@ -178,6 +178,11 @@ fn apply(root: &StateRoot, registry: &mut HostRegistry, action: HostAction) -> R
             workstream_id,
             expected_revision,
         } => apply_restore(registry, workstream_id, expected_revision),
+        HostAction::Rename {
+            workstream_id,
+            expected_revision,
+            name,
+        } => apply_rename(registry, workstream_id, expected_revision, &name),
         HostAction::Start {
             workstream_id,
             expected_revision,
@@ -361,6 +366,31 @@ fn apply_restore(
             rejected("revision conflict; refresh this host")
         }
         Err(_) => rejected("restore is unavailable"),
+    }
+}
+
+fn apply_rename(
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: i64,
+    name: &str,
+) -> ResponseEnvelope {
+    match crate::actions::rename(
+        registry,
+        workstream_id,
+        Revision::try_from(expected_revision).expect("protocol validates positive revisions"),
+        name,
+    ) {
+        Ok(()) => ResponseEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            response: HostResponse::Applied {
+                revision: expected_revision,
+            },
+        },
+        Err(crate::actions::ActionError::WorkstreamRevisionConflict) => {
+            rejected("revision conflict; refresh this host")
+        }
+        Err(_) => rejected("rename is unavailable"),
     }
 }
 

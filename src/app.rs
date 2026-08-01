@@ -117,7 +117,11 @@ enum Commands {
     /// Reopen one exact unresolved Start or Fork operation.
     RecoverOperation { operation_id: String },
     /// Rename the current managed Codex thread through its canonical name field.
-    Rename { workstream_id: String, name: String },
+    Rename {
+        workstream_id: String,
+        revision: i64,
+        name: String,
+    },
     /// Clear one observed result/recovery attention revision without sending provider input.
     Acknowledge {
         workstream_id: String,
@@ -239,6 +243,13 @@ enum HostCommands {
         alias: String,
         workstream_id: String,
         revision: i64,
+    },
+    /// Set one remote Workstream's canonical Codex thread title.
+    Rename {
+        alias: String,
+        workstream_id: String,
+        revision: i64,
+        name: String,
     },
     /// Create and start an independent managed Workstream on a remote host.
     New {
@@ -432,8 +443,14 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
         }
         Commands::Rename {
             workstream_id,
+            revision,
             name,
-        } => rename(&mut registry, parse_workstream(&workstream_id)?, &name),
+        } => rename(
+            &mut registry,
+            parse_workstream(&workstream_id)?,
+            parse_revision(revision)?,
+            &name,
+        ),
         Commands::Acknowledge {
             workstream_id,
             attention_revision,
@@ -550,6 +567,12 @@ fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError>
             workstream_id,
             revision,
         } => restore_remote_workstream(&catalog, &alias, &workstream_id, revision),
+        HostCommands::Rename {
+            alias,
+            workstream_id,
+            revision,
+            name,
+        } => rename_remote_workstream(&catalog, &alias, &workstream_id, revision, &name),
         HostCommands::New {
             alias,
             source_workstream_id,
@@ -779,6 +802,26 @@ fn restore_remote_workstream(
         },
     )?;
     println!("restored remote workstream {workstream_id}");
+    Ok(())
+}
+
+fn rename_remote_workstream(
+    catalog: &ClientCatalog,
+    alias: &str,
+    workstream_id: &str,
+    revision: i64,
+    name: &str,
+) -> Result<(), AppError> {
+    apply_remote_action(
+        catalog,
+        alias,
+        crate::protocol::HostAction::Rename {
+            workstream_id: parse_workstream(workstream_id)?,
+            expected_revision: revision,
+            name: name.to_owned(),
+        },
+    )?;
+    println!("renamed remote workstream {workstream_id}");
     Ok(())
 }
 
@@ -1456,16 +1499,10 @@ fn observe_hook(state_root: Option<PathBuf>) {
 fn rename(
     registry: &mut HostRegistry,
     workstream_id: WorkstreamId,
+    revision: Revision,
     name: &str,
 ) -> Result<(), AppError> {
-    let runtime = registry
-        .runtime_for_workstream(workstream_id)?
-        .ok_or(AppError::NoRuntime(workstream_id))?;
-    let binding = registry
-        .binding_for_runtime(runtime.runtime_id)?
-        .ok_or(AppError::NoBinding(workstream_id))?;
-    EphemeralAppServer::default().set_thread_name(&binding.native_session_id, name)?;
-    registry.record_thread_name(runtime.runtime_id, &binding.native_session_id, name)?;
+    actions::rename(registry, workstream_id, revision, name)?;
     println!("renamed workstream {workstream_id}");
     Ok(())
 }
@@ -1689,8 +1726,6 @@ enum AppError {
     RuntimeExited,
     #[error("workstream {0} has no runtime")]
     NoRuntime(WorkstreamId),
-    #[error("workstream {0} has no exact native Codex binding")]
-    NoBinding(WorkstreamId),
     #[error("CODEX_HOME cannot be determined")]
     CodexHomeUnavailable,
     #[error("observer profile is not installed; open wsnav to activate it")]

@@ -717,6 +717,10 @@ impl WorkstreamScope {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NavigatorModal {
     ConfirmArchive(NavigatorWorkstream),
+    Rename {
+        workstream: NavigatorWorkstream,
+        value: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1251,6 +1255,13 @@ impl NavigatorView {
 
     fn begin_archive_confirmation(&mut self, workstream: NavigatorWorkstream) {
         self.modal = Some(NavigatorModal::ConfirmArchive(workstream));
+    }
+
+    fn begin_rename(&mut self, workstream: NavigatorWorkstream) {
+        self.modal = Some(NavigatorModal::Rename {
+            value: workstream.display_name.clone(),
+            workstream,
+        });
     }
 
     fn dismiss_modal(&mut self) {
@@ -1855,6 +1866,7 @@ impl NavigatorView {
                         ("n", "new"),
                         ("f", "fork"),
                         ("p", "park"),
+                        ("r", "rename"),
                         ("x", "archive"),
                         ("a", "ack"),
                     ]),
@@ -1923,6 +1935,10 @@ impl NavigatorView {
             width,
             height,
         );
+        let title = match &modal {
+            NavigatorModal::ConfirmArchive(_) => " Archive working Workstream ",
+            NavigatorModal::Rename { .. } => " Rename Workstream ",
+        };
         let lines = match modal {
             NavigatorModal::ConfirmArchive(workstream) => vec![
                 Line::from(Span::styled(
@@ -1939,13 +1955,28 @@ impl NavigatorView {
                     Span::raw(" cancel"),
                 ]),
             ],
+            NavigatorModal::Rename { value, .. } => vec![
+                Line::raw("Set the canonical Codex thread title:"),
+                Line::from(Span::styled(
+                    truncate_display(&value, 44),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(vec![
+                    Span::styled("Enter", Style::default().fg(Color::Yellow)),
+                    Span::raw(" save   "),
+                    Span::styled("Esc", Style::default().fg(Color::Yellow)),
+                    Span::raw(" cancel"),
+                ]),
+            ],
         };
         frame.render_widget(Clear, area);
         frame.render_widget(
             Paragraph::new(lines).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Archive working Workstream ")
+                    .title(title)
                     .border_style(Style::default().fg(Color::Yellow)),
             ),
             area,
@@ -2084,6 +2115,10 @@ fn workstream_help_lines(scope: WorkstreamScope, heading: Style, key: Style) -> 
                 Span::raw("          fork at last settled turn"),
             ]),
             Line::from(vec![Span::styled("p", key), Span::raw("          park")]),
+            Line::from(vec![
+                Span::styled("r", key),
+                Span::raw("          rename canonical Codex thread"),
+            ]),
             Line::from(vec![
                 Span::styled("x", key),
                 Span::raw("          archive (confirms a working Runtime)"),
@@ -2638,6 +2673,9 @@ fn handle_navigator_key(
         return false;
     }
     let workstreams = view.page() == NavigatorPage::Workstreams && view.detail.is_none();
+    if workstreams && handle_workstream_action_key(key.code, root, presentation, remote, view) {
+        return false;
+    }
     match key.code {
         KeyCode::Char('q') => true,
         KeyCode::Esc => !view.dismiss_detail(),
@@ -2692,23 +2730,24 @@ fn handle_navigator_key(
             view.open_selected_detail();
             false
         }
-        KeyCode::Char('a') if workstreams && view.workstream_scope == WorkstreamScope::Active => {
-            acknowledge_selected(root, remote, view);
-            false
-        }
-        KeyCode::Char('p') if workstreams && view.workstream_scope == WorkstreamScope::Active => {
-            park_selected(root, remote, view);
-            false
-        }
-        KeyCode::Char('x') if workstreams && view.workstream_scope == WorkstreamScope::Active => {
-            archive_selected(root, remote, view);
-            false
-        }
-        KeyCode::Char('u') if workstreams && view.workstream_scope == WorkstreamScope::Archived => {
-            restore_selected(root, remote, view);
-            false
-        }
-        KeyCode::Char('n') if workstreams && view.workstream_scope == WorkstreamScope::Active => {
+        _ => false,
+    }
+}
+
+fn handle_workstream_action_key(
+    key: KeyCode,
+    root: &StateRoot,
+    presentation: &Presentation,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+) -> bool {
+    match (key, view.workstream_scope) {
+        (KeyCode::Char('a'), WorkstreamScope::Active) => acknowledge_selected(root, remote, view),
+        (KeyCode::Char('p'), WorkstreamScope::Active) => park_selected(root, remote, view),
+        (KeyCode::Char('x'), WorkstreamScope::Active) => archive_selected(root, remote, view),
+        (KeyCode::Char('r'), WorkstreamScope::Active) => rename_selected(view),
+        (KeyCode::Char('u'), WorkstreamScope::Archived) => restore_selected(root, remote, view),
+        (KeyCode::Char('n'), WorkstreamScope::Active) => {
             create_workstream_selected(
                 root,
                 presentation,
@@ -2716,14 +2755,13 @@ fn handle_navigator_key(
                 view,
                 CreationAction::Independent,
             );
-            false
         }
-        KeyCode::Char('f') if workstreams && view.workstream_scope == WorkstreamScope::Active => {
+        (KeyCode::Char('f'), WorkstreamScope::Active) => {
             create_workstream_selected(root, presentation, remote, view, CreationAction::Fork);
-            false
         }
-        _ => false,
+        _ => return false,
     }
+    true
 }
 
 fn handle_navigator_modal_key(
@@ -2732,12 +2770,45 @@ fn handle_navigator_modal_key(
     remote: &mut RemoteMonitor,
     view: &mut NavigatorView,
 ) -> bool {
-    match key.code {
-        KeyCode::Esc | KeyCode::Char('n') => view.dismiss_modal(),
-        KeyCode::Enter | KeyCode::Char('y') => {
-            if let Some(NavigatorModal::ConfirmArchive(workstream)) = view.confirm_modal() {
+    if matches!(key.code, KeyCode::Esc) {
+        view.dismiss_modal();
+        return false;
+    }
+    if matches!(key.code, KeyCode::Char('n'))
+        && matches!(view.modal, Some(NavigatorModal::ConfirmArchive(_)))
+    {
+        view.dismiss_modal();
+        return false;
+    }
+    if matches!(key.code, KeyCode::Enter) {
+        match view.confirm_modal() {
+            Some(NavigatorModal::ConfirmArchive(workstream)) => {
                 archive_workstream(root, remote, view, &workstream);
             }
+            Some(NavigatorModal::Rename { workstream, value }) => {
+                rename_workstream(root, remote, view, &workstream, &value);
+            }
+            None => {}
+        }
+        return false;
+    }
+    if matches!(key.code, KeyCode::Char('y'))
+        && matches!(view.modal, Some(NavigatorModal::ConfirmArchive(_)))
+    {
+        if let Some(NavigatorModal::ConfirmArchive(workstream)) = view.confirm_modal() {
+            archive_workstream(root, remote, view, &workstream);
+        }
+        return false;
+    }
+    let Some(NavigatorModal::Rename { value, .. }) = view.modal.as_mut() else {
+        return false;
+    };
+    match key.code {
+        KeyCode::Backspace => {
+            value.pop();
+        }
+        KeyCode::Char(character) if !character.is_control() && value.chars().count() < 512 => {
+            value.push(character);
         }
         _ => {}
     }
@@ -2942,6 +3013,35 @@ fn archive_selected(root: &StateRoot, remote: &mut RemoteMonitor, view: &mut Nav
     archive_workstream(root, remote, view, &selected);
 }
 
+fn rename_selected(view: &mut NavigatorView) {
+    let Some(selected) = view.selected().cloned() else {
+        view.set_message("no active Workstream is selected");
+        return;
+    };
+    if selected.host.is_remote() && !selected.host.is_reachable() {
+        view.set_message("remote host is unavailable; cached state is not actionable");
+        return;
+    }
+    view.begin_rename(selected);
+}
+
+fn rename_workstream(
+    root: &StateRoot,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+    selected: &NavigatorWorkstream,
+    name: &str,
+) {
+    match run_rename_action(root, selected, name) {
+        Ok(()) => {
+            remote.request_soon(selected.host.alias());
+            refresh_view(root, remote, view);
+            view.set_message("canonical Codex thread title updated");
+        }
+        Err(error) => view.set_message(action_message(&error)),
+    }
+}
+
 fn archive_workstream(
     root: &StateRoot,
     remote: &mut RemoteMonitor,
@@ -3142,6 +3242,41 @@ fn run_creation_action(
     parse_created_workstream(&output.stdout)
 }
 
+fn run_rename_action(
+    root: &StateRoot,
+    workstream: &NavigatorWorkstream,
+    name: &str,
+) -> Result<(), NavigatorError> {
+    if workstream.host.is_remote() && !workstream.host.is_reachable() {
+        return Err(NavigatorError::RemoteHostUnavailable);
+    }
+    let executable = std::env::current_exe().map_err(NavigatorError::ActionLaunch)?;
+    let mut command = Command::new(executable);
+    command.arg("--state-root").arg(root.base());
+    if workstream.host.is_remote() {
+        command
+            .arg("host")
+            .arg("rename")
+            .arg(workstream.host.alias())
+            .arg(workstream.workstream_id.to_string())
+            .arg(workstream.workstream_revision.value().to_string())
+            .arg(name);
+    } else {
+        command
+            .arg("rename")
+            .arg(workstream.workstream_id.to_string())
+            .arg(workstream.workstream_revision.value().to_string())
+            .arg(name);
+    }
+    let output =
+        output_bounded(&mut command, 1024, 1024).map_err(NavigatorError::from_action_process)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(NavigatorError::ActionFailed)
+    }
+}
+
 fn parse_created_workstream(output: &[u8]) -> Result<WorkstreamId, NavigatorError> {
     let output = std::str::from_utf8(output).map_err(|_| NavigatorError::InvalidActionResult)?;
     let Some(identifier) = output.split_whitespace().last() else {
@@ -3317,6 +3452,32 @@ mod tests {
         assert!(rendered.contains("Runtime: working"));
         assert!(rendered.contains("Visibility: active"));
         assert!(!rendered.contains(&workstream_id.to_string()));
+    }
+
+    #[test]
+    fn rename_modal_keeps_the_title_entry_inside_the_navigator() {
+        let workstream = row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle);
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![workstream.clone()],
+            hosts: Vec::new(),
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+        });
+        view.begin_rename(workstream);
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+
+        terminal.draw(|frame| view.render(frame)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("Rename Workstream"));
+        assert!(rendered.contains("Set the canonical Codex thread title"));
+        assert!(view.modal_visible());
     }
 
     #[test]

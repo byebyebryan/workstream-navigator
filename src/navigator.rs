@@ -3027,11 +3027,12 @@ fn project_overview_item(
             .add_modifier(Modifier::BOLD),
     ))];
     if let Some(remote_identity_display) = project.remote_identity_display.as_deref() {
+        let compact_remote = compact_remote_display(remote_identity_display);
         lines.push(Line::from(vec![
             Span::styled("↗ ", Style::default().fg(PROJECT_ORIGIN_ICON_COLOR)),
             Span::styled(
                 truncate_display(
-                    remote_identity_display,
+                    compact_remote,
                     usize::from(available_width.saturating_sub(2)),
                 ),
                 Style::default().fg(PROJECT_ORIGIN_LABEL_COLOR),
@@ -3094,6 +3095,14 @@ fn project_activity_line(project: &NavigatorProjectOverview) -> Line<'static> {
             Style::default().fg(PROJECT_ARCHIVED_COLOR),
         ),
     ])
+}
+
+/// The canonical remote label retains its host for safe normalization and
+/// grouping evidence. The narrow Projects page needs only its repository path.
+fn compact_remote_display(remote_identity_display: &str) -> &str {
+    remote_identity_display
+        .split_once('/')
+        .map_or(remote_identity_display, |(_, path)| path)
 }
 
 fn host_overview_height(host: &NavigatorHostSummary) -> u16 {
@@ -6097,7 +6106,8 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(rendered.contains("1 active · 2 archived"));
-        assert!(rendered.contains("↗ github.com/owner/repo"));
+        assert!(rendered.contains("↗ owner/repo"));
+        assert!(!rendered.contains("github.com/owner/repo"));
         assert!(!rendered.contains("origin ·"));
         assert!(!rendered.contains("0 active"));
         assert!(rendered.contains("local · main checkout"));
@@ -6301,6 +6311,19 @@ mod tests {
         assert_eq!(line.spans[1].style.fg, Some(PROJECT_TREE_COLOR));
         assert_eq!(line.spans[2].content, "0 archived");
         assert_eq!(line.spans[2].style.fg, Some(PROJECT_ARCHIVED_COLOR));
+    }
+
+    #[test]
+    fn project_origin_elides_the_normalized_remote_host_for_narrow_rendering() {
+        assert_eq!(
+            compact_remote_display("github.com/owner/repository"),
+            "owner/repository"
+        );
+        assert_eq!(
+            compact_remote_display("git.example.test:8443/group/repository"),
+            "group/repository"
+        );
+        assert_eq!(compact_remote_display("unknown"), "unknown");
     }
 
     #[test]

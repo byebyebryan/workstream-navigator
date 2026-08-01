@@ -1163,9 +1163,10 @@ returned in public snapshots. Permanent Project deletion, manual repository
 cleanup, and automatic cross-host merge/split remain outside D7.
 
 Projects render every host-owned location as a bounded tree under its logical
-Project, with active/archived counts. When available, it renders the muted
-display-only `↗ host/org/repo` label beneath the Project name; the
-fingerprint remains hidden and grouping-only. `n` starts a Workstream from the selected
+Project, with active/archived counts. When available, it renders the compact
+display-only `↗ org/repo` label beneath the Project name, eliding the normalized
+remote host for narrow terminals; the fingerprint remains hidden and
+grouping-only. `n` starts a Workstream from the selected
 Project. When it has more than one host location, a navigator-local picker asks
 where to start; a single-location Project starts directly. `a` adds an existing
 checkout through the navigator-local host picker and bounded checkout-path

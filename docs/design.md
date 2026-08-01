@@ -186,12 +186,10 @@ The local presentation session is a dedicated tmux server with its own socket
 and configuration. It never modifies or depends on the user's ordinary tmux
 server.
 
-The initial presentation protects a 32-cell navigator pane as the normal
-minimum. It keeps any additional navigator width on wider terminals, but lets
-the provider pane shrink below its preferred width when necessary rather than
-clipping the navigator's bounded rows and controls. A later manual resize may
-still make the pane narrower, so individual renderers retain their compact
-fallbacks.
+The initial presentation sets the navigator to its normal 32-cell width and
+gives every remaining terminal column to the provider pane. A later manual
+resize may make the navigator narrower or wider, so individual renderers
+retain their compact fallbacks.
 
 The navigator is a small Rust TUI in one pane. The provider pane is not a
 terminal widget rendered by Rust; it is a real tmux attachment to the host-owned

@@ -673,6 +673,10 @@ impl NavigatorPage {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NavigatorDetail {
+    Workstream {
+        host_alias: String,
+        workstream_id: WorkstreamId,
+    },
     Project(ProjectId),
     Host(String),
 }
@@ -910,7 +914,13 @@ impl NavigatorView {
 
     fn open_selected_detail(&mut self) {
         self.detail = match self.page {
-            NavigatorPage::Workstreams => None,
+            NavigatorPage::Workstreams => {
+                self.selected()
+                    .map(|workstream| NavigatorDetail::Workstream {
+                        host_alias: workstream.host.alias().to_owned(),
+                        workstream_id: workstream.workstream_id,
+                    })
+            }
             NavigatorPage::Projects => self.selected_project.map(NavigatorDetail::Project),
             NavigatorPage::Hosts => self.selected_host.clone().map(NavigatorDetail::Host),
         };
@@ -1019,6 +1029,15 @@ impl NavigatorView {
             self.selected_host = hosts.first().map(|host| host.alias.clone());
         }
         match &self.detail {
+            Some(NavigatorDetail::Workstream {
+                host_alias,
+                workstream_id,
+            }) if !self.snapshot.workstreams.iter().any(|workstream| {
+                workstream.host.alias() == host_alias && workstream.workstream_id == *workstream_id
+            }) =>
+            {
+                self.detail = None;
+            }
             Some(NavigatorDetail::Project(project_id))
                 if !projects
                     .iter()
@@ -1301,6 +1320,10 @@ impl NavigatorView {
             .split(areas[0]);
         self.render_page_tabs(frame, content[0]);
         match self.detail.clone() {
+            Some(NavigatorDetail::Workstream {
+                host_alias,
+                workstream_id,
+            }) => self.render_workstream_detail(frame, content[1], &host_alias, workstream_id),
             Some(NavigatorDetail::Project(project_id)) => {
                 self.render_project_detail(frame, content[1], project_id);
             }
@@ -1438,6 +1461,55 @@ impl NavigatorView {
             &mut state,
         );
         self.update_rendered_host_rows(&hosts, state.offset(), area);
+    }
+
+    fn render_workstream_detail(
+        &self,
+        frame: &mut Frame<'_>,
+        area: Rect,
+        host_alias: &str,
+        workstream_id: WorkstreamId,
+    ) {
+        let Some(workstream) = self.snapshot.workstreams.iter().find(|workstream| {
+            workstream.host.alias() == host_alias && workstream.workstream_id == workstream_id
+        }) else {
+            return;
+        };
+        let attention = if workstream.recovery_required {
+            "native recovery needed"
+        } else if workstream.result_ready {
+            "result ready"
+        } else {
+            "none"
+        };
+        let visibility = if workstream.archived {
+            "archived; restore does not start Codex"
+        } else {
+            "active"
+        };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    workstream.display_name.clone(),
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::raw(format!(
+                    "{} · {}",
+                    workstream.host.alias(),
+                    workstream.project_label
+                )),
+                Line::raw(format!("Runtime: {}", workstream.runtime_status.label())),
+                Line::raw(format!("Attention: {attention}")),
+                Line::raw(format!("Visibility: {visibility}")),
+                Line::raw("Enter or Esc returns to Workstreams"),
+            ])
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Workstream status "),
+            ),
+            area,
+        );
     }
 
     fn render_project_detail(&self, frame: &mut Frame<'_>, area: Rect, project_id: ProjectId) {
@@ -1776,18 +1848,21 @@ impl NavigatorView {
             return vec![("Enter", "back"), ("Esc", "back"), ("?", "keys")];
         }
         match self.page {
-            NavigatorPage::Workstreams => vec![
-                ("Enter", "open"),
-                ("n", "new"),
-                ("f", "fork"),
-                ("p", "park"),
-                ("x", "archive"),
-                ("u", "restore"),
-                ("a", "ack"),
-                ("s", "scope"),
-                ("v", "view"),
-                ("?", "keys"),
-            ],
+            NavigatorPage::Workstreams => {
+                let mut bindings = vec![("Enter", "open"), ("i", "status")];
+                match self.workstream_scope {
+                    WorkstreamScope::Active => bindings.extend([
+                        ("n", "new"),
+                        ("f", "fork"),
+                        ("p", "park"),
+                        ("x", "archive"),
+                        ("a", "ack"),
+                    ]),
+                    WorkstreamScope::Archived => bindings.push(("u", "restore")),
+                }
+                bindings.extend([("s", "scope"), ("v", "view"), ("?", "keys")]);
+                bindings
+            }
             NavigatorPage::Projects => vec![
                 ("Enter", "details"),
                 ("1", "workstreams"),
@@ -1980,6 +2055,10 @@ fn workstream_help_lines(scope: WorkstreamScope, heading: Style, key: Style) -> 
         Line::from(vec![
             Span::styled("Enter", key),
             Span::raw("      open, start, or recover"),
+        ]),
+        Line::from(vec![
+            Span::styled("i", key),
+            Span::raw("          show bounded status"),
         ]),
         Line::from(vec![
             Span::styled("Tab", key),
@@ -2605,6 +2684,10 @@ fn handle_navigator_key(
             activate_selected(root, presentation, remote, view);
             false
         }
+        KeyCode::Char('i') if workstreams => {
+            view.open_selected_detail();
+            false
+        }
         KeyCode::Enter => {
             view.open_selected_detail();
             false
@@ -3207,6 +3290,33 @@ mod tests {
             Some(NavigatorModal::ConfirmArchive(_))
         ));
         assert!(!view.modal_visible());
+    }
+
+    #[test]
+    fn workstream_status_detail_uses_only_bounded_navigator_metadata() {
+        let workstream_id = WorkstreamId::new();
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![row(workstream_id, NavigatorRuntimeStatus::Working)],
+            hosts: Vec::new(),
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+        });
+        view.open_selected_detail();
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+
+        terminal.draw(|frame| view.render(frame)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("Workstream status"));
+        assert!(rendered.contains("Runtime: working"));
+        assert!(rendered.contains("Visibility: active"));
+        assert!(!rendered.contains(&workstream_id.to_string()));
     }
 
     #[test]

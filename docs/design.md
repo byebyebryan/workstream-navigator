@@ -475,7 +475,12 @@ the registered executable. The probe contains only the package version, control
 ABI, protocol version, and host-schema version; it does not open the host state
 or disclose a path, host identity, registry generation, or provider metadata.
 A missing, malformed, or incompatible probe leaves the cached host visible but
-unavailable for actions and tells the operator to install a matching build.
+unavailable for actions and tells the operator to install a matching build. The
+Hosts page reports a bounded, credential-free cause: checking, SSH/`wsnav`
+unavailable, timeout, malformed probe, a local/remote ABI, protocol, or schema
+mismatch, changed identity/stale registration, rejected remote request, or a
+generic control communication failure. Version mismatches show both version
+numbers; raw SSH diagnostics, paths, and protocol frames never reach the UI.
 Normal registration, polling, and mutation repeat that check. This is a manual
 deployment boundary: V1 diagnoses an upgrade requirement and provides a
 runbook, but never copies, bootstraps, or updates a remote executable.
@@ -1183,7 +1188,10 @@ registry, Git checkout, worktree, or Codex history; this is intentional
 visibility cleanup, not permanent Project deletion.
 
 The Hosts page renders each host's reachability and observer state, followed by
-a bounded tree of its active Projects and their active Workstream counts. `a`
+a bounded tree of its active Projects and their active Workstream counts. A
+ready observer is a compact green check; review, modification, and disabled
+states remain explicit text. An unavailable host shows its bounded transport
+diagnosis rather than a generic unavailable label. `a`
 adds a remote SSH host: WSNav verifies and registers it, prepares its exact
 observer profile, then opens the native Codex hook review in the right pane.
 The user alone approves that profile in Codex; preparation never writes trust

@@ -34,6 +34,7 @@ use ratatui::{
 use thiserror::Error;
 
 use crate::{
+    build_info::BuildInfoError,
     domain::{
         AttentionState, Clock, HostId, LocationId, OperationId, OperationKind, OperationPhase,
         ProjectId, Revision, RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle,
@@ -49,7 +50,10 @@ use crate::{
         ClientCatalog, ClientHost, ClientHostTransport, ClientProjectLocation, HostIdentity,
         HostRegistry, IntegrationLifecycle, StateError, StateRoot, WorkstreamOverview,
     },
-    transport::{HostClient, RemoteExecutable, SshDestination, SshEndpoint, SystemCommandRunner},
+    transport::{
+        HostClient, RemoteExecutable, SshDestination, SshEndpoint, SystemCommandRunner,
+        TransportError,
+    },
 };
 
 /// One bounded row rendered by the local navigator.
@@ -89,7 +93,69 @@ pub enum NavigatorHost {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RemoteHostReachability {
     Reachable,
-    Unreachable,
+    Unreachable(RemoteHostIssue),
+}
+
+/// Bounded and credential-free reason why a registered host cannot currently
+/// participate in the navigator. This is transport evidence, never a claim
+/// about an agent Runtime or the remote machine's broader health.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RemoteHostIssue {
+    Checking,
+    SshOrRemoteExecutableUnavailable,
+    TimedOut,
+    BuildProbeMalformed,
+    ControlAbiMismatch { local: u16, remote: u16 },
+    ProtocolMismatch { local: u16, remote: u16 },
+    HostSchemaMismatch { local: i64, remote: i64 },
+    HostIdentityChanged,
+    HostRegistrationStale,
+    RemoteRequestRejected,
+    ControlCommunicationFailed,
+}
+
+impl RemoteHostIssue {
+    const fn is_transient(self) -> bool {
+        matches!(
+            self,
+            Self::Checking
+                | Self::SshOrRemoteExecutableUnavailable
+                | Self::TimedOut
+                | Self::ControlCommunicationFailed
+        )
+    }
+
+    fn label(self) -> String {
+        match self {
+            Self::Checking => "checking remote".to_owned(),
+            Self::SshOrRemoteExecutableUnavailable => "SSH/wsnav unavailable".to_owned(),
+            Self::TimedOut => "remote timed out".to_owned(),
+            Self::BuildProbeMalformed => "build probe malformed".to_owned(),
+            Self::ControlAbiMismatch { local, remote } => {
+                format!("control ABI {remote} ≠ {local}")
+            }
+            Self::ProtocolMismatch { local, remote } => format!("protocol {remote} ≠ {local}"),
+            Self::HostSchemaMismatch { local, remote } => format!("schema {remote} ≠ {local}"),
+            Self::HostIdentityChanged => "host identity changed".to_owned(),
+            Self::HostRegistrationStale => "host registration stale".to_owned(),
+            Self::RemoteRequestRejected => "remote request rejected".to_owned(),
+            Self::ControlCommunicationFailed => "control communication failed".to_owned(),
+        }
+    }
+
+    const fn color(self) -> Color {
+        if self.is_transient() {
+            Color::Yellow
+        } else {
+            Color::Red
+        }
+    }
+}
+
+impl RemoteHostReachability {
+    const fn is_reachable(self) -> bool {
+        matches!(self, Self::Reachable)
+    }
 }
 
 impl NavigatorHost {
@@ -105,14 +171,10 @@ impl NavigatorHost {
     }
 
     const fn is_reachable(&self) -> bool {
-        matches!(
-            self,
-            Self::Local
-                | Self::Remote {
-                    reachability: RemoteHostReachability::Reachable,
-                    ..
-                }
-        )
+        match self {
+            Self::Local => true,
+            Self::Remote { reachability, .. } => reachability.is_reachable(),
+        }
     }
 }
 
@@ -381,7 +443,7 @@ fn project_remote_workstream(
             reachability: if host_reachable {
                 RemoteHostReachability::Reachable
             } else {
-                RemoteHostReachability::Unreachable
+                RemoteHostReachability::Unreachable(RemoteHostIssue::ControlCommunicationFailed)
             },
         },
         project_id: project.project_id,
@@ -508,7 +570,7 @@ struct CachedRemoteHost {
     unresolved_operation_count: usize,
     unresolved_operations: Vec<NavigatorOperation>,
     observer_status: ObserverStatus,
-    reachable: bool,
+    reachability: RemoteHostReachability,
     pending: bool,
     next_poll: Instant,
     backoff: Duration,
@@ -522,7 +584,7 @@ struct RemotePollResult {
             crate::protocol::SnapshotResponse,
             crate::protocol::OperationsResponse,
         ),
-        (),
+        RemoteHostIssue,
     >,
 }
 
@@ -558,12 +620,12 @@ impl RemoteMonitor {
                     unresolved_operation_count: 0,
                     unresolved_operations: Vec::new(),
                     observer_status: ObserverStatus::NotInstalled,
-                    reachable: false,
+                    reachability: RemoteHostReachability::Unreachable(RemoteHostIssue::Checking),
                     pending: false,
                     next_poll: now,
                     backoff: REMOTE_INITIAL_BACKOFF,
                 });
-            if entry.reachable
+            if entry.reachability.is_reachable()
                 && selected_host.is_some_and(|selected| selected == host.alias)
                 && entry.next_poll > now + REMOTE_FOCUSED_POLL_INTERVAL
             {
@@ -629,11 +691,11 @@ impl RemoteMonitor {
                         })
                     })
                     .collect();
-                host.reachable = true;
+                host.reachability = RemoteHostReachability::Reachable;
                 host.backoff = REMOTE_INITIAL_BACKOFF;
                 host.next_poll = now + REMOTE_POLL_INTERVAL;
-            } else {
-                host.reachable = false;
+            } else if let Err(issue) = result.outcome {
+                host.reachability = RemoteHostReachability::Unreachable(issue);
                 host.next_poll = now + host.backoff;
                 host.backoff = host.backoff.saturating_mul(2).min(REMOTE_MAX_BACKOFF);
             }
@@ -645,11 +707,7 @@ impl RemoteMonitor {
         for (alias, host) in &self.hosts {
             local.hosts.push(NavigatorHostOverview {
                 alias: alias.clone(),
-                reachability: if host.reachable {
-                    RemoteHostReachability::Reachable
-                } else {
-                    RemoteHostReachability::Unreachable
-                },
+                reachability: host.reachability,
                 observer_status: host.observer_status,
             });
             local
@@ -657,15 +715,11 @@ impl RemoteMonitor {
                 .extend(host.workstreams.iter().cloned().map(|mut workstream| {
                     workstream.host = NavigatorHost::Remote {
                         alias: alias.clone(),
-                        reachability: if host.reachable {
-                            RemoteHostReachability::Reachable
-                        } else {
-                            RemoteHostReachability::Unreachable
-                        },
+                        reachability: host.reachability,
                     };
                     workstream
                 }));
-            if !host.reachable {
+            if !host.reachability.is_reachable() {
                 local.unreachable_hosts.push(alias.clone());
             }
             local.unresolved_operation_count += host.unresolved_operation_count;
@@ -719,29 +773,92 @@ fn fetch_remote_snapshot(
         crate::protocol::SnapshotResponse,
         crate::protocol::OperationsResponse,
     ),
-    (),
+    RemoteHostIssue,
 > {
     let ClientHostTransport::Ssh { destination } = &host.transport else {
-        return Err(());
+        return Err(RemoteHostIssue::HostRegistrationStale);
     };
-    let destination = SshDestination::parse(destination).map_err(|_| ())?;
+    let destination =
+        SshDestination::parse(destination).map_err(|_| RemoteHostIssue::HostRegistrationStale)?;
     let executable = host
         .executable_path
         .to_str()
-        .ok_or(())
-        .and_then(|value| RemoteExecutable::parse(value).map_err(|_| ()))?;
+        .ok_or(RemoteHostIssue::HostRegistrationStale)
+        .and_then(|value| {
+            RemoteExecutable::parse(value).map_err(|_| RemoteHostIssue::HostRegistrationStale)
+        })?;
     let endpoint = SshEndpoint::new(destination, executable);
     let client = HostClient::new(SystemCommandRunner);
     client
         .probe_ssh(&endpoint)
-        .map_err(|_| ())?
+        .map_err(|error| remote_probe_issue(&error))?
         .ensure_compatible_with_local()
-        .map_err(|_| ())?;
-    let hello = client.hello_ssh(&endpoint, "wsnav").map_err(|_| ())?;
-    host.verify_hello(&hello).map_err(|_| ())?;
-    let snapshot = client.snapshot_ssh(&endpoint).map_err(|_| ())?;
-    let operations = client.operations_ssh(&endpoint).map_err(|_| ())?;
+        .map_err(|error| remote_build_issue(&error))?;
+    let hello = client
+        .hello_ssh(&endpoint, "wsnav")
+        .map_err(|error| remote_control_issue(&error))?;
+    host.verify_hello(&hello)
+        .map_err(|error| remote_registration_issue(&error))?;
+    let snapshot = client
+        .snapshot_ssh(&endpoint)
+        .map_err(|error| remote_control_issue(&error))?;
+    let operations = client
+        .operations_ssh(&endpoint)
+        .map_err(|error| remote_control_issue(&error))?;
     Ok((snapshot, operations))
+}
+
+fn remote_probe_issue(error: &TransportError) -> RemoteHostIssue {
+    match error {
+        TransportError::ReleaseProbeUnavailable | TransportError::Launch(_) => {
+            RemoteHostIssue::SshOrRemoteExecutableUnavailable
+        }
+        TransportError::TimedOut => RemoteHostIssue::TimedOut,
+        TransportError::ReleaseProbeMalformed => RemoteHostIssue::BuildProbeMalformed,
+        _ => RemoteHostIssue::ControlCommunicationFailed,
+    }
+}
+
+fn remote_build_issue(error: &BuildInfoError) -> RemoteHostIssue {
+    match error {
+        BuildInfoError::ControlAbiMismatch { local, remote } => {
+            RemoteHostIssue::ControlAbiMismatch {
+                local: *local,
+                remote: *remote,
+            }
+        }
+        BuildInfoError::ProtocolVersionMismatch { local, remote } => {
+            RemoteHostIssue::ProtocolMismatch {
+                local: *local,
+                remote: *remote,
+            }
+        }
+        BuildInfoError::HostSchemaVersionMismatch { local, remote } => {
+            RemoteHostIssue::HostSchemaMismatch {
+                local: *local,
+                remote: *remote,
+            }
+        }
+        _ => RemoteHostIssue::BuildProbeMalformed,
+    }
+}
+
+fn remote_registration_issue(error: &StateError) -> RemoteHostIssue {
+    match error {
+        StateError::ClientHostIdentityMismatch => RemoteHostIssue::HostIdentityChanged,
+        StateError::ClientHostGenerationMismatch | StateError::ClientHostCapabilitiesMismatch => {
+            RemoteHostIssue::HostRegistrationStale
+        }
+        _ => RemoteHostIssue::ControlCommunicationFailed,
+    }
+}
+
+fn remote_control_issue(error: &TransportError) -> RemoteHostIssue {
+    match error {
+        TransportError::TimedOut => RemoteHostIssue::TimedOut,
+        TransportError::Rejected(_) => RemoteHostIssue::RemoteRequestRejected,
+        _ => RemoteHostIssue::ControlCommunicationFailed,
+    }
 }
 
 fn combined_snapshot(
@@ -1316,7 +1433,9 @@ impl NavigatorView {
                     reachability: if workstream.host.is_reachable() {
                         RemoteHostReachability::Reachable
                     } else {
-                        RemoteHostReachability::Unreachable
+                        RemoteHostReachability::Unreachable(
+                            RemoteHostIssue::ControlCommunicationFailed,
+                        )
                     },
                     observer_status: ObserverStatus::NotInstalled,
                     workstream_count: 1,
@@ -2295,18 +2414,28 @@ impl NavigatorView {
                 operation_hint.map_or_else(String::new, |hint| format!("  ·  {hint}"))
             );
         }
-        let cached_hint = (!self.snapshot.unreachable_hosts.is_empty()).then(|| {
-            format!(
-                "{} unavailable; showing cached state",
-                self.snapshot.unreachable_hosts.join(", "),
-            )
-        });
+        let cached_hint = self.cached_remote_hint();
         match (operation_hint, cached_hint) {
             (Some(operation), Some(cached)) => format!("{operation}  ·  {cached}"),
             (Some(operation), None) => operation,
             (None, Some(cached)) => cached,
             (None, None) => String::new(),
         }
+    }
+
+    fn cached_remote_hint(&self) -> Option<String> {
+        let unavailable = self
+            .hosts()
+            .into_iter()
+            .filter_map(|host| match host.reachability {
+                RemoteHostReachability::Reachable => None,
+                RemoteHostReachability::Unreachable(issue) => {
+                    Some(format!("{} {}", host.alias, issue.label()))
+                }
+            })
+            .collect::<Vec<_>>();
+        (!unavailable.is_empty())
+            .then(|| format!("{}; showing cached state", unavailable.join(", ")))
     }
 
     fn compact_key_lines(&self, width: u16) -> Vec<Line<'static>> {
@@ -3114,42 +3243,17 @@ fn host_overview_item(
     project_colors: &BTreeMap<ProjectId, Color>,
     available_width: u16,
 ) -> ListItem<'static> {
-    let reachability = match host.reachability {
-        RemoteHostReachability::Reachable => "available",
-        RemoteHostReachability::Unreachable => "unavailable; cached",
-    };
-    let mut lines = vec![
-        Line::from(Span::styled(
-            truncate_display(&host.alias, usize::from(available_width)),
-            Style::default()
-                .fg(host_color(&host.alias))
-                .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(vec![
-            Span::styled(
-                reachability,
-                Style::default().fg(match host.reachability {
-                    RemoteHostReachability::Reachable => Color::Gray,
-                    RemoteHostReachability::Unreachable => Color::Yellow,
-                }),
-            ),
-            Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                truncate_display(
-                    observer_status_label(host.observer_status),
-                    usize::from(
-                        available_width
-                            .saturating_sub(u16::try_from(reachability.len() + 3).unwrap_or(0)),
-                    ),
-                ),
-                Style::default().fg(observer_status_color(host.observer_status)),
-            ),
-        ]),
-    ];
+    let mut lines = vec![Line::from(Span::styled(
+        truncate_display(&host.alias, usize::from(available_width)),
+        Style::default()
+            .fg(host_color(&host.alias))
+            .add_modifier(Modifier::BOLD),
+    ))];
+    lines.push(host_connection_line(host, available_width));
     if host.active_projects.is_empty() {
         lines.push(Line::from(Span::styled(
             "└─ no active Projects",
-            Style::default().fg(Color::DarkGray),
+            Style::default().fg(PROJECT_TREE_COLOR),
         )));
     } else {
         lines.extend(
@@ -3168,7 +3272,7 @@ fn host_overview_item(
                         format!("{} active", project.active_workstream_count)
                     };
                     Line::from(vec![
-                        Span::styled(branch, Style::default().fg(Color::DarkGray)),
+                        Span::styled(branch, Style::default().fg(PROJECT_TREE_COLOR)),
                         Span::styled(
                             truncate_display(
                                 &project.label,
@@ -3176,7 +3280,7 @@ fn host_overview_item(
                             ),
                             Style::default().fg(project_accent(project.project_id, project_colors)),
                         ),
-                        Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(" · ", Style::default().fg(PROJECT_TREE_COLOR)),
                         Span::styled(count, Style::default().fg(Color::Gray)),
                     ])
                 }),
@@ -3185,21 +3289,39 @@ fn host_overview_item(
     ListItem::new(lines)
 }
 
-const fn observer_status_label(status: ObserverStatus) -> &'static str {
-    match status {
-        ObserverStatus::NotInstalled => "observer not installed",
-        ObserverStatus::TrustPending => "observer review needed",
-        ObserverStatus::Ready => "observer ready",
-        ObserverStatus::Modified => "observer changed",
-        ObserverStatus::Disabled => "observer disabled",
+fn host_connection_line(host: &NavigatorHostSummary, available_width: u16) -> Line<'static> {
+    match host.reachability {
+        RemoteHostReachability::Reachable => {
+            let (observer, observer_color) = observer_status_indicator(host.observer_status);
+            Line::from(vec![
+                Span::styled("available", Style::default().fg(Color::Indexed(250))),
+                Span::styled(" · ", Style::default().fg(PROJECT_TREE_COLOR)),
+                Span::styled(
+                    truncate_display(observer, usize::from(available_width.saturating_sub(12))),
+                    Style::default().fg(observer_color),
+                ),
+            ])
+        }
+        RemoteHostReachability::Unreachable(issue) => Line::from(vec![
+            Span::styled("✗ ", Style::default().fg(issue.color())),
+            Span::styled(
+                truncate_display(
+                    &issue.label(),
+                    usize::from(available_width.saturating_sub(2)),
+                ),
+                Style::default().fg(issue.color()),
+            ),
+        ]),
     }
 }
 
-const fn observer_status_color(status: ObserverStatus) -> Color {
+const fn observer_status_indicator(status: ObserverStatus) -> (&'static str, Color) {
     match status {
-        ObserverStatus::Ready => Color::Green,
-        ObserverStatus::TrustPending | ObserverStatus::Modified => Color::Yellow,
-        ObserverStatus::NotInstalled | ObserverStatus::Disabled => Color::Gray,
+        ObserverStatus::Ready => ("✓", Color::Green),
+        ObserverStatus::TrustPending => ("review needed", Color::Yellow),
+        ObserverStatus::Modified => ("observer changed", Color::Yellow),
+        ObserverStatus::NotInstalled => ("not set up", Color::Indexed(250)),
+        ObserverStatus::Disabled => ("disabled", Color::Indexed(250)),
     }
 }
 
@@ -4542,8 +4664,12 @@ fn activate_selected_host(
         view.set_message("observer is already ready on this host");
         return;
     }
-    if host.alias != "local" && host.reachability == RemoteHostReachability::Unreachable {
-        view.set_message("remote host is unavailable; observer activation was not sent");
+    if let RemoteHostReachability::Unreachable(issue) = host.reachability {
+        view.set_message(format!(
+            "{} is {}; observer activation was not sent",
+            host.alias,
+            issue.label()
+        ));
         return;
     }
     let prepared = if host.alias == "local" {
@@ -4625,8 +4751,12 @@ fn offboard_host(
         view.set_message("the selected Host is unavailable; refresh the navigator");
         return;
     };
-    if host.reachability == RemoteHostReachability::Unreachable {
-        view.set_message("remote host is unavailable; offboarding was not sent");
+    if let RemoteHostReachability::Unreachable(issue) = host.reachability {
+        view.set_message(format!(
+            "{} is {}; offboarding was not sent",
+            host.alias,
+            issue.label()
+        ));
         return;
     }
     if host.observer_status != ObserverStatus::NotInstalled
@@ -5790,7 +5920,9 @@ mod tests {
                 },
                 NavigatorHostOverview {
                     alias: "spare".to_owned(),
-                    reachability: RemoteHostReachability::Unreachable,
+                    reachability: RemoteHostReachability::Unreachable(
+                        RemoteHostIssue::SshOrRemoteExecutableUnavailable,
+                    ),
                     observer_status: ObserverStatus::NotInstalled,
                 },
             ],
@@ -5895,7 +6027,12 @@ mod tests {
                 },
                 NavigatorHostOverview {
                     alias: "snap".to_owned(),
-                    reachability: RemoteHostReachability::Reachable,
+                    reachability: RemoteHostReachability::Unreachable(
+                        RemoteHostIssue::ProtocolMismatch {
+                            local: 14,
+                            remote: 13,
+                        },
+                    ),
                     observer_status: ObserverStatus::TrustPending,
                 },
             ],
@@ -5905,7 +6042,7 @@ mod tests {
         });
         view.select_page(NavigatorPage::Hosts);
         view.select_next();
-        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
 
         terminal.draw(|frame| view.render(frame)).unwrap();
         let rendered = terminal
@@ -5916,13 +6053,43 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
-        assert!(rendered.contains("observer review needed"));
-        assert!(rendered.contains("available"));
         assert!(rendered.contains("project"));
         assert!(rendered.contains("1 active"));
         assert!(rendered.contains("└─"));
+        assert!(!rendered.contains("observer ready"));
         assert!(!rendered.contains(&workstream_id.to_string()));
         assert!(!rendered.contains(&location_id.to_string()));
+        assert_eq!(
+            observer_status_indicator(ObserverStatus::Ready),
+            ("✓", Color::Green)
+        );
+        let snap = view
+            .hosts()
+            .into_iter()
+            .find(|host| host.alias == "snap")
+            .unwrap();
+        assert_eq!(
+            String::from(host_connection_line(&snap, 100)),
+            "✗ protocol 13 ≠ 14"
+        );
+    }
+
+    #[test]
+    fn remote_build_mismatch_has_a_bounded_host_page_diagnosis() {
+        let issue = remote_build_issue(&BuildInfoError::ProtocolVersionMismatch {
+            local: 14,
+            remote: 13,
+        });
+
+        assert_eq!(
+            issue,
+            RemoteHostIssue::ProtocolMismatch {
+                local: 14,
+                remote: 13,
+            }
+        );
+        assert_eq!(issue.label(), "protocol 13 ≠ 14");
+        assert_eq!(issue.color(), Color::Red);
     }
 
     #[test]
@@ -6423,7 +6590,9 @@ mod tests {
                 unresolved_operation_count: 0,
                 unresolved_operations: Vec::new(),
                 observer_status: ObserverStatus::NotInstalled,
-                reachable: false,
+                reachability: RemoteHostReachability::Unreachable(
+                    RemoteHostIssue::SshOrRemoteExecutableUnavailable,
+                ),
                 pending: false,
                 next_poll: Instant::now(),
                 backoff: REMOTE_INITIAL_BACKOFF,
@@ -6437,6 +6606,10 @@ mod tests {
         assert!(cached.result_ready);
         assert!(!cached.host.is_reachable());
         assert_eq!(snapshot.unreachable_hosts, vec!["snap"]);
+        assert_eq!(
+            NavigatorView::new(snapshot).footer_status(),
+            "snap SSH/wsnav unavailable; showing cached state"
+        );
     }
 
     #[test]
@@ -6462,7 +6635,7 @@ mod tests {
                 unresolved_operation_count: 0,
                 unresolved_operations: Vec::new(),
                 observer_status: ObserverStatus::NotInstalled,
-                reachable: true,
+                reachability: RemoteHostReachability::Reachable,
                 pending: false,
                 next_poll: Instant::now(),
                 backoff: REMOTE_INITIAL_BACKOFF,

@@ -213,7 +213,10 @@ wsnav host doctor snap
 
 WSNav never copies, bootstraps, or updates a remote binary itself. A failed
 probe leaves cached remote rows visible but disables their actions until the
-operator resolves the installation.
+operator resolves the installation. The Hosts page distinguishes a matching
+build from a bounded problem such as SSH/`wsnav` unavailable, timeout, malformed
+probe, or explicit ABI/protocol/schema mismatch (for example,
+`protocol 13 ≠ 14`); it does not expose raw SSH output or paths.
 
 For a nonstandard SSH destination or executable path, keep the same short
 command and supply only the difference:

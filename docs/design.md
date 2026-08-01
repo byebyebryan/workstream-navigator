@@ -224,13 +224,13 @@ Workstreams                 Projects                    Hosts
 ```
 
 Workstreams is the default page and retains the product's ordinary switching
-workflow. Projects and Hosts are inventory/configuration pages. A compact,
-mouse-actionable page switcher stays inside the navigator pane; keyboard page
-shortcuts and page-specific footer hints avoid one crowded global command
-list. Opening Project or Host detail replaces only the navigator content.
-`Enter` consistently opens the selected entity, while `Esc` returns from
-detail to its list. No page creates a tmux popup, overlays the provider pane,
-or replaces the native TUI.
+workflow. Projects and Hosts are inventory/configuration pages, reached by
+their contextual `m` and `h` keys rather than a persistent tab bar. `Esc`
+returns from either management list to the ordinary Workstreams page, and
+returns from a detail to its list. Opening Project or Host detail replaces
+only the navigator content. `Enter` consistently opens the selected entity.
+No page creates a tmux popup, overlays the provider pane, or replaces the
+native TUI.
 
 Direct page-local keys are the canonical control path. The compact footer
 shows the most relevant bindings for the current page and state; `?` reveals
@@ -241,9 +241,9 @@ Each stateful action introduces its own bounded text entry, confirmation, and
 progress state with the authority that consumes it; the navigator does not keep
 an unconnected generic modal that could imply an action is available before its
 host contract exists.
-Mouse support in D7 covers page switching, selection, primary row activation,
-forms, and confirmation. Full mouse parity for every management action is not
-an acceptance requirement.
+Mouse support in D7 covers selection, primary row activation, forms, and
+confirmation. Full mouse parity for every management action is not an
+acceptance requirement.
 
 The Workstreams page retains its accepted muscle memory: `Enter` performs the
 primary open/start/recover action, `n` starts a sibling, `f` forks, `p` parks,

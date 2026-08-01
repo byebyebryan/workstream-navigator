@@ -745,7 +745,6 @@ pub struct NavigatorView {
     rendered_mouse_rows: Vec<(u16, usize)>,
     rendered_project_rows: Vec<(u16, ProjectId)>,
     rendered_host_rows: Vec<(u16, String)>,
-    rendered_page_tabs: Vec<(Rect, NavigatorPage)>,
     mouse_click: Option<MouseClickIntent>,
     message: Option<String>,
     help_visible: bool,
@@ -760,7 +759,6 @@ enum MouseClickIntent {
     Row,
     Project,
     Host,
-    Page(NavigatorPage),
 }
 
 /// The active navigator page. This remains process-local presentation state.
@@ -778,14 +776,6 @@ impl NavigatorPage {
             Self::Workstreams => "Workstreams",
             Self::Projects => "Projects",
             Self::Hosts => "Hosts",
-        }
-    }
-
-    const fn shortcut(self) -> char {
-        match self {
-            Self::Workstreams => '1',
-            Self::Projects => '2',
-            Self::Hosts => '3',
         }
     }
 }
@@ -989,7 +979,6 @@ impl NavigatorView {
             rendered_mouse_rows: Vec::new(),
             rendered_project_rows: Vec::new(),
             rendered_host_rows: Vec::new(),
-            rendered_page_tabs: Vec::new(),
             mouse_click: None,
             message: None,
             help_visible: false,
@@ -1749,7 +1738,7 @@ impl NavigatorView {
 
     pub fn render(&mut self, frame: &mut Frame<'_>) {
         let help_height = if self.help_visible {
-            frame.area().height.saturating_sub(4).clamp(3, 12)
+            frame.area().height.saturating_sub(4).clamp(3, 22)
         } else {
             2
         };
@@ -1761,27 +1750,22 @@ impl NavigatorView {
                 Constraint::Length(help_height),
             ])
             .split(frame.area());
-        let content = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(1), Constraint::Min(2)])
-            .split(areas[0]);
-        self.render_page_tabs(frame, content[0]);
         match self.detail.clone() {
-            Some(NavigatorDetail::Recovery) => self.render_recovery_detail(frame, content[1]),
+            Some(NavigatorDetail::Recovery) => self.render_recovery_detail(frame, areas[0]),
             Some(NavigatorDetail::Workstream {
                 host_alias,
                 workstream_id,
-            }) => self.render_workstream_detail(frame, content[1], &host_alias, workstream_id),
+            }) => self.render_workstream_detail(frame, areas[0], &host_alias, workstream_id),
             Some(NavigatorDetail::Project(project_id)) => {
-                self.render_project_detail(frame, content[1], project_id);
+                self.render_project_detail(frame, areas[0], project_id);
             }
             Some(NavigatorDetail::Host(alias)) => {
-                self.render_host_detail(frame, content[1], &alias);
+                self.render_host_detail(frame, areas[0], &alias);
             }
             None => match self.page {
-                NavigatorPage::Workstreams => self.render_workstreams(frame, content[1]),
-                NavigatorPage::Projects => self.render_projects(frame, content[1]),
-                NavigatorPage::Hosts => self.render_hosts(frame, content[1]),
+                NavigatorPage::Workstreams => self.render_workstreams(frame, areas[0]),
+                NavigatorPage::Projects => self.render_projects(frame, areas[0]),
+                NavigatorPage::Hosts => self.render_hosts(frame, areas[0]),
             },
         }
         frame.render_widget(
@@ -1800,38 +1784,6 @@ impl NavigatorView {
         if let Some(modal) = self.modal.clone() {
             Self::render_modal(frame, modal);
         }
-    }
-
-    fn render_page_tabs(&mut self, frame: &mut Frame<'_>, area: Rect) {
-        self.rendered_page_tabs.clear();
-        let pages = [
-            NavigatorPage::Workstreams,
-            NavigatorPage::Projects,
-            NavigatorPage::Hosts,
-        ];
-        let mut spans = Vec::new();
-        let mut x = area.x;
-        for page in pages {
-            let label = format!(" {} {} ", page.shortcut(), page.label());
-            let width = u16::try_from(label.chars().count()).unwrap_or(u16::MAX);
-            if x >= area.right() {
-                break;
-            }
-            let visible_width = width.min(area.right().saturating_sub(x));
-            self.rendered_page_tabs
-                .push((Rect::new(x, area.y, visible_width, area.height), page));
-            let style = if self.page == page {
-                Style::default()
-                    .fg(Color::White)
-                    .bg(SELECTED_ROW_BACKGROUND)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(Color::Gray)
-            };
-            spans.push(Span::styled(label, style));
-            x = x.saturating_add(width);
-        }
-        frame.render_widget(Paragraph::new(Line::from(spans)), area);
     }
 
     fn render_workstreams(&mut self, frame: &mut Frame<'_>, area: Rect) {
@@ -1858,8 +1810,8 @@ impl NavigatorView {
         frame.render_stateful_widget(
             List::new(items)
                 .block(Block::default().borders(Borders::ALL).title(format!(
-                    " Workstreams · {} · {} ",
-                    self.workstream_scope.label(),
+                    " {} · {} ",
+                    self.workstream_title(),
                     self.view_mode().label()
                 )))
                 .highlight_style(selected_row_style()),
@@ -2242,13 +2194,6 @@ impl NavigatorView {
         }
     }
 
-    fn page_from_position(&self, column: u16, row: u16) -> Option<NavigatorPage> {
-        self.rendered_page_tabs.iter().find_map(|(area, page)| {
-            (column >= area.x && column < area.right() && row >= area.y && row < area.bottom())
-                .then_some(*page)
-        })
-    }
-
     fn project_from_y(&self, y: u16) -> Option<ProjectId> {
         self.rendered_project_rows
             .iter()
@@ -2259,10 +2204,6 @@ impl NavigatorView {
         self.rendered_host_rows
             .iter()
             .find_map(|(row_y, alias)| (*row_y == y).then_some(alias.clone()))
-    }
-
-    fn begin_page_click(&mut self, page: NavigatorPage) {
-        self.mouse_click = Some(MouseClickIntent::Page(page));
     }
 
     fn begin_project_click(&mut self, project_id: Option<ProjectId>) {
@@ -2419,15 +2360,15 @@ impl NavigatorView {
             NavigatorPage::Projects => vec![
                 ("Enter", "details"),
                 ("n", "register checkout"),
-                ("1", "workstreams"),
-                ("3", "hosts"),
+                ("Esc", "workstreams"),
+                ("h", "hosts"),
                 ("?", "keys"),
             ],
             NavigatorPage::Hosts => vec![
                 ("Enter", "details"),
                 ("n", "register remote"),
-                ("1", "workstreams"),
-                ("2", "projects"),
+                ("Esc", "workstreams"),
+                ("m", "projects"),
                 ("?", "keys"),
             ],
         }
@@ -2464,6 +2405,13 @@ impl NavigatorView {
             .scroll((self.help_scroll, 0)),
             area,
         );
+    }
+
+    fn workstream_title(&self) -> &'static str {
+        match self.workstream_scope {
+            WorkstreamScope::Active => "Workstreams",
+            WorkstreamScope::Archived => "Workstreams · Archived",
+        }
     }
 
     fn render_modal(frame: &mut Frame<'_>, modal: NavigatorModal) {
@@ -2736,15 +2684,11 @@ fn help_lines(
         Line::from(Span::styled("Navigation", heading)),
         Line::from(vec![Span::styled("↑/↓ or j/k", key), Span::raw("  select")]),
         Line::from(vec![
-            Span::styled("1", key),
-            Span::raw("          Workstreams page"),
-        ]),
-        Line::from(vec![
-            Span::styled("2", key),
+            Span::styled("m", key),
             Span::raw("          Projects page"),
         ]),
         Line::from(vec![
-            Span::styled("3", key),
+            Span::styled("h", key),
             Span::raw("          Hosts page"),
         ]),
     ];
@@ -2806,7 +2750,6 @@ fn help_lines(
     lines.extend([
         Line::raw(""),
         Line::from(Span::styled("Mouse", heading)),
-        Line::raw("click a tab to switch pages"),
         Line::raw("click a row to select; release to open or focus"),
         Line::raw("click empty navigator space to focus it"),
         Line::raw(""),
@@ -3500,20 +3443,25 @@ fn handle_navigator_key(
     }
     match key.code {
         KeyCode::Char('q') => true,
-        KeyCode::Esc => !view.dismiss_detail(),
+        KeyCode::Esc => {
+            if view.dismiss_detail() {
+                false
+            } else if view.page() != NavigatorPage::Workstreams {
+                view.select_page(NavigatorPage::Workstreams);
+                false
+            } else {
+                true
+            }
+        }
         KeyCode::Char('?') => {
             view.toggle_help();
             false
         }
-        KeyCode::Char('1') => {
-            view.select_page(NavigatorPage::Workstreams);
-            false
-        }
-        KeyCode::Char('2') => {
+        KeyCode::Char('m') => {
             view.select_page(NavigatorPage::Projects);
             false
         }
-        KeyCode::Char('3') => {
+        KeyCode::Char('h') => {
             view.select_page(NavigatorPage::Hosts);
             false
         }
@@ -3784,9 +3732,7 @@ fn handle_navigator_mouse(
         MouseEventKind::ScrollDown => view.select_next(),
         MouseEventKind::ScrollUp => view.select_previous(),
         MouseEventKind::Down(MouseButton::Left) => {
-            if let Some(page) = view.page_from_position(mouse.column, mouse.row) {
-                view.begin_page_click(page);
-            } else if view.detail.is_some() {
+            if view.detail.is_some() {
                 view.begin_mouse_click(None);
             } else {
                 match view.page() {
@@ -3803,7 +3749,6 @@ fn handle_navigator_mouse(
         MouseEventKind::Up(MouseButton::Left) => match view.take_mouse_click() {
             Some(MouseClickIntent::Row) => activate_selected(root, presentation, remote, view),
             Some(MouseClickIntent::Project | MouseClickIntent::Host) => view.open_selected_detail(),
-            Some(MouseClickIntent::Page(page)) => view.select_page(page),
             Some(MouseClickIntent::Blank) => {
                 if let Err(error) = presentation.focus_navigator() {
                     view.set_message(action_message(&error));
@@ -4911,11 +4856,11 @@ mod tests {
         terminal.draw(|frame| view.render(frame)).unwrap();
 
         assert_eq!(view.row_from_y(0), None);
-        assert_eq!(view.row_from_y(1), None);
+        assert_eq!(view.row_from_y(1), Some(0));
         assert_eq!(view.row_from_y(2), Some(0));
-        assert_eq!(view.row_from_y(3), Some(0));
+        assert_eq!(view.row_from_y(3), Some(1));
         assert_eq!(view.row_from_y(4), Some(1));
-        assert_eq!(view.row_from_y(5), Some(1));
+        assert_eq!(view.row_from_y(5), None);
         assert_eq!(view.row_from_y(6), None);
     }
 
@@ -4938,7 +4883,12 @@ mod tests {
         terminal.draw(|frame| view.render(frame)).unwrap();
 
         assert!(view.rendered_offset > 0);
-        let clicked = view.row_from_y(3).unwrap();
+        let clicked = view
+            .rendered_mouse_rows
+            .iter()
+            .find_map(|(row_y, snapshot_index)| (*snapshot_index == 5).then_some(*row_y))
+            .and_then(|row_y| view.row_from_y(row_y))
+            .unwrap();
         view.begin_mouse_click(Some(clicked));
         assert_eq!(view.selected().map(|row| row.workstream_id), Some(expected));
     }
@@ -5721,7 +5671,7 @@ mod tests {
     }
 
     #[test]
-    fn management_page_mouse_targets_cover_tabs_and_two_line_rows() {
+    fn management_page_mouse_targets_cover_two_line_rows_without_page_tabs() {
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: vec![row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)],
             hosts: vec![
@@ -5743,29 +5693,18 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
 
         terminal.draw(|frame| view.render(frame)).unwrap();
-        let projects_tab = view
-            .rendered_page_tabs
-            .iter()
-            .find(|(_, page)| *page == NavigatorPage::Projects)
-            .map(|(area, _)| *area)
-            .unwrap();
-        assert_eq!(
-            view.page_from_position(projects_tab.x, projects_tab.y),
-            Some(NavigatorPage::Projects)
-        );
-
         view.select_page(NavigatorPage::Projects);
         terminal.draw(|frame| view.render(frame)).unwrap();
+        assert_eq!(view.project_from_y(1), view.selected_project);
         assert_eq!(view.project_from_y(2), view.selected_project);
-        assert_eq!(view.project_from_y(3), view.selected_project);
-        view.begin_project_click(view.project_from_y(3));
+        view.begin_project_click(view.project_from_y(2));
         assert_eq!(view.take_mouse_click(), Some(MouseClickIntent::Project));
 
         view.select_page(NavigatorPage::Hosts);
         terminal.draw(|frame| view.render(frame)).unwrap();
+        assert_eq!(view.host_from_y(1).as_deref(), Some("local"));
         assert_eq!(view.host_from_y(2).as_deref(), Some("local"));
-        assert_eq!(view.host_from_y(3).as_deref(), Some("local"));
-        view.begin_host_click(view.host_from_y(3));
+        view.begin_host_click(view.host_from_y(2));
         assert_eq!(view.take_mouse_click(), Some(MouseClickIntent::Host));
     }
 
@@ -5785,6 +5724,10 @@ mod tests {
             view.footer_status(),
             "No Workstreams yet · n registers a checkout"
         );
+        assert_eq!(view.workstream_title(), "Workstreams");
+        view.cycle_workstream_scope();
+        assert_eq!(view.workstream_title(), "Workstreams · Archived");
+        view.cycle_workstream_scope();
 
         view.select_page(NavigatorPage::Projects);
         let project_compact = view
@@ -5793,8 +5736,38 @@ mod tests {
             .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
             .collect::<String>();
         assert!(project_compact.contains("Enter details"));
-        assert!(project_compact.contains("1 workstreams"));
+        assert!(project_compact.contains("Esc workstreams"));
+        assert!(project_compact.contains("h hosts"));
         assert!(!project_compact.contains("n new"));
+
+        let workstream_help = help_lines(
+            NavigatorPage::Workstreams,
+            false,
+            false,
+            false,
+            WorkstreamScope::Active,
+        );
+        let workstream_help = workstream_help
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect::<String>();
+        assert!(workstream_help.contains("x          archive"));
+        assert!(workstream_help.contains("m          Projects page"));
+        assert!(workstream_help.contains("h          Hosts page"));
+        assert!(!workstream_help.contains("1          Workstreams page"));
+
+        view.select_page(NavigatorPage::Workstreams);
+        view.help_visible = true;
+        let mut help_terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        help_terminal.draw(|frame| view.render(frame)).unwrap();
+        let rendered_help = help_terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered_help.contains("archive (confirms a working Runtime)"));
 
         let expanded = help_lines(
             NavigatorPage::Workstreams,

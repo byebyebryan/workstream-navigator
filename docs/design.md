@@ -1136,6 +1136,16 @@ remote location sends one bounded structured checkout path to that host for
 local Git inspection; paths are never interpolated into SSH shell syntax or
 returned in public snapshots. Permanent Project deletion, manual repository
 cleanup, and automatic cross-host merge/split remain outside D7.
+
+`n` from the Projects list opens a navigator-local host picker followed by a
+bounded checkout-path entry. `a` in a Project detail uses the same flow for an
+additional location. The selected host alone receives that path for local Git
+inspection; no path is written into provider panes, returned by the SSH
+control response, or shown in Workstream snapshots. Matching credential-free
+repository fingerprints associate locations into one logical Project. The
+Project detail lists host and bounded location label plus active/archived
+counts; `n` there starts from the selected retained location, including when
+every source row is archived.
 An empty navigator opens this same registration flow. From Project detail, the
 user can start a Workstream at a selected ProjectLocation even when the Project
 has no active Workstream to use as a source row.

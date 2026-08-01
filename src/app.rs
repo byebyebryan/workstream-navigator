@@ -214,6 +214,8 @@ enum HostCommands {
     Operations { alias: String },
     /// Verify a remote executable's stateless release probe and registered host identity.
     Doctor { alias: String },
+    /// Register one existing Git checkout on a verified SSH host.
+    RegisterCheckout { alias: String, checkout: String },
     /// Start or cold-resume one remote Workstream at an observed revision.
     Start {
         alias: String,
@@ -542,6 +544,9 @@ fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError>
         HostCommands::Snapshot { alias } => snapshot_ssh_host(&catalog, &alias),
         HostCommands::Operations { alias } => operations_ssh_host(&catalog, &alias),
         HostCommands::Doctor { alias } => doctor_ssh_host(&catalog, &alias),
+        HostCommands::RegisterCheckout { alias, checkout } => {
+            register_remote_checkout(&catalog, &alias, &checkout)
+        }
         HostCommands::Start {
             alias,
             workstream_id,
@@ -696,6 +701,22 @@ fn operations_ssh_host(catalog: &ClientCatalog, alias: &str) -> Result<(), AppEr
             operation.revision,
         )
     }));
+    Ok(())
+}
+
+fn register_remote_checkout(
+    catalog: &ClientCatalog,
+    alias: &str,
+    checkout: &str,
+) -> Result<(), AppError> {
+    let workstream_id = create_remote_workstream(
+        catalog,
+        alias,
+        crate::protocol::HostAction::RegisterCheckout {
+            checkout_path: checkout.to_owned(),
+        },
+    )?;
+    println!("registered workstream {workstream_id}");
     Ok(())
 }
 

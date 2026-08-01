@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{fs, path::PathBuf, process::Command};
 
 use wsnav::{
     domain::WorkstreamId,
@@ -27,7 +27,7 @@ fn local_subprocess_uses_the_same_bounded_protocol_service_as_ssh() {
     assert!(hello.registry_generation.len() <= 128);
     assert!(snapshot.workstreams.is_empty());
     assert!(operations.operations.is_empty());
-    assert_eq!(CURRENT_PROTOCOL_VERSION, 10);
+    assert_eq!(CURRENT_PROTOCOL_VERSION, 11);
 }
 
 #[test]
@@ -68,6 +68,86 @@ fn local_subprocess_apply_uses_the_same_revision_guard_as_an_ssh_host() {
             .unwrap()
             .result_unseen_since_revision,
         None
+    );
+}
+
+#[test]
+fn local_subprocess_registers_one_existing_checkout_without_returning_its_path() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_root = temporary.path().join("state");
+    let checkout = temporary.path().join("checkout");
+    assert!(
+        Command::new("git")
+            .args(["init", "--quiet"])
+            .arg(&checkout)
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(checkout.join("README.md"), "# disposable\n").unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&checkout)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&checkout)
+            .args([
+                "-c",
+                "user.name=WSNav Test",
+                "-c",
+                "user.email=wsnav@example.invalid",
+                "commit",
+                "--quiet",
+                "-m",
+                "initial",
+            ])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let endpoint = LocalEndpoint {
+        executable: PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
+        state_root: state_root.clone(),
+    };
+
+    let workstream_id = HostClient::new(SystemCommandRunner)
+        .create_local(
+            &endpoint,
+            HostAction::RegisterCheckout {
+                checkout_path: checkout.to_string_lossy().into_owned(),
+            },
+        )
+        .unwrap();
+    let snapshot = HostClient::new(SystemCommandRunner)
+        .snapshot_local(&endpoint)
+        .unwrap();
+
+    assert!(
+        snapshot
+            .workstreams
+            .iter()
+            .any(|workstream| workstream.workstream_id == workstream_id)
+    );
+    assert!(
+        snapshot
+            .workstreams
+            .iter()
+            .all(|workstream| workstream.project_display_name != checkout.to_string_lossy())
+    );
+    assert_eq!(
+        HostRegistry::open(&StateRoot::create(&state_root).unwrap())
+            .unwrap()
+            .workstream_overviews()
+            .unwrap()
+            .iter()
+            .filter(|workstream| workstream.workstream_id == workstream_id)
+            .count(),
+        1
     );
 }
 

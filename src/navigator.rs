@@ -451,6 +451,7 @@ const REMOTE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const REMOTE_FOCUSED_POLL_INTERVAL: Duration = Duration::from_millis(750);
 const REMOTE_INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 const REMOTE_MAX_BACKOFF: Duration = Duration::from_secs(30);
+const MAX_NAVIGATOR_CHECKOUT_PATH_BYTES: usize = 4096;
 
 /// Non-durable client presentation state for bounded asynchronous SSH refresh.
 /// It retains the last accepted snapshot if a host becomes unavailable; an SSH
@@ -814,6 +815,14 @@ enum NavigatorModal {
         workstream: NavigatorWorkstream,
         value: String,
     },
+    SelectRegistrationHost {
+        hosts: Vec<NavigatorHost>,
+        selected: usize,
+    },
+    RegisterCheckout {
+        host: NavigatorHost,
+        value: String,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1161,6 +1170,30 @@ impl NavigatorView {
             .cloned()
     }
 
+    fn select_project_for_workstream(
+        &mut self,
+        host_alias: &str,
+        workstream_id: WorkstreamId,
+    ) -> bool {
+        let Some((index, project_id)) = self
+            .snapshot
+            .workstreams
+            .iter()
+            .enumerate()
+            .find(|(_, workstream)| {
+                workstream.host.alias() == host_alias && workstream.workstream_id == workstream_id
+            })
+            .map(|(index, workstream)| (index, workstream.project_id))
+        else {
+            return false;
+        };
+        self.page = NavigatorPage::Projects;
+        self.detail = None;
+        self.selected = index;
+        self.selected_project = Some(project_id);
+        true
+    }
+
     fn hosts(&self) -> Vec<NavigatorHostSummary> {
         let mut hosts = self
             .snapshot
@@ -1505,6 +1538,57 @@ impl NavigatorView {
             value: workstream.display_name.clone(),
             workstream,
         });
+    }
+
+    fn begin_checkout_registration(&mut self) {
+        let mut hosts = self
+            .snapshot
+            .hosts
+            .iter()
+            .map(|host| {
+                if host.alias == "local" {
+                    NavigatorHost::Local
+                } else {
+                    NavigatorHost::Remote {
+                        alias: host.alias.clone(),
+                        reachability: host.reachability,
+                    }
+                }
+            })
+            .collect::<Vec<_>>();
+        if !hosts
+            .iter()
+            .any(|host| matches!(host, NavigatorHost::Local))
+        {
+            hosts.push(NavigatorHost::Local);
+        }
+        hosts.sort_by(|left, right| {
+            (left.alias() != "local")
+                .cmp(&(right.alias() != "local"))
+                .then_with(|| left.alias().cmp(right.alias()))
+        });
+        hosts.truncate(16);
+        self.modal = Some(NavigatorModal::SelectRegistrationHost { hosts, selected: 0 });
+    }
+
+    fn select_registration_host_next(&mut self) {
+        let Some(NavigatorModal::SelectRegistrationHost { hosts, selected }) = self.modal.as_mut()
+        else {
+            return;
+        };
+        if !hosts.is_empty() {
+            *selected = (*selected + 1) % hosts.len();
+        }
+    }
+
+    fn select_registration_host_previous(&mut self) {
+        let Some(NavigatorModal::SelectRegistrationHost { hosts, selected }) = self.modal.as_mut()
+        else {
+            return;
+        };
+        if !hosts.is_empty() {
+            *selected = selected.checked_sub(1).unwrap_or(hosts.len() - 1);
+        }
     }
 
     fn dismiss_modal(&mut self) {
@@ -2108,7 +2192,7 @@ impl NavigatorView {
         });
         if self.visible_workstream_indexes().is_empty() {
             let empty_label = if self.snapshot.workstreams.is_empty() {
-                "No Workstreams yet".to_owned()
+                "No Workstreams yet · n registers a checkout".to_owned()
             } else {
                 format!(
                     "No {} Workstreams",
@@ -2182,6 +2266,7 @@ impl NavigatorView {
             let mut bindings = vec![("Enter", enter), ("Esc", "back")];
             if matches!(detail, NavigatorDetail::Project(_)) {
                 bindings.push(("n", "start location"));
+                bindings.push(("a", "add checkout"));
             }
             bindings.push(("?", "keys"));
             return bindings;
@@ -2191,7 +2276,14 @@ impl NavigatorView {
                 let mut bindings = vec![("Enter", "open"), ("i", "status")];
                 match self.workstream_scope {
                     WorkstreamScope::Active => bindings.extend([
-                        ("n", "new"),
+                        (
+                            "n",
+                            if self.snapshot.workstreams.is_empty() {
+                                "register"
+                            } else {
+                                "new"
+                            },
+                        ),
                         ("f", "fork"),
                         ("p", "park"),
                         ("r", "rename"),
@@ -2206,6 +2298,7 @@ impl NavigatorView {
             }
             NavigatorPage::Projects => vec![
                 ("Enter", "details"),
+                ("n", "register checkout"),
                 ("1", "workstreams"),
                 ("3", "hosts"),
                 ("?", "keys"),
@@ -2253,55 +2346,8 @@ impl NavigatorView {
     }
 
     fn render_modal(frame: &mut Frame<'_>, modal: NavigatorModal) {
-        let outer = frame.area();
-        let width = outer.width.min(52);
-        let height = outer.height.min(7);
-        let area = Rect::new(
-            outer
-                .x
-                .saturating_add(outer.width.saturating_sub(width) / 2),
-            outer
-                .y
-                .saturating_add(outer.height.saturating_sub(height) / 2),
-            width,
-            height,
-        );
-        let title = match &modal {
-            NavigatorModal::ConfirmArchive(_) => " Archive working Workstream ",
-            NavigatorModal::Rename { .. } => " Rename Workstream ",
-        };
-        let lines = match modal {
-            NavigatorModal::ConfirmArchive(workstream) => vec![
-                Line::from(Span::styled(
-                    truncate_display(&workstream.display_name, 42),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::raw("This parks the working Codex Runtime before archiving."),
-                Line::from(vec![
-                    Span::styled("Enter/y", Style::default().fg(Color::Yellow)),
-                    Span::raw(" confirm   "),
-                    Span::styled("Esc/n", Style::default().fg(Color::Yellow)),
-                    Span::raw(" cancel"),
-                ]),
-            ],
-            NavigatorModal::Rename { value, .. } => vec![
-                Line::raw("Set the canonical Codex thread title:"),
-                Line::from(Span::styled(
-                    truncate_display(&value, 44),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::from(vec![
-                    Span::styled("Enter", Style::default().fg(Color::Yellow)),
-                    Span::raw(" save   "),
-                    Span::styled("Esc", Style::default().fg(Color::Yellow)),
-                    Span::raw(" cancel"),
-                ]),
-            ],
-        };
+        let area = navigator_modal_area(frame.area(), &modal);
+        let (title, lines) = navigator_modal_content(modal);
         frame.render_widget(Clear, area);
         frame.render_widget(
             Paragraph::new(lines).block(
@@ -2319,6 +2365,125 @@ impl NavigatorView {
         self.rendered_mouse_rows
             .iter()
             .find_map(|(row_y, snapshot_index)| (*row_y == y).then_some(*snapshot_index))
+    }
+}
+
+fn navigator_modal_area(outer: Rect, modal: &NavigatorModal) -> Rect {
+    let width = outer.width.min(52);
+    let desired_height = match modal {
+        NavigatorModal::SelectRegistrationHost { hosts, .. } => hosts.len().saturating_add(4),
+        NavigatorModal::ConfirmArchive(_)
+        | NavigatorModal::Rename { .. }
+        | NavigatorModal::RegisterCheckout { .. } => 7,
+    };
+    let height = outer
+        .height
+        .min(u16::try_from(desired_height).unwrap_or(u16::MAX));
+    Rect::new(
+        outer
+            .x
+            .saturating_add(outer.width.saturating_sub(width) / 2),
+        outer
+            .y
+            .saturating_add(outer.height.saturating_sub(height) / 2),
+        width,
+        height,
+    )
+}
+
+fn navigator_modal_content(modal: NavigatorModal) -> (String, Vec<Line<'static>>) {
+    let key = Style::default().fg(Color::Yellow);
+    match modal {
+        NavigatorModal::ConfirmArchive(workstream) => (
+            " Archive working Workstream ".to_owned(),
+            vec![
+                Line::from(Span::styled(
+                    truncate_display(&workstream.display_name, 42),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::raw("This parks the working Codex Runtime before archiving."),
+                Line::from(vec![
+                    Span::styled("Enter/y", key),
+                    Span::raw(" confirm   "),
+                    Span::styled("Esc/n", key),
+                    Span::raw(" cancel"),
+                ]),
+            ],
+        ),
+        NavigatorModal::Rename { value, .. } => (
+            " Rename Workstream ".to_owned(),
+            vec![
+                Line::raw("Set the canonical Codex thread title:"),
+                Line::from(Span::styled(
+                    truncate_display(&value, 44),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::from(vec![
+                    Span::styled("Enter", key),
+                    Span::raw(" save   "),
+                    Span::styled("Esc", key),
+                    Span::raw(" cancel"),
+                ]),
+            ],
+        ),
+        NavigatorModal::SelectRegistrationHost { hosts, selected } => {
+            let mut lines = vec![Line::raw("Choose the host that owns this checkout:")];
+            lines.extend(hosts.into_iter().enumerate().map(|(index, host)| {
+                let marker = if index == selected { "> " } else { "  " };
+                let availability = if host.is_reachable() {
+                    ""
+                } else {
+                    " · unavailable"
+                };
+                Line::from(Span::styled(
+                    format!("{marker}{}{}", host.alias(), availability),
+                    if index == selected {
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    },
+                ))
+            }));
+            lines.push(Line::from(vec![
+                Span::styled("Enter", key),
+                Span::raw(" choose   "),
+                Span::styled("Esc", key),
+                Span::raw(" cancel"),
+            ]));
+            (" Register checkout · choose host ".to_owned(), lines)
+        }
+        NavigatorModal::RegisterCheckout { host, value } => (
+            if host.is_remote() {
+                " Register remote checkout ".to_owned()
+            } else {
+                " Register local checkout ".to_owned()
+            },
+            vec![
+                Line::raw(format!(
+                    "Enter an existing Git checkout on {}:",
+                    host.alias()
+                )),
+                Line::from(Span::styled(
+                    truncate_display(&value, 44),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::raw("The path is sent only to the selected host."),
+                Line::from(vec![
+                    Span::styled("Enter", key),
+                    Span::raw(" register   "),
+                    Span::styled("Esc", key),
+                    Span::raw(" cancel"),
+                ]),
+            ],
+        ),
     }
 }
 
@@ -2382,22 +2547,35 @@ fn help_lines(
             ]),
         ]);
         if showing_project {
-            lines.push(Line::from(vec![
-                Span::styled("n", key),
-                Span::raw("          start a new Workstream at the selected location"),
-            ]));
+            lines.extend([
+                Line::from(vec![
+                    Span::styled("n", key),
+                    Span::raw("          start a new Workstream at the selected location"),
+                ]),
+                Line::from(vec![
+                    Span::styled("a", key),
+                    Span::raw("          register another existing checkout"),
+                ]),
+            ]);
         }
     } else if page == NavigatorPage::Workstreams {
         lines.extend(workstream_help_lines(workstream_scope, heading, key));
     } else {
-        lines.extend([
+        let mut page_lines = vec![
             Line::raw(""),
             Line::from(Span::styled(page.label(), heading)),
             Line::from(vec![
                 Span::styled("Enter", key),
                 Span::raw("      show bounded details"),
             ]),
-        ]);
+        ];
+        if page == NavigatorPage::Projects {
+            page_lines.push(Line::from(vec![
+                Span::styled("n", key),
+                Span::raw("          register an existing checkout"),
+            ]));
+        }
+        lines.extend(page_lines);
     }
     lines.extend([
         Line::raw(""),
@@ -3050,6 +3228,12 @@ fn handle_navigator_key(
         create_workstream_from_selected_project_location(root, presentation, remote, view);
         return false;
     }
+    if matches!(view.detail, Some(NavigatorDetail::Project(_)))
+        && matches!(key.code, KeyCode::Char('a'))
+    {
+        view.begin_checkout_registration();
+        return false;
+    }
     let workstreams = view.page() == NavigatorPage::Workstreams && view.detail.is_none();
     if workstreams && handle_workstream_action_key(key.code, root, presentation, remote, view) {
         return false;
@@ -3083,6 +3267,10 @@ fn handle_navigator_key(
         }
         KeyCode::Char('o') if workstreams => {
             view.open_recovery();
+            false
+        }
+        KeyCode::Char('n') if view.page() == NavigatorPage::Projects && view.detail.is_none() => {
+            view.begin_checkout_registration();
             false
         }
         KeyCode::Down | KeyCode::Char('j') => {
@@ -3162,6 +3350,19 @@ fn handle_navigator_modal_key(
         view.dismiss_modal();
         return false;
     }
+    if matches!(
+        view.modal,
+        Some(NavigatorModal::SelectRegistrationHost { .. })
+    ) {
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => view.select_registration_host_next(),
+            KeyCode::Up | KeyCode::Char('k') => view.select_registration_host_previous(),
+            _ => {}
+        }
+        if !matches!(key.code, KeyCode::Enter) {
+            return false;
+        }
+    }
     if matches!(key.code, KeyCode::Enter) {
         match view.confirm_modal() {
             Some(NavigatorModal::ConfirmArchive(workstream)) => {
@@ -3169,6 +3370,23 @@ fn handle_navigator_modal_key(
             }
             Some(NavigatorModal::Rename { workstream, value }) => {
                 rename_workstream(root, remote, view, &workstream, &value);
+            }
+            Some(NavigatorModal::SelectRegistrationHost { hosts, selected }) => {
+                if let Some(host) = hosts.get(selected).cloned() {
+                    view.modal = Some(NavigatorModal::RegisterCheckout {
+                        host,
+                        value: String::new(),
+                    });
+                } else {
+                    view.set_message("no registered host is available for checkout registration");
+                }
+            }
+            Some(NavigatorModal::RegisterCheckout { host, value }) if value.trim().is_empty() => {
+                view.modal = Some(NavigatorModal::RegisterCheckout { host, value });
+                view.set_message("enter an existing Git checkout path");
+            }
+            Some(NavigatorModal::RegisterCheckout { host, value }) => {
+                register_checkout(root, remote, view, &host, &value);
             }
             None => {}
         }
@@ -3182,17 +3400,29 @@ fn handle_navigator_modal_key(
         }
         return false;
     }
-    let Some(NavigatorModal::Rename { value, .. }) = view.modal.as_mut() else {
-        return false;
-    };
-    match key.code {
-        KeyCode::Backspace => {
-            value.pop();
-        }
-        KeyCode::Char(character) if !character.is_control() && value.chars().count() < 512 => {
-            value.push(character);
-        }
-        _ => {}
+    match view.modal.as_mut() {
+        Some(NavigatorModal::Rename { value, .. }) => match key.code {
+            KeyCode::Backspace => {
+                value.pop();
+            }
+            KeyCode::Char(character) if !character.is_control() && value.chars().count() < 512 => {
+                value.push(character);
+            }
+            _ => {}
+        },
+        Some(NavigatorModal::RegisterCheckout { value, .. }) => match key.code {
+            KeyCode::Backspace => {
+                value.pop();
+            }
+            KeyCode::Char(character)
+                if !character.is_control() && value.len() < MAX_NAVIGATOR_CHECKOUT_PATH_BYTES =>
+            {
+                value.push(character);
+            }
+            _ => {}
+        },
+        Some(NavigatorModal::ConfirmArchive(_) | NavigatorModal::SelectRegistrationHost { .. })
+        | None => {}
     }
     false
 }
@@ -3553,7 +3783,11 @@ fn create_workstream_selected(
     action: CreationAction,
 ) {
     let Some(source) = view.selected().cloned() else {
-        view.set_message("no Workstream is registered; run wsnav register /path/to/git-checkout");
+        if view.snapshot.workstreams.is_empty() {
+            view.begin_checkout_registration();
+        } else {
+            view.set_message("select a ProjectLocation to start a new Workstream");
+        }
         return;
     };
     create_workstream_from_source(root, presentation, remote, view, &source, action);
@@ -3613,6 +3847,57 @@ fn create_workstream_from_source(
         presentation.focus_provider()
     }) {
         Ok(()) => view.set_message(action.success_message()),
+        Err(error) => view.set_message(action_message(&error)),
+    }
+}
+
+fn register_checkout(
+    root: &StateRoot,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+    host: &NavigatorHost,
+    checkout: &str,
+) {
+    if host.is_remote() && !host.is_reachable() {
+        view.set_message("remote host is unavailable; checkout registration was not sent");
+        return;
+    }
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => {
+            view.set_message(action_message(&error));
+            return;
+        }
+    };
+    let mut command = Command::new(executable);
+    command.arg("--state-root").arg(root.base());
+    if host.is_remote() {
+        command
+            .arg("host")
+            .arg("register-checkout")
+            .arg(host.alias())
+            .arg(checkout);
+    } else {
+        command.arg("register").arg(checkout);
+    }
+    match output_bounded(&mut command, 1024, 1024).map_err(NavigatorError::from_action_process) {
+        Ok(output) if output.status.success() => match parse_created_workstream(&output.stdout) {
+            Ok(workstream_id) => {
+                remote.request_soon(host.alias());
+                refresh_view(root, remote, view);
+                if view.select_project_for_workstream(host.alias(), workstream_id) {
+                    view.set_message("checkout registered; select this Project to start Codex");
+                } else if host.is_remote() {
+                    view.set_message(
+                        "remote checkout registered; waiting for its bounded snapshot",
+                    );
+                } else {
+                    view.set_message("checkout registration completed; refresh the Project view");
+                }
+            }
+            Err(error) => view.set_message(action_message(&error)),
+        },
+        Ok(_) => view.set_message("checkout registration is unavailable"),
         Err(error) => view.set_message(action_message(&error)),
     }
 }
@@ -3942,6 +4227,52 @@ mod tests {
         assert!(rendered.contains("Rename Workstream"));
         assert!(rendered.contains("Set the canonical Codex thread title"));
         assert!(view.modal_visible());
+    }
+
+    #[test]
+    fn checkout_registration_uses_a_navigator_local_host_picker_and_path_entry() {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: Vec::new(),
+            hosts: vec![
+                NavigatorHostOverview {
+                    alias: "local".to_owned(),
+                    reachability: RemoteHostReachability::Reachable,
+                },
+                NavigatorHostOverview {
+                    alias: "snap".to_owned(),
+                    reachability: RemoteHostReachability::Reachable,
+                },
+            ],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
+        });
+        view.begin_checkout_registration();
+        view.select_registration_host_next();
+        let Some(NavigatorModal::SelectRegistrationHost { hosts, selected }) = view.confirm_modal()
+        else {
+            panic!("registration host picker should be active");
+        };
+        assert_eq!(hosts[selected].alias(), "snap");
+        view.modal = Some(NavigatorModal::RegisterCheckout {
+            host: hosts[selected].clone(),
+            value: "/private/checkout".to_owned(),
+        });
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+
+        terminal.draw(|frame| view.render(frame)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("Register remote checkout"));
+        assert!(rendered.contains("snap"));
+        assert!(rendered.contains("/private/checkout"));
+        assert!(!rendered.contains("provider pane"));
     }
 
     #[test]
@@ -4439,7 +4770,10 @@ mod tests {
     fn empty_navigator_requires_an_explicit_checkout_registration() {
         let view = NavigatorView::new(LocalNavigatorSnapshot::default());
 
-        assert_eq!(view.footer_status(), "No Workstreams yet");
+        assert_eq!(
+            view.footer_status(),
+            "No Workstreams yet · n registers a checkout"
+        );
     }
 
     #[test]
@@ -4840,10 +5174,13 @@ mod tests {
             .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
             .collect::<String>();
         assert!(compact.contains("Enter open"));
-        assert!(compact.contains("n new"));
+        assert!(compact.contains("n register"));
         assert!(compact.contains("? keys"));
         assert!(!compact.contains("No Workstreams"));
-        assert_eq!(view.footer_status(), "No Workstreams yet");
+        assert_eq!(
+            view.footer_status(),
+            "No Workstreams yet · n registers a checkout"
+        );
 
         view.select_page(NavigatorPage::Projects);
         let project_compact = view

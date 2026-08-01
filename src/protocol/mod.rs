@@ -1,8 +1,9 @@
 //! Bounded machine-to-machine frames used by local and SSH host adapters.
 //!
 //! The protocol deliberately contains only durable navigator metadata. It
-//! never transports a provider prompt, response, terminal capture, checkout
-//! path, or hook payload.
+//! never transports a provider prompt, response, terminal capture, or hook
+//! payload. A checkout path may appear only in the one bounded registration
+//! request sent to its selected host; it is never returned in a response.
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -12,7 +13,7 @@ use crate::domain::{
     RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 10;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 11;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -25,6 +26,7 @@ const MAX_THREAD_NAME_BYTES: usize = 512;
 const MAX_VERSION_BYTES: usize = 64;
 const MAX_REGISTRY_GENERATION_BYTES: usize = 128;
 const MAX_REQUEST_KEY_BYTES: usize = 128;
+const MAX_CHECKOUT_PATH_BYTES: usize = 4096;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RequestEnvelope {
@@ -94,6 +96,9 @@ impl HostRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostAction {
+    /// Register one existing checkout only on this host. The bounded path is
+    /// request-only and is never included in a response or snapshot.
+    RegisterCheckout { checkout_path: String },
     AcknowledgeAttention {
         workstream_id: WorkstreamId,
         expected_revision: i64,
@@ -174,12 +179,15 @@ impl HostAction {
             | Self::ForkWorkstream {
                 expected_revision, ..
             } => Some(*expected_revision),
-            Self::RecoverOperation { .. } => None,
+            Self::RegisterCheckout { .. } | Self::RecoverOperation { .. } => None,
         };
         if let Some(expected_revision) = expected_revision {
             Revision::try_from(expected_revision).map_err(|_| ProtocolError::InvalidRevision)?;
         }
         match self {
+            Self::RegisterCheckout { checkout_path } => {
+                validate_bounded("checkout path", checkout_path, MAX_CHECKOUT_PATH_BYTES)?;
+            }
             Self::NewWorkstream { request_key, .. } | Self::ForkWorkstream { request_key, .. } => {
                 validate_bounded("request key", request_key, MAX_REQUEST_KEY_BYTES)?;
             }
@@ -559,6 +567,32 @@ mod tests {
         };
 
         assert!(request.validate().is_ok());
+    }
+
+    #[test]
+    fn checkout_registration_accepts_only_one_bounded_single_line_request_path() {
+        let request = RequestEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            request: HostRequest::Apply {
+                action: HostAction::RegisterCheckout {
+                    checkout_path: "/workspace/project".to_owned(),
+                },
+            },
+        };
+        assert!(request.validate().is_ok());
+
+        let invalid = RequestEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            request: HostRequest::Apply {
+                action: HostAction::RegisterCheckout {
+                    checkout_path: "project\nother".to_owned(),
+                },
+            },
+        };
+        assert!(matches!(
+            invalid.validate(),
+            Err(ProtocolError::ControlCharacter("checkout path"))
+        ));
     }
 
     #[test]

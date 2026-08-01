@@ -6,6 +6,7 @@
 
 use std::{
     io::{self, Read, Write},
+    path::Path,
     process::{Command, Stdio},
 };
 
@@ -147,6 +148,9 @@ fn dispatch(state_root: Option<std::path::PathBuf>, request: &RequestEnvelope) -
 
 fn apply(root: &StateRoot, registry: &mut HostRegistry, action: HostAction) -> ResponseEnvelope {
     match action {
+        HostAction::RegisterCheckout { checkout_path } => {
+            apply_register_checkout(registry, &checkout_path)
+        }
         HostAction::AcknowledgeAttention {
             workstream_id,
             expected_revision,
@@ -216,6 +220,29 @@ fn apply(root: &StateRoot, registry: &mut HostRegistry, action: HostAction) -> R
             expected_revision,
             request_key,
         ),
+    }
+}
+
+fn apply_register_checkout(registry: &mut HostRegistry, checkout_path: &str) -> ResponseEnvelope {
+    let Ok(repository) = crate::repository::inspect(Path::new(checkout_path)) else {
+        return rejected("checkout is unavailable");
+    };
+    match registry.register_external_workstream_with_metadata(
+        repository.checkout_path,
+        &repository.repository_path,
+        repository.repository_identity,
+        repository.default_base_ref,
+        &repository.display_name,
+        repository.remote_identity_fingerprint.as_deref(),
+    ) {
+        Ok(registered) => ResponseEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            response: HostResponse::WorkstreamCreated {
+                workstream_id: registered.workstream_id,
+                revision: Revision::INITIAL.value(),
+            },
+        },
+        Err(_) => rejected("checkout registration is unavailable"),
     }
 }
 

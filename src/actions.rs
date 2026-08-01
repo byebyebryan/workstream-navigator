@@ -17,8 +17,8 @@ use thiserror::Error;
 
 use crate::{
     domain::{
-        OperationId, OperationKind, OperationPhase, Revision, RuntimeId, WorkstreamId,
-        WorkstreamLifecycle,
+        Clock, OperationId, OperationKind, OperationPhase, Revision, RuntimeId, SystemClock,
+        WorkstreamId, WorkstreamLifecycle,
     },
     provider::codex::app_server::{EphemeralAppServer, ForkReconciliation},
     provider::codex::profile::{ObserverProfile, ProfileError},
@@ -412,6 +412,10 @@ fn prepare_managed_worktree(
     kind: OperationKind,
     git: &dyn GitWorktree,
 ) -> Result<crate::state::ManagedWorkstreamPreparation, ActionError> {
+    let overview = active_workstream_overview(registry, source_workstream_id)?;
+    if expected_revision.is_some_and(|expected| expected != overview.revision) {
+        return Err(ActionError::WorkstreamRevisionConflict);
+    }
     let location = registry.workstream_git_location(source_workstream_id)?;
     if expected_revision.is_some_and(|expected| expected != location.source_revision) {
         return Err(ActionError::WorkstreamRevisionConflict);
@@ -503,8 +507,11 @@ pub fn start(
     workstream_id: WorkstreamId,
     expected_revision: Option<Revision>,
 ) -> Result<StartOutcome, ActionError> {
-    ensure_workstream_revision(registry, workstream_id, expected_revision)?;
-    if workstream_lifecycle(registry, workstream_id)? == WorkstreamLifecycle::RecoveryRequired {
+    let overview = active_workstream_overview(registry, workstream_id)?;
+    if expected_revision.is_some_and(|expected| expected != overview.revision) {
+        return Err(ActionError::WorkstreamRevisionConflict);
+    }
+    if overview.lifecycle == WorkstreamLifecycle::RecoveryRequired {
         return Err(ActionError::NativeRecoveryRequired);
     }
     reconcile_observer_trust(root, registry)?;
@@ -592,8 +599,11 @@ pub fn recover(
     workstream_id: WorkstreamId,
     expected_revision: Option<Revision>,
 ) -> Result<StartOutcome, ActionError> {
-    ensure_workstream_revision(registry, workstream_id, expected_revision)?;
-    if workstream_lifecycle(registry, workstream_id)? != WorkstreamLifecycle::RecoveryRequired {
+    let overview = active_workstream_overview(registry, workstream_id)?;
+    if expected_revision.is_some_and(|expected| expected != overview.revision) {
+        return Err(ActionError::WorkstreamRevisionConflict);
+    }
+    if overview.lifecycle != WorkstreamLifecycle::RecoveryRequired {
         return Err(ActionError::NativeRecoveryUnavailable);
     }
     reconcile_observer_trust(root, registry)?;
@@ -806,7 +816,10 @@ pub fn park(
     workstream_id: WorkstreamId,
     expected_revision: Option<Revision>,
 ) -> Result<Revision, ActionError> {
-    ensure_workstream_revision(registry, workstream_id, expected_revision)?;
+    let overview = active_workstream_overview(registry, workstream_id)?;
+    if expected_revision.is_some_and(|expected| expected != overview.revision) {
+        return Err(ActionError::WorkstreamRevisionConflict);
+    }
     let record = registry
         .runtime_for_workstream(workstream_id)?
         .ok_or(ActionError::NoRuntime(workstream_id))?;
@@ -820,6 +833,64 @@ pub fn park(
     runtime.park()?;
     registry.park_runtime(record.runtime_id, record.revision)?;
     workstream_revision(registry, workstream_id)
+}
+
+/// Archives a Workstream as a reversible navigator-visibility change. A live
+/// Runtime is parked first so the provider is never left running behind a
+/// hidden row. If parking commits but the archive transition cannot, the
+/// Workstream remains visibly parked and can be retried with fresh revision
+/// evidence.
+///
+/// # Errors
+///
+/// Returns an error when the Workstream revision is stale, a required Runtime
+/// park fails, the Workstream is already archived, or durable state cannot
+/// commit the exact archive transition.
+pub fn archive(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: Revision,
+) -> Result<Revision, ActionError> {
+    let overview = workstream_overview(registry, workstream_id)?;
+    if overview.revision != expected_revision {
+        return Err(ActionError::WorkstreamRevisionConflict);
+    }
+    if overview.archived_at_millis.is_some() {
+        return Err(ActionError::WorkstreamAlreadyArchived);
+    }
+    let archive_revision = if overview.lifecycle != WorkstreamLifecycle::Parked
+        && overview
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.status != crate::domain::RuntimeStatus::Stopped)
+    {
+        park(root, registry, workstream_id, Some(expected_revision))?
+    } else {
+        expected_revision
+    };
+    let archived_at_millis = SystemClock.now_millis().map_err(StateError::from)?;
+    registry
+        .archive_workstream(workstream_id, archive_revision, archived_at_millis)
+        .map_err(Into::into)
+}
+
+/// Restores an archived Workstream to the active navigator scope without
+/// starting or resuming Codex.
+///
+/// # Errors
+///
+/// Returns an error when the Workstream revision is stale, it is not archived,
+/// or durable state cannot commit the exact restore transition.
+pub fn restore(
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: Revision,
+) -> Result<Revision, ActionError> {
+    ensure_workstream_revision(registry, workstream_id, Some(expected_revision))?;
+    registry
+        .restore_workstream(workstream_id, expected_revision)
+        .map_err(Into::into)
 }
 
 /// Waits briefly for the durable outcome of a concurrently requested park.
@@ -932,16 +1003,26 @@ fn workstream_revision(
         .ok_or(ActionError::UnknownWorkstream)
 }
 
-fn workstream_lifecycle(
+fn workstream_overview(
     registry: &HostRegistry,
     workstream_id: WorkstreamId,
-) -> Result<WorkstreamLifecycle, ActionError> {
+) -> Result<crate::state::WorkstreamOverview, ActionError> {
     registry
         .workstream_overviews()?
         .into_iter()
         .find(|overview| overview.workstream_id == workstream_id)
-        .map(|overview| overview.lifecycle)
         .ok_or(ActionError::UnknownWorkstream)
+}
+
+fn active_workstream_overview(
+    registry: &HostRegistry,
+    workstream_id: WorkstreamId,
+) -> Result<crate::state::WorkstreamOverview, ActionError> {
+    let overview = workstream_overview(registry, workstream_id)?;
+    if overview.archived_at_millis.is_some() {
+        return Err(ActionError::WorkstreamArchived);
+    }
+    Ok(overview)
 }
 
 fn observer_profile(root: &crate::state::StateRoot) -> Result<ObserverProfile, ActionError> {
@@ -1021,6 +1102,10 @@ pub enum ActionError {
     NativeRecoveryUnavailable,
     #[error("workstream is unknown")]
     UnknownWorkstream,
+    #[error("workstream is archived; restore it before continuing")]
+    WorkstreamArchived,
+    #[error("workstream is already archived")]
+    WorkstreamAlreadyArchived,
     #[error("workstream revision changed; refresh before acting")]
     WorkstreamRevisionConflict,
     #[error("managed Workstream operation requires recovery; Git was not retried")]
@@ -1134,6 +1219,46 @@ mod tests {
             registry.codex_integration().unwrap().unwrap().lifecycle,
             IntegrationLifecycle::Ready
         );
+    }
+
+    #[test]
+    fn archive_and_restore_without_a_runtime_never_start_codex() {
+        let (temporary, mut registry, workstream_id) = registry();
+        let root = crate::state::StateRoot::create(temporary.path()).unwrap();
+
+        let archived_revision =
+            archive(&root, &mut registry, workstream_id, Revision::INITIAL).unwrap();
+        let archived = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == workstream_id)
+            .unwrap();
+        assert!(archived.archived_at_millis.is_some());
+        assert!(archived.runtime.is_none());
+        assert!(matches!(
+            start(&root, &mut registry, workstream_id, Some(archived_revision)),
+            Err(ActionError::WorkstreamArchived)
+        ));
+        assert!(matches!(
+            park(&root, &mut registry, workstream_id, Some(archived_revision)),
+            Err(ActionError::WorkstreamArchived)
+        ));
+        assert!(matches!(
+            archive(&root, &mut registry, workstream_id, archived_revision),
+            Err(ActionError::WorkstreamAlreadyArchived)
+        ));
+
+        let restored_revision = restore(&mut registry, workstream_id, archived_revision).unwrap();
+        let restored = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == workstream_id)
+            .unwrap();
+        assert_eq!(restored.archived_at_millis, None);
+        assert!(restored.runtime.is_none());
+        assert_eq!(restored.revision, restored_revision);
     }
 
     fn git(repository: &Path, arguments: &[&str]) {

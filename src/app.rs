@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::{
     actions::{self},
-    domain::{OperationId, RuntimeId, WorkstreamId},
+    domain::{OperationId, Revision, RuntimeId, WorkstreamId},
     navigator::run_local_navigator,
     presentation::{AttachmentPhase, Presentation},
     provider::codex::app_server::EphemeralAppServer,
@@ -100,6 +100,16 @@ enum Commands {
     Attach { workstream_id: String },
     /// Park a runtime without deleting its checkout or Codex session history.
     Park { workstream_id: String },
+    /// Hide a Workstream from the ordinary navigator without deleting retained state.
+    Archive {
+        workstream_id: String,
+        revision: i64,
+    },
+    /// Return an archived Workstream to the ordinary navigator without starting Codex.
+    Restore {
+        workstream_id: String,
+        revision: i64,
+    },
     /// Show one local runtime's durable record and live private-tmux probe.
     Status { workstream_id: String },
     /// List unresolved Start and Fork operations without exposing request keys or provider data.
@@ -214,6 +224,18 @@ enum HostCommands {
     },
     /// Park one remote Workstream at an observed revision.
     Park {
+        alias: String,
+        workstream_id: String,
+        revision: i64,
+    },
+    /// Hide one remote Workstream without deleting its retained state.
+    Archive {
+        alias: String,
+        workstream_id: String,
+        revision: i64,
+    },
+    /// Return one archived remote Workstream without starting Codex.
+    Restore {
         alias: String,
         workstream_id: String,
         revision: i64,
@@ -384,6 +406,23 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
         Commands::Park { workstream_id } => {
             park(root, &mut registry, parse_workstream(&workstream_id)?)
         }
+        Commands::Archive {
+            workstream_id,
+            revision,
+        } => archive(
+            root,
+            &mut registry,
+            parse_workstream(&workstream_id)?,
+            parse_revision(revision)?,
+        ),
+        Commands::Restore {
+            workstream_id,
+            revision,
+        } => restore(
+            &mut registry,
+            parse_workstream(&workstream_id)?,
+            parse_revision(revision)?,
+        ),
         Commands::Status { workstream_id } => {
             status(root, &mut registry, parse_workstream(&workstream_id)?)
         }
@@ -501,6 +540,16 @@ fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError>
             workstream_id,
             revision,
         } => park_remote_workstream(&catalog, &alias, &workstream_id, revision),
+        HostCommands::Archive {
+            alias,
+            workstream_id,
+            revision,
+        } => archive_remote_workstream(&catalog, &alias, &workstream_id, revision),
+        HostCommands::Restore {
+            alias,
+            workstream_id,
+            revision,
+        } => restore_remote_workstream(&catalog, &alias, &workstream_id, revision),
         HostCommands::New {
             alias,
             source_workstream_id,
@@ -694,6 +743,42 @@ fn park_remote_workstream(
         },
     )?;
     println!("parked remote workstream {workstream_id}");
+    Ok(())
+}
+
+fn archive_remote_workstream(
+    catalog: &ClientCatalog,
+    alias: &str,
+    workstream_id: &str,
+    revision: i64,
+) -> Result<(), AppError> {
+    apply_remote_action(
+        catalog,
+        alias,
+        crate::protocol::HostAction::Archive {
+            workstream_id: parse_workstream(workstream_id)?,
+            expected_revision: revision,
+        },
+    )?;
+    println!("archived remote workstream {workstream_id}");
+    Ok(())
+}
+
+fn restore_remote_workstream(
+    catalog: &ClientCatalog,
+    alias: &str,
+    workstream_id: &str,
+    revision: i64,
+) -> Result<(), AppError> {
+    apply_remote_action(
+        catalog,
+        alias,
+        crate::protocol::HostAction::Restore {
+            workstream_id: parse_workstream(workstream_id)?,
+            expected_revision: revision,
+        },
+    )?;
+    println!("restored remote workstream {workstream_id}");
     Ok(())
 }
 
@@ -1422,6 +1507,27 @@ fn park(
     Ok(())
 }
 
+fn archive(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    revision: Revision,
+) -> Result<(), AppError> {
+    actions::archive(root, registry, workstream_id, revision)?;
+    println!("archived workstream {workstream_id}");
+    Ok(())
+}
+
+fn restore(
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    revision: Revision,
+) -> Result<(), AppError> {
+    actions::restore(registry, workstream_id, revision)?;
+    println!("restored workstream {workstream_id}");
+    Ok(())
+}
+
 fn status(
     root: &StateRoot,
     registry: &mut HostRegistry,
@@ -1537,6 +1643,10 @@ fn parse_operation(value: &str) -> Result<OperationId, AppError> {
     OperationId::from_str(value).map_err(AppError::InvalidOperationId)
 }
 
+fn parse_revision(value: i64) -> Result<Revision, AppError> {
+    Revision::try_from(value).map_err(|_| AppError::InvalidWorkstreamRevision)
+}
+
 fn default_state_root() -> PathBuf {
     env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -1556,6 +1666,8 @@ enum AppError {
     InvalidWorkstreamId(uuid::Error),
     #[error("invalid operation ID")]
     InvalidOperationId(uuid::Error),
+    #[error("workstream revision is invalid")]
+    InvalidWorkstreamRevision,
     #[error("invalid runtime ID")]
     InvalidRuntimeId(uuid::Error),
     #[error("invalid provider attachment attempt")]

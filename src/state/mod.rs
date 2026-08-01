@@ -23,7 +23,7 @@ use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 /// The newest host-registry schema this build can open or create.
 ///
 /// This is safe release-probe metadata; it is not a host-state observation.
-pub const HOST_SCHEMA_VERSION: i64 = 5;
+pub const HOST_SCHEMA_VERSION: i64 = 6;
 const CLIENT_SCHEMA_VERSION: i64 = 3;
 const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
@@ -72,6 +72,7 @@ const HOST_SCHEMA_SQL: &str = "
         source_workstream_id TEXT REFERENCES workstreams(workstream_id),
         checkout_id TEXT NOT NULL UNIQUE REFERENCES checkouts(checkout_id),
         lifecycle TEXT NOT NULL,
+        archived_at_millis INTEGER,
         last_activity_sequence INTEGER NOT NULL CHECK (last_activity_sequence >= 0),
         last_activity_at_millis INTEGER NOT NULL CHECK (last_activity_at_millis >= 0),
         revision INTEGER NOT NULL CHECK (revision > 0)
@@ -458,6 +459,9 @@ pub struct WorkstreamOverview {
     pub remote_identity_fingerprint: Option<String>,
     pub checkout_path: PathBuf,
     pub lifecycle: WorkstreamLifecycle,
+    /// Archive is an independent visibility state. It preserves all lifecycle,
+    /// Runtime, binding, attention, checkout, and lineage records.
+    pub archived_at_millis: Option<i64>,
     pub last_activity_sequence: i64,
     /// Wall-clock time of the most recent observed native conversation activity.
     /// `None` means no turn has been observed and no time is inferred.
@@ -476,6 +480,7 @@ struct PersistedWorkstreamOverview {
     remote_identity_fingerprint: Option<String>,
     checkout_path: String,
     lifecycle: String,
+    archived_at_millis: Option<i64>,
     activity_sequence: i64,
     activity_at_millis: i64,
     revision: i64,
@@ -947,27 +952,30 @@ impl HostRegistry {
         &self,
         workstream_id: WorkstreamId,
     ) -> Result<WorkstreamGitLocation, StateError> {
-        self.connection
+        let location: (String, String, i64, Option<i64>) = self
+            .connection
             .query_row(
                 "SELECT project_locations.repository_path,
                         project_locations.default_base_ref,
-                        workstreams.revision
+                        workstreams.revision,
+                        workstreams.archived_at_millis
                  FROM workstreams
                  JOIN project_locations ON project_locations.location_id = workstreams.location_id
                  WHERE workstreams.workstream_id = ?1",
                 [workstream_id.to_string()],
-                |row| {
-                    Ok(WorkstreamGitLocation {
-                        repository_path: PathBuf::from(row.get::<_, String>(0)?),
-                        default_base_ref: row.get(1)?,
-                        source_revision: Revision::try_from(row.get::<_, i64>(2)?)
-                            .map_err(to_from_sql_error)?,
-                    })
-                },
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()
             .map_err(StateError::Sqlite)?
-            .ok_or(StateError::UnknownOpenWorkstream(workstream_id))
+            .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
+        if location.3.is_some() {
+            return Err(StateError::WorkstreamArchived(workstream_id));
+        }
+        Ok(WorkstreamGitLocation {
+            repository_path: PathBuf::from(location.0),
+            default_base_ref: location.1,
+            source_revision: Revision::try_from(location.2)?,
+        })
     }
 
     /// Atomically records the exact managed worktree plan before any Git
@@ -1285,18 +1293,21 @@ impl HostRegistry {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
-        let (checkout_path, workstream_lifecycle): (String, String) = transaction
+        let (checkout_path, workstream_lifecycle, archived_at_millis): (String, String, Option<i64>) = transaction
             .query_row(
-                "SELECT checkouts.path, workstreams.lifecycle FROM workstreams
+                "SELECT checkouts.path, workstreams.lifecycle, workstreams.archived_at_millis FROM workstreams
                  JOIN checkouts ON checkouts.checkout_id = workstreams.checkout_id
                  WHERE workstreams.workstream_id = ?1
                    AND workstreams.lifecycle IN ('open', 'parked')",
                 [workstream_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()
             .map_err(StateError::Sqlite)?
             .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
+        if archived_at_millis.is_some() {
+            return Err(StateError::WorkstreamArchived(workstream_id));
+        }
         let current: Option<RuntimeRecord> = transaction
             .query_row(
                 "SELECT runtime_id, tmux_generation, tmux_session, cwd, process_birth, lifecycle, revision
@@ -1393,18 +1404,21 @@ impl HostRegistry {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
-        let checkout_path: String = transaction
+        let (checkout_path, archived_at_millis): (String, Option<i64>) = transaction
             .query_row(
-                "SELECT checkouts.path FROM workstreams
+                "SELECT checkouts.path, workstreams.archived_at_millis FROM workstreams
                  JOIN checkouts ON checkouts.checkout_id = workstreams.checkout_id
                  WHERE workstreams.workstream_id = ?1
                    AND workstreams.lifecycle = 'recovery_required'",
                 [workstream_id.to_string()],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(StateError::Sqlite)?
             .ok_or(StateError::RecoveryUnavailable(workstream_id))?;
+        if archived_at_millis.is_some() {
+            return Err(StateError::WorkstreamArchived(workstream_id));
+        }
         let current: RuntimeRecord = transaction
             .query_row(
                 "SELECT runtime_id, tmux_generation, tmux_session, cwd, process_birth, lifecycle, revision
@@ -1628,6 +1642,97 @@ impl HostRegistry {
         }
     }
 
+    /// Hides one exact Workstream from the active navigator scope without
+    /// deleting its Runtime, provider binding, attention, checkout, or
+    /// lineage. The caller is responsible for any necessary Runtime park
+    /// before this durable visibility transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Workstream is missing, already archived, its
+    /// revision is stale, the timestamp is invalid, or the transaction fails.
+    pub fn archive_workstream(
+        &mut self,
+        workstream_id: WorkstreamId,
+        expected_revision: Revision,
+        archived_at_millis: i64,
+    ) -> Result<Revision, StateError> {
+        if archived_at_millis < 0 {
+            return Err(StateError::InvalidRegistryField("archive timestamp"));
+        }
+        self.transition_workstream_archive(
+            workstream_id,
+            expected_revision,
+            Some(archived_at_millis),
+        )
+    }
+
+    /// Returns one archived Workstream to the active navigator scope without
+    /// starting or resuming a provider Runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Workstream is missing, not archived, its
+    /// revision is stale, or the transaction fails.
+    pub fn restore_workstream(
+        &mut self,
+        workstream_id: WorkstreamId,
+        expected_revision: Revision,
+    ) -> Result<Revision, StateError> {
+        self.transition_workstream_archive(workstream_id, expected_revision, None)
+    }
+
+    fn transition_workstream_archive(
+        &mut self,
+        workstream_id: WorkstreamId,
+        expected_revision: Revision,
+        archived_at_millis: Option<i64>,
+    ) -> Result<Revision, StateError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let existing = transaction
+            .query_row(
+                "SELECT revision, archived_at_millis FROM workstreams WHERE workstream_id = ?1",
+                [workstream_id.to_string()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
+        let current_revision = Revision::try_from(existing.0)?;
+        if current_revision != expected_revision {
+            return Err(StateError::Domain(DomainError::RevisionConflict {
+                expected: expected_revision,
+                current: current_revision,
+            }));
+        }
+        match (existing.1, archived_at_millis) {
+            (Some(_), Some(_)) => return Err(StateError::WorkstreamAlreadyArchived(workstream_id)),
+            (None, None) => return Err(StateError::WorkstreamNotArchived(workstream_id)),
+            (None, Some(_)) | (Some(_), None) => {}
+        }
+        let next_revision = current_revision.next();
+        let updated = transaction
+            .execute(
+                "UPDATE workstreams SET archived_at_millis = ?1, revision = ?2
+                 WHERE workstream_id = ?3 AND revision = ?4",
+                params![
+                    archived_at_millis,
+                    next_revision.value(),
+                    workstream_id.to_string(),
+                    current_revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if updated != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(next_revision)
+    }
+
     /// Returns one deterministic bounded Workstream page ordered by latest
     /// activity, checkout, and opaque Workstream identity.
     ///
@@ -1654,6 +1759,7 @@ impl HostRegistry {
                         project_locations.remote_identity_fingerprint,
                         checkouts.path,
                         workstreams.lifecycle,
+                        workstreams.archived_at_millis,
                         workstreams.last_activity_sequence,
                         workstreams.last_activity_at_millis, workstreams.revision
                  FROM workstreams
@@ -1675,9 +1781,10 @@ impl HostRegistry {
                     remote_identity_fingerprint: row.get(4)?,
                     checkout_path: row.get(5)?,
                     lifecycle: row.get(6)?,
-                    activity_sequence: row.get(7)?,
-                    activity_at_millis: row.get(8)?,
-                    revision: row.get(9)?,
+                    archived_at_millis: row.get(7)?,
+                    activity_sequence: row.get(8)?,
+                    activity_at_millis: row.get(9)?,
+                    revision: row.get(10)?,
                 })
             })
             .map_err(StateError::Sqlite)?
@@ -1733,6 +1840,7 @@ impl HostRegistry {
                 .filter(|fingerprint| !fingerprint.is_empty()),
             checkout_path: PathBuf::from(base.checkout_path),
             lifecycle,
+            archived_at_millis: base.archived_at_millis,
             last_activity_sequence: base.activity_sequence,
             last_activity_at_millis: (base.activity_at_millis != 0)
                 .then_some(base.activity_at_millis),
@@ -2503,6 +2611,7 @@ fn load_managed_workstream_source(
                     project_locations.repository_path,
                     project_locations.repository_identity,
                     project_locations.managed_worktree_root,
+                    workstreams.archived_at_millis,
                     runtimes.runtime_id, runtimes.lifecycle,
                     provider_bindings.native_session_id,
                     provider_bindings.last_settled_turn_id,
@@ -2520,17 +2629,21 @@ fn load_managed_workstream_source(
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
-                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<i64>>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
                 ))
             },
         )
         .optional()
         .map_err(StateError::Sqlite)?
         .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
+    if source.5.is_some() {
+        return Err(StateError::WorkstreamArchived(workstream_id));
+    }
     Ok(ManagedWorkstreamSource {
         location_id: Uuid::parse_str(&source.0)
             .map(LocationId::from)
@@ -2540,16 +2653,16 @@ fn load_managed_workstream_source(
         repository_identity: source.3,
         managed_worktree_root: PathBuf::from(source.4),
         runtime_id: source
-            .5
+            .6
             .as_deref()
             .map(Uuid::parse_str)
             .transpose()
             .map_err(StateError::InvalidPersistedUuid)?
             .map(RuntimeId::from),
-        runtime_lifecycle: source.6,
-        native_session_id: source.7,
-        last_settled_turn_id: source.8,
-        native_name: source.9,
+        runtime_lifecycle: source.7,
+        native_session_id: source.8,
+        last_settled_turn_id: source.9,
+        native_name: source.10,
     })
 }
 
@@ -3359,11 +3472,12 @@ fn migrate_host_schema(connection: &mut Connection, state_root: &Path) -> Result
                     .map_err(StateError::Sqlite)?;
             }
         }
-        4 => {}
+        4 | 5 => {}
         HOST_SCHEMA_VERSION => return Ok(()),
         _ => return Err(StateError::UnsupportedSchemaVersion(current)),
     }
     ensure_host_repository_metadata_columns(&transaction)?;
+    ensure_workstream_archive_column(&transaction)?;
     transaction
         .execute(&format!("PRAGMA user_version = {HOST_SCHEMA_VERSION}"), [])
         .map_err(StateError::Sqlite)?;
@@ -3374,6 +3488,40 @@ fn migrate_host_schema(connection: &mut Connection, state_root: &Path) -> Result
         )
         .map_err(StateError::Sqlite)?;
     transaction.commit().map_err(StateError::Sqlite)
+}
+
+fn ensure_workstream_archive_column(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), StateError> {
+    let table_exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'workstreams'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)?;
+    if !table_exists {
+        return Ok(());
+    }
+    let exists: bool = transaction
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM pragma_table_info('workstreams')
+                WHERE name = 'archived_at_millis'
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)?;
+    if !exists {
+        transaction
+            .execute_batch("ALTER TABLE workstreams ADD COLUMN archived_at_millis INTEGER;")
+            .map_err(StateError::Sqlite)?;
+    }
+    Ok(())
 }
 
 fn ensure_host_repository_metadata_columns(
@@ -4483,6 +4631,12 @@ pub enum StateError {
     UnknownOperation(OperationId),
     #[error("workstream {0} is unknown or not open")]
     UnknownOpenWorkstream(WorkstreamId),
+    #[error("workstream {0} is already archived")]
+    WorkstreamAlreadyArchived(WorkstreamId),
+    #[error("workstream {0} is not archived")]
+    WorkstreamNotArchived(WorkstreamId),
+    #[error("workstream {0} is archived; restore it before starting or forking")]
+    WorkstreamArchived(WorkstreamId),
     #[error("workstream {0} already has a live runtime")]
     RuntimeAlreadyLive(WorkstreamId),
     #[error("workstream {0} is not ready for explicit native recovery")]
@@ -4713,6 +4867,88 @@ mod tests {
             .acknowledge_result_attention(workstream_id, second.revision)
             .unwrap();
         assert_eq!(acknowledged.result_unseen_since_revision, None);
+    }
+
+    #[test]
+    fn archive_and_restore_change_only_visibility_with_revision_guards() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir".to_owned(),
+                "main".to_owned(),
+            )
+            .unwrap();
+        let attention = registry
+            .mark_result_attention(
+                registered.workstream_id,
+                "native-session".to_owned(),
+                "settled-turn".to_owned(),
+            )
+            .unwrap();
+        let before = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == registered.workstream_id)
+            .unwrap();
+
+        let archived_revision = registry
+            .archive_workstream(registered.workstream_id, before.revision, 1_234)
+            .unwrap();
+        let archived = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == registered.workstream_id)
+            .unwrap();
+        assert_eq!(archived.archived_at_millis, Some(1_234));
+        assert_eq!(archived.lifecycle, before.lifecycle);
+        assert_eq!(archived.checkout_path, before.checkout_path);
+        assert_eq!(archived.attention, before.attention);
+        assert_eq!(archived.revision, archived_revision);
+        assert!(matches!(
+            registry.reserve_runtime(registered.workstream_id),
+            Err(StateError::WorkstreamArchived(id)) if id == registered.workstream_id
+        ));
+        assert!(matches!(
+            registry.workstream_git_location(registered.workstream_id),
+            Err(StateError::WorkstreamArchived(id)) if id == registered.workstream_id
+        ));
+        assert!(matches!(
+            registry.prepare_managed_workstream(
+                "archived-source".to_owned(),
+                OperationKind::Start,
+                registered.workstream_id,
+                archived_revision,
+                "a".repeat(40),
+            ),
+            Err(StateError::WorkstreamArchived(id)) if id == registered.workstream_id
+        ));
+        assert!(matches!(
+            registry.restore_workstream(registered.workstream_id, before.revision),
+            Err(StateError::Domain(DomainError::RevisionConflict { .. }))
+        ));
+
+        let restored_revision = registry
+            .restore_workstream(registered.workstream_id, archived_revision)
+            .unwrap();
+        let restored = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == registered.workstream_id)
+            .unwrap();
+        assert_eq!(restored.archived_at_millis, None);
+        assert_eq!(restored.lifecycle, before.lifecycle);
+        assert_eq!(restored.attention, Some(attention));
+        assert_eq!(restored.revision, restored_revision);
+        assert!(matches!(
+            registry.restore_workstream(registered.workstream_id, restored_revision),
+            Err(StateError::WorkstreamNotArchived(id)) if id == registered.workstream_id
+        ));
     }
 
     #[test]
@@ -5326,6 +5562,38 @@ mod tests {
                     .as_path()
             )
         );
+    }
+
+    #[test]
+    fn v5_host_schema_adds_archive_visibility_without_losing_workstreams() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let legacy_sql = HOST_SCHEMA_SQL.replace("        archived_at_millis INTEGER,\n", "");
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        connection.execute_batch(&legacy_sql).unwrap();
+        connection
+            .execute(
+                "INSERT INTO host_identity VALUES (1, ?1, 'generation', 5)",
+                [HostId::new().to_string()],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA user_version = 5;")
+            .unwrap();
+        drop(connection);
+
+        let registry = HostRegistry::open(&root).unwrap();
+        assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        let archived_column: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('workstreams')
+                 WHERE name = 'archived_at_millis'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived_column, 1);
     }
 
     #[test]

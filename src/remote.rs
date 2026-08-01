@@ -170,6 +170,14 @@ fn apply(root: &StateRoot, registry: &mut HostRegistry, action: HostAction) -> R
             workstream_id,
             expected_revision,
         } => apply_park(root, registry, workstream_id, expected_revision),
+        HostAction::Archive {
+            workstream_id,
+            expected_revision,
+        } => apply_archive(root, registry, workstream_id, expected_revision),
+        HostAction::Restore {
+            workstream_id,
+            expected_revision,
+        } => apply_restore(registry, workstream_id, expected_revision),
         HostAction::Start {
             workstream_id,
             expected_revision,
@@ -305,6 +313,54 @@ fn apply_park(
             rejected("revision conflict; refresh this host")
         }
         Err(_) => rejected("park outcome needs recovery"),
+    }
+}
+
+fn apply_archive(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: i64,
+) -> ResponseEnvelope {
+    match crate::actions::archive(
+        root,
+        registry,
+        workstream_id,
+        Revision::try_from(expected_revision).expect("protocol validates positive revisions"),
+    ) {
+        Ok(revision) => ResponseEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            response: HostResponse::Applied {
+                revision: revision.value(),
+            },
+        },
+        Err(crate::actions::ActionError::WorkstreamRevisionConflict) => {
+            rejected("revision conflict; refresh this host")
+        }
+        Err(_) => rejected("archive is unavailable"),
+    }
+}
+
+fn apply_restore(
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: i64,
+) -> ResponseEnvelope {
+    match crate::actions::restore(
+        registry,
+        workstream_id,
+        Revision::try_from(expected_revision).expect("protocol validates positive revisions"),
+    ) {
+        Ok(revision) => ResponseEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            response: HostResponse::Applied {
+                revision: revision.value(),
+            },
+        },
+        Err(crate::actions::ActionError::WorkstreamRevisionConflict) => {
+            rejected("revision conflict; refresh this host")
+        }
+        Err(_) => rejected("restore is unavailable"),
     }
 }
 
@@ -444,6 +500,7 @@ fn snapshot_workstream(root: &StateRoot, overview: &WorkstreamOverview) -> Snaps
             runtime_status
         },
         lifecycle: overview.lifecycle,
+        archived: overview.archived_at_millis.is_some(),
         result_ready: attention
             .and_then(|attention| attention.result_unseen_since_revision)
             .is_some(),
@@ -777,6 +834,7 @@ mod tests {
                 "/private/state/worktrees/location/00000000-0000-0000-0000-000000000001",
             ),
             lifecycle: WorkstreamLifecycle::Open,
+            archived_at_millis: Some(1_234),
             last_activity_sequence: 1,
             last_activity_at_millis: None,
             revision: Revision::INITIAL,
@@ -785,10 +843,9 @@ mod tests {
             attention: None,
         };
 
-        assert_eq!(
-            snapshot_workstream(&root, &overview).project_display_name,
-            "dms-power-status"
-        );
+        let snapshot = snapshot_workstream(&root, &overview);
+        assert_eq!(snapshot.project_display_name, "dms-power-status");
+        assert!(snapshot.archived);
     }
 
     #[test]
@@ -833,5 +890,74 @@ mod tests {
                 .result_unseen_since_revision,
             None
         );
+    }
+
+    #[test]
+    fn archive_and_restore_are_revision_guarded_remote_visibility_actions() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let registered = HostRegistry::open(&root)
+            .unwrap()
+            .register_external_workstream(
+                PathBuf::from("/private/repository"),
+                "common-dir".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let archive = RequestEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            request: HostRequest::Apply {
+                action: HostAction::Archive {
+                    workstream_id: registered.workstream_id,
+                    expected_revision: Revision::INITIAL.value(),
+                },
+            },
+        }
+        .encode()
+        .unwrap();
+        let mut archive_output = Vec::new();
+        serve(
+            Some(root.base().to_path_buf()),
+            &mut Cursor::new(archive),
+            &mut archive_output,
+        )
+        .unwrap();
+        let archived_revision = match ResponseEnvelope::decode(&archive_output).unwrap().response {
+            HostResponse::Applied { revision } => revision,
+            response => panic!("unexpected archive response: {response:?}"),
+        };
+
+        let snapshot = snapshot(&root, &mut HostRegistry::open(&root).unwrap(), None).unwrap();
+        assert_eq!(snapshot.workstreams.len(), 1);
+        assert!(snapshot.workstreams[0].archived);
+
+        let restore = RequestEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            request: HostRequest::Apply {
+                action: HostAction::Restore {
+                    workstream_id: registered.workstream_id,
+                    expected_revision: archived_revision,
+                },
+            },
+        }
+        .encode()
+        .unwrap();
+        let mut restore_output = Vec::new();
+        serve(
+            Some(root.base().to_path_buf()),
+            &mut Cursor::new(restore),
+            &mut restore_output,
+        )
+        .unwrap();
+        assert!(matches!(
+            ResponseEnvelope::decode(&restore_output).unwrap().response,
+            HostResponse::Applied { revision } if revision == archived_revision + 1
+        ));
+        let restored = HostRegistry::open(&root)
+            .unwrap()
+            .workstream_overviews()
+            .unwrap();
+        assert_eq!(restored[0].archived_at_millis, None);
+        assert!(restored[0].runtime.is_none());
     }
 }

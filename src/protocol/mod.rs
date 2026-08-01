@@ -12,7 +12,7 @@ use crate::domain::{
     RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 8;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 9;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -101,6 +101,17 @@ pub enum HostAction {
         workstream_id: WorkstreamId,
         expected_revision: i64,
     },
+    /// Hide a Workstream from the active navigator scope without deleting its
+    /// retained provider or checkout state.
+    Archive {
+        workstream_id: WorkstreamId,
+        expected_revision: i64,
+    },
+    /// Return a Workstream to the active navigator scope without starting it.
+    Restore {
+        workstream_id: WorkstreamId,
+        expected_revision: i64,
+    },
     Start {
         workstream_id: WorkstreamId,
         expected_revision: i64,
@@ -135,6 +146,12 @@ impl HostAction {
             | Self::Park {
                 expected_revision, ..
             }
+            | Self::Archive {
+                expected_revision, ..
+            }
+            | Self::Restore {
+                expected_revision, ..
+            }
             | Self::Start {
                 expected_revision, ..
             }
@@ -158,6 +175,8 @@ impl HostAction {
             }
             Self::AcknowledgeAttention { .. }
             | Self::Park { .. }
+            | Self::Archive { .. }
+            | Self::Restore { .. }
             | Self::Start { .. }
             | Self::Recover { .. }
             | Self::RecoverOperation { .. } => {}
@@ -362,6 +381,7 @@ pub struct SnapshotWorkstream {
     pub runtime_id: Option<RuntimeId>,
     pub runtime_status: RuntimeStatus,
     pub lifecycle: WorkstreamLifecycle,
+    pub archived: bool,
     pub result_ready: bool,
     pub recovery_required: bool,
     pub attention_revision: Option<i64>,
@@ -543,7 +563,7 @@ mod tests {
         let request = RequestEnvelope {
             version: CURRENT_PROTOCOL_VERSION,
             request: HostRequest::Apply {
-                action: HostAction::Park {
+                action: HostAction::Archive {
                     workstream_id: WorkstreamId::new(),
                     expected_revision: 0,
                 },
@@ -597,6 +617,7 @@ mod tests {
                 runtime_id: None,
                 runtime_status: RuntimeStatus::Idle,
                 lifecycle: WorkstreamLifecycle::Open,
+                archived: false,
                 result_ready: false,
                 recovery_required: false,
                 attention_revision: None,
@@ -629,6 +650,7 @@ mod tests {
                 runtime_id: None,
                 runtime_status: RuntimeStatus::Idle,
                 lifecycle: WorkstreamLifecycle::Open,
+                archived: false,
                 result_ready: false,
                 recovery_required: false,
                 attention_revision: None,

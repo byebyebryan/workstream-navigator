@@ -959,6 +959,7 @@ mod tests {
             runtime_id: None,
             runtime_status: crate::domain::RuntimeStatus::Idle,
             lifecycle: crate::domain::WorkstreamLifecycle::Open,
+            archived: false,
             result_ready: false,
             recovery_required: false,
             attention_revision: None,

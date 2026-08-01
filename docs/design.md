@@ -1,9 +1,9 @@
 # Workstream Navigator V1 Design
 
-Date: 2026-07-31
+Date: 2026-08-01
 
-Status: implemented V1 operator-beta contract with D6.1 project-identity polish;
-no compatibility contract
+Status: implemented operator-beta contract through D6.9 with approved D7
+workflow-management direction; no compatibility contract
 
 ## Product thesis
 
@@ -46,6 +46,11 @@ its completed visible result.
    transcript copies, or rendered-history substitute.
 8. **No legacy constraints.** The Python prototype is behavioral evidence only.
    V1 has no schema, command, state, or compatibility obligation to it.
+9. **Keep ordinary operation inside the TUI.** After WSNav and its declared
+   external prerequisites are installed, a user can perform every ordinary
+   WSNav-owned catalog, lifecycle, recovery, and observer action from the
+   two-pane navigator. Direct CLI commands remain optional scripting,
+   diagnostics, and break-glass parity, never a required normal workflow.
 
 ## V1 scope
 
@@ -55,9 +60,13 @@ its completed visible result.
 - A minimal two-pane terminal experience: navigator beside the directly
   interactive native Codex TUI.
 - Explicit host registration and capability checks.
-- Logical projects with one or more pre-registered host locations.
+- Logical projects with one or more explicitly registered host locations.
 - Workstream creation, switching, parking, exact resume, and display through
   the current tip's Codex-owned thread name.
+- Navigator-local Workstreams, Projects, and Hosts pages, with Workstreams as
+  the default operational home rather than a generic management dashboard.
+- Reversible Workstream archive and restore for removing inactive work from the
+  ordinary navigator without deleting provider history or Git state.
 - Independent workstreams created from a project location's configured default
   Git base.
 - Conversation-forked workstreams whose filesystem also starts independently
@@ -71,7 +80,8 @@ its completed visible result.
 - Reconnection after local UI or SSH loss.
 - Recovery after the host tmux runtime disappears, using the provider's native
   session identity.
-- Direct CLI equivalents for the TUI's important actions.
+- TUI access to every ordinary WSNav-owned action, with optional direct CLI
+  equivalents for scripting, diagnostics, and recovery.
 - Multiple same-user attachment points to one provider runtime, using tmux's
   native shared-screen behavior without a separate input-lease system.
 
@@ -99,14 +109,19 @@ its completed visible result.
 - Automatic Git fetch, pull, commit, merge, rebase, reset, stash, push,
   cherry-pick, or conflict resolution.
 - Copying uncommitted files or source-only commits into a forked workstream.
+- Hard deletion of Workstream records, native provider sessions, external or
+  managed checkouts, or managed branches. Archive is visibility and retention,
+  not cleanup authority.
+- Automatic remote installation, upgrade, repository cloning, or host-wide
+  teardown from the Hosts page.
 - Claude or broad provider parity.
 - Multiple-controller catalog synchronization. Each navigator client may
   independently reconstruct the same presentation grouping from host-supplied
   repository fingerprints, but clients do not replicate their catalogs.
 
 Cross-host operation in V1 means that one navigator can see, start, attach to,
-and resume work at pre-registered project locations on several hosts. It does
-not mean that one workstream migrates between them.
+and resume work at explicitly registered project locations on several hosts.
+It does not mean that one workstream migrates between them.
 
 ## Concepts and ownership
 
@@ -179,19 +194,115 @@ TUI behavior without building a PTY server or terminal emulator.
 The dedicated tmux status line stays disabled because it consumes a row from
 the provider surface. Navigation and status live in the navigator pane.
 
-The navigator keeps its persistent footer compact. `?` opens a centered
-shortcut reference rendered only within the Ratatui navigator pane; `?`, `Esc`,
-or `q` closes it. This is not a tmux popup, window, or provider overlay. While
-the reference is visible, all other navigator keyboard and mouse actions are
-inert, so opening help cannot accidentally activate or mutate a Workstream.
+The navigator footer reserves separate space for status and controls. A
+bounded status line shows warnings, progress, or the latest action outcome; it
+never replaces the contextual key strip below it. The key strip keeps
+single-key terminal actions first-class and wraps only at complete action
+boundaries into at most two compact lines. It never lets terminal wrapping mix
+two bindings. On a terminal too short to preserve useful content, the strip
+collapses to `? keys`.
 
-`v` cycles three local-only navigator views: `Recent`, `By host`, and `By
-project`. `Recent` is the default global activity order. Grouped views retain
-that order by placing the group containing the newest visible activity first
-and keeping its Workstreams newest-first. Headers are non-actionable display
-rows; selection, mouse activation, and provider attachment remain exact
-Workstream operations. The chosen view is not durable or synchronized between
-navigator clients.
+`?` toggles an expanded shortcut reference at the bottom of the Ratatui
+navigator pane. The reference is page-specific and single-column, with one key
+or mouse gesture per line. It scrolls if it exceeds the available height rather
+than pairing or wrapping entries into each other. `?`, `Esc`, or `q` collapses
+it. This is not a tmux popup, window, centered overlay, or provider overlay.
+While expanded, all other navigator keyboard and mouse actions are inert, so
+help cannot accidentally activate or mutate a Workstream.
+
+The navigator pane has three sibling top-level pages rather than a generic
+management landing page:
+
+```text
+Workstreams                 Projects                    Hosts
+├── Active / Archived       ├── Project list            ├── Host list
+├── Recent                  └── Project detail          └── Host detail
+├── By project                  ├── Locations               ├── Health
+├── By host                     ├── Workstreams             ├── Observer
+└── Recovery                    ├── Register location       ├── Remove observer
+                                └── Start Workstream        └── Forget
+```
+
+Workstreams is the default page and retains the product's ordinary switching
+workflow. Projects and Hosts are inventory/configuration pages. A compact,
+mouse-actionable page switcher stays inside the navigator pane; keyboard page
+shortcuts and page-specific footer hints avoid one crowded global command
+list. Opening Project or Host detail replaces only the navigator content.
+`Enter` consistently opens the selected entity, while `Esc` returns from
+detail to its list. No page creates a tmux popup, overlays the provider pane,
+or replaces the native TUI.
+
+Direct page-local keys are the canonical control path. The compact footer
+shows the most relevant bindings for the current page and state; `?` reveals
+the complete list. Detail pages provide bounded status and context, but D7
+does not require a menu-driven action system. A later clickable action menu may
+augment the same operations without replacing or delaying the direct keys.
+Mouse support in D7 covers page switching, selection, primary row activation,
+forms, and confirmation. Full mouse parity for every management action is not
+an acceptance requirement.
+
+The Workstreams page retains its accepted muscle memory: `Enter` performs the
+primary open/start/recover action, `n` starts a sibling, `f` forks, `p` parks,
+`a` acknowledges, `v` changes grouping, and `?` toggles the full reference.
+New D7 actions receive page-local single-key bindings without reinterpreting
+those keys. Projects and Hosts may reuse letters because the active page and
+its visible footer make the scope explicit.
+
+Within the Workstreams page, `v` cycles the local-only `Recent`, `By project`,
+and `By host` views in that order. These remain operational
+Workstream-browsing projections, not substitutes for the Project or Host
+configuration pages. `Recent` is the
+default global activity order. Grouped views retain that order by placing the
+group containing the newest visible activity first and keeping its Workstreams
+newest-first. Headers are non-actionable display rows; selection, mouse
+activation, and provider attachment remain exact Workstream operations. Page,
+detail, visibility-filter, and grouping choices are client presentation state,
+not host action authority.
+
+The navigator assumes horizontal space is scarce and spends vertical space to
+keep rows scannable. A `Recent` Workstream uses exactly two display lines:
+
+```text
+local · workstream-navigator
+✓ lifecycle hook repair                              3m
+```
+
+The first line owns host and Project context. The second owns the lifecycle
+indicator, Codex thread title, and compact activity age. Age is right-aligned
+when space permits; the title truncates before the indicator or age is lost.
+Both display lines are one selectable and mouse-actionable Workstream row.
+Long context labels truncate within their own line rather than pushing title,
+status, or age onto a third line.
+
+Grouped views render explicit trees instead of communicating hierarchy through
+indentation alone. The group header is the selected axis; each Workstream is a
+two-line child whose context line names the other axis and whose continuation
+line carries status, title, and age:
+
+```text
+By project
+
+workstream-navigator
+├─ local
+│  ✓ lifecycle repair   3m
+└─ snap
+   p remote follow-up    1d
+```
+
+```text
+By host
+
+local
+├─ workstream-navigator
+│  ✓ lifecycle repair   3m
+└─ cubey
+   p terrain review      1d
+```
+
+Tree branch and continuation glyphs are structural, neutral-colored chrome.
+They do not become lifecycle indicators, selection targets, or identity. A
+group header remains non-actionable; either line of a child resolves to the
+same exact host and Workstream identity.
 
 The navigator uses two deliberately quiet color axes. A readable host-label
 accent distinguishes the few active hosts. A deterministic collision-resolved
@@ -714,7 +825,7 @@ ProjectLocation
 
 Workstream
   workstream_id, location_id, origin,
-  source_workstream_id?, checkout_id, lifecycle, revision
+  source_workstream_id?, checkout_id, lifecycle, archived_at?, revision
 
 Checkout
   checkout_id, path, ownership, branch?, creation_commit?,
@@ -772,6 +883,10 @@ capture, credential, or environment dump is persisted.
 - One sticky AttentionState exists per Workstream; it never changes
   presentation focus.
 - Runtime status and Workstream lifecycle are separate.
+- Archive visibility is separate from Workstream lifecycle. An archived
+  Workstream retains `parked` or `recovery_required`, its exact binding,
+  AttentionState, Checkout, and lineage; restore never starts a Runtime
+  automatically.
 
 Every accepted settled turn marks the Workstream's AttentionState as unseen
 independent of focus, updates its latest exact identifiers, and leaves
@@ -852,6 +967,11 @@ is outside V1: parking a Workstream stops its Runtime but preserves its checkout
 branch, provider binding, and registry record. Workstream Navigator does not
 delete external or managed checkouts, remove branches, or decide whether work
 was merged.
+
+Archiving follows the same retention boundary. A live Workstream is explicitly
+parked before it becomes hidden from the ordinary navigator; a partial archive
+therefore remains visibly parked and can be retried. Archive preserves the
+Checkout and branch regardless of cleanliness and never invokes Git cleanup.
 
 `doctor` may report preserved managed worktrees and their recorded ownership.
 Any cleanup uses ordinary user-directed Git tooling outside Workstream
@@ -969,11 +1089,70 @@ Required interactions:
 - keyboard and mouse selection in the navigator;
 - direct keyboard and mouse interaction in the provider pane;
 - one action to focus or reconnect a Workstream;
-- Start Workstream with project defaults;
+- register the first local ProjectLocation from the empty navigator without a
+  shell command or cwd inference;
+- Start Workstream from a selected Workstream or ProjectLocation using project
+  defaults;
 - Fork Workstream from an exact managed source;
-- rename the current tip through Codex's canonical thread-name field;
-- park/resume without deleting provider history; and
+- inspect bounded Workstream status and rename the current tip through Codex's
+  canonical thread-name field;
+- park/resume without deleting provider history;
+- archive a Workstream out of the active list and restore it without starting
+  Codex or deleting its retained state;
+- list and recover exact unresolved Start or Fork operations;
+- inspect and register ProjectLocations on local or SSH hosts;
+- inspect, register, verify, activate, remove the exact observer from, and
+  forget SSH host registrations;
 - acknowledge result or recovery attention without injecting provider traffic.
+
+The normal human workflow begins with bare `wsnav` and requires no later
+`wsnav` shell command. Public CLI equivalents remain supported for scripting,
+diagnosis, direct attachment, and break-glass recovery, but the documentation
+and empty states never send the user to them for an ordinary WSNav operation.
+Installing or upgrading local/remote executables, configuring SSH trust,
+cloning repositories, native Codex input and hook approval, and deferred Git
+cleanup remain external prerequisites or explicitly excluded operations.
+
+The Workstreams page owns Active and Archived scopes. Archive is the ordinary
+answer to accumulated test or inactive Workstreams; there is no hard-delete
+action. Projects disappear from the active operational view when they have no
+active Workstreams, but remain available through Projects and Archived views.
+Active/Archived visibility and `Recent`/`By project`/`By host` grouping are
+independent presentation axes. Archiving a working Runtime requires explicit
+confirmation because parking it interrupts the current provider turn.
+
+The Workstreams Recovery page lists bounded unresolved Start and Fork
+operations that cannot safely appear as ordinary Workstream rows. It provides
+the same exact revision-guarded reconciliation as the direct recovery command;
+request keys, paths, provider identifiers, and raw evidence remain hidden.
+
+The Projects page reflects the ownership boundary explicitly: a logical
+client-side Project contains one or more host-owned ProjectLocations. Adding a
+remote location sends one bounded structured checkout path to that host for
+local Git inspection; paths are never interpolated into SSH shell syntax or
+returned in public snapshots. Permanent Project deletion, manual repository
+cleanup, and automatic cross-host merge/split remain outside D7.
+An empty navigator opens this same registration flow. From Project detail, the
+user can start a Workstream at a selected ProjectLocation even when the Project
+has no active Workstream to use as a source row.
+
+The Hosts page can register, verify, activate, remove the exact owned observer
+from, and forget an SSH host. Observer removal retains the existing fail-closed
+profile ownership and live-Runtime guards. Forget is client-catalog-only: it
+removes the alias and local Project associations but does not contact the host,
+stop a Runtime, delete remote state, or uninstall anything. Its confirmation
+shows retained Workstream, ProjectLocation, and unresolved-operation counts so
+the visibility effect is explicit. The protected local host cannot be
+forgotten. If an observer review is required, its native profile-selected
+Codex TUI runs in the right provider pane through the same local or SSH terminal
+boundary and leaves no Workstream behind.
+
+Navigator page changes, forms, and finite management actions leave the current
+provider attachment and focus unchanged. Only an explicit Workstream primary
+action or observer review replaces the right pane. Potentially slow Git, SSH,
+provider-metadata, and observer actions expose bounded progress in the
+navigator, suppress duplicate submission, and commit only an exact current
+revision; they never freeze silently or print management output into Codex.
 
 The navigator does not ask for model IDs, session IDs, branch names, request
 IDs, or a mandatory title in the ordinary path.

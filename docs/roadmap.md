@@ -1,11 +1,11 @@
 # Workstream Navigator V1 Roadmap
 
-Date: 2026-07-31
+Date: 2026-08-01
 
-Status: D0 through D6.9 complete; D7 implementation is ready for its bounded
-native acceptance. The former environment-based lifecycle observer is retired
-in favor of static-profile plus direct-ancestry authority and navigator-owned
-native activation.
+Status: D0 through D6.9 complete. D7 is expanded into navigator workflow and
+lifecycle management; its observer-activation slice is implemented and ready
+for bounded native acceptance, while its management slices are not yet
+implemented.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -47,7 +47,7 @@ This document owns sequencing, exit gates, and progress.
 | D6.5 | Project-marker collision correction | Complete |
 | D6.6 | Project-label accent refinement | Complete |
 | D6.9 | Codex observer authority repair | Complete |
-| D7 | Navigator-owned observer activation | In progress |
+| D7 | Navigator workflow and lifecycle management | In progress |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](spikes/0009-codex-hook-environment-boundary.md)
@@ -713,40 +713,105 @@ Exit gate:
   `/hooks` review, and records fresh lifecycle activity without provider-pane
   output.
 
-## D7 - Navigator-owned observer activation
+## D7 - Navigator workflow and lifecycle management
 
-Implementation status: ready for native acceptance. A fresh host-local `wsnav`
-now reconciles its exact observer profile before normal work, then hosts any
-necessary native Codex trust review in the navigator's temporary right pane
-instead of exposing a separate setup workflow.
+Implementation status: observer activation is ready for native acceptance;
+the approved Workstream, Project, and Host management pages remain planned.
+D7 makes ordinary WSNav administration available through the navigator without
+turning it into a task manager or replacing the provider surface.
 
 Scope:
 
-- make bare and explicit `wsnav navigator` the host-local activation entry
-  point, while retaining setup/update commands only as hidden diagnostics;
-- create an absent exact profile or migrate an exact legacy declaration only
-  while no managed Runtime is live;
-- run the native profile-selected `/hooks` review in the navigator's blank
-  provider pane with a disposable cwd, never in a Workstream or existing agent
-  session;
-- show activation guidance in the navigator, silently verify native trust when
-  the temporary TUI exits, and leave the pane blank afterward; and
-- retain fail-closed handling of a foreign or modified profile, untrusted
-  review, a failed native TUI, and any live managed Runtime.
+- make the two-pane TUI sufficient for every ordinary WSNav-owned operation
+  after external installation prerequisites, with CLI commands retained only
+  as optional scripting, diagnostics, direct attachment, and break-glass
+  parity;
+- retain Workstreams as the default page and add sibling Projects and Hosts
+  pages inside the existing navigator pane, with mouse and keyboard switching,
+  nested detail, and page-specific help;
+- retain page-local single-key actions as the canonical terminal control path,
+  with a separate status line, a compact action-boundary-wrapped key strip, and
+  a `?`-toggled single-column expanded reference at the bottom of the pane;
+- add reversible Workstream archive/restore as a visibility concern separate
+  from runtime lifecycle, preserving provider binding, attention, lineage,
+  checkout, branch, and native history;
+- expose bounded Workstream status, canonical rename, attention acknowledgement,
+  and exact unresolved-operation recovery through the Workstreams page;
+- add Project inventory and local/remote ProjectLocation registration without
+  cloning, syncing, deleting, or exposing remote repository paths, including
+  the empty-navigator flow and starting at a selected ProjectLocation;
+- add Host registration, health, verification, observer activation, and
+  exact observer removal plus client-only forget, while protecting the local
+  host and leaving remote state untouched;
+- keep bare and explicit `wsnav navigator` as the host-local observer
+  activation entry point, retaining setup/update commands only as hidden
+  diagnostics; and
+- run required local or remote native `/hooks` review in the right provider
+  pane with a disposable cwd, never in a Workstream or existing agent session.
+
+Delivery slices:
+
+1. **D7.0 - Observer activation closure.** Complete bounded native acceptance
+   of the implemented host-local activation. Creation or exact legacy migration
+   remains restricted to hosts with no live managed Runtime; native review uses
+   a disposable cwd in the right pane, verifies trust only after the TUI exits,
+   and fails closed on foreign profiles, failed review, or ambiguous state.
+2. **D7.1 - Management navigation foundation.** Add the three top-level pages,
+   list/detail navigation, bounded text entry, confirmation, non-blocking action
+   state, mouse behavior, and direct page-local keys without changing provider
+   state. Refine the narrow Workstreams pane with two-line Recent rows, explicit
+   two-line tree children in grouped views, the `Recent` / `By project` /
+   `By host` cycle, compact bottom key hints, and a single-column expanded
+   reference while retaining the accepted Workstreams bindings.
+3. **D7.2 - Workstream lifecycle and recovery.** Add bounded status and
+   canonical rename, preserve existing open/new/fork/park/acknowledge keys, add
+   revision-guarded local/remote archive visibility and restore-without-start,
+   and make exact unresolved Start/Fork reconciliation available through the
+   Workstreams Recovery page.
+4. **D7.3 - Project management.** List logical Projects and their host-owned
+   locations, show active/archived counts, register the first or an additional
+   existing checkout on a selected local or SSH host, and start a Workstream at
+   a selected location without requiring an existing active row.
+5. **D7.4 - Host management.** Register, verify, activate, remove the exact
+   observer from, and forget SSH hosts through the navigator while preserving
+   client/host ownership boundaries. Carry the native review boundary proven
+   in D7.0 through the remote Host detail flow.
+6. **D7.5 - Integrated acceptance.** Exercise fresh local and remote setup,
+   Project registration, Workstream lifecycle/recovery, observer removal, and
+   host forget/re-register using only the two-pane TUI after installation,
+   without provider-pane management traffic or remote Runtime interference.
 
 Exit gate:
 
-- tests cover fresh activation, untrusted-ready reconciliation, live-runtime
-  refusal, hidden diagnostics, and shell-free temporary-pane launch;
-- a disposable native acceptance proves the review occurs in the right pane,
-  leaves no Workstream/runtime behind, and marks the exact profile ready only
-  after native approval; and
+- deterministic tests cover page navigation, modal input isolation,
+  confirmation, duplicate-action suppression, status/action-line separation,
+  compact/expanded key-help state, narrow-width row truncation, two-line mouse
+  targeting, explicit grouped-tree rendering, view-cycle order, archive/restore
+  revisions, ProjectLocation ownership, remote path bounds, host forget
+  semantics, and local-host protection;
+- observer tests retain fresh activation, untrusted-ready reconciliation,
+  live-runtime refusal, hidden diagnostic commands, and shell-free temporary
+  pane launch;
+- native acceptance proves local and remote observer review occurs in the right
+  pane, leaves no Workstream/runtime behind, and marks only the exact profile
+  ready after native approval;
+- local-plus-SSH acceptance proves archive removes a Workstream from the active
+  view without deleting Git or provider state, restore does not start Codex,
+  and forgetting a host does not mutate that host;
+- a greenfield post-install acceptance uses bare `wsnav` for local observer
+  approval, first Project registration, SSH host and remote-location
+  registration, Workstream start/fork/rename/park/recover/acknowledge/archive/
+  restore, unresolved-operation recovery, observer removal, and host
+  forget/re-register without entering another `wsnav` shell command;
+- the native provider result and input surface remain untouched until the user
+  explicitly chooses a Workstream or observer-review action; and
 - formatting, tests, lint, package checks, and `git diff --check` pass.
 
 ## Deferred beyond V1
 
-The roadmap does not include arbitrary existing-session adoption, worktree or
-branch removal, checkout synchronization, task/context transfer, transcript or
-memory features, automatic plan rollover, profile composition, Claude parity,
+The roadmap does not include arbitrary existing-session adoption, hard
+Workstream/provider-session deletion, worktree or branch removal, checkout
+synchronization, task/context transfer, transcript or memory features,
+automatic plan rollover, profile composition, Claude parity,
 multiple-controller catalog synchronization, a public daemon, or a replacement
 provider UI.

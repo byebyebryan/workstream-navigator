@@ -18,9 +18,13 @@ cross-host Project grouping polish, documented in the [D6.1 project-identity
 acceptance][D6.1 acceptance]. D6.2 makes navigator controls discoverable
 without adding another terminal surface, and D6.3 orders local and remote rows
 by visible activity recency. D6.4 adds quiet host/Project grouping views, and
-D6.5-D6.6 make visible Project accents distinct and readable. The Rust
-implementation does not preserve
-compatibility with the earlier Python prototype.
+D6.5-D6.6 make visible Project accents distinct and readable. D7 broadens the
+navigator-owned observer activation work into a terminal-first workflow where
+every ordinary WSNav operation is available through planned Workstreams,
+Projects, and Hosts pages using direct contextual keys, with reversible
+Workstream archive/restore and recovery; those management slices are
+design-approved but not yet implemented. The Rust implementation does not
+preserve compatibility with the earlier Python prototype.
 
 The frozen prototype remains available as implementation evidence in
 [agent-switchboard-python-reference][].
@@ -53,8 +57,8 @@ keeps the native Codex workflow canonical, uses dedicated tmux runtimes and SSH
 for attachment, and limits Workstream Navigator to hosts, project locations,
 workstreams, status, and conservative worktree operations.
 
-The approved D0-D6.5 implementation sequence and checkpoint acceptance gates are
-tracked in the [V1 roadmap][].
+The approved implementation sequence through D7 and its checkpoint acceptance
+gates are tracked in the [V1 roadmap][].
 
 The accepted local Codex CLI slice and its sanitized native acceptance evidence
 are documented in [D1 local native-Codex acceptance][D1 acceptance]. The run

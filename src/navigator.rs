@@ -1123,6 +1123,17 @@ const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "�
 /// `DarkGray` is reserved for secondary activity text and the parked marker,
 /// so it must never become the selected-row background.
 const SELECTED_ROW_BACKGROUND: Color = Color::Indexed(236);
+const PARKED_INDICATOR_COLOR: Color = Color::Indexed(110);
+
+/// Activity age is a neutral brightness ramp rather than another identity or
+/// lifecycle color. Recent work should be easiest to spot; stale work remains
+/// readable but deliberately recedes.
+const AGE_UNKNOWN_COLOR: Color = Color::Indexed(244);
+const AGE_RECENT_COLOR: Color = Color::Indexed(255);
+const AGE_HOURLY_COLOR: Color = Color::Indexed(251);
+const AGE_DAILY_COLOR: Color = Color::Indexed(247);
+const AGE_WEEKLY_COLOR: Color = Color::Indexed(244);
+const AGE_STALE_COLOR: Color = Color::Indexed(241);
 
 fn selected_row_style() -> Style {
     Style::default()
@@ -1373,16 +1384,17 @@ fn activity_elapsed_seconds(
     )
 }
 
-/// Keeps age secondary to the Workstream title and lifecycle indicator. The
-/// normal range stays neutral; only old unattended work receives a quiet warm
-/// accent. This deliberately avoids green, yellow, and red, which belong to
-/// lifecycle state.
+/// Uses a readable neutral ramp, brightest for the newest activity and
+/// progressively muted for older work. This deliberately avoids the
+/// green/yellow/red lifecycle colors and the host/project identity palettes.
 fn activity_age_color(last_activity_at_millis: Option<i64>, now_millis: Option<i64>) -> Color {
     match activity_elapsed_seconds(last_activity_at_millis, now_millis) {
-        None | Some(0..=3_599) => Color::DarkGray,
-        Some(3_600..=86_399) => Color::Gray,
-        Some(86_400..=604_799) => Color::Indexed(250),
-        Some(_) => Color::Indexed(180),
+        None => AGE_UNKNOWN_COLOR,
+        Some(0..=59) => AGE_RECENT_COLOR,
+        Some(60..=3_599) => AGE_HOURLY_COLOR,
+        Some(3_600..=86_399) => AGE_DAILY_COLOR,
+        Some(86_400..=604_799) => AGE_WEEKLY_COLOR,
+        Some(_) => AGE_STALE_COLOR,
     }
 }
 
@@ -1400,7 +1412,7 @@ fn status_indicator(row: &NavigatorWorkstream, spinner_frame: usize) -> (&'stati
             Style::default().fg(Color::Yellow),
         ),
         NavigatorRuntimeStatus::Unknown => ("?", Style::default().fg(Color::Red)),
-        NavigatorRuntimeStatus::Parked => ("‖", Style::default().fg(Color::DarkGray)),
+        NavigatorRuntimeStatus::Parked => ("‖", Style::default().fg(PARKED_INDICATOR_COLOR)),
         NavigatorRuntimeStatus::Starting => ("…", Style::default().fg(Color::Cyan)),
         NavigatorRuntimeStatus::Idle | NavigatorRuntimeStatus::Attention => {
             if row.result_ready {
@@ -2118,21 +2130,49 @@ mod tests {
     }
 
     #[test]
-    fn activity_age_color_is_quiet_until_a_workstream_is_stale() {
-        assert_eq!(activity_age_color(None, Some(60_000)), Color::DarkGray);
+    fn activity_age_color_is_brightest_for_recent_work_and_dims_with_age() {
+        assert_eq!(activity_age_color(None, Some(60_000)), AGE_UNKNOWN_COLOR);
+        assert_eq!(activity_age_color(Some(0), Some(59_000)), AGE_RECENT_COLOR);
         assert_eq!(
             activity_age_color(Some(0), Some(3_599_000)),
-            Color::DarkGray
+            AGE_HOURLY_COLOR
         );
-        assert_eq!(activity_age_color(Some(0), Some(3_600_000)), Color::Gray);
+        assert_eq!(
+            activity_age_color(Some(0), Some(3_600_000)),
+            AGE_DAILY_COLOR
+        );
         assert_eq!(
             activity_age_color(Some(0), Some(86_400_000)),
-            Color::Indexed(250)
+            AGE_WEEKLY_COLOR
         );
         assert_eq!(
             activity_age_color(Some(0), Some(604_800_000)),
-            Color::Indexed(180)
+            AGE_STALE_COLOR
         );
+        assert!(
+            [
+                AGE_RECENT_COLOR,
+                AGE_HOURLY_COLOR,
+                AGE_DAILY_COLOR,
+                AGE_WEEKLY_COLOR,
+                AGE_STALE_COLOR,
+            ]
+            .windows(2)
+            .all(|pair| match pair {
+                [Color::Indexed(newer), Color::Indexed(older)] => newer > older,
+                _ => false,
+            })
+        );
+    }
+
+    #[test]
+    fn parked_indicator_has_its_own_readable_state_color() {
+        let row = row(WorkstreamId::new(), NavigatorRuntimeStatus::Parked);
+        let (indicator, style) = status_indicator(&row, 0);
+
+        assert_eq!(indicator, "‖");
+        assert_eq!(style.fg, Some(PARKED_INDICATOR_COLOR));
+        assert_ne!(PARKED_INDICATOR_COLOR, Color::DarkGray);
     }
 
     #[test]
@@ -2223,12 +2263,17 @@ mod tests {
             Color::White,
             Color::Gray,
             Color::DarkGray,
-            Color::Indexed(250),
-            Color::Indexed(180),
             Color::Red,
             Color::Yellow,
             Color::Cyan,
             Color::Green,
+            PARKED_INDICATOR_COLOR,
+            AGE_UNKNOWN_COLOR,
+            AGE_RECENT_COLOR,
+            AGE_HOURLY_COLOR,
+            AGE_DAILY_COLOR,
+            AGE_WEEKLY_COLOR,
+            AGE_STALE_COLOR,
         ];
 
         assert!(!semantic_colors.contains(&SELECTED_ROW_BACKGROUND));

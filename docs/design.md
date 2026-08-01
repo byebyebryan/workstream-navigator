@@ -186,6 +186,13 @@ The local presentation session is a dedicated tmux server with its own socket
 and configuration. It never modifies or depends on the user's ordinary tmux
 server.
 
+The initial presentation protects a 32-cell navigator pane as the normal
+minimum. It keeps any additional navigator width on wider terminals, but lets
+the provider pane shrink below its preferred width when necessary rather than
+clipping the navigator's bounded rows and controls. A later manual resize may
+still make the pane narrower, so individual renderers retain their compact
+fallbacks.
+
 The navigator is a small Rust TUI in one pane. The provider pane is not a
 terminal widget rendered by Rust; it is a real tmux attachment to the host-owned
 provider runtime. This retains direct keyboard, mouse, resize, color, and native
@@ -194,9 +201,11 @@ TUI behavior without building a PTY server or terminal emulator.
 The dedicated tmux status line stays disabled because it consumes a row from
 the provider surface. Navigation and status live in the navigator pane.
 
-The navigator footer reserves separate space for status and controls. A
-bounded status line shows warnings, progress, or the latest action outcome; it
-never replaces the contextual key strip below it. The key strip keeps
+The navigator footer reserves separate space for status and controls. When
+there is a warning, progress update, or action outcome, it appears in a
+bordered `Status` box with at most three wrapped content lines directly above
+the persistent contextual key strip. Ordinary grouping state is not repeated
+there. The box never replaces the controls below it. The key strip keeps
 single-key terminal actions first-class and wraps only at complete action
 boundaries into at most two compact lines. It never lets terminal wrapping mix
 two bindings. On a terminal too short to preserve useful content, the strip
@@ -284,6 +293,11 @@ when space permits; the title truncates before the indicator or age is lost.
 Both display lines are one selectable and mouse-actionable Workstream row.
 Long context labels truncate within their own line rather than pushing title,
 status, or age onto a third line.
+
+Project inventory rows use the same narrow-pane discipline. At the 32-cell
+navigator minimum, Project counts use the compact `loc` label so the active
+count, archived count, and location count remain visible on one line; wider
+panes restore the full `location` or `locations` label.
 
 Grouped views render explicit trees instead of communicating hierarchy through
 indentation alone. The group header is the selected axis; each Workstream is a

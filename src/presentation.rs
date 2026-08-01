@@ -21,6 +21,9 @@ const PRESENTATION_PREFIX: &str = "wsnav-presentation-";
 const NAVIGATOR_WINDOW: &str = "navigator";
 const NAVIGATOR_PANE: &str = "0.0";
 const PROVIDER_PANE: &str = "0.1";
+/// The normal narrow navigator width, including its outside borders.
+const MIN_NAVIGATOR_PANE_WIDTH: u16 = 32;
+const PREFERRED_PROVIDER_PANE_WIDTH: u16 = 96;
 const MAX_TMUX_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_ATTACHMENT_STATUS_BYTES: u64 = 4 * 1024;
 const ATTACHMENT_STATUS_FILE: &str = "attachment.json";
@@ -204,7 +207,7 @@ impl Presentation {
                 "-t".into(),
                 format!("{}:0.0", self.paths.session_name).into(),
                 "-l".into(),
-                "96".into(),
+                PREFERRED_PROVIDER_PANE_WIDTH.to_string().into(),
                 wait[0].clone(),
                 wait[1].clone(),
                 wait[2].clone(),
@@ -212,6 +215,10 @@ impl Presentation {
             ],
         );
         if let Err(error) = result {
+            let _ = self.close();
+            return Err(error);
+        }
+        if let Err(error) = self.ensure_minimum_navigator_width() {
             let _ = self.close();
             return Err(error);
         }
@@ -679,6 +686,48 @@ impl Presentation {
         }
     }
 
+    /// Keeps the navigator usable when the preferred provider pane would
+    /// otherwise consume all but a handful of terminal columns. Wider
+    /// terminals retain the extra navigator space chosen by tmux.
+    fn ensure_minimum_navigator_width(&self) -> Result<(), PresentationError> {
+        if self.pane_width(NAVIGATOR_PANE)? >= MIN_NAVIGATOR_PANE_WIDTH {
+            return Ok(());
+        }
+        self.invoke(
+            None,
+            vec![
+                "resize-pane".into(),
+                "-t".into(),
+                format!("{}:{NAVIGATOR_PANE}", self.paths.session_name).into(),
+                "-x".into(),
+                MIN_NAVIGATOR_PANE_WIDTH.to_string().into(),
+            ],
+        )
+    }
+
+    fn pane_width(&self, pane: &str) -> Result<u16, PresentationError> {
+        let mut command = Command::new("tmux");
+        command
+            .env_remove("TMUX")
+            .arg("-S")
+            .arg(&self.paths.socket)
+            .args([
+                "display-message",
+                "-p",
+                "-t",
+                &format!("{}:{pane}", self.paths.session_name),
+                "#{pane_width}",
+            ]);
+        let output = output_bounded(&mut command, 16, MAX_TMUX_OUTPUT_BYTES)
+            .map_err(PresentationError::from_bounded_tmux)?;
+        if !output.status.success() {
+            return Err(PresentationError::TmuxRejected(sanitize_diagnostic(
+                &String::from_utf8_lossy(&output.stderr),
+            )));
+        }
+        parse_pane_width(&output.stdout).ok_or(PresentationError::InvalidPaneWidth)
+    }
+
     fn invoke(
         &self,
         config: Option<&Path>,
@@ -723,6 +772,15 @@ fn sanitize_diagnostic(diagnostic: &str) -> String {
         .filter(|character| !character.is_control() || *character == ' ')
         .take(256)
         .collect()
+}
+
+fn parse_pane_width(output: &[u8]) -> Option<u16> {
+    std::str::from_utf8(output)
+        .ok()?
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|width| *width > 0)
 }
 
 fn validate_host_alias(host_alias: &str) -> Result<(), PresentationError> {
@@ -771,6 +829,8 @@ pub enum PresentationError {
     InvalidControlPath(PathBuf),
     #[error("invalid private provider attachment status")]
     InvalidAttachmentStatus,
+    #[error("private navigator pane reported an invalid width")]
+    InvalidPaneWidth,
     #[error("provider attachment attempt is stale or already complete")]
     StaleAttachmentAttempt,
     #[error("I/O: {0}")]
@@ -813,6 +873,14 @@ mod tests {
             PRESENTATION_TMUX_CONFIG
                 .contains("bind-key -n MouseUp1Pane select-pane -t = \\; send-keys -M")
         );
+    }
+
+    #[test]
+    fn navigator_minimum_width_uses_the_normal_32_cell_pane() {
+        assert_eq!(MIN_NAVIGATOR_PANE_WIDTH, 32);
+        assert_eq!(parse_pane_width(b"32\n"), Some(32));
+        assert_eq!(parse_pane_width(b"0\n"), None);
+        assert_eq!(parse_pane_width(b"wide\n"), None);
     }
 
     #[test]

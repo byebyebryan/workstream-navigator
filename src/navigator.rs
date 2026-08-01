@@ -29,7 +29,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
 };
 use thiserror::Error;
 
@@ -1737,6 +1737,12 @@ impl NavigatorView {
     }
 
     pub fn render(&mut self, frame: &mut Frame<'_>) {
+        let status = self.footer_status();
+        let status_height = if status.is_empty() {
+            0
+        } else {
+            STATUS_BOX_HEIGHT
+        };
         let help_height = if self.help_visible {
             frame.area().height.saturating_sub(4).clamp(3, 22)
         } else {
@@ -1746,7 +1752,7 @@ impl NavigatorView {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(3),
-                Constraint::Length(1),
+                Constraint::Length(status_height),
                 Constraint::Length(help_height),
             ])
             .split(frame.area());
@@ -1773,10 +1779,9 @@ impl NavigatorView {
                 NavigatorPage::Hosts => self.render_hosts(frame, content_area),
             },
         }
-        frame.render_widget(
-            Paragraph::new(self.footer_status()).style(self.footer_style()),
-            areas[1],
-        );
+        if !status.is_empty() {
+            self.render_status_box(frame, areas[1], &status);
+        }
         if self.help_visible {
             self.render_help_reference(frame, areas[2]);
         } else {
@@ -1858,7 +1863,7 @@ impl NavigatorView {
         let projects = self.projects();
         let items = projects
             .iter()
-            .map(project_overview_item)
+            .map(|project| project_overview_item(project, area.width.saturating_sub(2)))
             .collect::<Vec<_>>();
         let mut state = ListState::default();
         state.select(
@@ -2289,25 +2294,17 @@ impl NavigatorView {
                 operation_hint.map_or_else(String::new, |hint| format!("  ·  {hint}"))
             );
         }
-        let view_hint = if self.page == NavigatorPage::Workstreams {
-            format!("view: {}", self.view_mode().label())
-        } else {
-            String::new()
-        };
-        if let Some(operation_hint) = operation_hint {
-            return if view_hint.is_empty() {
-                operation_hint
-            } else {
-                format!("{operation_hint}  ·  {view_hint}")
-            };
-        }
-        if self.snapshot.unreachable_hosts.is_empty() {
-            view_hint
-        } else {
+        let cached_hint = (!self.snapshot.unreachable_hosts.is_empty()).then(|| {
             format!(
-                "{} unavailable; showing cached state  ·  {view_hint}",
+                "{} unavailable; showing cached state",
                 self.snapshot.unreachable_hosts.join(", "),
             )
+        });
+        match (operation_hint, cached_hint) {
+            (Some(operation), Some(cached)) => format!("{operation}  ·  {cached}"),
+            (Some(operation), None) => operation,
+            (None, Some(cached)) => cached,
+            (None, None) => String::new(),
         }
     }
 
@@ -2417,6 +2414,21 @@ impl NavigatorView {
         } else {
             Style::default().fg(Color::Gray)
         }
+    }
+
+    fn render_status_box(&self, frame: &mut Frame<'_>, area: Rect, status: &str) {
+        frame.render_widget(
+            Paragraph::new(status)
+                .style(self.footer_style())
+                .wrap(Wrap { trim: true })
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .title(" Status ")
+                        .border_style(self.footer_style()),
+                ),
+            area,
+        );
     }
 
     fn render_help_reference(&self, frame: &mut Frame<'_>, area: Rect) {
@@ -2884,6 +2896,8 @@ fn workstream_help_lines(scope: WorkstreamScope, heading: Style, key: Style) -> 
 }
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+/// A bordered status frame with at most three wrapped content lines.
+const STATUS_BOX_HEIGHT: u16 = 5;
 
 /// Keep selection distinct from every semantic row foreground. In particular,
 /// `DarkGray` is reserved for secondary activity text and the parked marker,
@@ -2946,7 +2960,10 @@ fn host_header_item(alias: &str) -> ListItem<'static> {
     ]))
 }
 
-fn project_overview_item(project: &NavigatorProjectOverview) -> ListItem<'static> {
+fn project_overview_item(
+    project: &NavigatorProjectOverview,
+    available_width: u16,
+) -> ListItem<'static> {
     ListItem::new(vec![
         Line::from(Span::styled(
             project.label.clone(),
@@ -2954,26 +2971,31 @@ fn project_overview_item(project: &NavigatorProjectOverview) -> ListItem<'static
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
         )),
-        Line::from(vec![
-            Span::styled(
-                project_activity_summary(project),
-                Style::default().fg(Color::Gray),
-            ),
-            Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                format!(
-                    "{} location{}",
-                    project.locations.len(),
-                    if project.locations.len() == 1 {
-                        ""
-                    } else {
-                        "s"
-                    }
-                ),
-                Style::default().fg(Color::LightBlue),
-            ),
-        ]),
+        Line::from(vec![Span::styled(
+            project_overview_summary(project, available_width),
+            Style::default().fg(Color::Gray),
+        )]),
     ])
+}
+
+fn project_overview_summary(project: &NavigatorProjectOverview, available_width: u16) -> String {
+    let activity = project_activity_summary(project);
+    let full = format!(
+        "{activity} · {} location{}",
+        project.locations.len(),
+        if project.locations.len() == 1 {
+            ""
+        } else {
+            "s"
+        }
+    );
+    let compact = format!("{activity} · {} loc", project.locations.len());
+    let selected = if full.chars().count() <= usize::from(available_width) {
+        full
+    } else {
+        compact
+    };
+    truncate_display(&selected, usize::from(available_width))
 }
 
 fn project_activity_summary(project: &NavigatorProjectOverview) -> String {
@@ -5302,7 +5324,7 @@ mod tests {
         assert_eq!(view.view_mode(), NavigatorViewMode::Recent);
         view.cycle_view_mode();
         assert_eq!(view.view_mode(), NavigatorViewMode::Project);
-        assert!(view.footer_status().contains("view: By project"));
+        assert_eq!(view.footer_status(), "");
         view.cycle_view_mode();
         assert_eq!(view.view_mode(), NavigatorViewMode::Host);
         view.cycle_view_mode();
@@ -5824,6 +5846,58 @@ mod tests {
                 .count()
                 <= 1
         }));
+    }
+
+    #[test]
+    fn status_box_wraps_bounded_navigator_feedback_above_key_hints() {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
+        view.set_message(
+            "an intentionally long navigator action result wraps without replacing persistent keys",
+        );
+        let mut terminal = Terminal::new(TestBackend::new(32, 16)).unwrap();
+
+        terminal.draw(|frame| view.render(frame)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("Status"));
+        assert!(rendered.contains("an intentionally long"));
+        assert!(rendered.contains("navigator action result"));
+        assert!(rendered.contains("Enter open"));
+    }
+
+    #[test]
+    fn project_summary_uses_compact_location_text_at_32_cell_navigator_width() {
+        let project = NavigatorProjectOverview {
+            project_id: ProjectId::new(),
+            label: "project".to_owned(),
+            workstream_count: 1,
+            active_workstream_count: 1,
+            archived_workstream_count: 0,
+            locations: vec![NavigatorProjectLocation {
+                host: NavigatorHost::Local,
+                location_id: LocationId::new(),
+                label: "main checkout".to_owned(),
+                active_workstream_count: 1,
+                archived_workstream_count: 0,
+                latest_activity_at_millis: Some(1_000),
+            }],
+            latest_activity_at_millis: Some(1_000),
+        };
+
+        assert_eq!(
+            project_overview_summary(&project, 30),
+            "1 active · 0 archived · 1 loc"
+        );
+        assert_eq!(
+            project_overview_summary(&project, 80),
+            "1 active · 0 archived · 1 location"
+        );
     }
 
     #[test]

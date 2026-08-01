@@ -1164,7 +1164,7 @@ cleanup, and automatic cross-host merge/split remain outside D7.
 
 Projects render every host-owned location as a bounded tree under its logical
 Project, with active/archived counts. When available, it renders the muted
-display-only `origin · host/org/repo` label beneath the Project name; the
+display-only `↗ host/org/repo` label beneath the Project name; the
 fingerprint remains hidden and grouping-only. `n` starts a Workstream from the selected
 Project. When it has more than one host location, a navigator-local picker asks
 where to start; a single-location Project starts directly. `a` adds an existing

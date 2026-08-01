@@ -1945,9 +1945,12 @@ impl NavigatorView {
 
     fn render_projects(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let projects = self.projects();
+        let project_colors = visible_project_colors(&self.snapshot);
         let items = projects
             .iter()
-            .map(|project| project_overview_item(project, area.width.saturating_sub(2)))
+            .map(|project| {
+                project_overview_item(project, &project_colors, area.width.saturating_sub(2))
+            })
             .collect::<Vec<_>>();
         let mut state = ListState::default();
         state.select(
@@ -2959,6 +2962,13 @@ const AGE_HOURLY_COLOR: Color = Color::Indexed(251);
 const AGE_DAILY_COLOR: Color = Color::Indexed(247);
 const AGE_WEEKLY_COLOR: Color = Color::Indexed(244);
 const AGE_STALE_COLOR: Color = Color::Indexed(241);
+/// Projects pages deliberately avoid near-black supporting text: this pane
+/// commonly sits against an unthemed black terminal background.
+const PROJECT_TREE_COLOR: Color = Color::Indexed(245);
+const PROJECT_ORIGIN_ICON_COLOR: Color = Color::Indexed(109);
+const PROJECT_ORIGIN_LABEL_COLOR: Color = Color::Indexed(250);
+const PROJECT_ACTIVE_COLOR: Color = Color::Green;
+const PROJECT_ARCHIVED_COLOR: Color = Color::Indexed(110);
 
 fn selected_row_style() -> Style {
     Style::default()
@@ -3007,45 +3017,38 @@ fn host_header_item(alias: &str) -> ListItem<'static> {
 
 fn project_overview_item(
     project: &NavigatorProjectOverview,
+    project_colors: &BTreeMap<ProjectId, Color>,
     available_width: u16,
 ) -> ListItem<'static> {
     let mut lines = vec![Line::from(Span::styled(
         truncate_display(&project.label, usize::from(available_width)),
         Style::default()
-            .fg(Color::White)
+            .fg(project_accent(project.project_id, project_colors))
             .add_modifier(Modifier::BOLD),
     ))];
     if let Some(remote_identity_display) = project.remote_identity_display.as_deref() {
         lines.push(Line::from(vec![
-            Span::styled("origin · ", Style::default().fg(Color::DarkGray)),
+            Span::styled("↗ ", Style::default().fg(PROJECT_ORIGIN_ICON_COLOR)),
             Span::styled(
                 truncate_display(
                     remote_identity_display,
-                    usize::from(available_width.saturating_sub(9)),
+                    usize::from(available_width.saturating_sub(2)),
                 ),
-                Style::default().fg(Color::Gray),
+                Style::default().fg(PROJECT_ORIGIN_LABEL_COLOR),
             ),
         ]));
     }
-    lines.push(Line::from(vec![Span::styled(
-        project_overview_summary(project, available_width),
-        Style::default().fg(Color::Gray),
-    )]));
+    lines.push(project_activity_line(project));
     lines.extend(
         project
             .locations
             .iter()
             .enumerate()
-            .flat_map(|(index, location)| {
+            .map(|(index, location)| {
                 let branch = if index + 1 == project.locations.len() {
                     "└─"
                 } else {
                     "├─"
-                };
-                let continuation = if index + 1 == project.locations.len() {
-                    "  "
-                } else {
-                    "│ "
                 };
                 let location_label_width = usize::from(
                     available_width.saturating_sub(
@@ -3053,24 +3056,18 @@ fn project_overview_item(
                             .unwrap_or(u16::MAX),
                     ),
                 );
-                [
-                    Line::from(vec![
-                        Span::styled(branch, Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            location.host.alias().to_owned(),
-                            Style::default().fg(host_color(location.host.alias())),
-                        ),
-                        Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-                        Span::styled(
-                            truncate_display(&location.label, location_label_width),
-                            Style::default().fg(Color::Gray),
-                        ),
-                    ]),
-                    Line::from(Span::styled(
-                        format!("{continuation} {}", location_activity_summary(location)),
-                        Style::default().fg(Color::DarkGray),
-                    )),
-                ]
+                Line::from(vec![
+                    Span::styled(branch, Style::default().fg(PROJECT_TREE_COLOR)),
+                    Span::styled(
+                        location.host.alias().to_owned(),
+                        Style::default().fg(host_color(location.host.alias())),
+                    ),
+                    Span::styled(" · ", Style::default().fg(PROJECT_TREE_COLOR)),
+                    Span::styled(
+                        truncate_display(&location.label, location_label_width),
+                        Style::default().fg(Color::Gray),
+                    ),
+                ])
             }),
     );
     ListItem::new(lines)
@@ -3080,43 +3077,23 @@ fn project_overview_height(project: &NavigatorProjectOverview) -> u16 {
     u16::try_from(
         2_usize
             .saturating_add(usize::from(project.remote_identity_display.is_some()))
-            .saturating_add(project.locations.len().saturating_mul(2)),
+            .saturating_add(project.locations.len()),
     )
     .unwrap_or(u16::MAX)
 }
 
-fn project_overview_summary(project: &NavigatorProjectOverview, available_width: u16) -> String {
-    let activity = project_activity_summary(project);
-    let full = format!(
-        "{activity} · {} location{}",
-        project.locations.len(),
-        if project.locations.len() == 1 {
-            ""
-        } else {
-            "s"
-        }
-    );
-    let compact = format!("{activity} · {} loc", project.locations.len());
-    let selected = if full.chars().count() <= usize::from(available_width) {
-        full
-    } else {
-        compact
-    };
-    truncate_display(&selected, usize::from(available_width))
-}
-
-fn project_activity_summary(project: &NavigatorProjectOverview) -> String {
-    format!(
-        "{} active · {} archived",
-        project.active_workstream_count, project.archived_workstream_count
-    )
-}
-
-fn location_activity_summary(location: &NavigatorProjectLocation) -> String {
-    format!(
-        "{} active · {} archived",
-        location.active_workstream_count, location.archived_workstream_count
-    )
+fn project_activity_line(project: &NavigatorProjectOverview) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(
+            format!("{} active", project.active_workstream_count),
+            Style::default().fg(PROJECT_ACTIVE_COLOR),
+        ),
+        Span::styled(" · ", Style::default().fg(PROJECT_TREE_COLOR)),
+        Span::styled(
+            format!("{} archived", project.archived_workstream_count),
+            Style::default().fg(PROJECT_ARCHIVED_COLOR),
+        ),
+    ])
 }
 
 fn host_overview_height(host: &NavigatorHostSummary) -> u16 {
@@ -5439,6 +5416,10 @@ mod tests {
             Color::Cyan,
             Color::Green,
             PARKED_INDICATOR_COLOR,
+            PROJECT_TREE_COLOR,
+            PROJECT_ORIGIN_ICON_COLOR,
+            PROJECT_ORIGIN_LABEL_COLOR,
+            PROJECT_ARCHIVED_COLOR,
             AGE_UNKNOWN_COLOR,
             AGE_RECENT_COLOR,
             AGE_HOURLY_COLOR,
@@ -5450,6 +5431,10 @@ mod tests {
         assert!(!semantic_colors.contains(&SELECTED_ROW_BACKGROUND));
         assert!(!HOST_LABEL_PALETTE.contains(&SELECTED_ROW_BACKGROUND));
         assert!(!PROJECT_MARKER_PALETTE.contains(&SELECTED_ROW_BACKGROUND));
+        assert_ne!(PROJECT_TREE_COLOR, Color::DarkGray);
+        assert_ne!(PROJECT_ORIGIN_ICON_COLOR, Color::DarkGray);
+        assert_ne!(PROJECT_ORIGIN_LABEL_COLOR, Color::DarkGray);
+        assert_ne!(PROJECT_ARCHIVED_COLOR, Color::DarkGray);
         assert_eq!(
             selected_row_style().bg,
             Some(SELECTED_ROW_BACKGROUND),
@@ -6112,7 +6097,9 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(rendered.contains("1 active · 2 archived"));
-        assert!(rendered.contains("origin · github.com/owner/repo"));
+        assert!(rendered.contains("↗ github.com/owner/repo"));
+        assert!(!rendered.contains("origin ·"));
+        assert!(!rendered.contains("0 active"));
         assert!(rendered.contains("local · main checkout"));
         assert!(rendered.contains("snap · remote checkout"));
         assert!(rendered.contains("├─"));
@@ -6287,7 +6274,7 @@ mod tests {
     }
 
     #[test]
-    fn project_summary_uses_compact_location_text_at_32_cell_navigator_width() {
+    fn project_summary_uses_distinct_readable_active_and_archived_colors() {
         let project = NavigatorProjectOverview {
             project_id: ProjectId::new(),
             label: "project".to_owned(),
@@ -6306,14 +6293,14 @@ mod tests {
             latest_activity_at_millis: Some(1_000),
         };
 
-        assert_eq!(
-            project_overview_summary(&project, 30),
-            "1 active · 0 archived · 1 loc"
-        );
-        assert_eq!(
-            project_overview_summary(&project, 80),
-            "1 active · 0 archived · 1 location"
-        );
+        let line = project_activity_line(&project);
+
+        assert_eq!(line.spans[0].content, "1 active");
+        assert_eq!(line.spans[0].style.fg, Some(PROJECT_ACTIVE_COLOR));
+        assert_eq!(line.spans[1].content, " · ");
+        assert_eq!(line.spans[1].style.fg, Some(PROJECT_TREE_COLOR));
+        assert_eq!(line.spans[2].content, "0 archived");
+        assert_eq!(line.spans[2].style.fg, Some(PROJECT_ARCHIVED_COLOR));
     }
 
     #[test]

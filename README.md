@@ -130,7 +130,7 @@ later managed Workstreams remain repository siblings.
 
 When a registered checkout has one unambiguous network fetch remote, the
 Projects page also shows its credential-free normalized label, such as
-`origin · github.com/org/repo`. This label is display-only: WSNav groups
+`↗ github.com/org/repo`. This label is display-only: WSNav groups
 cross-host locations by its hidden fingerprint, never by the visible text.
 Raw remote URLs, credentials, schemes, query strings, and filesystem paths are
 not sent to the navigator.

@@ -1601,6 +1601,26 @@ impl NavigatorView {
         self.hosts().into_iter().find(|host| host.alias == alias)
     }
 
+    /// Counts only Runtimes which the host registry still considers live.
+    /// `Unknown` and recovery-required rows correspond to durably stopped
+    /// Runtime records, so they cannot block exact observer removal.
+    fn live_runtime_count(&self, host_alias: &str) -> usize {
+        self.snapshot
+            .workstreams
+            .iter()
+            .filter(|workstream| {
+                workstream.host.alias() == host_alias
+                    && matches!(
+                        workstream.runtime_status,
+                        NavigatorRuntimeStatus::Starting
+                            | NavigatorRuntimeStatus::Idle
+                            | NavigatorRuntimeStatus::Working
+                            | NavigatorRuntimeStatus::Attention
+                    )
+            })
+            .count()
+    }
+
     fn begin_host_registration(&mut self) {
         self.modal = Some(NavigatorModal::RegisterHost {
             value: String::new(),
@@ -4325,6 +4345,14 @@ fn remove_selected_host_observer(view: &mut NavigatorView) {
         view.set_message("remote host is unavailable; observer removal was not sent");
         return;
     }
+    let live_runtime_count = view.live_runtime_count(&host.alias);
+    if live_runtime_count > 0 {
+        let suffix = if live_runtime_count == 1 { "" } else { "s" };
+        view.set_message(format!(
+            "park {live_runtime_count} live Workstream{suffix} before removing the observer"
+        ));
+        return;
+    }
     view.begin_observer_removal(host.alias);
 }
 
@@ -5570,6 +5598,38 @@ mod tests {
         assert!(rendered.contains("forget client registration"));
         assert!(!rendered.contains(&workstream_id.to_string()));
         assert!(!rendered.contains(&location_id.to_string()));
+    }
+
+    #[test]
+    fn observer_removal_explains_when_live_workstreams_prevent_it() {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![row(WorkstreamId::new(), NavigatorRuntimeStatus::Starting)],
+            hosts: vec![NavigatorHostOverview {
+                alias: "local".to_owned(),
+                reachability: RemoteHostReachability::Reachable,
+                observer_status: ObserverStatus::Ready,
+            }],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
+        });
+        view.select_page(NavigatorPage::Hosts);
+
+        remove_selected_host_observer(&mut view);
+
+        assert_eq!(view.modal, None);
+        assert_eq!(
+            view.message.as_deref(),
+            Some("park 1 live Workstream before removing the observer")
+        );
+
+        view.snapshot.workstreams[0].runtime_status = NavigatorRuntimeStatus::Parked;
+        remove_selected_host_observer(&mut view);
+
+        assert!(matches!(
+            view.modal,
+            Some(NavigatorModal::ConfirmRemoveObserver { ref alias }) if alias == "local"
+        ));
     }
 
     #[test]

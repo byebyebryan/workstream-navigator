@@ -35,8 +35,8 @@ use thiserror::Error;
 
 use crate::{
     domain::{
-        Clock, HostId, ProjectId, Revision, RuntimeStatus, SystemClock, WorkstreamId,
-        WorkstreamLifecycle,
+        Clock, HostId, OperationId, OperationKind, OperationPhase, ProjectId, Revision,
+        RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle,
     },
     presentation::{AttachmentPhase, AttachmentStatus, Presentation, PresentationError},
     process::{BoundedProcessError, output_bounded},
@@ -136,6 +136,24 @@ impl NavigatorRuntimeStatus {
     }
 }
 
+const fn operation_kind_label(kind: OperationKind) -> &'static str {
+    match kind {
+        OperationKind::Start => "Start",
+        OperationKind::Fork => "Fork",
+    }
+}
+
+const fn operation_phase_label(phase: OperationPhase) -> &'static str {
+    match phase {
+        OperationPhase::Prepared => "prepared",
+        OperationPhase::ExternalEffectStarted => "external effect started",
+        OperationPhase::AwaitingReconciliation => "awaiting reconciliation",
+        OperationPhase::Committed => "committed",
+        OperationPhase::RecoveryRequired => "recovery required",
+        OperationPhase::Failed => "failed",
+    }
+}
+
 /// A complete bounded projection of the local host registry.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LocalNavigatorSnapshot {
@@ -143,6 +161,19 @@ pub struct LocalNavigatorSnapshot {
     pub hosts: Vec<NavigatorHostOverview>,
     pub unreachable_hosts: Vec<String>,
     pub unresolved_operation_count: usize,
+    pub unresolved_operations: Vec<NavigatorOperation>,
+}
+
+/// Opaque recovery metadata. Request keys, paths, provider identifiers, and
+/// effect evidence remain on the host; the operation ID is held only long
+/// enough for the navigator to issue exact recovery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NavigatorOperation {
+    pub host: NavigatorHost,
+    pub operation_id: OperationId,
+    pub kind: OperationKind,
+    pub phase: OperationPhase,
+    pub revision: Revision,
 }
 
 /// Bounded host presentation metadata independent of whether the host currently
@@ -174,6 +205,17 @@ pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, Naviga
         .into_iter()
         .map(|overview| project_workstream(root, &mut catalog, &host, &executable, &overview))
         .collect::<Result<Vec<_>, _>>()?;
+    let unresolved_operations = registry
+        .unresolved_operation_overviews()?
+        .into_iter()
+        .map(|operation| NavigatorOperation {
+            host: NavigatorHost::Local,
+            operation_id: operation.operation_id,
+            kind: operation.kind,
+            phase: operation.phase,
+            revision: operation.revision,
+        })
+        .collect::<Vec<_>>();
     Ok(LocalNavigatorSnapshot {
         workstreams,
         hosts: vec![NavigatorHostOverview {
@@ -181,7 +223,8 @@ pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, Naviga
             reachability: RemoteHostReachability::Reachable,
         }],
         unreachable_hosts: Vec::new(),
-        unresolved_operation_count: registry.unresolved_operation_overviews()?.len(),
+        unresolved_operation_count: unresolved_operations.len(),
+        unresolved_operations,
     })
 }
 
@@ -413,6 +456,7 @@ struct RemoteMonitor {
 struct CachedRemoteHost {
     workstreams: Vec<NavigatorWorkstream>,
     unresolved_operation_count: usize,
+    unresolved_operations: Vec<NavigatorOperation>,
     reachable: bool,
     pending: bool,
     next_poll: Instant,
@@ -422,7 +466,13 @@ struct CachedRemoteHost {
 struct RemotePollResult {
     alias: String,
     host_id: HostId,
-    outcome: Result<crate::protocol::SnapshotResponse, ()>,
+    outcome: Result<
+        (
+            crate::protocol::SnapshotResponse,
+            crate::protocol::OperationsResponse,
+        ),
+        (),
+    >,
 }
 
 impl RemoteMonitor {
@@ -455,6 +505,7 @@ impl RemoteMonitor {
                 .or_insert_with(|| CachedRemoteHost {
                     workstreams: Vec::new(),
                     unresolved_operation_count: 0,
+                    unresolved_operations: Vec::new(),
                     reachable: false,
                     pending: false,
                     next_poll: now,
@@ -489,7 +540,7 @@ impl RemoteMonitor {
                 continue;
             };
             host.pending = false;
-            if let Ok(snapshot) = result.outcome {
+            if let Ok((snapshot, operations)) = result.outcome {
                 host.workstreams = snapshot
                     .workstreams
                     .iter()
@@ -504,6 +555,24 @@ impl RemoteMonitor {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 host.unresolved_operation_count = usize::from(snapshot.unresolved_operation_count);
+                host.unresolved_operations = operations
+                    .operations
+                    .into_iter()
+                    .filter_map(|operation| {
+                        Revision::try_from(operation.revision).ok().map(|revision| {
+                            NavigatorOperation {
+                                host: NavigatorHost::Remote {
+                                    alias: result.alias.clone(),
+                                    reachability: RemoteHostReachability::Reachable,
+                                },
+                                operation_id: operation.operation_id,
+                                kind: operation.kind,
+                                phase: operation.phase,
+                                revision,
+                            }
+                        })
+                    })
+                    .collect();
                 host.reachable = true;
                 host.backoff = REMOTE_INITIAL_BACKOFF;
                 host.next_poll = now + REMOTE_POLL_INTERVAL;
@@ -543,6 +612,9 @@ impl RemoteMonitor {
                 local.unreachable_hosts.push(alias.clone());
             }
             local.unresolved_operation_count += host.unresolved_operation_count;
+            local
+                .unresolved_operations
+                .extend(host.unresolved_operations.iter().cloned());
         }
         local
             .hosts
@@ -576,7 +648,15 @@ fn compare_workstream_activity(
         .then_with(|| left.workstream_id.cmp(&right.workstream_id))
 }
 
-fn fetch_remote_snapshot(host: &ClientHost) -> Result<crate::protocol::SnapshotResponse, ()> {
+fn fetch_remote_snapshot(
+    host: &ClientHost,
+) -> Result<
+    (
+        crate::protocol::SnapshotResponse,
+        crate::protocol::OperationsResponse,
+    ),
+    (),
+> {
     let ClientHostTransport::Ssh { destination } = &host.transport else {
         return Err(());
     };
@@ -595,7 +675,9 @@ fn fetch_remote_snapshot(host: &ClientHost) -> Result<crate::protocol::SnapshotR
         .map_err(|_| ())?;
     let hello = client.hello_ssh(&endpoint, "wsnav").map_err(|_| ())?;
     host.verify_hello(&hello).map_err(|_| ())?;
-    client.snapshot_ssh(&endpoint).map_err(|_| ())
+    let snapshot = client.snapshot_ssh(&endpoint).map_err(|_| ())?;
+    let operations = client.operations_ssh(&endpoint).map_err(|_| ())?;
+    Ok((snapshot, operations))
 }
 
 fn combined_snapshot(
@@ -618,6 +700,7 @@ pub struct NavigatorView {
     detail: Option<NavigatorDetail>,
     selected_project: Option<ProjectId>,
     selected_host: Option<String>,
+    selected_operation: usize,
     view_mode: NavigatorViewMode,
     workstream_scope: WorkstreamScope,
     attached: Option<(String, WorkstreamId)>,
@@ -673,6 +756,7 @@ impl NavigatorPage {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NavigatorDetail {
+    Recovery,
     Workstream {
         host_alias: String,
         workstream_id: WorkstreamId,
@@ -821,6 +905,7 @@ impl NavigatorView {
             detail: None,
             selected_project: None,
             selected_host: Some("local".to_owned()),
+            selected_operation: 0,
             view_mode: NavigatorViewMode::Recent,
             workstream_scope: WorkstreamScope::Active,
             attached: None,
@@ -897,7 +982,12 @@ impl NavigatorView {
     }
 
     fn selected_host_alias(&self) -> Option<&str> {
-        if self.page == NavigatorPage::Hosts {
+        if matches!(self.detail, Some(NavigatorDetail::Recovery)) {
+            self.snapshot
+                .unresolved_operations
+                .get(self.selected_operation)
+                .map(|operation| operation.host.alias())
+        } else if self.page == NavigatorPage::Hosts {
             self.selected_host.as_deref()
         } else {
             self.selected().map(|row| row.host.alias())
@@ -928,6 +1018,17 @@ impl NavigatorView {
             NavigatorPage::Projects => self.selected_project.map(NavigatorDetail::Project),
             NavigatorPage::Hosts => self.selected_host.clone().map(NavigatorDetail::Host),
         };
+    }
+
+    fn open_recovery(&mut self) {
+        if self.snapshot.unresolved_operations.is_empty() {
+            self.set_message("no unresolved Workstream operations");
+        } else {
+            self.selected_operation = self
+                .selected_operation
+                .min(self.snapshot.unresolved_operations.len().saturating_sub(1));
+            self.detail = Some(NavigatorDetail::Recovery);
+        }
     }
 
     fn dismiss_detail(&mut self) -> bool {
@@ -1018,6 +1119,9 @@ impl NavigatorView {
     }
 
     fn normalize_page_selection(&mut self) {
+        self.selected_operation = self
+            .selected_operation
+            .min(self.snapshot.unresolved_operations.len().saturating_sub(1));
         let projects = self.projects();
         if !projects
             .iter()
@@ -1033,6 +1137,9 @@ impl NavigatorView {
             self.selected_host = hosts.first().map(|host| host.alias.clone());
         }
         match &self.detail {
+            Some(NavigatorDetail::Recovery) if self.snapshot.unresolved_operations.is_empty() => {
+                self.detail = None;
+            }
             Some(NavigatorDetail::Workstream {
                 host_alias,
                 workstream_id,
@@ -1059,6 +1166,13 @@ impl NavigatorView {
     }
 
     pub fn select_next(&mut self) {
+        if matches!(self.detail, Some(NavigatorDetail::Recovery)) {
+            if !self.snapshot.unresolved_operations.is_empty() {
+                self.selected_operation =
+                    (self.selected_operation + 1) % self.snapshot.unresolved_operations.len();
+            }
+            return;
+        }
         if self.detail.is_some() {
             return;
         }
@@ -1097,6 +1211,15 @@ impl NavigatorView {
     }
 
     pub fn select_previous(&mut self) {
+        if matches!(self.detail, Some(NavigatorDetail::Recovery)) {
+            if !self.snapshot.unresolved_operations.is_empty() {
+                self.selected_operation = self
+                    .selected_operation
+                    .checked_sub(1)
+                    .unwrap_or(self.snapshot.unresolved_operations.len() - 1);
+            }
+            return;
+        }
         if self.detail.is_some() {
             return;
         }
@@ -1281,9 +1404,14 @@ impl NavigatorView {
     }
 
     fn scroll_help_next(&mut self) {
-        let last = help_lines(self.page, self.detail.is_some(), self.workstream_scope)
-            .len()
-            .saturating_sub(1);
+        let last = help_lines(
+            self.page,
+            self.detail.is_some(),
+            matches!(self.detail, Some(NavigatorDetail::Recovery)),
+            self.workstream_scope,
+        )
+        .len()
+        .saturating_sub(1);
         self.help_scroll = self
             .help_scroll
             .saturating_add(1)
@@ -1331,6 +1459,7 @@ impl NavigatorView {
             .split(areas[0]);
         self.render_page_tabs(frame, content[0]);
         match self.detail.clone() {
+            Some(NavigatorDetail::Recovery) => self.render_recovery_detail(frame, content[1]),
             Some(NavigatorDetail::Workstream {
                 host_alias,
                 workstream_id,
@@ -1518,6 +1647,45 @@ impl NavigatorView {
                 Block::default()
                     .borders(Borders::ALL)
                     .title(" Workstream status "),
+            ),
+            area,
+        );
+    }
+
+    fn render_recovery_detail(&self, frame: &mut Frame<'_>, area: Rect) {
+        let lines = self
+            .snapshot
+            .unresolved_operations
+            .iter()
+            .enumerate()
+            .map(|(index, operation)| {
+                let marker = if index == self.selected_operation {
+                    "> "
+                } else {
+                    "  "
+                };
+                Line::from(Span::styled(
+                    format!(
+                        "{marker}{} · {} · {}",
+                        operation.host.alias(),
+                        operation_kind_label(operation.kind),
+                        operation_phase_label(operation.phase)
+                    ),
+                    if index == self.selected_operation {
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    },
+                ))
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(
+            Paragraph::new(lines).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .title(" Recovery · Enter reconcile · Esc back "),
             ),
             area,
         );
@@ -1855,8 +2023,13 @@ impl NavigatorView {
     }
 
     fn compact_bindings(&self) -> Vec<(&'static str, &'static str)> {
-        if self.detail.is_some() {
-            return vec![("Enter", "back"), ("Esc", "back"), ("?", "keys")];
+        if let Some(detail) = &self.detail {
+            let enter = if matches!(detail, NavigatorDetail::Recovery) {
+                "reconcile"
+            } else {
+                "back"
+            };
+            return vec![("Enter", enter), ("Esc", "back"), ("?", "keys")];
         }
         match self.page {
             NavigatorPage::Workstreams => {
@@ -1873,6 +2046,7 @@ impl NavigatorView {
                     WorkstreamScope::Archived => bindings.push(("u", "restore")),
                 }
                 bindings.extend([("s", "scope"), ("v", "view"), ("?", "keys")]);
+                bindings.insert(2, ("o", "recovery"));
                 bindings
             }
             NavigatorPage::Projects => vec![
@@ -1908,6 +2082,7 @@ impl NavigatorView {
             Paragraph::new(help_lines(
                 self.page,
                 self.detail.is_some(),
+                matches!(self.detail, Some(NavigatorDetail::Recovery)),
                 self.workstream_scope,
             ))
             .block(
@@ -2009,6 +2184,7 @@ fn binding_line(bindings: &[(&str, &str)]) -> Line<'static> {
 fn help_lines(
     page: NavigatorPage,
     showing_detail: bool,
+    showing_recovery: bool,
     workstream_scope: WorkstreamScope,
 ) -> Vec<Line<'static>> {
     let heading = Style::default()
@@ -2037,7 +2213,11 @@ fn help_lines(
             Line::from(Span::styled("Details", heading)),
             Line::from(vec![
                 Span::styled("Enter", key),
-                Span::raw("      return to the list"),
+                Span::raw(if showing_recovery {
+                    "      reconcile selected operation"
+                } else {
+                    "      return to the list"
+                }),
             ]),
             Line::from(vec![
                 Span::styled("Esc", key),
@@ -2102,6 +2282,10 @@ fn workstream_help_lines(scope: WorkstreamScope, heading: Style, key: Style) -> 
         Line::from(vec![
             Span::styled("s", key),
             Span::raw("          switch active/archived scope"),
+        ]),
+        Line::from(vec![
+            Span::styled("o", key),
+            Span::raw("          recover an unresolved Start or Fork"),
         ]),
     ];
     if scope == WorkstreamScope::Active {
@@ -2672,6 +2856,11 @@ fn handle_navigator_key(
         }
         return false;
     }
+    if matches!(view.detail, Some(NavigatorDetail::Recovery)) && matches!(key.code, KeyCode::Enter)
+    {
+        recover_selected_operation(root, remote, view);
+        return false;
+    }
     let workstreams = view.page() == NavigatorPage::Workstreams && view.detail.is_none();
     if workstreams && handle_workstream_action_key(key.code, root, presentation, remote, view) {
         return false;
@@ -2701,6 +2890,10 @@ fn handle_navigator_key(
         }
         KeyCode::Char('s') if workstreams => {
             view.cycle_workstream_scope();
+            false
+        }
+        KeyCode::Char('o') if workstreams => {
+            view.open_recovery();
             false
         }
         KeyCode::Down | KeyCode::Char('j') => {
@@ -3088,6 +3281,52 @@ fn restore_selected(root: &StateRoot, remote: &mut RemoteMonitor, view: &mut Nav
     }
 }
 
+fn recover_selected_operation(
+    root: &StateRoot,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+) {
+    let Some(operation) = view
+        .snapshot
+        .unresolved_operations
+        .get(view.selected_operation)
+        .cloned()
+    else {
+        view.set_message("no unresolved Workstream operation is selected");
+        return;
+    };
+    let executable = match std::env::current_exe() {
+        Ok(executable) => executable,
+        Err(error) => {
+            view.set_message(action_message(&error));
+            return;
+        }
+    };
+    let mut command = Command::new(executable);
+    command.arg("--state-root").arg(root.base());
+    if operation.host.is_remote() {
+        command
+            .arg("host")
+            .arg("recover-operation")
+            .arg(operation.host.alias())
+            .arg(operation.operation_id.to_string());
+    } else {
+        command
+            .arg("recover-operation")
+            .arg(operation.operation_id.to_string());
+    }
+    match output_bounded(&mut command, 1024, 1024).map_err(NavigatorError::from_action_process) {
+        Ok(output) if output.status.success() => {
+            remote.request_soon(operation.host.alias());
+            refresh_view(root, remote, view);
+            view.dismiss_detail();
+            view.set_message("recovery reconciled the exact recorded operation");
+        }
+        Ok(_) => view.set_message("the exact operation remains unavailable for recovery"),
+        Err(error) => view.set_message(action_message(&error)),
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum CreationAction {
     Independent,
@@ -3342,6 +3581,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         };
         let mut view = NavigatorView::new(snapshot);
         view.select_previous();
@@ -3361,6 +3601,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
 
         assert_eq!(
@@ -3404,6 +3645,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
         view.begin_archive_confirmation(workstream);
         let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
@@ -3435,6 +3677,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
         view.open_selected_detail();
         let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
@@ -3462,6 +3705,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
         view.begin_rename(workstream);
         let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
@@ -3492,6 +3736,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
         let first_row = view.selected().unwrap().clone();
         let second_row = view.snapshot.workstreams[1].clone();
@@ -3513,6 +3758,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
 
         assert!(!view.is_attached_to(view.selected().unwrap()));
@@ -3527,6 +3773,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
         let attempt_id = uuid::Uuid::new_v4();
         let running = AttachmentStatus {
@@ -3543,6 +3790,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
         assert!(!view.is_attached_to(&workstream));
         view.observe_attachment(&running);
@@ -3568,6 +3816,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
 
         view.begin_mouse_click(None);
@@ -3588,6 +3837,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
 
@@ -3613,6 +3863,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
         view.selected = 5;
         let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
@@ -3746,6 +3997,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
         let expected_project_color = *visible_project_colors(&view.snapshot)
             .get(&view.snapshot.workstreams[0].project_id)
@@ -3793,6 +4045,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         };
         let row = &snapshot.workstreams[0];
         let project_colors = visible_project_colors(&snapshot);
@@ -3864,6 +4117,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         };
 
         let colors = visible_project_colors(&snapshot);
@@ -3884,6 +4138,7 @@ mod tests {
         let mut terminal = Terminal::new(TestBackend::new(200, 8)).unwrap();
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             unresolved_operation_count: 1,
+            unresolved_operations: Vec::new(),
             ..LocalNavigatorSnapshot::default()
         });
 
@@ -3899,6 +4154,65 @@ mod tests {
         assert!(rendered.contains("operation needs recovery"));
         assert!(rendered.contains("No Workstreams yet"));
         assert!(rendered.contains("? keys"));
+    }
+
+    #[test]
+    fn recovery_page_shows_only_bounded_operation_identity_and_reconciles_selection() {
+        let local_operation_id = OperationId::new();
+        let remote_operation_id = OperationId::new();
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: Vec::new(),
+            hosts: vec![NavigatorHostOverview {
+                alias: "snap".to_owned(),
+                reachability: RemoteHostReachability::Reachable,
+            }],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 2,
+            unresolved_operations: vec![
+                NavigatorOperation {
+                    host: NavigatorHost::Local,
+                    operation_id: local_operation_id,
+                    kind: OperationKind::Start,
+                    phase: OperationPhase::AwaitingReconciliation,
+                    revision: Revision::INITIAL,
+                },
+                NavigatorOperation {
+                    host: NavigatorHost::Remote {
+                        alias: "snap".to_owned(),
+                        reachability: RemoteHostReachability::Reachable,
+                    },
+                    operation_id: remote_operation_id,
+                    kind: OperationKind::Fork,
+                    phase: OperationPhase::RecoveryRequired,
+                    revision: Revision::INITIAL.next(),
+                },
+            ],
+        });
+        view.open_recovery();
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
+
+        terminal.draw(|frame| view.render(frame)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("Recovery"));
+        assert!(rendered.contains("local · Start · awaiting reconciliation"));
+        assert!(rendered.contains("snap · Fork · recovery required"));
+        assert!(!rendered.contains(&local_operation_id.to_string()));
+        assert!(!rendered.contains(&remote_operation_id.to_string()));
+        assert_eq!(view.selected_host_alias(), Some("local"));
+
+        view.select_next();
+        assert_eq!(view.selected_operation, 1);
+        assert_eq!(view.selected_host_alias(), Some("snap"));
+
+        view.replace_snapshot(LocalNavigatorSnapshot::default());
+        assert_eq!(view.detail, None);
     }
 
     #[test]
@@ -3929,6 +4243,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
 
         assert_eq!(view.view_mode(), NavigatorViewMode::Recent);
@@ -3978,6 +4293,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
 
         view.cycle_view_mode();
@@ -4050,6 +4366,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
         view.toggle_help();
 
@@ -4065,12 +4382,18 @@ mod tests {
         assert!(rendered.contains("Keys · Workstreams"));
         assert!(rendered.contains("Navigation"));
         assert!(rendered.contains("Workstreams"));
-        let full_help = help_lines(NavigatorPage::Workstreams, false, WorkstreamScope::Active)
-            .into_iter()
-            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
-            .collect::<String>();
+        let full_help = help_lines(
+            NavigatorPage::Workstreams,
+            false,
+            false,
+            WorkstreamScope::Active,
+        )
+        .into_iter()
+        .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+        .collect::<String>();
         assert!(full_help.contains("click a row to select"));
         assert!(full_help.contains("cycle recent/project/host"));
+        assert!(full_help.contains("recover an unresolved Start or Fork"));
         assert!(full_help.contains("close keys"));
         assert!(!rendered.contains("provider pane"));
     }
@@ -4115,6 +4438,7 @@ mod tests {
             ],
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
         view.observe_attachment(&AttachmentStatus {
             attempt_id: uuid::Uuid::new_v4(),
@@ -4171,6 +4495,7 @@ mod tests {
             ],
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
 
@@ -4225,7 +4550,12 @@ mod tests {
         assert!(project_compact.contains("1 workstreams"));
         assert!(!project_compact.contains("n new"));
 
-        let expanded = help_lines(NavigatorPage::Workstreams, false, WorkstreamScope::Active);
+        let expanded = help_lines(
+            NavigatorPage::Workstreams,
+            false,
+            false,
+            WorkstreamScope::Active,
+        );
         assert!(expanded.iter().all(|line| {
             line.spans
                 .iter()
@@ -4255,6 +4585,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
         view.view_mode = NavigatorViewMode::Project;
         let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
@@ -4329,6 +4660,7 @@ mod tests {
                     ..row(workstream_id, NavigatorRuntimeStatus::Working)
                 }],
                 unresolved_operation_count: 0,
+                unresolved_operations: Vec::new(),
                 reachable: false,
                 pending: false,
                 next_poll: Instant::now(),
@@ -4366,6 +4698,7 @@ mod tests {
                     },
                 ],
                 unresolved_operation_count: 0,
+                unresolved_operations: Vec::new(),
                 reachable: true,
                 pending: false,
                 next_poll: Instant::now(),
@@ -4384,6 +4717,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
 
         assert_eq!(
@@ -4450,6 +4784,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
         view.select_next();
 
@@ -4458,6 +4793,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
 
         assert_eq!(view.selected().unwrap().host.alias(), "snap");
@@ -4482,6 +4818,7 @@ mod tests {
             hosts: Vec::new(),
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
         });
 
         assert!(view.select_workstream("snap", destination));

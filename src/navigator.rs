@@ -2393,14 +2393,14 @@ impl NavigatorView {
                 ("Enter", "details"),
                 ("n", "register checkout"),
                 ("Esc", "workstreams"),
-                ("h", "hosts"),
+                (".", "hosts"),
                 ("?", "keys"),
             ],
             NavigatorPage::Hosts => vec![
                 ("Enter", "details"),
                 ("n", "register remote"),
                 ("Esc", "workstreams"),
-                ("m", "projects"),
+                (",", "projects"),
                 ("?", "keys"),
             ],
         }
@@ -2716,11 +2716,11 @@ fn help_lines(
         Line::from(Span::styled("Navigation", heading)),
         Line::from(vec![Span::styled("↑/↓ or j/k", key), Span::raw("  select")]),
         Line::from(vec![
-            Span::styled("m", key),
+            Span::styled(",", key),
             Span::raw("          Projects page"),
         ]),
         Line::from(vec![
-            Span::styled("h", key),
+            Span::styled(".", key),
             Span::raw("          Hosts page"),
         ]),
     ];
@@ -3489,11 +3489,11 @@ fn handle_navigator_key(
             view.toggle_help();
             false
         }
-        KeyCode::Char('m') => {
+        KeyCode::Char(',') => {
             view.select_page(NavigatorPage::Projects);
             false
         }
-        KeyCode::Char('h') => {
+        KeyCode::Char('.') => {
             view.select_page(NavigatorPage::Hosts);
             false
         }
@@ -5778,7 +5778,7 @@ mod tests {
             .collect::<String>();
         assert!(project_compact.contains("Enter details"));
         assert!(project_compact.contains("Esc workstreams"));
-        assert!(project_compact.contains("h hosts"));
+        assert!(project_compact.contains(". hosts"));
         assert!(!project_compact.contains("n new"));
 
         let workstream_help = help_lines(
@@ -5793,8 +5793,8 @@ mod tests {
             .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
             .collect::<String>();
         assert!(workstream_help.contains("x          archive"));
-        assert!(workstream_help.contains("m          Projects page"));
-        assert!(workstream_help.contains("h          Hosts page"));
+        assert!(workstream_help.contains(",          Projects page"));
+        assert!(workstream_help.contains(".          Hosts page"));
         assert!(!workstream_help.contains("1          Workstreams page"));
 
         view.select_page(NavigatorPage::Workstreams);

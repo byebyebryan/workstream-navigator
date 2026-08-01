@@ -230,7 +230,7 @@ Workstreams
 
 Workstreams is the default page and retains the product's ordinary switching
 workflow. Projects and Hosts are inventory/configuration pages, reached by
-their contextual `m` and `h` keys rather than a persistent tab bar. `Esc`
+their contextual `,` and `.` keys rather than a persistent tab bar. `Esc`
 returns from either management list to the ordinary Workstreams page, and
 returns from a detail to its list. Opening Project or Host detail replaces
 only the navigator content. A thin `Workstreams` parent frame above the

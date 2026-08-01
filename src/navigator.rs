@@ -1412,7 +1412,7 @@ fn status_indicator(row: &NavigatorWorkstream, spinner_frame: usize) -> (&'stati
             Style::default().fg(Color::Yellow),
         ),
         NavigatorRuntimeStatus::Unknown => ("?", Style::default().fg(Color::Red)),
-        NavigatorRuntimeStatus::Parked => ("○", Style::default().fg(PARKED_INDICATOR_COLOR)),
+        NavigatorRuntimeStatus::Parked => ("☾", Style::default().fg(PARKED_INDICATOR_COLOR)),
         NavigatorRuntimeStatus::Starting => ("…", Style::default().fg(Color::Cyan)),
         NavigatorRuntimeStatus::Idle | NavigatorRuntimeStatus::Attention => {
             if row.result_ready {
@@ -2170,7 +2170,7 @@ mod tests {
         let row = row(WorkstreamId::new(), NavigatorRuntimeStatus::Parked);
         let (indicator, style) = status_indicator(&row, 0);
 
-        assert_eq!(indicator, "○");
+        assert_eq!(indicator, "☾");
         assert_eq!(style.fg, Some(PARKED_INDICATOR_COLOR));
         assert_ne!(PARKED_INDICATOR_COLOR, Color::DarkGray);
     }

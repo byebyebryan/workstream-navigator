@@ -187,9 +187,10 @@ and configuration. It never modifies or depends on the user's ordinary tmux
 server.
 
 The initial presentation sets the navigator to its normal 32-cell width and
-gives every remaining terminal column to the provider pane. A later manual
-resize may make the navigator narrower or wider, so individual renderers
-retain their compact fallbacks.
+gives every remaining terminal column to the provider pane. Tmux can rescale a
+new split when it adopts the controlling terminal, so the navigator reapplies
+that width after each terminal resize. Individual renderers retain their
+compact fallbacks for explicitly narrowed panes.
 
 The navigator is a small Rust TUI in one pane. The provider pane is not a
 terminal widget rendered by Rust; it is a real tmux attachment to the host-owned

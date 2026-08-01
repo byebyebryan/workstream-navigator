@@ -3436,6 +3436,12 @@ pub fn run_local_navigator(
                     handle_navigator_mouse(mouse, root, &presentation, &mut remote, &mut view);
                     false
                 }
+                Event::Resize(_, _) => {
+                    if let Err(error) = presentation.set_default_navigator_width() {
+                        view.set_message(action_message(&error));
+                    }
+                    false
+                }
                 _ => false,
             };
             if exit {

@@ -688,7 +688,13 @@ impl Presentation {
 
     /// Keeps the narrow navigator at its deliberate default width, leaving
     /// all remaining terminal columns to the native provider pane.
-    fn set_default_navigator_width(&self) -> Result<(), PresentationError> {
+    /// Reapplies the compact navigator layout after tmux adopts a controlling
+    /// client's terminal size.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact private tmux server rejects the resize.
+    pub fn set_default_navigator_width(&self) -> Result<(), PresentationError> {
         self.invoke(None, self.default_navigator_resize_arguments())
     }
 

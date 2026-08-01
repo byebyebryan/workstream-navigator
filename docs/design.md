@@ -484,11 +484,10 @@ The pre-refactor launch-environment authority mechanism is falsified by
 [Spike 0009](spikes/0009-codex-hook-environment-boundary.md): it must remain
 fail-closed and cannot supply lifecycle status. [Spike
 0010](spikes/0010-codex-hook-ancestry-authority.md) proves the static-argument
-plus direct-parent candidate only. Until that candidate is implemented with
-the normal transactional binding and App Server corroboration gates,
-observer-derived status, attention, cutover, and exact-fork preconditions are
-not a production capability. No shell-wrapper ancestry fallback is allowed;
-that would admit an agent tool-shell forgery.
+plus direct-parent candidate. The production observer implements that candidate
+with the normal transactional binding and App Server corroboration gates. No
+shell-wrapper ancestry fallback is allowed; that would admit an agent
+tool-shell forgery.
 
 Hook evidence can update status and bind an observed native session inside an
 already managed runtime. It cannot authorize workstream creation, fork,

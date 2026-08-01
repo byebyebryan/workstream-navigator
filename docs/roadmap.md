@@ -2,9 +2,8 @@
 
 Date: 2026-07-31
 
-Status: D0 through D6.6 complete; the environment-based lifecycle observer is
-falsified in live use and its replacement authority design is pending an
-explicit implementation checkpoint.
+Status: D0 through D6.9 complete; the former environment-based lifecycle
+observer is retired in favor of static-profile plus direct-ancestry authority.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -45,15 +44,16 @@ This document owns sequencing, exit gates, and progress.
 | D6.4 | Navigator grouping and visual-hierarchy polish | Complete |
 | D6.5 | Project-marker collision correction | Complete |
 | D6.6 | Project-label accent refinement | Complete |
+| D6.9 | Codex observer authority repair | Complete |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](spikes/0009-codex-hook-environment-boundary.md)
 subsequently falsified its launch-environment observer authority. [Spike
 0010](spikes/0010-codex-hook-ancestry-authority.md) validates a strict
 PID-plus-birth-plus-cwd candidate on Codex 0.146.0, but no production rework is
-included in those completed checkpoints. Observer-dependent lifecycle features
-remain blocked until a separately scoped implementation and live acceptance
-checkpoint lands.
+included in those completed checkpoints. D6.9 implements that candidate and
+requires a fresh native trust review before it admits any observer-derived
+lifecycle state.
 
 ## D0 - Contract kernel
 
@@ -678,6 +678,37 @@ Exit gate:
   missing-timestamp age-style boundaries;
 - no age color becomes durable state, action authority, or protocol data; and
 - formatting, tests, lint, package checks, and `git diff --check` pass.
+
+## D6.9 - Codex observer authority repair
+
+Implementation status: complete. The observer no longer depends on launch
+environment values that Codex strips before invoking a hook. Its exact owned
+profile now passes the canonical private state root as a quoted command
+argument, then accepts one hook only after it matches a single live WSNav
+Runtime by direct parent PID, process birth, and cwd.
+
+Scope:
+
+- retain stdin draining before all state and authority checks, so unmanaged or
+  rejected large payloads cannot cause a broken pipe;
+- replace the removed environment authority with a static profile command and
+  a private-registry candidate scan bounded to live, process-fingerprinted
+  Runtimes;
+- reject wrappers, stale or ambiguous candidates, wrong private tmux panes,
+  process births, and cwd values before any state mutation;
+- version profile ownership, require explicit update of the old declaration,
+  and return the observer to native-trust pending; and
+- retain exact legacy-profile removal without silently replacing an old
+  declaration.
+
+Exit gate:
+
+- unit tests cover static command generation, legacy update/removal,
+  process-fingerprinted candidate selection, and direct-parent-only ancestry;
+- the full repository check and package-content gates pass; and
+- a live host update parks all managed Runtimes, performs the explicit native
+  `/hooks` review, and records fresh lifecycle activity without provider-pane
+  output.
 
 ## Deferred beyond V1
 

@@ -214,10 +214,11 @@ impl ProcessProbe for LinuxProcessProbe {
     }
 }
 
-/// Confirms that this hook process is a direct child of the current provider,
-/// or one shell-wrapper away from it. A same-user shell can inherit launch
-/// environment values, but it cannot satisfy this short ancestry path unless
-/// it is the native provider's lifecycle-hook child.
+/// Confirms that this hook process is a direct child of the current provider.
+///
+/// Codex 0.146.0 uses this shape for native command hooks. A shell-wrapper
+/// allowance would let an agent tool shell invoke the hook handler and forge a
+/// lifecycle payload, so an unknown process topology fails closed.
 #[must_use]
 pub fn is_direct_provider_hook(provider_pid: u32, expected_birth: &str) -> bool {
     let probe = LinuxProcessProbe;
@@ -227,7 +228,11 @@ pub fn is_direct_provider_hook(provider_pid: u32, expected_birth: &str) -> bool 
     let Some(parent) = process_parent(std::process::id()) else {
         return false;
     };
-    direct_provider_depth(parent, provider_pid, process_parent).is_some()
+    has_direct_provider_parent(parent, provider_pid)
+}
+
+fn has_direct_provider_parent(hook_parent: u32, provider_pid: u32) -> bool {
+    hook_parent == provider_pid
 }
 
 fn process_parent(pid: u32) -> Option<u32> {
@@ -238,21 +243,6 @@ fn process_parent(pid: u32) -> Option<u32> {
         .nth(1)?
         .parse()
         .ok()
-}
-
-fn direct_provider_depth(
-    first_parent: u32,
-    provider_pid: u32,
-    parent_of: impl Fn(u32) -> Option<u32>,
-) -> Option<usize> {
-    let mut cursor = first_parent;
-    for depth in 0..=1 {
-        if cursor == provider_pid {
-            return Some(depth);
-        }
-        cursor = parent_of(cursor)?;
-    }
-    None
 }
 
 /// Owns exactly one tmux server/session/window/pane for one runtime.
@@ -710,22 +700,18 @@ mod tests {
         }
     }
 
-    #[test]
-    fn direct_provider_ancestry_allows_only_the_native_hook_shape() {
-        let parents = BTreeMap::from([(10_u32, 20_u32), (20, 30), (30, 40)]);
-        let parent_of = |pid| parents.get(&pid).copied();
-
-        assert_eq!(direct_provider_depth(20, 20, parent_of), Some(0));
-        assert_eq!(direct_provider_depth(10, 20, parent_of), Some(1));
-        assert_eq!(direct_provider_depth(10, 30, parent_of), None);
-    }
-
     fn successful() -> TmuxResponse {
         TmuxResponse {
             success: true,
             stdout: String::new(),
             stderr: String::new(),
         }
+    }
+
+    #[test]
+    fn hook_ancestry_requires_the_exact_provider_parent() {
+        assert!(has_direct_provider_parent(42, 42));
+        assert!(!has_direct_provider_parent(43, 42));
     }
 
     #[test]

@@ -29,7 +29,6 @@ use crate::{
     worktree::{GitWorktree, ManagedWorktree, SystemGitWorktree, WorktreeEvidence},
 };
 
-pub(crate) const OBSERVER_AUTHORITY: &str = "wsnav-observer-v1";
 const PARK_CONFIRM_TIMEOUT: Duration = Duration::from_millis(500);
 const PARK_CONFIRM_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -514,7 +513,7 @@ pub fn start(
     if integration.lifecycle != IntegrationLifecycle::Ready {
         return Err(ActionError::ObserverNotReady);
     }
-    let manager = observer_profile()?;
+    let manager = observer_profile(root)?;
     manager.install(
         integration.ownership.owner_id.clone(),
         Some(&integration.ownership),
@@ -602,7 +601,7 @@ pub fn recover(
     if integration.lifecycle != IntegrationLifecycle::Ready {
         return Err(ActionError::ObserverNotReady);
     }
-    let manager = observer_profile()?;
+    let manager = observer_profile(root)?;
     manager.install(
         integration.ownership.owner_id.clone(),
         Some(&integration.ownership),
@@ -737,11 +736,7 @@ fn launch_reserved_runtime(
     let launch = NativeLaunch {
         cwd: record.cwd.clone(),
         program,
-        environment: managed_codex_environment(
-            root.base(),
-            &record.runtime_id,
-            &record.tmux_generation,
-        ),
+        environment: managed_codex_environment(),
     };
     if let Err(error) = runtime.start(&launch) {
         let _ = runtime.park();
@@ -898,21 +893,13 @@ pub fn codex_recovery_program(
 /// Set the locale only for the owned Codex process (and its hook children), so
 /// its terminal renderer has a stable UTF-8 contract without changing the
 /// user's shell or an unmanaged provider session.
-fn managed_codex_environment(
-    state_root: &Path,
-    runtime_id: &RuntimeId,
-    runtime_generation: &str,
-) -> BTreeMap<OsString, OsString> {
+fn managed_codex_environment() -> BTreeMap<OsString, OsString> {
     const UTF8_LOCALE: &str = "C.UTF-8";
 
     BTreeMap::from([
         ("LANG".into(), UTF8_LOCALE.into()),
         ("LC_CTYPE".into(), UTF8_LOCALE.into()),
         ("LC_ALL".into(), UTF8_LOCALE.into()),
-        ("WSNAV_STATE_ROOT".into(), state_root.as_os_str().to_owned()),
-        ("WSNAV_RUNTIME_ID".into(), runtime_id.to_string().into()),
-        ("WSNAV_RUNTIME_GENERATION".into(), runtime_generation.into()),
-        ("WSNAV_OBSERVER_AUTHORITY".into(), OBSERVER_AUTHORITY.into()),
     ])
 }
 
@@ -955,13 +942,13 @@ fn workstream_lifecycle(
         .ok_or(ActionError::UnknownWorkstream)
 }
 
-fn observer_profile() -> Result<ObserverProfile, ActionError> {
+fn observer_profile(root: &crate::state::StateRoot) -> Result<ObserverProfile, ActionError> {
     let codex_home = env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
         .ok_or(ActionError::CodexHomeUnavailable)?;
     let executable = env::current_exe().map_err(ActionError::Io)?;
-    Ok(ObserverProfile::new(codex_home, executable))
+    Ok(ObserverProfile::new(codex_home, executable, root.base()))
 }
 
 #[derive(Debug, Error)]
@@ -1075,9 +1062,8 @@ mod tests {
     }
 
     #[test]
-    fn managed_codex_environment_has_an_explicit_utf8_locale() {
-        let environment =
-            managed_codex_environment(Path::new("/state"), &RuntimeId::new(), "runtime-generation");
+    fn managed_codex_environment_has_only_the_explicit_utf8_locale() {
+        let environment = managed_codex_environment();
 
         for key in ["LANG", "LC_CTYPE", "LC_ALL"] {
             assert_eq!(
@@ -1085,10 +1071,7 @@ mod tests {
                 Some(&OsString::from("C.UTF-8"))
             );
         }
-        assert_eq!(
-            environment.get(&OsString::from("WSNAV_STATE_ROOT")),
-            Some(&OsString::from("/state"))
-        );
+        assert_eq!(environment.len(), 3);
     }
 
     #[test]

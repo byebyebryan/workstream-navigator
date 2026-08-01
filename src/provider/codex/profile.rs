@@ -11,6 +11,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 pub const OBSERVER_PROFILE_NAME: &str = "wsnav-observer";
+pub const OBSERVER_PROFILE_SCHEMA_VERSION: u8 = 2;
 const PROFILE_MARKER: &str = "# Managed by Workstream Navigator. Do not edit manually.\n";
 
 /// The immutable record retained by host state for an owned profile.
@@ -18,6 +19,7 @@ const PROFILE_MARKER: &str = "# Managed by Workstream Navigator. Do not edit man
 pub struct ProfileOwnership {
     pub canonical_path: PathBuf,
     pub owner_id: String,
+    pub profile_schema_version: u8,
     pub hook_executable: PathBuf,
     pub content_hash: String,
 }
@@ -27,15 +29,21 @@ pub struct ProfileOwnership {
 pub struct ObserverProfile {
     codex_home: PathBuf,
     hook_executable: PathBuf,
+    state_root: PathBuf,
 }
 
 impl ObserverProfile {
     /// Creates a profile manager for one user's normal `CODEX_HOME`.
     #[must_use]
-    pub fn new(codex_home: impl Into<PathBuf>, hook_executable: impl Into<PathBuf>) -> Self {
+    pub fn new(
+        codex_home: impl Into<PathBuf>,
+        hook_executable: impl Into<PathBuf>,
+        state_root: impl Into<PathBuf>,
+    ) -> Self {
         Self {
             codex_home: codex_home.into(),
             hook_executable: hook_executable.into(),
+            state_root: state_root.into(),
         }
     }
 
@@ -49,7 +57,7 @@ impl ObserverProfile {
     /// Renders the profile containing only passive lifecycle hooks.
     #[must_use]
     pub fn rendered(&self) -> String {
-        let command = shell_quote(&self.hook_executable);
+        let command = hook_command(&self.hook_executable, &self.state_root);
         format!(
             "{PROFILE_MARKER}[features]\nhooks = true\n\n[[hooks.SessionStart]]\nmatcher = \"startup|resume|clear|compact\"\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = 3\n\n[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = 3\n\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = 3\n\n[[hooks.SessionEnd]]\nmatcher = \"other\"\n[[hooks.SessionEnd.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = 3\n"
         )
@@ -76,6 +84,9 @@ impl ObserverProfile {
             if existing.canonical_path != path || existing.hook_executable != self.hook_executable {
                 return Err(ProfileError::OwnershipMismatch);
             }
+            if existing.profile_schema_version != OBSERVER_PROFILE_SCHEMA_VERSION {
+                return Err(ProfileError::UpdateRequired);
+            }
             self.verify_owned_document(existing, &expected_hash)?;
             return Ok(existing.clone());
         }
@@ -86,6 +97,7 @@ impl ObserverProfile {
         Ok(ProfileOwnership {
             canonical_path: path,
             owner_id,
+            profile_schema_version: OBSERVER_PROFILE_SCHEMA_VERSION,
             hook_executable: self.hook_executable.clone(),
             content_hash: expected_hash,
         })
@@ -105,7 +117,8 @@ impl ObserverProfile {
         if !path.is_file() {
             return Err(ProfileError::MissingOwnedPath(path));
         }
-        self.verify_owned_document(ownership, &hash(&self.rendered()))?;
+        let declaration = self.declaration_for(ownership)?;
+        self.verify_owned_document(ownership, &hash(&declaration))?;
         fs::remove_file(path).map_err(ProfileError::Io)
     }
 
@@ -118,6 +131,9 @@ impl ObserverProfile {
     /// Returns an error if profile ownership changed or native trust is absent
     /// or incomplete.
     pub fn verify_native_trust(&self, ownership: &ProfileOwnership) -> Result<(), ProfileError> {
+        if ownership.profile_schema_version != OBSERVER_PROFILE_SCHEMA_VERSION {
+            return Err(ProfileError::UpdateRequired);
+        }
         let suffix = self.owned_native_suffix(ownership, &hash(&self.rendered()))?;
         if suffix.is_some_and(|suffix| has_complete_hook_trust(&suffix, &self.path())) {
             Ok(())
@@ -142,18 +158,26 @@ impl ObserverProfile {
         }
         let rendered = self.rendered();
         let content_hash = hash(&rendered);
-        if existing.hook_executable == self.hook_executable && existing.content_hash == content_hash
+        if existing.profile_schema_version == OBSERVER_PROFILE_SCHEMA_VERSION
+            && existing.hook_executable == self.hook_executable
+            && existing.content_hash == content_hash
         {
             self.verify_owned_document(existing, &content_hash)?;
             return Ok(existing.clone());
         }
 
-        let previous = Self::new(self.codex_home.clone(), existing.hook_executable.clone());
-        previous.verify_owned_document(existing, &hash(&previous.rendered()))?;
+        let previous = Self::new(
+            self.codex_home.clone(),
+            existing.hook_executable.clone(),
+            self.state_root.clone(),
+        );
+        let previous_declaration = previous.declaration_for(existing)?;
+        previous.verify_owned_document(existing, &hash(&previous_declaration))?;
         atomic_private_write(&path, rendered.as_bytes())?;
         Ok(ProfileOwnership {
             canonical_path: path,
             owner_id: existing.owner_id.clone(),
+            profile_schema_version: OBSERVER_PROFILE_SCHEMA_VERSION,
             hook_executable: self.hook_executable.clone(),
             content_hash,
         })
@@ -182,7 +206,7 @@ impl ObserverProfile {
         let content = fs::read(&path).map_err(ProfileError::Io)?;
         let content =
             std::str::from_utf8(&content).map_err(|_| ProfileError::ModifiedPath(path.clone()))?;
-        let declared = self.rendered();
+        let declared = self.declaration_for(ownership)?;
         let Some(native_suffix) = content.strip_prefix(&declared) else {
             return Err(ProfileError::ModifiedPath(path));
         };
@@ -198,12 +222,42 @@ impl ObserverProfile {
             Err(ProfileError::ModifiedPath(self.path()))
         }
     }
+
+    fn declaration_for(&self, ownership: &ProfileOwnership) -> Result<String, ProfileError> {
+        match ownership.profile_schema_version {
+            1 => Ok(legacy_rendered(&ownership.hook_executable)),
+            OBSERVER_PROFILE_SCHEMA_VERSION => {
+                if ownership.hook_executable != self.hook_executable {
+                    return Err(ProfileError::OwnershipMismatch);
+                }
+                Ok(self.rendered())
+            }
+            _ => Err(ProfileError::OwnershipMismatch),
+        }
+    }
 }
 
-fn shell_quote(executable: &Path) -> String {
-    let escaped = executable.to_string_lossy().replace('\'', "'\\\"'\\\"'");
-    let command = format!("'{escaped}' _hook");
-    toml_string(&command)
+fn legacy_rendered(executable: &Path) -> String {
+    let command = legacy_hook_command(executable);
+    format!(
+        "{PROFILE_MARKER}[features]\nhooks = true\n\n[[hooks.SessionStart]]\nmatcher = \"startup|resume|clear|compact\"\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = 3\n\n[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = 3\n\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = 3\n\n[[hooks.SessionEnd]]\nmatcher = \"other\"\n[[hooks.SessionEnd.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = 3\n"
+    )
+}
+
+fn hook_command(executable: &Path, state_root: &Path) -> String {
+    let executable = shell_quote_argument(executable);
+    let state_root = shell_quote_argument(state_root);
+    toml_string(&format!("{executable} --state-root {state_root} _hook"))
+}
+
+fn legacy_hook_command(executable: &Path) -> String {
+    let executable = shell_quote_argument(executable);
+    toml_string(&format!("{executable} _hook"))
+}
+
+fn shell_quote_argument(value: &Path) -> String {
+    let escaped = value.to_string_lossy().replace('\'', "'\\\"'\\\"'");
+    format!("'{escaped}'")
 }
 
 fn toml_string(value: &str) -> String {
@@ -359,6 +413,8 @@ pub enum ProfileError {
     OwnershipMismatch,
     #[error("native observer-hook trust is incomplete or absent")]
     NativeTrustPending,
+    #[error("observer profile needs an explicit update before it can run")]
+    UpdateRequired,
 }
 
 #[cfg(test)]
@@ -368,7 +424,11 @@ mod tests {
     use super::*;
 
     fn manager(root: &Path) -> ObserverProfile {
-        ObserverProfile::new(root.join("codex-home"), root.join("bin/wsnav"))
+        ObserverProfile::new(
+            root.join("codex-home"),
+            root.join("bin/wsnav"),
+            root.join("state"),
+        )
     }
 
     fn complete_native_hook_suffix(manager: &ObserverProfile) -> String {
@@ -387,13 +447,16 @@ mod tests {
     #[test]
     fn profile_is_scoped_to_passive_lifecycle_hooks() {
         let temporary = tempfile::tempdir().unwrap();
-        let rendered = manager(temporary.path()).rendered();
+        let manager = manager(temporary.path());
+        let rendered = manager.rendered();
 
         assert!(rendered.contains("[features]\nhooks = true"));
         assert!(rendered.contains("hooks.SessionStart"));
         assert!(rendered.contains("hooks.UserPromptSubmit"));
         assert!(rendered.contains("hooks.Stop"));
         assert!(rendered.contains("hooks.SessionEnd"));
+        assert!(rendered.contains("--state-root"));
+        assert!(rendered.contains(&format!("'{}'", manager.state_root.display())));
         assert!(!rendered.contains("model"));
         assert!(!rendered.contains("permissions"));
     }
@@ -501,6 +564,7 @@ mod tests {
         let updated_manager = ObserverProfile::new(
             temporary.path().join("codex-home"),
             temporary.path().join("bin/wsnav-next"),
+            temporary.path().join("state"),
         );
         let updated = updated_manager.update(&ownership).unwrap();
 
@@ -513,6 +577,58 @@ mod tests {
             updated_manager.verify_native_trust(&updated),
             Err(ProfileError::NativeTrustPending)
         ));
+    }
+
+    #[test]
+    fn legacy_profile_requires_an_explicit_update_then_native_review() {
+        let temporary = tempfile::tempdir().unwrap();
+        let manager = manager(temporary.path());
+        fs::create_dir_all(manager.path().parent().unwrap()).unwrap();
+        let legacy = ProfileOwnership {
+            canonical_path: manager.path(),
+            owner_id: "owner".to_owned(),
+            profile_schema_version: 1,
+            hook_executable: temporary.path().join("bin/wsnav"),
+            content_hash: hash(&legacy_rendered(&temporary.path().join("bin/wsnav"))),
+        };
+        fs::write(manager.path(), legacy_rendered(&legacy.hook_executable)).unwrap();
+
+        assert!(matches!(
+            manager.install("owner".to_owned(), Some(&legacy)),
+            Err(ProfileError::UpdateRequired)
+        ));
+
+        let updated = manager.update(&legacy).unwrap();
+        assert_eq!(
+            updated.profile_schema_version,
+            OBSERVER_PROFILE_SCHEMA_VERSION
+        );
+        assert_eq!(
+            fs::read_to_string(manager.path()).unwrap(),
+            manager.rendered()
+        );
+        assert!(matches!(
+            manager.verify_native_trust(&updated),
+            Err(ProfileError::NativeTrustPending)
+        ));
+    }
+
+    #[test]
+    fn exact_legacy_profile_can_still_be_removed_without_replacement() {
+        let temporary = tempfile::tempdir().unwrap();
+        let manager = manager(temporary.path());
+        fs::create_dir_all(manager.path().parent().unwrap()).unwrap();
+        let legacy = ProfileOwnership {
+            canonical_path: manager.path(),
+            owner_id: "owner".to_owned(),
+            profile_schema_version: 1,
+            hook_executable: temporary.path().join("bin/wsnav"),
+            content_hash: hash(&legacy_rendered(&temporary.path().join("bin/wsnav"))),
+        };
+        fs::write(manager.path(), legacy_rendered(&legacy.hook_executable)).unwrap();
+
+        manager.remove(&legacy).unwrap();
+        assert!(!manager.path().exists());
     }
 
     #[test]

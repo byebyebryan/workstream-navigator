@@ -12,7 +12,7 @@ use clap::{Parser, Subcommand};
 use thiserror::Error;
 
 use crate::{
-    actions::{self, OBSERVER_AUTHORITY},
+    actions::{self},
     domain::{OperationId, RuntimeId, WorkstreamId},
     navigator::run_local_navigator,
     presentation::{AttachmentPhase, Presentation},
@@ -345,10 +345,10 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
     let mut registry = HostRegistry::open(root)?;
     match command {
         Commands::Setup { skip_review } => setup(root, &mut registry, skip_review),
-        Commands::TrustObserver => trust_observer(&mut registry),
-        Commands::Doctor => doctor(&registry),
-        Commands::UpdateObserver => update_observer(&mut registry),
-        Commands::RemoveObserver => remove_observer(&mut registry),
+        Commands::TrustObserver => trust_observer(root, &mut registry),
+        Commands::Doctor => doctor(root, &registry),
+        Commands::UpdateObserver => update_observer(root, &mut registry),
+        Commands::RemoveObserver => remove_observer(root, &mut registry),
         Commands::Register { checkout } => register(&mut registry, &checkout),
         Commands::NewWorkstream {
             source_workstream_id,
@@ -954,7 +954,7 @@ fn fork_workstream(
 }
 
 fn setup(root: &StateRoot, registry: &mut HostRegistry, skip_review: bool) -> Result<(), AppError> {
-    let manager = observer_profile()?;
+    let manager = observer_profile(root)?;
     let existing = registry.codex_integration()?;
     let ownership = manager.install(
         uuid::Uuid::new_v4().to_string(),
@@ -993,14 +993,14 @@ fn setup(root: &StateRoot, registry: &mut HostRegistry, skip_review: bool) -> Re
     }
 }
 
-fn update_observer(registry: &mut HostRegistry) -> Result<(), AppError> {
+fn update_observer(root: &StateRoot, registry: &mut HostRegistry) -> Result<(), AppError> {
     if registry.has_live_runtime()? {
         return Err(AppError::LiveRuntimePreventsUpdate);
     }
     let integration = registry
         .codex_integration()?
         .ok_or(AppError::ObserverNotInstalled)?;
-    let ownership = observer_profile()?.update(&integration.ownership)?;
+    let ownership = observer_profile(root)?.update(&integration.ownership)?;
     if ownership == integration.ownership {
         println!("observer profile is already current");
         return Ok(());
@@ -1014,17 +1014,24 @@ fn update_observer(registry: &mut HostRegistry) -> Result<(), AppError> {
     Ok(())
 }
 
-fn doctor(registry: &HostRegistry) -> Result<(), AppError> {
+fn doctor(root: &StateRoot, registry: &HostRegistry) -> Result<(), AppError> {
     let integration = registry.codex_integration()?;
     let Some(integration) = integration else {
         println!("observer: not installed");
         return Ok(());
     };
-    let manager = observer_profile()?;
-    manager.install(
+    let manager = observer_profile(root)?;
+    match manager.install(
         integration.ownership.owner_id.clone(),
         Some(&integration.ownership),
-    )?;
+    ) {
+        Err(crate::provider::codex::profile::ProfileError::UpdateRequired) => {
+            println!("observer: update required");
+            return Ok(());
+        }
+        Err(error) => return Err(AppError::Profile(error)),
+        Ok(_) => {}
+    }
     if integration.lifecycle == IntegrationLifecycle::Ready
         && manager.verify_native_trust(&integration.ownership).is_err()
     {
@@ -1035,24 +1042,24 @@ fn doctor(registry: &HostRegistry) -> Result<(), AppError> {
     Ok(())
 }
 
-fn remove_observer(registry: &mut HostRegistry) -> Result<(), AppError> {
+fn remove_observer(root: &StateRoot, registry: &mut HostRegistry) -> Result<(), AppError> {
     if registry.has_live_runtime()? {
         return Err(AppError::LiveRuntimePreventsRemoval);
     }
     let integration = registry
         .codex_integration()?
         .ok_or(AppError::ObserverNotInstalled)?;
-    observer_profile()?.remove(&integration.ownership)?;
+    observer_profile(root)?.remove(&integration.ownership)?;
     registry.remove_codex_integration(&integration.ownership)?;
     println!("observer profile removed");
     Ok(())
 }
 
-fn trust_observer(registry: &mut HostRegistry) -> Result<(), AppError> {
+fn trust_observer(root: &StateRoot, registry: &mut HostRegistry) -> Result<(), AppError> {
     let integration = registry
         .codex_integration()?
         .ok_or(AppError::ObserverNotInstalled)?;
-    let manager = observer_profile()?;
+    let manager = observer_profile(root)?;
     if finalize_native_trust(registry, &manager, &integration.ownership)? {
         println!("observer profile marked ready");
         Ok(())
@@ -1158,71 +1165,62 @@ fn codex_launch_program(
     actions::codex_launch_program(cwd, binding)
 }
 
-fn observer_profile() -> Result<ObserverProfile, AppError> {
+fn observer_profile(root: &StateRoot) -> Result<ObserverProfile, AppError> {
     let codex_home = env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
         .ok_or(AppError::CodexHomeUnavailable)?;
     let executable = env::current_exe().map_err(AppError::Io)?;
-    Ok(ObserverProfile::new(codex_home, executable))
+    Ok(ObserverProfile::new(codex_home, executable, root.base()))
 }
 
 fn observe_hook(state_root: Option<PathBuf>) {
-    // Drain before inspecting any authority environment. Codex can still be
-    // writing a large lifecycle payload when unmanaged hooks are rejected.
+    // Drain before inspecting state or process evidence. Codex can still be
+    // writing a large lifecycle payload when an unmanaged hook is rejected.
     let Ok(observation) = drain_and_parse(&mut std::io::stdin().lock()) else {
         return;
     };
-    let Some(state_root) =
-        state_root.or_else(|| env::var_os("WSNAV_STATE_ROOT").map(PathBuf::from))
-    else {
+    let Some(state_root) = state_root else {
         return;
     };
-    let Ok(runtime_id) = env::var("WSNAV_RUNTIME_ID") else {
-        return;
-    };
-    let Ok(runtime_id) = RuntimeId::from_str(&runtime_id) else {
-        return;
-    };
-    let Ok(generation) = env::var("WSNAV_RUNTIME_GENERATION") else {
-        return;
-    };
-    if env::var("WSNAV_OBSERVER_AUTHORITY").ok().as_deref() != Some(OBSERVER_AUTHORITY) {
-        return;
-    }
     let Ok(root) = StateRoot::create(state_root) else {
         return;
     };
     let Ok(mut registry) = HostRegistry::open(&root) else {
         return;
     };
-    let Ok(expected_birth) = registry.expected_hook_process_birth(runtime_id, &generation) else {
-        return;
-    };
-    let Ok(Some(record)) = registry.runtime_by_id(runtime_id) else {
-        return;
-    };
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
-    let Ok(paths) = RuntimePaths::for_record(root.base(), runtime_id, &record.tmux_session) else {
+    let Ok(candidates) = registry.hook_runtime_candidates() else {
         return;
     };
-    let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
-    let Ok(RuntimeProbe::Live {
-        pane_pid,
-        cwd,
-        process_birth: Some(actual_birth),
-        ..
-    }) = runtime.probe()
-    else {
+    let matches = candidates
+        .into_iter()
+        .filter(|record| record.cwd.as_path() == Path::new(&observation.cwd))
+        .filter_map(|record| {
+            let paths =
+                RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)
+                    .ok()?;
+            let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+            let RuntimeProbe::Live {
+                pane_pid,
+                cwd,
+                process_birth: Some(actual_birth),
+                ..
+            } = runtime.probe().ok()?
+            else {
+                return None;
+            };
+            let expected_birth = record.process_birth.as_deref()?;
+            (cwd == record.cwd
+                && actual_birth == expected_birth
+                && is_direct_provider_hook(pane_pid, expected_birth))
+            .then_some(record)
+        })
+        .collect::<Vec<_>>();
+    let [record] = matches.as_slice() else {
         return;
     };
-    if cwd.as_path() != Path::new(&observation.cwd)
-        || actual_birth != expected_birth
-        || !is_direct_provider_hook(pane_pid, &expected_birth)
-    {
-        return;
-    }
     let metadata = if matches!(
         observation.event,
         crate::provider::codex::hooks::LifecycleEvent::SessionStart
@@ -1236,11 +1234,15 @@ fn observe_hook(state_root: Option<PathBuf>) {
     };
     let session_id = observation.native_session_id.clone();
     if registry
-        .apply_hook_observation(runtime_id, &generation, observation)
+        .apply_hook_observation(record.runtime_id, &record.tmux_generation, observation)
         .is_ok()
         && let Some(metadata) = metadata
     {
-        let _ = registry.record_thread_metadata(runtime_id, &session_id, metadata.name.as_deref());
+        let _ = registry.record_thread_metadata(
+            record.runtime_id,
+            &session_id,
+            metadata.name.as_deref(),
+        );
     }
 }
 
@@ -1646,6 +1648,7 @@ mod tests {
         let manager = ObserverProfile::new(
             temporary.path().join("codex-home"),
             temporary.path().join("bin/wsnav"),
+            root.base(),
         );
         let ownership = manager.install("owner".to_owned(), None).unwrap();
         registry

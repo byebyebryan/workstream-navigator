@@ -16,6 +16,8 @@ use crate::domain::{
 use crate::protocol::{Capabilities, HelloResponse};
 use crate::provider::codex::hooks::{HookObservation, LifecycleEvent};
 use crate::provider::codex::names::NameState;
+#[cfg(test)]
+use crate::provider::codex::profile::OBSERVER_PROFILE_SCHEMA_VERSION;
 use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 
 /// The newest host-registry schema this build can open or create.
@@ -587,8 +589,8 @@ impl HostRegistry {
     pub fn codex_integration(&self) -> Result<Option<CodexIntegration>, StateError> {
         self.connection
             .query_row(
-                "SELECT canonical_profile_path, owner_id, hook_executable_path,
-                    generated_content_hash, lifecycle, revision
+                "SELECT canonical_profile_path, owner_id, profile_schema_version,
+                    hook_executable_path, generated_content_hash, lifecycle, revision
                  FROM codex_integrations WHERE profile_name = ?1",
                 [OBSERVER_PROFILE_NAME],
                 row_to_integration,
@@ -623,14 +625,16 @@ impl HostRegistry {
                 integration_id, profile_name, canonical_profile_path, owner_id,
                 profile_schema_version, hook_executable_path, generated_content_hash,
                 lifecycle, revision
-             ) VALUES (?1, ?2, ?3, ?4, 1, ?5, ?6, ?7, ?8)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(profile_name) DO UPDATE SET
+                profile_schema_version = excluded.profile_schema_version,
                 lifecycle = excluded.lifecycle, revision = excluded.revision",
                 params![
                     Uuid::new_v4().to_string(),
                     OBSERVER_PROFILE_NAME,
                     ownership.canonical_path.to_string_lossy(),
                     ownership.owner_id,
+                    i64::from(ownership.profile_schema_version),
                     ownership.hook_executable.to_string_lossy(),
                     ownership.content_hash,
                     integration_lifecycle_text(lifecycle),
@@ -671,12 +675,13 @@ impl HostRegistry {
             .connection
             .execute(
                 "UPDATE codex_integrations SET canonical_profile_path = ?1, owner_id = ?2,
-                hook_executable_path = ?3, generated_content_hash = ?4, lifecycle = ?5,
-                revision = ?6
-             WHERE profile_name = ?7 AND generated_content_hash = ?8 AND revision = ?9",
+                profile_schema_version = ?3, hook_executable_path = ?4,
+                generated_content_hash = ?5, lifecycle = ?6, revision = ?7
+             WHERE profile_name = ?8 AND generated_content_hash = ?9 AND revision = ?10",
                 params![
                     replacement.canonical_path.to_string_lossy(),
                     replacement.owner_id,
+                    i64::from(replacement.profile_schema_version),
                     replacement.hook_executable.to_string_lossy(),
                     replacement.content_hash,
                     integration_lifecycle_text(lifecycle),
@@ -1492,6 +1497,76 @@ impl HostRegistry {
             )
             .optional()
             .map_err(StateError::Sqlite)
+    }
+
+    /// Returns only current, process-fingerprinted private Runtimes that may
+    /// corroborate a passive Codex hook. This is host-local evidence; callers
+    /// must still probe the exact private tmux pane and require one match.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when persisted Runtime identity is malformed or the
+    /// private registry cannot be queried.
+    pub fn hook_runtime_candidates(&self) -> Result<Vec<RuntimeRecord>, StateError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT runtime_id, workstream_id, tmux_generation, tmux_session,
+                        cwd, process_birth, lifecycle, revision
+                 FROM runtimes
+                 WHERE lifecycle IN ('starting', 'idle', 'working', 'attention')
+                   AND process_birth IS NOT NULL",
+            )
+            .map_err(StateError::Sqlite)?;
+        statement
+            .query_map([], |row| {
+                let runtime_id: String = row.get(0)?;
+                let workstream_id: String = row.get(1)?;
+                let tmux_generation: String = row.get(2)?;
+                let tmux_session: String = row.get(3)?;
+                let cwd: String = row.get(4)?;
+                let process_birth: Option<String> = row.get(5)?;
+                let lifecycle: String = row.get(6)?;
+                let revision: i64 = row.get(7)?;
+                Ok((
+                    runtime_id,
+                    workstream_id,
+                    tmux_generation,
+                    tmux_session,
+                    cwd,
+                    process_birth,
+                    lifecycle,
+                    revision,
+                ))
+            })
+            .map_err(StateError::Sqlite)?
+            .map(|row| {
+                let (
+                    runtime_id,
+                    workstream_id,
+                    tmux_generation,
+                    tmux_session,
+                    cwd,
+                    process_birth,
+                    lifecycle,
+                    revision,
+                ) = row.map_err(StateError::Sqlite)?;
+                Ok(RuntimeRecord {
+                    runtime_id: Uuid::parse_str(&runtime_id)
+                        .map(RuntimeId::from)
+                        .map_err(StateError::InvalidPersistedUuid)?,
+                    workstream_id: Uuid::parse_str(&workstream_id)
+                        .map(WorkstreamId::from)
+                        .map_err(StateError::InvalidPersistedUuid)?,
+                    tmux_generation,
+                    tmux_session,
+                    cwd: PathBuf::from(cwd),
+                    process_birth,
+                    status: runtime_status_from_text(&lifecycle)?,
+                    revision: Revision::try_from(revision)?,
+                })
+            })
+            .collect()
     }
 
     /// Confirms that one exact Runtime ended through the explicit park action.
@@ -3735,14 +3810,16 @@ fn row_to_runtime_with_id(
 }
 
 fn row_to_integration(row: &rusqlite::Row<'_>) -> rusqlite::Result<CodexIntegration> {
-    let lifecycle: String = row.get(4)?;
-    let revision: i64 = row.get(5)?;
+    let profile_schema_version = u8::try_from(row.get::<_, i64>(2)?).map_err(to_from_sql_error)?;
+    let lifecycle: String = row.get(5)?;
+    let revision: i64 = row.get(6)?;
     Ok(CodexIntegration {
         ownership: ProfileOwnership {
             canonical_path: PathBuf::from(row.get::<_, String>(0)?),
             owner_id: row.get(1)?,
-            hook_executable: PathBuf::from(row.get::<_, String>(2)?),
-            content_hash: row.get(3)?,
+            profile_schema_version,
+            hook_executable: PathBuf::from(row.get::<_, String>(3)?),
+            content_hash: row.get(4)?,
         },
         lifecycle: integration_lifecycle_from_text(&lifecycle).map_err(to_from_sql_error)?,
         revision: Revision::try_from(revision).map_err(to_from_sql_error)?,
@@ -4523,6 +4600,40 @@ mod tests {
             runtime.tmux_session,
             format!("wsnav-{}", runtime.runtime_id)
         );
+    }
+
+    #[test]
+    fn hook_candidates_are_limited_to_live_process_fingerprinted_runtimes() {
+        let (_temporary, mut registry) = registry();
+        let first = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/first"),
+                "first-repository".to_owned(),
+                "first-commit".to_owned(),
+            )
+            .unwrap();
+        let second = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/second"),
+                "second-repository".to_owned(),
+                "second-commit".to_owned(),
+            )
+            .unwrap();
+        let first_runtime = registry.reserve_runtime(first.workstream_id).unwrap();
+        let second_runtime = registry.reserve_runtime(second.workstream_id).unwrap();
+        registry
+            .record_runtime_process_birth(
+                first_runtime.runtime_id,
+                first_runtime.revision,
+                "first-birth",
+            )
+            .unwrap();
+
+        let candidates = registry.hook_runtime_candidates().unwrap();
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].runtime_id, first_runtime.runtime_id);
+        assert_ne!(candidates[0].runtime_id, second_runtime.runtime_id);
     }
 
     #[test]
@@ -6281,6 +6392,7 @@ mod tests {
         let ownership = ProfileOwnership {
             canonical_path: PathBuf::from("/private/codex/wsnav-observer.config.toml"),
             owner_id: "owner".to_owned(),
+            profile_schema_version: OBSERVER_PROFILE_SCHEMA_VERSION,
             hook_executable: PathBuf::from("/private/bin/wsnav"),
             content_hash: "hash".to_owned(),
         };
@@ -6302,6 +6414,7 @@ mod tests {
         let original = ProfileOwnership {
             canonical_path: PathBuf::from("/private/codex/wsnav-observer.config.toml"),
             owner_id: "owner".to_owned(),
+            profile_schema_version: OBSERVER_PROFILE_SCHEMA_VERSION,
             hook_executable: PathBuf::from("/private/bin/wsnav-old"),
             content_hash: "old-hash".to_owned(),
         };

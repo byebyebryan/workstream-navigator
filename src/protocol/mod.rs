@@ -13,7 +13,7 @@ use crate::domain::{
     RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 11;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 13;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -96,6 +96,12 @@ impl HostRequest {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostAction {
+    /// Install or reconcile the exact WSNav-owned observer profile. Native
+    /// hook approval remains an explicit interactive provider-surface action.
+    PrepareObserver,
+    /// Remove only an exact unchanged WSNav-owned observer profile after every
+    /// managed Runtime on that host has stopped.
+    RemoveObserver,
     /// Register one existing checkout only on this host. The bounded path is
     /// request-only and is never included in a response or snapshot.
     RegisterCheckout { checkout_path: String },
@@ -179,7 +185,10 @@ impl HostAction {
             | Self::ForkWorkstream {
                 expected_revision, ..
             } => Some(*expected_revision),
-            Self::RegisterCheckout { .. } | Self::RecoverOperation { .. } => None,
+            Self::PrepareObserver
+            | Self::RemoveObserver
+            | Self::RegisterCheckout { .. }
+            | Self::RecoverOperation { .. } => None,
         };
         if let Some(expected_revision) = expected_revision {
             Revision::try_from(expected_revision).map_err(|_| ProtocolError::InvalidRevision)?;
@@ -197,7 +206,9 @@ impl HostAction {
                     return Err(ProtocolError::InvalidThreadName);
                 }
             }
-            Self::AcknowledgeAttention { .. }
+            Self::PrepareObserver
+            | Self::RemoveObserver
+            | Self::AcknowledgeAttention { .. }
             | Self::Park { .. }
             | Self::Archive { .. }
             | Self::Restore { .. }
@@ -334,10 +345,25 @@ pub struct Capabilities {
     pub tmux: bool,
 }
 
+/// Bounded observer lifecycle state safe to expose to a trusted navigator.
+/// It describes only `WSNav`'s exact owned Codex observer declaration; it never
+/// represents provider prompts, hook payloads, or an arbitrary profile.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ObserverStatus {
+    #[default]
+    NotInstalled,
+    TrustPending,
+    Ready,
+    Modified,
+    Disabled,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SnapshotResponse {
     pub workstreams: Vec<SnapshotWorkstream>,
     pub unresolved_operation_count: u16,
+    pub observer_status: ObserverStatus,
     /// Opaque row offset for the next deterministic bounded page.
     pub next_cursor: Option<u32>,
 }
@@ -678,6 +704,7 @@ mod tests {
                 revision: 1,
             }],
             unresolved_operation_count: 0,
+            observer_status: ObserverStatus::NotInstalled,
             next_cursor: None,
         };
 
@@ -688,6 +715,21 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn observer_lifecycle_actions_are_identifier_free_protocol_requests() {
+        for action in [HostAction::PrepareObserver, HostAction::RemoveObserver] {
+            let request = RequestEnvelope {
+                version: CURRENT_PROTOCOL_VERSION,
+                request: HostRequest::Apply { action },
+            };
+
+            let frame = request.encode().unwrap();
+            let decoded = RequestEnvelope::decode(&frame).unwrap();
+
+            assert_eq!(decoded, request);
+        }
     }
 
     #[test]
@@ -711,6 +753,7 @@ mod tests {
                 revision: 1,
             }],
             unresolved_operation_count: 0,
+            observer_status: ObserverStatus::NotInstalled,
             next_cursor: None,
         };
         assert!(matches!(

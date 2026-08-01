@@ -17,12 +17,12 @@ use crate::{
     process::output_bounded,
     protocol::{
         CURRENT_PROTOCOL_VERSION, Capabilities, HelloResponse, HostAction, HostRequest,
-        HostResponse, MAX_FRAME_BYTES, OperationSnapshot, OperationsResponse, RequestEnvelope,
-        ResponseEnvelope, SnapshotResponse, SnapshotWorkstream,
+        HostResponse, MAX_FRAME_BYTES, ObserverStatus, OperationSnapshot, OperationsResponse,
+        RequestEnvelope, ResponseEnvelope, SnapshotResponse, SnapshotWorkstream,
     },
     provider::codex::names::{NameContext, resolve_name},
     runtime::{LinuxProcessProbe, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux},
-    state::{HostRegistry, StateError, StateRoot, WorkstreamOverview},
+    state::{HostRegistry, IntegrationLifecycle, StateError, StateRoot, WorkstreamOverview},
 };
 
 /// Serves one stdin/stdout protocol exchange for a local or SSH caller.
@@ -148,6 +148,16 @@ fn dispatch(state_root: Option<std::path::PathBuf>, request: &RequestEnvelope) -
 
 fn apply(root: &StateRoot, registry: &mut HostRegistry, action: HostAction) -> ResponseEnvelope {
     match action {
+        HostAction::PrepareObserver => {
+            match crate::app::prepare_observer_activation(root, registry) {
+                Ok(_) => applied(1),
+                Err(_) => rejected("observer activation is unavailable"),
+            }
+        }
+        HostAction::RemoveObserver => match crate::app::remove_observer_exact(root, registry) {
+            Ok(()) => applied(1),
+            Err(_) => rejected("observer removal is unavailable"),
+        },
         HostAction::RegisterCheckout { checkout_path } => {
             apply_register_checkout(registry, &checkout_path)
         }
@@ -220,6 +230,13 @@ fn apply(root: &StateRoot, registry: &mut HostRegistry, action: HostAction) -> R
             expected_revision,
             request_key,
         ),
+    }
+}
+
+fn applied(revision: i64) -> ResponseEnvelope {
+    ResponseEnvelope {
+        version: CURRENT_PROTOCOL_VERSION,
+        response: HostResponse::Applied { revision },
     }
 }
 
@@ -519,8 +536,24 @@ fn snapshot(
     Ok(SnapshotResponse {
         workstreams,
         unresolved_operation_count,
+        observer_status: observer_status(registry)?,
         next_cursor: page.next_cursor,
     })
+}
+
+fn observer_status(registry: &HostRegistry) -> Result<ObserverStatus, StateError> {
+    Ok(
+        match registry
+            .codex_integration()?
+            .map(|integration| integration.lifecycle)
+        {
+            None => ObserverStatus::NotInstalled,
+            Some(IntegrationLifecycle::TrustPending) => ObserverStatus::TrustPending,
+            Some(IntegrationLifecycle::Ready) => ObserverStatus::Ready,
+            Some(IntegrationLifecycle::Modified) => ObserverStatus::Modified,
+            Some(IntegrationLifecycle::Disabled) => ObserverStatus::Disabled,
+        },
+    )
 }
 
 fn operations(registry: &HostRegistry) -> Result<OperationsResponse, StateError> {
@@ -778,8 +811,41 @@ mod tests {
         let response = ResponseEnvelope::decode(&output).unwrap();
         assert!(matches!(
             response.response,
-            HostResponse::Snapshot(SnapshotResponse { ref workstreams, .. }) if workstreams.is_empty()
+            HostResponse::Snapshot(SnapshotResponse {
+                ref workstreams,
+                observer_status: ObserverStatus::NotInstalled,
+                ..
+            }) if workstreams.is_empty()
         ));
+    }
+
+    #[test]
+    fn exact_observer_removal_rejects_without_leaking_or_corrupting_the_frame() {
+        let temporary = tempfile::tempdir().unwrap();
+        let request = RequestEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            request: HostRequest::Apply {
+                action: HostAction::RemoveObserver,
+            },
+        }
+        .encode()
+        .unwrap();
+        let mut output = Vec::new();
+
+        serve(
+            Some(temporary.path().join("state")),
+            &mut Cursor::new(request),
+            &mut output,
+        )
+        .unwrap();
+
+        let response = ResponseEnvelope::decode(&output).unwrap();
+        assert!(matches!(
+            response.response,
+            HostResponse::Rejected { ref diagnostic }
+                if diagnostic == "observer removal is unavailable"
+        ));
+        assert!(!String::from_utf8_lossy(&output).contains("observer profile removed"));
     }
 
     #[test]

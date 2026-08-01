@@ -297,6 +297,21 @@ impl Presentation {
         )
     }
 
+    /// Replaces the provider pane with the native observer-review surface on
+    /// one registered remote host. The local presentation still owns only its
+    /// own pane and never stores or writes provider terminal bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact owned presentation pane cannot be
+    /// replaced.
+    pub fn start_remote_observer_review(&self, host_alias: &str) -> Result<(), PresentationError> {
+        self.invoke(
+            None,
+            self.provider_respawn_for_command(self.remote_observer_review_command(host_alias)),
+        )
+    }
+
     fn provider_respawn_arguments(
         &self,
         workstream_id: WorkstreamId,
@@ -527,6 +542,16 @@ impl Presentation {
             "--state-root".into(),
             self.state_root.clone().into_os_string(),
             "_observer_review".into(),
+        ]
+    }
+
+    fn remote_observer_review_command(&self, host_alias: &str) -> Vec<OsString> {
+        vec![
+            self.executable.clone().into_os_string(),
+            "--state-root".into(),
+            self.state_root.clone().into_os_string(),
+            "_provider_remote_observer_review".into(),
+            host_alias.into(),
         ]
     }
 
@@ -901,6 +926,23 @@ mod tests {
                 .iter()
                 .all(|argument| argument != "sh" && argument != "/bin/sh")
         );
+    }
+
+    #[test]
+    fn remote_observer_review_uses_a_direct_provider_pane_command() {
+        let temporary = tempfile::tempdir().unwrap();
+        let presentation = Presentation {
+            paths: PresentationPaths::fresh(temporary.path()),
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+
+        let command = presentation.remote_observer_review_command("snap");
+
+        assert_eq!(command[0], "/workspace/wsnav");
+        assert_eq!(command[3], "_provider_remote_observer_review");
+        assert_eq!(command[4], "snap");
+        assert!(command.iter().all(|argument| argument != "sh"));
     }
 
     #[test]

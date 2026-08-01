@@ -158,6 +158,14 @@ enum Commands {
     /// Workstream and must never emit diagnostics into the provider pane.
     #[command(name = "_observer_review", hide = true)]
     ObserverReview,
+    /// Internal one-shot remote observer review. Unlike the local provider-pane
+    /// helper, it returns after native Codex exits so SSH can close cleanly.
+    #[command(name = "_remote_observer_review", hide = true)]
+    RemoteObserverReview,
+    /// Internal remote native observer-review surface. It is not a Workstream
+    /// attachment and must never emit navigator diagnostics into the provider pane.
+    #[command(name = "_provider_remote_observer_review", hide = true)]
+    ProviderRemoteObserverReview { host_alias: String },
     /// Internal local provider-pane attachment helper. It intentionally keeps
     /// all navigator diagnostics out of the native provider surface.
     #[command(name = "_provider_attach", hide = true)]
@@ -216,6 +224,10 @@ enum HostCommands {
     Doctor { alias: String },
     /// Register one existing Git checkout on a verified SSH host.
     RegisterCheckout { alias: String, checkout: String },
+    /// Install or reconcile a remote exact observer profile before native review.
+    PrepareObserver { alias: String },
+    /// Remove only an exact remote observer profile after managed Runtimes stop.
+    RemoveObserver { alias: String },
     /// Start or cold-resume one remote Workstream at an observed revision.
     Start {
         alias: String,
@@ -288,7 +300,9 @@ const fn is_provider_surface_command(command: Option<&Commands>) -> bool {
         Some(
             Commands::ProviderAttach { .. }
                 | Commands::ProviderRemoteAttach { .. }
+                | Commands::ProviderRemoteObserverReview { .. }
                 | Commands::ObserverReview
+                | Commands::RemoteObserverReview
                 | Commands::RemoteAttach { .. }
                 | Commands::RuntimeLaunch { .. }
         )
@@ -329,6 +343,13 @@ fn execute(cli: Cli) -> Result<(), AppError> {
         }
         Commands::ProviderWait => return provider_wait(),
         Commands::ObserverReview => return observer_review(&root),
+        Commands::RemoteObserverReview => {
+            observer_review_once(&root);
+            return Ok(());
+        }
+        Commands::ProviderRemoteObserverReview { host_alias } => {
+            return provider_remote_observer_review(&root, &host_alias);
+        }
         Commands::ProviderAttach {
             workstream_id,
             presentation_socket,
@@ -465,6 +486,8 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
         | Commands::NavigatorPane { .. }
         | Commands::ProviderWait
         | Commands::ObserverReview
+        | Commands::RemoteObserverReview
+        | Commands::ProviderRemoteObserverReview { .. }
         | Commands::ProviderAttach { .. }
         | Commands::ProviderRemoteAttach { .. }
         | Commands::Hook
@@ -547,6 +570,8 @@ fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError>
         HostCommands::RegisterCheckout { alias, checkout } => {
             register_remote_checkout(&catalog, &alias, &checkout)
         }
+        HostCommands::PrepareObserver { alias } => prepare_remote_observer(&catalog, &alias),
+        HostCommands::RemoveObserver { alias } => remove_remote_observer(&catalog, &alias),
         HostCommands::Start {
             alias,
             workstream_id,
@@ -717,6 +742,18 @@ fn register_remote_checkout(
         },
     )?;
     println!("registered workstream {workstream_id}");
+    Ok(())
+}
+
+fn prepare_remote_observer(catalog: &ClientCatalog, alias: &str) -> Result<(), AppError> {
+    apply_remote_action(catalog, alias, crate::protocol::HostAction::PrepareObserver)?;
+    println!("remote observer profile is ready for native hook review");
+    Ok(())
+}
+
+fn remove_remote_observer(catalog: &ClientCatalog, alias: &str) -> Result<(), AppError> {
+    apply_remote_action(catalog, alias, crate::protocol::HostAction::RemoveObserver)?;
+    println!("remote observer profile removed");
     Ok(())
 }
 
@@ -996,6 +1033,19 @@ fn provider_remote_attach(
     provider_wait()
 }
 
+/// Runs the remote observer review only in the presentation provider pane.
+/// Codex owns every visible byte. This helper intentionally discards transport
+/// diagnostics and returns to the blank pane after the native review exits.
+fn provider_remote_observer_review(root: &StateRoot, host_alias: &str) -> Result<(), AppError> {
+    let _ = (|| -> Result<(), AppError> {
+        let catalog = ClientCatalog::open(root)?;
+        let endpoint = checked_ssh_endpoint(&catalog, host_alias)?;
+        crate::transport::review_observer_ssh(&endpoint)?;
+        Ok(())
+    })();
+    provider_wait()
+}
+
 fn registered_ssh_endpoint(catalog: &ClientCatalog, alias: &str) -> Result<SshEndpoint, AppError> {
     let host = catalog.host(alias)?.ok_or(AppError::UnknownHostAlias)?;
     let ClientHostTransport::Ssh { destination } = host.transport else {
@@ -1146,7 +1196,7 @@ fn setup(root: &StateRoot, registry: &mut HostRegistry, skip_review: bool) -> Re
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ObserverActivation {
+pub(crate) enum ObserverActivation {
     Ready,
     ReviewRequired,
 }
@@ -1156,7 +1206,7 @@ enum ObserverActivation {
 /// `wsnav` itself is the explicit user intent for this bounded setup action.
 /// It never trusts a hook, rewrites an unowned declaration, or changes a
 /// profile while a managed Runtime is live.
-fn prepare_observer_activation(
+pub(crate) fn prepare_observer_activation(
     root: &StateRoot,
     registry: &mut HostRegistry,
 ) -> Result<ObserverActivation, AppError> {
@@ -1277,6 +1327,17 @@ fn doctor(root: &StateRoot, registry: &mut HostRegistry) -> Result<(), AppError>
 }
 
 fn remove_observer(root: &StateRoot, registry: &mut HostRegistry) -> Result<(), AppError> {
+    remove_observer_exact(root, registry)?;
+    println!("observer profile removed");
+    Ok(())
+}
+
+/// Removes only the exact observer declaration. The remote control service
+/// uses this silent helper so its protocol stdout remains one framed response.
+pub(crate) fn remove_observer_exact(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+) -> Result<(), AppError> {
     if registry.has_live_runtime()? {
         return Err(AppError::LiveRuntimePreventsRemoval);
     }
@@ -1285,7 +1346,6 @@ fn remove_observer(root: &StateRoot, registry: &mut HostRegistry) -> Result<(), 
         .ok_or(AppError::ObserverNotInstalled)?;
     observer_profile(root)?.remove(&integration.ownership)?;
     registry.remove_codex_integration(&integration.ownership)?;
-    println!("observer profile removed");
     Ok(())
 }
 
@@ -1326,9 +1386,13 @@ fn finalize_native_trust(
 /// this helper silently reconciles native trust and returns the pane to its
 /// blank wait state.
 fn observer_review(root: &StateRoot) -> Result<(), AppError> {
+    observer_review_once(root);
+    provider_wait()
+}
+
+fn observer_review_once(root: &StateRoot) {
     let _ = native_trust_review_in_provider_pane(root);
     let _ = reconcile_observer_review(root);
-    provider_wait()
 }
 
 fn reconcile_observer_review(root: &StateRoot) -> Result<(), AppError> {
@@ -1715,7 +1779,7 @@ fn default_state_root() -> PathBuf {
 
 /// User-facing local-command failures.
 #[derive(Debug, Error)]
-enum AppError {
+pub(crate) enum AppError {
     #[error("native tmux attach failed")]
     AttachFailed,
     #[error("attention revision is invalid")]

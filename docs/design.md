@@ -1159,7 +1159,10 @@ shows retained Workstream, ProjectLocation, and unresolved-operation counts so
 the visibility effect is explicit. The protected local host cannot be
 forgotten. If an observer review is required, its native profile-selected
 Codex TUI runs in the right provider pane through the same local or SSH terminal
-boundary and leaves no Workstream behind.
+boundary and leaves no Workstream behind. Remote review uses a one-shot remote
+endpoint that returns after the native Codex TUI exits; the local provider pane
+then resumes its own blank wait state, so no SSH review connection becomes a
+second remote persistence layer.
 
 Navigator page changes, forms, and finite management actions leave the current
 provider attachment and focus unchanged. Only an explicit Workstream primary

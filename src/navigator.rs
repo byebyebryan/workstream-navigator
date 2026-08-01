@@ -40,6 +40,7 @@ use crate::{
     },
     presentation::{AttachmentPhase, AttachmentStatus, Presentation, PresentationError},
     process::{BoundedProcessError, output_bounded},
+    protocol::ObserverStatus,
     provider::codex::names::{NameContext, resolve_name},
     runtime::{
         LinuxProcessProbe, PrivateRuntime, RuntimeError, RuntimePaths, RuntimeProbe, SystemTmux,
@@ -187,6 +188,7 @@ pub struct NavigatorOperation {
 pub struct NavigatorHostOverview {
     pub alias: String,
     pub reachability: RemoteHostReachability,
+    pub observer_status: ObserverStatus,
 }
 
 /// Reads a fresh local-only navigator projection from the durable host state.
@@ -202,6 +204,7 @@ pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, Naviga
     crate::actions::reconcile_lost_runtimes(root, &mut registry)?;
     crate::repository::refresh_pending_metadata(&mut registry)?;
     let host = registry.identity()?;
+    let observer_status = observer_status(&registry)?;
     let mut catalog = ClientCatalog::open(root)?;
     let executable = std::env::current_exe().map_err(NavigatorError::CurrentExecutable)?;
     let workstreams = registry
@@ -225,11 +228,27 @@ pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, Naviga
         hosts: vec![NavigatorHostOverview {
             alias: "local".to_owned(),
             reachability: RemoteHostReachability::Reachable,
+            observer_status,
         }],
         unreachable_hosts: Vec::new(),
         unresolved_operation_count: unresolved_operations.len(),
         unresolved_operations,
     })
+}
+
+fn observer_status(registry: &HostRegistry) -> Result<ObserverStatus, NavigatorError> {
+    Ok(
+        match registry
+            .codex_integration()?
+            .map(|integration| integration.lifecycle)
+        {
+            None => ObserverStatus::NotInstalled,
+            Some(IntegrationLifecycle::TrustPending) => ObserverStatus::TrustPending,
+            Some(IntegrationLifecycle::Ready) => ObserverStatus::Ready,
+            Some(IntegrationLifecycle::Modified) => ObserverStatus::Modified,
+            Some(IntegrationLifecycle::Disabled) => ObserverStatus::Disabled,
+        },
+    )
 }
 
 fn project_workstream(
@@ -466,6 +485,7 @@ struct CachedRemoteHost {
     workstreams: Vec<NavigatorWorkstream>,
     unresolved_operation_count: usize,
     unresolved_operations: Vec<NavigatorOperation>,
+    observer_status: ObserverStatus,
     reachable: bool,
     pending: bool,
     next_poll: Instant,
@@ -515,6 +535,7 @@ impl RemoteMonitor {
                     workstreams: Vec::new(),
                     unresolved_operation_count: 0,
                     unresolved_operations: Vec::new(),
+                    observer_status: ObserverStatus::NotInstalled,
                     reachable: false,
                     pending: false,
                     next_poll: now,
@@ -564,6 +585,7 @@ impl RemoteMonitor {
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 host.unresolved_operation_count = usize::from(snapshot.unresolved_operation_count);
+                host.observer_status = snapshot.observer_status;
                 host.unresolved_operations = operations
                     .operations
                     .into_iter()
@@ -603,6 +625,7 @@ impl RemoteMonitor {
                 } else {
                     RemoteHostReachability::Unreachable
                 },
+                observer_status: host.observer_status,
             });
             local
                 .workstreams
@@ -811,6 +834,15 @@ impl WorkstreamScope {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NavigatorModal {
     ConfirmArchive(NavigatorWorkstream),
+    ConfirmRemoveObserver {
+        alias: String,
+    },
+    ConfirmForgetHost {
+        alias: String,
+        workstream_count: usize,
+        location_count: usize,
+        unresolved_operation_count: usize,
+    },
     Rename {
         workstream: NavigatorWorkstream,
         value: String,
@@ -821,6 +853,9 @@ enum NavigatorModal {
     },
     RegisterCheckout {
         host: NavigatorHost,
+        value: String,
+    },
+    RegisterHost {
         value: String,
     },
 }
@@ -853,7 +888,10 @@ struct NavigatorProjectLocation {
 struct NavigatorHostSummary {
     alias: String,
     reachability: RemoteHostReachability,
+    observer_status: ObserverStatus,
     workstream_count: usize,
+    location_count: usize,
+    unresolved_operation_count: usize,
     latest_activity_at_millis: Option<i64>,
 }
 
@@ -1202,16 +1240,23 @@ impl NavigatorView {
             .map(|host| NavigatorHostSummary {
                 alias: host.alias.clone(),
                 reachability: host.reachability,
+                observer_status: host.observer_status,
                 workstream_count: 0,
+                location_count: 0,
+                unresolved_operation_count: 0,
                 latest_activity_at_millis: None,
             })
             .collect::<Vec<_>>();
+        let mut locations = BTreeSet::new();
         for workstream in &self.snapshot.workstreams {
             if let Some(host) = hosts
                 .iter_mut()
                 .find(|host| host.alias == workstream.host.alias())
             {
                 host.workstream_count += 1;
+                if locations.insert((workstream.host.alias().to_owned(), workstream.location_id)) {
+                    host.location_count += 1;
+                }
                 host.latest_activity_at_millis = host
                     .latest_activity_at_millis
                     .max(workstream.last_activity_at_millis);
@@ -1223,9 +1268,20 @@ impl NavigatorView {
                     } else {
                         RemoteHostReachability::Unreachable
                     },
+                    observer_status: ObserverStatus::NotInstalled,
                     workstream_count: 1,
+                    location_count: 1,
+                    unresolved_operation_count: 0,
                     latest_activity_at_millis: workstream.last_activity_at_millis,
                 });
+            }
+        }
+        for operation in &self.snapshot.unresolved_operations {
+            if let Some(host) = hosts
+                .iter_mut()
+                .find(|host| host.alias == operation.host.alias())
+            {
+                host.unresolved_operation_count += 1;
             }
         }
         hosts.sort_by(|left, right| {
@@ -1537,6 +1593,30 @@ impl NavigatorView {
         self.modal = Some(NavigatorModal::Rename {
             value: workstream.display_name.clone(),
             workstream,
+        });
+    }
+
+    fn selected_host_summary(&self) -> Option<NavigatorHostSummary> {
+        let alias = self.selected_host.as_deref()?;
+        self.hosts().into_iter().find(|host| host.alias == alias)
+    }
+
+    fn begin_host_registration(&mut self) {
+        self.modal = Some(NavigatorModal::RegisterHost {
+            value: String::new(),
+        });
+    }
+
+    fn begin_observer_removal(&mut self, alias: String) {
+        self.modal = Some(NavigatorModal::ConfirmRemoveObserver { alias });
+    }
+
+    fn begin_host_forget(&mut self, host: NavigatorHostSummary) {
+        self.modal = Some(NavigatorModal::ConfirmForgetHost {
+            alias: host.alias,
+            workstream_count: host.workstream_count,
+            location_count: host.location_count,
+            unresolved_operation_count: host.unresolved_operation_count,
         });
     }
 
@@ -1969,12 +2049,21 @@ impl NavigatorView {
         frame.render_widget(
             Paragraph::new(vec![
                 Line::from(Span::styled(
-                    host.alias,
+                    host.alias.clone(),
                     Style::default().add_modifier(Modifier::BOLD),
                 )),
                 Line::raw(reachability),
                 Line::raw(workstream_label),
-                Line::raw("Enter or Esc returns to the Host list"),
+                Line::raw(format!(
+                    "Observer: {}",
+                    observer_status_label(host.observer_status)
+                )),
+                Line::raw("v verify · a activate/review · r remove observer"),
+                Line::raw(if host.alias == "local" {
+                    "Enter or Esc returns to the Host list"
+                } else {
+                    "x forget client registration · Enter/Esc returns"
+                }),
             ])
             .block(Block::default().borders(Borders::ALL).title(" Host ")),
             area,
@@ -2268,6 +2357,14 @@ impl NavigatorView {
                 bindings.push(("n", "start location"));
                 bindings.push(("a", "add checkout"));
             }
+            if matches!(detail, NavigatorDetail::Host(_)) {
+                bindings.extend([
+                    ("v", "verify"),
+                    ("a", "activate"),
+                    ("r", "remove observer"),
+                    ("x", "forget remote"),
+                ]);
+            }
             bindings.push(("?", "keys"));
             return bindings;
         }
@@ -2305,6 +2402,7 @@ impl NavigatorView {
             ],
             NavigatorPage::Hosts => vec![
                 ("Enter", "details"),
+                ("n", "register remote"),
                 ("1", "workstreams"),
                 ("2", "projects"),
                 ("?", "keys"),
@@ -2373,8 +2471,11 @@ fn navigator_modal_area(outer: Rect, modal: &NavigatorModal) -> Rect {
     let desired_height = match modal {
         NavigatorModal::SelectRegistrationHost { hosts, .. } => hosts.len().saturating_add(4),
         NavigatorModal::ConfirmArchive(_)
+        | NavigatorModal::ConfirmRemoveObserver { .. }
+        | NavigatorModal::ConfirmForgetHost { .. }
         | NavigatorModal::Rename { .. }
-        | NavigatorModal::RegisterCheckout { .. } => 7,
+        | NavigatorModal::RegisterCheckout { .. }
+        | NavigatorModal::RegisterHost { .. } => 7,
     };
     let height = outer
         .height
@@ -2412,6 +2513,19 @@ fn navigator_modal_content(modal: NavigatorModal) -> (String, Vec<Line<'static>>
                 ]),
             ],
         ),
+        NavigatorModal::ConfirmRemoveObserver { alias } => observer_removal_modal(alias, key),
+        NavigatorModal::ConfirmForgetHost {
+            alias,
+            workstream_count,
+            location_count,
+            unresolved_operation_count,
+        } => forget_host_modal(
+            alias,
+            workstream_count,
+            location_count,
+            unresolved_operation_count,
+            key,
+        ),
         NavigatorModal::Rename { value, .. } => (
             " Rename Workstream ".to_owned(),
             vec![
@@ -2431,32 +2545,7 @@ fn navigator_modal_content(modal: NavigatorModal) -> (String, Vec<Line<'static>>
             ],
         ),
         NavigatorModal::SelectRegistrationHost { hosts, selected } => {
-            let mut lines = vec![Line::raw("Choose the host that owns this checkout:")];
-            lines.extend(hosts.into_iter().enumerate().map(|(index, host)| {
-                let marker = if index == selected { "> " } else { "  " };
-                let availability = if host.is_reachable() {
-                    ""
-                } else {
-                    " · unavailable"
-                };
-                Line::from(Span::styled(
-                    format!("{marker}{}{}", host.alias(), availability),
-                    if index == selected {
-                        Style::default()
-                            .fg(Color::White)
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default().fg(Color::Gray)
-                    },
-                ))
-            }));
-            lines.push(Line::from(vec![
-                Span::styled("Enter", key),
-                Span::raw(" choose   "),
-                Span::styled("Esc", key),
-                Span::raw(" cancel"),
-            ]));
-            (" Register checkout · choose host ".to_owned(), lines)
+            registration_host_picker_modal(hosts, selected, key)
         }
         NavigatorModal::RegisterCheckout { host, value } => (
             if host.is_remote() {
@@ -2484,7 +2573,114 @@ fn navigator_modal_content(modal: NavigatorModal) -> (String, Vec<Line<'static>>
                 ]),
             ],
         ),
+        NavigatorModal::RegisterHost { value } => register_host_modal(&value, key),
     }
+}
+
+fn observer_removal_modal(alias: String, key: Style) -> (String, Vec<Line<'static>>) {
+    (
+        " Remove observer profile ".to_owned(),
+        vec![
+            modal_emphasis(alias),
+            Line::raw("Removes only WSNav's exact observer profile after live Runtimes stop."),
+            confirmation_line("remove", key),
+        ],
+    )
+}
+
+fn forget_host_modal(
+    alias: String,
+    workstream_count: usize,
+    location_count: usize,
+    unresolved_operation_count: usize,
+    key: Style,
+) -> (String, Vec<Line<'static>>) {
+    (
+        " Forget remote host ".to_owned(),
+        vec![
+            modal_emphasis(alias),
+            Line::raw(format!(
+                "Retains {workstream_count} Workstreams on the host; removes {location_count} local Project locations."
+            )),
+            Line::raw(format!(
+                "{unresolved_operation_count} unresolved operation{} remain remote. No remote connection is made.",
+                if unresolved_operation_count == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            )),
+            confirmation_line("forget", key),
+        ],
+    )
+}
+
+fn registration_host_picker_modal(
+    hosts: Vec<NavigatorHost>,
+    selected: usize,
+    key: Style,
+) -> (String, Vec<Line<'static>>) {
+    let mut lines = vec![Line::raw("Choose the host that owns this checkout:")];
+    lines.extend(hosts.into_iter().enumerate().map(|(index, host)| {
+        let marker = if index == selected { "> " } else { "  " };
+        let availability = if host.is_reachable() {
+            ""
+        } else {
+            " · unavailable"
+        };
+        Line::from(Span::styled(
+            format!("{marker}{}{}", host.alias(), availability),
+            if index == selected {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ))
+    }));
+    lines.push(Line::from(vec![
+        Span::styled("Enter", key),
+        Span::raw(" choose   "),
+        Span::styled("Esc", key),
+        Span::raw(" cancel"),
+    ]));
+    (" Register checkout · choose host ".to_owned(), lines)
+}
+
+fn register_host_modal(value: &str, key: Style) -> (String, Vec<Line<'static>>) {
+    (
+        " Register remote host ".to_owned(),
+        vec![
+            Line::raw("Enter a configured SSH host alias (for example, snap):"),
+            modal_emphasis(truncate_display(value, 44)),
+            Line::raw("Uses the standard remote wsnav installation."),
+            Line::from(vec![
+                Span::styled("Enter", key),
+                Span::raw(" verify and register   "),
+                Span::styled("Esc", key),
+                Span::raw(" cancel"),
+            ]),
+        ],
+    )
+}
+
+fn modal_emphasis(value: String) -> Line<'static> {
+    Line::from(Span::styled(
+        value,
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn confirmation_line(action: &'static str, key: Style) -> Line<'static> {
+    Line::from(vec![
+        Span::styled("Enter/y", key),
+        Span::raw(format!(" {action}   ")),
+        Span::styled("Esc/n", key),
+        Span::raw(" cancel"),
+    ])
 }
 
 fn binding_line(bindings: &[(&str, &str)]) -> Line<'static> {
@@ -2557,6 +2753,8 @@ fn help_lines(
                     Span::raw("          register another existing checkout"),
                 ]),
             ]);
+        } else if page == NavigatorPage::Hosts {
+            lines.extend(host_detail_help_lines(key));
         }
     } else if page == NavigatorPage::Workstreams {
         lines.extend(workstream_help_lines(workstream_scope, heading, key));
@@ -2573,6 +2771,11 @@ fn help_lines(
             page_lines.push(Line::from(vec![
                 Span::styled("n", key),
                 Span::raw("          register an existing checkout"),
+            ]));
+        } else if page == NavigatorPage::Hosts {
+            page_lines.push(Line::from(vec![
+                Span::styled("n", key),
+                Span::raw("          verify and register a remote SSH host"),
             ]));
         }
         lines.extend(page_lines);
@@ -2598,6 +2801,26 @@ fn help_lines(
         ]),
     ]);
     lines
+}
+
+fn host_detail_help_lines(key: Style) -> Vec<Line<'static>> {
+    [
+        (
+            "v",
+            "          verify registered host identity and capabilities",
+        ),
+        (
+            "a",
+            "          activate observer and open native hook review",
+        ),
+        ("r", "          remove only WSNav's exact observer profile"),
+        ("x", "          forget remote client registration only"),
+    ]
+    .into_iter()
+    .map(|(shortcut, description)| {
+        Line::from(vec![Span::styled(shortcut, key), Span::raw(description)])
+    })
+    .collect()
 }
 
 fn workstream_help_lines(scope: WorkstreamScope, heading: Style, key: Style) -> Vec<Line<'static>> {
@@ -2796,8 +3019,31 @@ fn host_overview_item(host: &NavigatorHostSummary) -> ListItem<'static> {
                     RemoteHostReachability::Unreachable => Color::Yellow,
                 }),
             ),
+            Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                observer_status_label(host.observer_status),
+                Style::default().fg(observer_status_color(host.observer_status)),
+            ),
         ]),
     ])
+}
+
+const fn observer_status_label(status: ObserverStatus) -> &'static str {
+    match status {
+        ObserverStatus::NotInstalled => "observer not installed",
+        ObserverStatus::TrustPending => "observer review needed",
+        ObserverStatus::Ready => "observer ready",
+        ObserverStatus::Modified => "observer changed",
+        ObserverStatus::Disabled => "observer disabled",
+    }
+}
+
+const fn observer_status_color(status: ObserverStatus) -> Color {
+    match status {
+        ObserverStatus::Ready => Color::Green,
+        ObserverStatus::TrustPending | ObserverStatus::Modified => Color::Yellow,
+        ObserverStatus::NotInstalled | ObserverStatus::Disabled => Color::Gray,
+    }
 }
 
 fn project_header_item(
@@ -3222,16 +3468,7 @@ fn handle_navigator_key(
         recover_selected_operation(root, remote, view);
         return false;
     }
-    if matches!(view.detail, Some(NavigatorDetail::Project(_)))
-        && matches!(key.code, KeyCode::Char('n'))
-    {
-        create_workstream_from_selected_project_location(root, presentation, remote, view);
-        return false;
-    }
-    if matches!(view.detail, Some(NavigatorDetail::Project(_)))
-        && matches!(key.code, KeyCode::Char('a'))
-    {
-        view.begin_checkout_registration();
+    if handle_detail_key(key.code, root, presentation, remote, view) {
         return false;
     }
     let workstreams = view.page() == NavigatorPage::Workstreams && view.detail.is_none();
@@ -3273,6 +3510,10 @@ fn handle_navigator_key(
             view.begin_checkout_registration();
             false
         }
+        KeyCode::Char('n') if view.page() == NavigatorPage::Hosts && view.detail.is_none() => {
+            view.begin_host_registration();
+            false
+        }
         KeyCode::Down | KeyCode::Char('j') => {
             view.select_next();
             false
@@ -3302,6 +3543,31 @@ fn handle_navigator_key(
         }
         _ => false,
     }
+}
+
+fn handle_detail_key(
+    key: KeyCode,
+    root: &StateRoot,
+    presentation: &Presentation,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+) -> bool {
+    match (&view.detail, key) {
+        (Some(NavigatorDetail::Project(_)), KeyCode::Char('n')) => {
+            create_workstream_from_selected_project_location(root, presentation, remote, view);
+        }
+        (Some(NavigatorDetail::Project(_)), KeyCode::Char('a')) => {
+            view.begin_checkout_registration();
+        }
+        (Some(NavigatorDetail::Host(_)), KeyCode::Char('v')) => verify_selected_host(root, view),
+        (Some(NavigatorDetail::Host(_)), KeyCode::Char('a')) => {
+            activate_selected_host(root, presentation, remote, view);
+        }
+        (Some(NavigatorDetail::Host(_)), KeyCode::Char('r')) => remove_selected_host_observer(view),
+        (Some(NavigatorDetail::Host(_)), KeyCode::Char('x')) => forget_selected_host(view),
+        _ => return false,
+    }
+    true
 }
 
 fn handle_workstream_action_key(
@@ -3345,7 +3611,14 @@ fn handle_navigator_modal_key(
         return false;
     }
     if matches!(key.code, KeyCode::Char('n'))
-        && matches!(view.modal, Some(NavigatorModal::ConfirmArchive(_)))
+        && matches!(
+            view.modal,
+            Some(
+                NavigatorModal::ConfirmArchive(_)
+                    | NavigatorModal::ConfirmRemoveObserver { .. }
+                    | NavigatorModal::ConfirmForgetHost { .. }
+            )
+        )
     {
         view.dismiss_modal();
         return false;
@@ -3364,40 +3637,20 @@ fn handle_navigator_modal_key(
         }
     }
     if matches!(key.code, KeyCode::Enter) {
-        match view.confirm_modal() {
-            Some(NavigatorModal::ConfirmArchive(workstream)) => {
-                archive_workstream(root, remote, view, &workstream);
-            }
-            Some(NavigatorModal::Rename { workstream, value }) => {
-                rename_workstream(root, remote, view, &workstream, &value);
-            }
-            Some(NavigatorModal::SelectRegistrationHost { hosts, selected }) => {
-                if let Some(host) = hosts.get(selected).cloned() {
-                    view.modal = Some(NavigatorModal::RegisterCheckout {
-                        host,
-                        value: String::new(),
-                    });
-                } else {
-                    view.set_message("no registered host is available for checkout registration");
-                }
-            }
-            Some(NavigatorModal::RegisterCheckout { host, value }) if value.trim().is_empty() => {
-                view.modal = Some(NavigatorModal::RegisterCheckout { host, value });
-                view.set_message("enter an existing Git checkout path");
-            }
-            Some(NavigatorModal::RegisterCheckout { host, value }) => {
-                register_checkout(root, remote, view, &host, &value);
-            }
-            None => {}
-        }
+        confirm_navigator_modal(root, remote, view);
         return false;
     }
     if matches!(key.code, KeyCode::Char('y'))
-        && matches!(view.modal, Some(NavigatorModal::ConfirmArchive(_)))
+        && matches!(
+            view.modal,
+            Some(
+                NavigatorModal::ConfirmArchive(_)
+                    | NavigatorModal::ConfirmRemoveObserver { .. }
+                    | NavigatorModal::ConfirmForgetHost { .. }
+            )
+        )
     {
-        if let Some(NavigatorModal::ConfirmArchive(workstream)) = view.confirm_modal() {
-            archive_workstream(root, remote, view, &workstream);
-        }
+        confirm_navigator_modal(root, remote, view);
         return false;
     }
     match view.modal.as_mut() {
@@ -3421,10 +3674,77 @@ fn handle_navigator_modal_key(
             }
             _ => {}
         },
-        Some(NavigatorModal::ConfirmArchive(_) | NavigatorModal::SelectRegistrationHost { .. })
+        Some(NavigatorModal::RegisterHost { value }) => match key.code {
+            KeyCode::Backspace => {
+                value.pop();
+            }
+            KeyCode::Char(character) if !character.is_control() && value.len() < 255 => {
+                value.push(character);
+            }
+            _ => {}
+        },
+        Some(
+            NavigatorModal::ConfirmArchive(_)
+            | NavigatorModal::ConfirmRemoveObserver { .. }
+            | NavigatorModal::ConfirmForgetHost { .. }
+            | NavigatorModal::SelectRegistrationHost { .. },
+        )
         | None => {}
     }
     false
+}
+
+fn confirm_navigator_modal(root: &StateRoot, remote: &mut RemoteMonitor, view: &mut NavigatorView) {
+    match view.confirm_modal() {
+        Some(NavigatorModal::ConfirmArchive(workstream)) => {
+            archive_workstream(root, remote, view, &workstream);
+        }
+        Some(NavigatorModal::ConfirmRemoveObserver { alias }) => {
+            remove_host_observer(root, remote, view, &alias);
+        }
+        Some(NavigatorModal::ConfirmForgetHost {
+            alias,
+            workstream_count,
+            location_count,
+            unresolved_operation_count,
+        }) => forget_host(
+            root,
+            remote,
+            view,
+            &alias,
+            workstream_count,
+            location_count,
+            unresolved_operation_count,
+        ),
+        Some(NavigatorModal::Rename { workstream, value }) => {
+            rename_workstream(root, remote, view, &workstream, &value);
+        }
+        Some(NavigatorModal::SelectRegistrationHost { hosts, selected }) => {
+            if let Some(host) = hosts.get(selected).cloned() {
+                view.modal = Some(NavigatorModal::RegisterCheckout {
+                    host,
+                    value: String::new(),
+                });
+            } else {
+                view.set_message("no registered host is available for checkout registration");
+            }
+        }
+        Some(NavigatorModal::RegisterCheckout { host, value }) if value.trim().is_empty() => {
+            view.modal = Some(NavigatorModal::RegisterCheckout { host, value });
+            view.set_message("enter an existing Git checkout path");
+        }
+        Some(NavigatorModal::RegisterCheckout { host, value }) => {
+            register_checkout(root, remote, view, &host, &value);
+        }
+        Some(NavigatorModal::RegisterHost { value }) if value.trim().is_empty() => {
+            view.modal = Some(NavigatorModal::RegisterHost { value });
+            view.set_message("enter an SSH destination to register");
+        }
+        Some(NavigatorModal::RegisterHost { value }) => {
+            register_remote_host(root, remote, view, &value);
+        }
+        None => {}
+    }
 }
 
 fn handle_navigator_mouse(
@@ -3902,6 +4222,169 @@ fn register_checkout(
     }
 }
 
+fn run_navigator_command(root: &StateRoot, arguments: &[&str]) -> Result<(), NavigatorError> {
+    let executable = std::env::current_exe().map_err(NavigatorError::ActionLaunch)?;
+    let mut command = Command::new(executable);
+    command.arg("--state-root").arg(root.base()).args(arguments);
+    let output =
+        output_bounded(&mut command, 1024, 1024).map_err(NavigatorError::from_action_process)?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(NavigatorError::ActionFailed)
+    }
+}
+
+fn register_remote_host(
+    root: &StateRoot,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+    destination: &str,
+) {
+    let destination = destination.trim();
+    match run_navigator_command(root, &["register-remote", destination]) {
+        Ok(()) => {
+            remote.request_soon(destination);
+            refresh_view(root, remote, view);
+            view.set_message("remote host verified and registered");
+        }
+        Err(error) => view.set_message(action_message(&error)),
+    }
+}
+
+fn verify_selected_host(root: &StateRoot, view: &mut NavigatorView) {
+    let Some(host) = view.selected_host_summary() else {
+        view.set_message("no Host is selected");
+        return;
+    };
+    let result = if host.alias == "local" {
+        run_navigator_command(root, &["doctor"])
+    } else {
+        run_navigator_command(root, &["host", "doctor", &host.alias])
+    };
+    match result {
+        Ok(()) => view.set_message("host identity and capabilities verified"),
+        Err(error) => view.set_message(action_message(&error)),
+    }
+}
+
+fn activate_selected_host(
+    root: &StateRoot,
+    presentation: &Presentation,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+) {
+    let Some(host) = view.selected_host_summary() else {
+        view.set_message("no Host is selected");
+        return;
+    };
+    if host.observer_status == ObserverStatus::Ready {
+        view.set_message("observer is already ready on this host");
+        return;
+    }
+    if host.alias != "local" && host.reachability == RemoteHostReachability::Unreachable {
+        view.set_message("remote host is unavailable; observer activation was not sent");
+        return;
+    }
+    let prepared = if host.alias == "local" {
+        run_navigator_command(root, &["setup", "--skip-review"])
+    } else {
+        run_navigator_command(root, &["host", "prepare-observer", &host.alias])
+    };
+    if let Err(error) = prepared {
+        view.set_message(action_message(&error));
+        return;
+    }
+    let review = if host.alias == "local" {
+        presentation.start_observer_review()
+    } else {
+        presentation.start_remote_observer_review(&host.alias)
+    };
+    match review.and_then(|()| presentation.focus_provider()) {
+        Ok(()) => {
+            remote.request_soon(&host.alias);
+            refresh_view(root, remote, view);
+            view.set_message(
+                "approve the exact observer hooks in the native Codex pane, then exit Codex",
+            );
+        }
+        Err(error) => view.set_message(action_message(&error)),
+    }
+}
+
+fn remove_selected_host_observer(view: &mut NavigatorView) {
+    let Some(host) = view.selected_host_summary() else {
+        view.set_message("no Host is selected");
+        return;
+    };
+    if host.observer_status == ObserverStatus::NotInstalled {
+        view.set_message("no WSNav observer profile is installed on this host");
+        return;
+    }
+    if host.alias != "local" && host.reachability == RemoteHostReachability::Unreachable {
+        view.set_message("remote host is unavailable; observer removal was not sent");
+        return;
+    }
+    view.begin_observer_removal(host.alias);
+}
+
+fn remove_host_observer(
+    root: &StateRoot,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+    alias: &str,
+) {
+    let result = if alias == "local" {
+        run_navigator_command(root, &["remove-observer"])
+    } else {
+        run_navigator_command(root, &["host", "remove-observer", alias])
+    };
+    match result {
+        Ok(()) => {
+            remote.request_soon(alias);
+            refresh_view(root, remote, view);
+            view.set_message("exact WSNav observer profile removed; Workstreams were retained");
+        }
+        Err(error) => view.set_message(action_message(&error)),
+    }
+}
+
+fn forget_selected_host(view: &mut NavigatorView) {
+    let Some(host) = view.selected_host_summary() else {
+        view.set_message("no Host is selected");
+        return;
+    };
+    if host.alias == "local" {
+        view.set_message("the local Host is protected and cannot be forgotten");
+        return;
+    }
+    view.begin_host_forget(host);
+}
+
+fn forget_host(
+    root: &StateRoot,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+    alias: &str,
+    workstream_count: usize,
+    location_count: usize,
+    unresolved_operation_count: usize,
+) {
+    // `host reset` changes only this client catalog. It deliberately does not
+    // call the remote host or alter retained remote workstreams.
+    match run_navigator_command(root, &["host", "reset", alias]) {
+        Ok(()) => {
+            refresh_view(root, remote, view);
+            view.set_message(format!(
+                "forgot {alias}: {workstream_count} remote Workstreams and {unresolved_operation_count} operation{} retained; {location_count} local Project location{} removed",
+                if unresolved_operation_count == 1 { "" } else { "s" },
+                if location_count == 1 { "" } else { "s" },
+            ));
+        }
+        Err(error) => view.set_message(action_message(&error)),
+    }
+}
+
 fn refresh_attachment_status(presentation: &Presentation, view: &mut NavigatorView) {
     match presentation.attachment_status() {
         Ok(Some(status)) => view.observe_attachment(&status),
@@ -4237,10 +4720,12 @@ mod tests {
                 NavigatorHostOverview {
                     alias: "local".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
+                    observer_status: ObserverStatus::NotInstalled,
                 },
                 NavigatorHostOverview {
                     alias: "snap".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
+                    observer_status: ObserverStatus::NotInstalled,
                 },
             ],
             unreachable_hosts: Vec::new(),
@@ -4716,6 +5201,7 @@ mod tests {
             hosts: vec![NavigatorHostOverview {
                 alias: "snap".to_owned(),
                 reachability: RemoteHostReachability::Reachable,
+                observer_status: ObserverStatus::NotInstalled,
             }],
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 2,
@@ -4981,14 +5467,17 @@ mod tests {
                 NavigatorHostOverview {
                     alias: "local".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
+                    observer_status: ObserverStatus::NotInstalled,
                 },
                 NavigatorHostOverview {
                     alias: "snap".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
+                    observer_status: ObserverStatus::NotInstalled,
                 },
                 NavigatorHostOverview {
                     alias: "spare".to_owned(),
                     reachability: RemoteHostReachability::Unreachable,
+                    observer_status: ObserverStatus::NotInstalled,
                 },
             ],
             unreachable_hosts: Vec::new(),
@@ -5035,6 +5524,55 @@ mod tests {
     }
 
     #[test]
+    fn host_page_exposes_observer_lifecycle_without_provider_or_location_identifiers() {
+        let workstream_id = WorkstreamId::new();
+        let location_id = LocationId::new();
+        let mut remote = row(workstream_id, NavigatorRuntimeStatus::Idle);
+        remote.host = NavigatorHost::Remote {
+            alias: "snap".to_owned(),
+            reachability: RemoteHostReachability::Reachable,
+        };
+        remote.location_id = location_id;
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![remote],
+            hosts: vec![
+                NavigatorHostOverview {
+                    alias: "local".to_owned(),
+                    reachability: RemoteHostReachability::Reachable,
+                    observer_status: ObserverStatus::Ready,
+                },
+                NavigatorHostOverview {
+                    alias: "snap".to_owned(),
+                    reachability: RemoteHostReachability::Reachable,
+                    observer_status: ObserverStatus::TrustPending,
+                },
+            ],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
+        });
+        view.select_page(NavigatorPage::Hosts);
+        view.select_next();
+        view.open_selected_detail();
+        let mut terminal = Terminal::new(TestBackend::new(100, 12)).unwrap();
+
+        terminal.draw(|frame| view.render(frame)).unwrap();
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+
+        assert!(rendered.contains("Observer: observer review needed"));
+        assert!(rendered.contains("activate/review"));
+        assert!(rendered.contains("forget client registration"));
+        assert!(!rendered.contains(&workstream_id.to_string()));
+        assert!(!rendered.contains(&location_id.to_string()));
+    }
+
+    #[test]
     fn project_detail_selects_host_owned_locations_without_rendering_opaque_ids() {
         let project_id = ProjectId::new();
         let local_location = LocationId::new();
@@ -5077,6 +5615,7 @@ mod tests {
             hosts: vec![NavigatorHostOverview {
                 alias: "snap".to_owned(),
                 reachability: RemoteHostReachability::Reachable,
+                observer_status: ObserverStatus::NotInstalled,
             }],
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
@@ -5126,10 +5665,12 @@ mod tests {
                 NavigatorHostOverview {
                     alias: "local".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
+                    observer_status: ObserverStatus::NotInstalled,
                 },
                 NavigatorHostOverview {
                     alias: "snap".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
+                    observer_status: ObserverStatus::NotInstalled,
                 },
             ],
             unreachable_hosts: Vec::new(),
@@ -5304,6 +5845,7 @@ mod tests {
                 }],
                 unresolved_operation_count: 0,
                 unresolved_operations: Vec::new(),
+                observer_status: ObserverStatus::NotInstalled,
                 reachable: false,
                 pending: false,
                 next_poll: Instant::now(),
@@ -5342,6 +5884,7 @@ mod tests {
                 ],
                 unresolved_operation_count: 0,
                 unresolved_operations: Vec::new(),
+                observer_status: ObserverStatus::NotInstalled,
                 reachable: true,
                 pending: false,
                 next_poll: Instant::now(),

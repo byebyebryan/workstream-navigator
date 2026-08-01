@@ -20,7 +20,7 @@ use crate::build_info::BuildInfo;
 use crate::domain::{RuntimeId, WorkstreamId};
 use crate::protocol::{
     HelloResponse, HostAction, HostRequest, HostResponse, MAX_FRAME_BYTES, MAX_SNAPSHOT_PAGES,
-    OperationsResponse, RequestEnvelope, ResponseEnvelope, SnapshotResponse,
+    ObserverStatus, OperationsResponse, RequestEnvelope, ResponseEnvelope, SnapshotResponse,
 };
 
 const MAX_STDERR_BYTES: usize = 4096;
@@ -412,6 +412,7 @@ impl<R: CommandRunner> HostClient<R> {
         let mut workstreams = Vec::new();
         let mut identities = BTreeSet::new();
         let mut unresolved_operation_count = None;
+        let mut observer_status = None;
         for _ in 0..MAX_SNAPSHOT_PAGES {
             let page = fetch(cursor)?;
             if let Some(expected) = unresolved_operation_count {
@@ -420,6 +421,13 @@ impl<R: CommandRunner> HostClient<R> {
                 }
             } else {
                 unresolved_operation_count = Some(page.unresolved_operation_count);
+            }
+            if let Some(expected) = observer_status {
+                if expected != page.observer_status {
+                    return Err(TransportError::InconsistentSnapshotPage);
+                }
+            } else {
+                observer_status = Some(page.observer_status);
             }
             for workstream in page.workstreams {
                 if !identities.insert(workstream.workstream_id) {
@@ -431,6 +439,7 @@ impl<R: CommandRunner> HostClient<R> {
                 return Ok(SnapshotResponse {
                     workstreams,
                     unresolved_operation_count: unresolved_operation_count.unwrap_or(0),
+                    observer_status: observer_status.unwrap_or(ObserverStatus::NotInstalled),
                     next_cursor: None,
                 });
             };
@@ -541,6 +550,26 @@ pub fn attach_ssh(endpoint: &SshEndpoint, runtime_id: RuntimeId) -> Result<(), T
     }
 }
 
+/// Opens the remote native Codex hook-review surface through the current
+/// terminal. It has no control payload: after SSH connects, the only visible
+/// bytes are the provider's own terminal UI.
+///
+/// # Errors
+///
+/// Returns an error when the fixed interactive SSH review command cannot run.
+pub fn review_observer_ssh(endpoint: &SshEndpoint) -> Result<(), TransportError> {
+    let status = Command::new("ssh")
+        .args(ssh_observer_review_arguments(endpoint))
+        .stderr(Stdio::null())
+        .status()
+        .map_err(TransportError::Launch)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(TransportError::InteractiveObserverReviewFailed)
+    }
+}
+
 fn ssh_invocation(endpoint: &SshEndpoint, request: &RequestEnvelope) -> CommandInvocation {
     CommandInvocation {
         program: OsString::from("ssh"),
@@ -610,6 +639,19 @@ fn ssh_attach_arguments(endpoint: &SshEndpoint, runtime_id: RuntimeId) -> Vec<Os
         OsString::from(endpoint.executable.as_str()),
         OsString::from("_attach"),
         OsString::from(runtime_id.to_string()),
+    ]
+}
+
+fn ssh_observer_review_arguments(endpoint: &SshEndpoint) -> Vec<OsString> {
+    vec![
+        OsString::from("-tt"),
+        OsString::from("-o"),
+        OsString::from("BatchMode=yes"),
+        OsString::from("-o"),
+        OsString::from("ConnectTimeout=8"),
+        OsString::from(endpoint.destination.as_str()),
+        OsString::from(endpoint.executable.as_str()),
+        OsString::from("_remote_observer_review"),
     ]
 }
 
@@ -709,6 +751,8 @@ pub enum TransportError {
     ReleaseProbeMalformed,
     #[error("remote native tmux attachment failed")]
     InteractiveAttachmentFailed,
+    #[error("remote native observer review failed")]
+    InteractiveObserverReviewFailed,
     #[error("host returned an unexpected protocol response")]
     UnexpectedResponse,
     #[error("host returned inconsistent snapshot pages")]
@@ -863,11 +907,13 @@ mod tests {
             SnapshotResponse {
                 workstreams: vec![snapshot_workstream(first_id)],
                 unresolved_operation_count: 1,
+                observer_status: ObserverStatus::NotInstalled,
                 next_cursor: Some(1),
             },
             SnapshotResponse {
                 workstreams: vec![snapshot_workstream(second_id)],
                 unresolved_operation_count: 1,
+                observer_status: ObserverStatus::NotInstalled,
                 next_cursor: None,
             },
         ]);
@@ -899,11 +945,13 @@ mod tests {
             SnapshotResponse {
                 workstreams: vec![snapshot_workstream(workstream_id)],
                 unresolved_operation_count: 0,
+                observer_status: ObserverStatus::NotInstalled,
                 next_cursor: Some(1),
             },
             SnapshotResponse {
                 workstreams: vec![snapshot_workstream(workstream_id)],
                 unresolved_operation_count: 0,
+                observer_status: ObserverStatus::NotInstalled,
                 next_cursor: None,
             },
         ]);
@@ -984,6 +1032,22 @@ mod tests {
         assert_eq!(arguments[6], OsStr::new("/home/bryan/.local/bin/wsnav"));
         assert_eq!(arguments[7], OsStr::new("_attach"));
         assert_eq!(arguments[8], OsStr::new(&runtime_id.to_string()));
+    }
+
+    #[test]
+    fn interactive_observer_review_is_a_fixed_tty_command_with_no_control_stream() {
+        let endpoint = SshEndpoint::new(
+            SshDestination::parse("snap").unwrap(),
+            RemoteExecutable::parse("/home/bryan/.local/bin/wsnav").unwrap(),
+        );
+
+        let arguments = ssh_observer_review_arguments(&endpoint);
+
+        assert_eq!(arguments[0], OsStr::new("-tt"));
+        assert_eq!(arguments[5], OsStr::new("snap"));
+        assert_eq!(arguments[6], OsStr::new("/home/bryan/.local/bin/wsnav"));
+        assert_eq!(arguments[7], OsStr::new("_remote_observer_review"));
+        assert!(arguments.iter().all(|argument| argument != "sh"));
     }
 
     fn hello_response() -> ResponseEnvelope {

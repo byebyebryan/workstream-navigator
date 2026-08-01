@@ -2,11 +2,9 @@
 
 Date: 2026-08-01
 
-Status: D0 through D6.9 complete. D7 is expanded into navigator workflow and
-lifecycle management; its observer-activation slice is implemented and ready
-for bounded native acceptance. D7.1's navigator page, grouping, key-reference,
-and mouse foundation is implemented; its stateful management slices remain
-pending.
+Status: D0 through D6.9 complete. D7.1 through D7.4 are implemented and
+automatically validated. D7.0 observer activation and D7.5 integrated native
+acceptance remain pending; D7 is not yet complete.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -716,15 +714,18 @@ Exit gate:
 
 ## D7 - Navigator workflow and lifecycle management
 
-Implementation status: observer activation is ready for native acceptance.
+Implementation status: D7.1 through D7.4 are implemented. Observer activation
+and the complete two-pane local/remote lifecycle still require bounded native
+acceptance before this checkpoint can close.
 D7.1 supplies the Workstreams, Projects, and Hosts navigation foundation;
 D7.2 now supplies revision-guarded archive/restore through local and SSH host
 contracts, Active/Archived navigator scopes, bounded Workstream status,
 canonical rename, and exact local/remote unresolved-operation reconciliation.
 D7.3 now exposes bounded host-owned ProjectLocations with active/archived
 counts, supports starting at a selected retained location, and registers
-existing local or SSH checkouts through navigator-local forms. Host management
-remains planned.
+existing local or SSH checkouts through navigator-local forms. D7.4 now adds
+host registration, health verification, observer lifecycle status, explicit
+activation/review, exact removal, and client-only forget through Hosts detail.
 D7 makes ordinary WSNav administration available through the navigator without
 turning it into a task manager or replacing the provider surface.
 

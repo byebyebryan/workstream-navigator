@@ -19,11 +19,12 @@ acceptance][D6.1 acceptance]. D6.2 makes navigator controls discoverable
 without adding another terminal surface, and D6.3 orders local and remote rows
 by visible activity recency. D6.4 adds quiet host/Project grouping views, and
 D6.5-D6.6 make visible Project accents distinct and readable. D7 broadens the
-navigator-owned observer activation work into a terminal-first workflow. Its
-first navigation slice supplies Workstreams, Projects, and Hosts pages with
-direct contextual keys; archive/restore, recovery, Project registration, and
-Host management remain planned stateful slices. The Rust implementation does
-not preserve compatibility with the earlier Python prototype.
+navigator-owned observer activation work into a complete terminal-first
+workflow: the Workstreams home, Projects and Hosts management pages,
+archive/restore, recovery, Project registration, and guarded SSH host
+onboarding/offboarding are all available without leaving the navigator. The
+Rust implementation does not preserve compatibility with the earlier Python
+prototype.
 
 The frozen prototype remains available as implementation evidence in
 [agent-switchboard-python-reference][].
@@ -107,20 +108,21 @@ Profile updates deliberately refuse to run while a managed Runtime is live.
 ## First local project
 
 The first `wsnav` on a host activates and reviews its observer; it does not
-infer or register the current directory. Then register the Git checkout you
-want WSNav to manage explicitly:
+infer or register the current directory. After native approval, use the
+Projects page (`,`) and `a` to add the Git checkout you want WSNav to manage.
+The navigator asks for the host and checkout path without sending management
+text to a provider pane:
 
 ```console
-# once on this host; approve the exact hook entries in the native right pane
-wsnav
-
-# from the checkout, or supply another explicit Git checkout path
-wsnav register "$PWD"
+# approve the exact hook entries in the native right pane, then use Projects → a
 wsnav
 ```
 
-An empty navigator repeats the registration command rather than guessing a
-project from the process working directory. Registration accepts a main
+`wsnav register <path>` remains available for scripting or break-glass
+diagnosis; it is not required for ordinary setup.
+
+An empty navigator opens the same add flow rather than guessing a project from
+the process working directory. Registration accepts a main
 checkout, an externally created linked worktree, or a directory below either.
 WSNav normalizes the selected checkout root separately from the repository's
 primary worktree, so the selected Workstream keeps its own filesystem while
@@ -159,12 +161,20 @@ source has an exact settled native turn; use `n` for an unrelated fresh start.
 ## SSH hosts
 
 Install the same `wsnav` build yourself on the remote host at
-`~/.local/bin/wsnav`, then register its existing SSH destination locally:
+`~/.local/bin/wsnav`. Then, in local WSNav, open Hosts (`.`), press `a`, and
+enter its existing SSH destination (for example, `snap`). WSNav verifies and
+registers the host, prepares its exact observer profile, and opens the remote
+native Codex hook review in the right pane. Approve that profile in Codex.
 
 ```console
-wsnav register-remote snap
+# in the local navigator: Hosts → a → snap → approve native review
 wsnav
 ```
+
+The Hosts page shows each host's active Project tree. `x` asks whether to
+disconnect the local registration (keeping the remote observer) or offboard
+the host (remove WSNav's exact observer, then disconnect). Offboarding refuses
+while managed Runtimes are live or the host is unreachable.
 
 When registered locations on different hosts have the same unambiguous
 canonical fetch remote, WSNav presents them as one logical Project while

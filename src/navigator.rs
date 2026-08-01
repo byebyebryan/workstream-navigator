@@ -842,14 +842,12 @@ impl WorkstreamScope {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NavigatorModal {
     ConfirmArchive(NavigatorWorkstream),
-    ConfirmRemoveObserver {
-        alias: String,
-    },
-    ConfirmForgetHost {
+    SelectHostRemoval {
         alias: String,
         workstream_count: usize,
         location_count: usize,
         unresolved_operation_count: usize,
+        offboard: bool,
     },
     ConfirmForgetProject {
         project_id: ProjectId,
@@ -911,6 +909,14 @@ struct NavigatorHostSummary {
     location_count: usize,
     unresolved_operation_count: usize,
     latest_activity_at_millis: Option<i64>,
+    active_projects: Vec<NavigatorHostProject>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct NavigatorHostProject {
+    project_id: ProjectId,
+    label: String,
+    active_workstream_count: usize,
 }
 
 /// Local presentation grouping only. It is deliberately not durable state.
@@ -1256,6 +1262,7 @@ impl NavigatorView {
                 location_count: 0,
                 unresolved_operation_count: 0,
                 latest_activity_at_millis: None,
+                active_projects: Vec::new(),
             })
             .collect::<Vec<_>>();
         let mut locations = BTreeSet::new();
@@ -1271,6 +1278,21 @@ impl NavigatorView {
                 host.latest_activity_at_millis = host
                     .latest_activity_at_millis
                     .max(workstream.last_activity_at_millis);
+                if !workstream.archived {
+                    if let Some(project) = host
+                        .active_projects
+                        .iter_mut()
+                        .find(|project| project.project_id == workstream.project_id)
+                    {
+                        project.active_workstream_count += 1;
+                    } else {
+                        host.active_projects.push(NavigatorHostProject {
+                            project_id: workstream.project_id,
+                            label: workstream.project_label.clone(),
+                            active_workstream_count: 1,
+                        });
+                    }
+                }
             } else {
                 hosts.push(NavigatorHostSummary {
                     alias: workstream.host.alias().to_owned(),
@@ -1284,6 +1306,14 @@ impl NavigatorView {
                     location_count: 1,
                     unresolved_operation_count: 0,
                     latest_activity_at_millis: workstream.last_activity_at_millis,
+                    active_projects: (!workstream.archived)
+                        .then(|| NavigatorHostProject {
+                            project_id: workstream.project_id,
+                            label: workstream.project_label.clone(),
+                            active_workstream_count: 1,
+                        })
+                        .into_iter()
+                        .collect(),
                 });
             }
         }
@@ -1294,6 +1324,13 @@ impl NavigatorView {
             {
                 host.unresolved_operation_count += 1;
             }
+        }
+        for host in &mut hosts {
+            host.active_projects.sort_by(|left, right| {
+                left.label
+                    .cmp(&right.label)
+                    .then_with(|| left.project_id.cmp(&right.project_id))
+            });
         }
         hosts.sort_by(|left, right| {
             (left.alias != "local")
@@ -1591,16 +1628,13 @@ impl NavigatorView {
         });
     }
 
-    fn begin_observer_removal(&mut self, alias: String) {
-        self.modal = Some(NavigatorModal::ConfirmRemoveObserver { alias });
-    }
-
     fn begin_host_forget(&mut self, host: NavigatorHostSummary) {
-        self.modal = Some(NavigatorModal::ConfirmForgetHost {
+        self.modal = Some(NavigatorModal::SelectHostRemoval {
             alias: host.alias,
             workstream_count: host.workstream_count,
             location_count: host.location_count,
             unresolved_operation_count: host.unresolved_operation_count,
+            offboard: false,
         });
     }
 
@@ -1714,6 +1748,12 @@ impl NavigatorView {
         };
         if !locations.is_empty() {
             *selected = selected.checked_sub(1).unwrap_or(locations.len() - 1);
+        }
+    }
+
+    fn toggle_host_removal_mode(&mut self) {
+        if let Some(NavigatorModal::SelectHostRemoval { offboard, .. }) = self.modal.as_mut() {
+            *offboard = !*offboard;
         }
     }
 
@@ -1910,9 +1950,10 @@ impl NavigatorView {
 
     fn render_hosts(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let hosts = self.hosts();
+        let project_colors = visible_project_colors(&self.snapshot);
         let items = hosts
             .iter()
-            .map(|host| host_overview_item(host, area.width.saturating_sub(2)))
+            .map(|host| host_overview_item(host, &project_colors, area.width.saturating_sub(2)))
             .collect::<Vec<_>>();
         let mut state = ListState::default();
         state.select(
@@ -2162,7 +2203,9 @@ impl NavigatorView {
             if y >= content_bottom {
                 break;
             }
-            let next_y = y.saturating_add(host_overview_height()).min(content_bottom);
+            let next_y = y
+                .saturating_add(host_overview_height(host))
+                .min(content_bottom);
             self.rendered_host_rows
                 .extend((y..next_y).map(|row_y| (row_y, host.alias.clone())));
             y = next_y;
@@ -2321,11 +2364,8 @@ impl NavigatorView {
                 ("?", "keys"),
             ],
             NavigatorPage::Hosts => vec![
-                ("n", "register remote"),
-                ("v", "verify"),
-                ("a", "activate"),
-                ("r", "remove"),
-                ("x", "forget"),
+                ("a", "add"),
+                ("x", "remove"),
                 ("Esc", "workstreams"),
                 (",", "projects"),
                 ("?", "keys"),
@@ -2418,8 +2458,7 @@ fn navigator_modal_area(outer: Rect, modal: &NavigatorModal) -> Rect {
             locations.len().saturating_add(4)
         }
         NavigatorModal::ConfirmArchive(_)
-        | NavigatorModal::ConfirmRemoveObserver { .. }
-        | NavigatorModal::ConfirmForgetHost { .. }
+        | NavigatorModal::SelectHostRemoval { .. }
         | NavigatorModal::ConfirmForgetProject { .. }
         | NavigatorModal::Rename { .. }
         | NavigatorModal::RegisterCheckout { .. }
@@ -2461,17 +2500,18 @@ fn navigator_modal_content(modal: NavigatorModal) -> (String, Vec<Line<'static>>
                 ]),
             ],
         ),
-        NavigatorModal::ConfirmRemoveObserver { alias } => observer_removal_modal(alias, key),
-        NavigatorModal::ConfirmForgetHost {
+        NavigatorModal::SelectHostRemoval {
             alias,
             workstream_count,
             location_count,
             unresolved_operation_count,
-        } => forget_host_modal(
+            offboard,
+        } => host_removal_modal(
             alias,
             workstream_count,
             location_count,
             unresolved_operation_count,
+            offboard,
             key,
         ),
         NavigatorModal::ConfirmForgetProject {
@@ -2535,40 +2575,47 @@ fn navigator_modal_content(modal: NavigatorModal) -> (String, Vec<Line<'static>>
     }
 }
 
-fn observer_removal_modal(alias: String, key: Style) -> (String, Vec<Line<'static>>) {
-    (
-        " Remove observer profile ".to_owned(),
-        vec![
-            modal_emphasis(alias),
-            Line::raw("Removes only WSNav's exact observer profile after live Runtimes stop."),
-            confirmation_line("remove", key),
-        ],
-    )
-}
-
-fn forget_host_modal(
+fn host_removal_modal(
     alias: String,
     workstream_count: usize,
     location_count: usize,
     unresolved_operation_count: usize,
+    offboard: bool,
     key: Style,
 ) -> (String, Vec<Line<'static>>) {
+    let keep_marker = if offboard { "  " } else { "> " };
+    let offboard_marker = if offboard { "> " } else { "  " };
     (
-        " Forget remote host ".to_owned(),
+        " Remove remote Host ".to_owned(),
         vec![
             modal_emphasis(alias),
+            Line::from(vec![
+                Span::styled(keep_marker, if offboard { Style::default() } else { key }),
+                Span::raw("disconnect: forget WSNav registration; keep observer"),
+            ]),
+            Line::from(vec![
+                Span::styled(
+                    offboard_marker,
+                    if offboard { key } else { Style::default() },
+                ),
+                Span::raw("offboard: remove observer, then forget registration"),
+            ]),
             Line::raw(format!(
-                "Retains {workstream_count} Workstreams on the host; removes {location_count} local Project locations."
-            )),
-            Line::raw(format!(
-                "{unresolved_operation_count} unresolved operation{} remain remote. No remote connection is made.",
+                "Retains {workstream_count} Workstreams and {unresolved_operation_count} operation{}; removes {location_count} local Project locations.",
                 if unresolved_operation_count == 1 {
                     ""
                 } else {
                     "s"
                 }
             )),
-            confirmation_line("forget", key),
+            Line::from(vec![
+                Span::styled("↑/↓", key),
+                Span::raw(" choose   "),
+                Span::styled("Enter", key),
+                Span::raw(" continue   "),
+                Span::styled("Esc", key),
+                Span::raw(" cancel"),
+            ]),
         ],
     )
 }
@@ -2779,11 +2826,16 @@ fn help_lines(
                 ]),
             ]);
         } else if page == NavigatorPage::Hosts {
-            page_lines.push(Line::from(vec![
-                Span::styled("n", key),
-                Span::raw("          verify and register a remote SSH host"),
-            ]));
-            page_lines.extend(host_detail_help_lines(key));
+            page_lines.extend([
+                Line::from(vec![
+                    Span::styled("a", key),
+                    Span::raw("          add, verify, and set up a remote SSH host"),
+                ]),
+                Line::from(vec![
+                    Span::styled("x", key),
+                    Span::raw("          disconnect or offboard the selected remote Host"),
+                ]),
+            ]);
         }
         lines.extend(page_lines);
     }
@@ -2807,26 +2859,6 @@ fn help_lines(
         ]),
     ]);
     lines
-}
-
-fn host_detail_help_lines(key: Style) -> Vec<Line<'static>> {
-    [
-        (
-            "v",
-            "          verify registered host identity and capabilities",
-        ),
-        (
-            "a",
-            "          activate observer and open native hook review",
-        ),
-        ("r", "          remove only WSNav's exact observer profile"),
-        ("x", "          forget remote client registration only"),
-    ]
-    .into_iter()
-    .map(|(shortcut, description)| {
-        Line::from(vec![Span::styled(shortcut, key), Span::raw(description)])
-    })
-    .collect()
 }
 
 fn workstream_help_lines(scope: WorkstreamScope, heading: Style, key: Style) -> Vec<Line<'static>> {
@@ -3056,37 +3088,25 @@ fn location_activity_summary(location: &NavigatorProjectLocation) -> String {
     )
 }
 
-const fn host_overview_height() -> u16 {
-    3
+fn host_overview_height(host: &NavigatorHostSummary) -> u16 {
+    u16::try_from(2_usize.saturating_add(host.active_projects.len().max(1))).unwrap_or(u16::MAX)
 }
 
-fn host_overview_item(host: &NavigatorHostSummary, available_width: u16) -> ListItem<'static> {
+fn host_overview_item(
+    host: &NavigatorHostSummary,
+    project_colors: &BTreeMap<ProjectId, Color>,
+    available_width: u16,
+) -> ListItem<'static> {
     let reachability = match host.reachability {
         RemoteHostReachability::Reachable => "available",
         RemoteHostReachability::Unreachable => "unavailable; cached",
     };
-    let workstream_label = if host.workstream_count == 1 {
-        "1 Workstream".to_owned()
-    } else {
-        format!("{} Workstreams", host.workstream_count)
-    };
-    ListItem::new(vec![
+    let mut lines = vec![
         Line::from(Span::styled(
             truncate_display(&host.alias, usize::from(available_width)),
             Style::default()
                 .fg(host_color(&host.alias))
                 .add_modifier(Modifier::BOLD),
-        )),
-        Line::from(Span::styled(
-            truncate_display(
-                &format!(
-                    "{workstream_label} · {} location{}",
-                    host.location_count,
-                    if host.location_count == 1 { "" } else { "s" }
-                ),
-                usize::from(available_width),
-            ),
-            Style::default().fg(Color::Gray),
         )),
         Line::from(vec![
             Span::styled(
@@ -3108,7 +3128,44 @@ fn host_overview_item(host: &NavigatorHostSummary, available_width: u16) -> List
                 Style::default().fg(observer_status_color(host.observer_status)),
             ),
         ]),
-    ])
+    ];
+    if host.active_projects.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "└─ no active Projects",
+            Style::default().fg(Color::DarkGray),
+        )));
+    } else {
+        lines.extend(
+            host.active_projects
+                .iter()
+                .enumerate()
+                .map(|(index, project)| {
+                    let branch = if index + 1 == host.active_projects.len() {
+                        "└─"
+                    } else {
+                        "├─"
+                    };
+                    let count = if project.active_workstream_count == 1 {
+                        "1 active".to_owned()
+                    } else {
+                        format!("{} active", project.active_workstream_count)
+                    };
+                    Line::from(vec![
+                        Span::styled(branch, Style::default().fg(Color::DarkGray)),
+                        Span::styled(
+                            truncate_display(
+                                &project.label,
+                                usize::from(available_width.saturating_sub(2)),
+                            ),
+                            Style::default().fg(project_accent(project.project_id, project_colors)),
+                        ),
+                        Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+                        Span::styled(count, Style::default().fg(Color::Gray)),
+                    ])
+                }),
+        );
+    }
+    ListItem::new(lines)
 }
 
 const fn observer_status_label(status: ObserverStatus) -> &'static str {
@@ -3642,12 +3699,7 @@ fn handle_management_page_key(
         }
         (NavigatorPage::Projects, KeyCode::Char('a')) => view.begin_checkout_registration(),
         (NavigatorPage::Projects, KeyCode::Char('x')) => view.begin_project_forget(),
-        (NavigatorPage::Hosts, KeyCode::Char('n')) => view.begin_host_registration(),
-        (NavigatorPage::Hosts, KeyCode::Char('v')) => verify_selected_host(root, view),
-        (NavigatorPage::Hosts, KeyCode::Char('a')) => {
-            activate_selected_host(root, presentation, remote, view);
-        }
-        (NavigatorPage::Hosts, KeyCode::Char('r')) => remove_selected_host_observer(view),
+        (NavigatorPage::Hosts, KeyCode::Char('a')) => view.begin_host_registration(),
         (NavigatorPage::Hosts, KeyCode::Char('x')) => forget_selected_host(view),
         _ => return false,
     }
@@ -3699,39 +3751,8 @@ fn handle_navigator_modal_key(
         view.dismiss_modal();
         return false;
     }
-    if matches!(
-        view.modal,
-        Some(
-            NavigatorModal::SelectRegistrationHost { .. }
-                | NavigatorModal::SelectProjectLocation { .. }
-        )
-    ) {
-        match key.code {
-            KeyCode::Down | KeyCode::Char('j') => {
-                if matches!(
-                    view.modal,
-                    Some(NavigatorModal::SelectRegistrationHost { .. })
-                ) {
-                    view.select_registration_host_next();
-                } else {
-                    view.select_project_location_next();
-                }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if matches!(
-                    view.modal,
-                    Some(NavigatorModal::SelectRegistrationHost { .. })
-                ) {
-                    view.select_registration_host_previous();
-                } else {
-                    view.select_project_location_previous();
-                }
-            }
-            _ => {}
-        }
-        if !matches!(key.code, KeyCode::Enter) {
-            return false;
-        }
+    if handle_modal_picker_key(key.code, view) {
+        return false;
     }
     if matches!(key.code, KeyCode::Enter) {
         confirm_navigator_modal(root, presentation, remote, view);
@@ -3773,8 +3794,7 @@ fn handle_navigator_modal_key(
         },
         Some(
             NavigatorModal::ConfirmArchive(_)
-            | NavigatorModal::ConfirmRemoveObserver { .. }
-            | NavigatorModal::ConfirmForgetHost { .. }
+            | NavigatorModal::SelectHostRemoval { .. }
             | NavigatorModal::ConfirmForgetProject { .. }
             | NavigatorModal::SelectRegistrationHost { .. }
             | NavigatorModal::SelectProjectLocation { .. },
@@ -3784,15 +3804,45 @@ fn handle_navigator_modal_key(
     false
 }
 
+fn handle_modal_picker_key(key: KeyCode, view: &mut NavigatorView) -> bool {
+    let picker = if matches!(
+        view.modal,
+        Some(NavigatorModal::SelectRegistrationHost { .. })
+    ) {
+        0
+    } else if matches!(
+        view.modal,
+        Some(NavigatorModal::SelectProjectLocation { .. })
+    ) {
+        1
+    } else if matches!(view.modal, Some(NavigatorModal::SelectHostRemoval { .. })) {
+        2
+    } else {
+        return false;
+    };
+    match key {
+        KeyCode::Down | KeyCode::Char('j') => match picker {
+            0 => view.select_registration_host_next(),
+            1 => view.select_project_location_next(),
+            2 => view.toggle_host_removal_mode(),
+            _ => unreachable!("picker discriminator must cover every picker modal"),
+        },
+        KeyCode::Up | KeyCode::Char('k') => match picker {
+            0 => view.select_registration_host_previous(),
+            1 => view.select_project_location_previous(),
+            2 => view.toggle_host_removal_mode(),
+            _ => unreachable!("picker discriminator must cover every picker modal"),
+        },
+        KeyCode::Enter => return false,
+        _ => {}
+    }
+    true
+}
+
 fn is_confirmation_modal(modal: Option<&NavigatorModal>) -> bool {
     matches!(
         modal,
-        Some(
-            NavigatorModal::ConfirmArchive(_)
-                | NavigatorModal::ConfirmRemoveObserver { .. }
-                | NavigatorModal::ConfirmForgetHost { .. }
-                | NavigatorModal::ConfirmForgetProject { .. }
-        )
+        Some(NavigatorModal::ConfirmArchive(_) | NavigatorModal::ConfirmForgetProject { .. })
     )
 }
 
@@ -3806,23 +3856,9 @@ fn confirm_navigator_modal(
         Some(NavigatorModal::ConfirmArchive(workstream)) => {
             archive_workstream(root, remote, view, &workstream);
         }
-        Some(NavigatorModal::ConfirmRemoveObserver { alias }) => {
-            remove_host_observer(root, remote, view, &alias);
+        Some(removal @ NavigatorModal::SelectHostRemoval { .. }) => {
+            confirm_host_removal(root, remote, view, removal);
         }
-        Some(NavigatorModal::ConfirmForgetHost {
-            alias,
-            workstream_count,
-            location_count,
-            unresolved_operation_count,
-        }) => forget_host(
-            root,
-            remote,
-            view,
-            &alias,
-            workstream_count,
-            location_count,
-            unresolved_operation_count,
-        ),
         Some(NavigatorModal::ConfirmForgetProject {
             project_id,
             label,
@@ -3897,9 +3933,48 @@ fn confirm_navigator_modal(
             view.set_message("enter an SSH destination to register");
         }
         Some(NavigatorModal::RegisterHost { value }) => {
-            register_remote_host(root, remote, view, &value);
+            register_remote_host(root, presentation, remote, view, &value);
         }
         None => {}
+    }
+}
+
+fn confirm_host_removal(
+    root: &StateRoot,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+    removal: NavigatorModal,
+) {
+    let NavigatorModal::SelectHostRemoval {
+        alias,
+        workstream_count,
+        location_count,
+        unresolved_operation_count,
+        offboard,
+    } = removal
+    else {
+        unreachable!("host-removal action requires a host-removal modal");
+    };
+    if offboard {
+        offboard_host(
+            root,
+            remote,
+            view,
+            &alias,
+            workstream_count,
+            location_count,
+            unresolved_operation_count,
+        );
+    } else {
+        forget_host(
+            root,
+            remote,
+            view,
+            &alias,
+            workstream_count,
+            location_count,
+            unresolved_operation_count,
+        );
     }
 }
 
@@ -4419,6 +4494,7 @@ fn run_navigator_command(root: &StateRoot, arguments: &[&str]) -> Result<(), Nav
 
 fn register_remote_host(
     root: &StateRoot,
+    presentation: &Presentation,
     remote: &mut RemoteMonitor,
     view: &mut NavigatorView,
     destination: &str,
@@ -4428,24 +4504,9 @@ fn register_remote_host(
         Ok(()) => {
             remote.request_soon(destination);
             refresh_view(root, remote, view);
-            view.set_message("remote host verified and registered");
+            view.selected_host = Some(destination.to_owned());
+            activate_selected_host(root, presentation, remote, view);
         }
-        Err(error) => view.set_message(action_message(&error)),
-    }
-}
-
-fn verify_selected_host(root: &StateRoot, view: &mut NavigatorView) {
-    let Some(host) = view.selected_host_summary() else {
-        view.set_message("no Host is selected");
-        return;
-    };
-    let result = if host.alias == "local" {
-        run_navigator_command(root, &["doctor"])
-    } else {
-        run_navigator_command(root, &["host", "doctor", &host.alias])
-    };
-    match result {
-        Ok(()) => view.set_message("host identity and capabilities verified"),
         Err(error) => view.set_message(action_message(&error)),
     }
 }
@@ -4494,51 +4555,6 @@ fn activate_selected_host(
     }
 }
 
-fn remove_selected_host_observer(view: &mut NavigatorView) {
-    let Some(host) = view.selected_host_summary() else {
-        view.set_message("no Host is selected");
-        return;
-    };
-    if host.observer_status == ObserverStatus::NotInstalled {
-        view.set_message("no WSNav observer profile is installed on this host");
-        return;
-    }
-    if host.alias != "local" && host.reachability == RemoteHostReachability::Unreachable {
-        view.set_message("remote host is unavailable; observer removal was not sent");
-        return;
-    }
-    let live_runtime_count = view.live_runtime_count(&host.alias);
-    if live_runtime_count > 0 {
-        let suffix = if live_runtime_count == 1 { "" } else { "s" };
-        view.set_message(format!(
-            "park {live_runtime_count} live Workstream{suffix} before removing the observer"
-        ));
-        return;
-    }
-    view.begin_observer_removal(host.alias);
-}
-
-fn remove_host_observer(
-    root: &StateRoot,
-    remote: &mut RemoteMonitor,
-    view: &mut NavigatorView,
-    alias: &str,
-) {
-    let result = if alias == "local" {
-        run_navigator_command(root, &["remove-observer"])
-    } else {
-        run_navigator_command(root, &["host", "remove-observer", alias])
-    };
-    match result {
-        Ok(()) => {
-            remote.request_soon(alias);
-            refresh_view(root, remote, view);
-            view.set_message("exact WSNav observer profile removed; Workstreams were retained");
-        }
-        Err(error) => view.set_message(action_message(&error)),
-    }
-}
-
 fn forget_selected_host(view: &mut NavigatorView) {
     let Some(host) = view.selected_host_summary() else {
         view.set_message("no Host is selected");
@@ -4573,6 +4589,44 @@ fn forget_host(
         }
         Err(error) => view.set_message(action_message(&error)),
     }
+}
+
+fn offboard_host(
+    root: &StateRoot,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+    alias: &str,
+    workstream_count: usize,
+    location_count: usize,
+    unresolved_operation_count: usize,
+) {
+    if view.live_runtime_count(alias) > 0 {
+        view.set_message("park live Workstreams before offboarding this host");
+        return;
+    }
+    let Some(host) = view.hosts().into_iter().find(|host| host.alias == alias) else {
+        view.set_message("the selected Host is unavailable; refresh the navigator");
+        return;
+    };
+    if host.reachability == RemoteHostReachability::Unreachable {
+        view.set_message("remote host is unavailable; offboarding was not sent");
+        return;
+    }
+    if host.observer_status != ObserverStatus::NotInstalled
+        && let Err(error) = run_navigator_command(root, &["host", "remove-observer", alias])
+    {
+        view.set_message(action_message(&error));
+        return;
+    }
+    forget_host(
+        root,
+        remote,
+        view,
+        alias,
+        workstream_count,
+        location_count,
+        unresolved_operation_count,
+    );
 }
 
 fn forget_project(
@@ -5758,7 +5812,45 @@ mod tests {
     }
 
     #[test]
-    fn host_page_exposes_observer_lifecycle_without_provider_or_location_identifiers() {
+    fn host_summary_groups_active_projects_and_omits_archived_workstreams() {
+        let alpha = ProjectId::new();
+        let beta = ProjectId::new();
+        let mut archived = row(WorkstreamId::new(), NavigatorRuntimeStatus::Parked);
+        archived.project_id = beta;
+        archived.project_label = "beta".to_owned();
+        archived.archived = true;
+        let mut second_alpha = row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle);
+        second_alpha.project_id = alpha;
+        second_alpha.project_label = "alpha".to_owned();
+        let mut first_alpha = row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle);
+        first_alpha.project_id = alpha;
+        first_alpha.project_label = "alpha".to_owned();
+        let view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![archived, second_alpha, first_alpha],
+            hosts: vec![NavigatorHostOverview {
+                alias: "local".to_owned(),
+                reachability: RemoteHostReachability::Reachable,
+                observer_status: ObserverStatus::Ready,
+            }],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
+        });
+
+        let hosts = view.hosts();
+        assert_eq!(hosts.len(), 1);
+        assert_eq!(
+            hosts[0]
+                .active_projects
+                .iter()
+                .map(|project| (project.label.as_str(), project.active_workstream_count))
+                .collect::<Vec<_>>(),
+            vec![("alpha", 2)]
+        );
+    }
+
+    #[test]
+    fn host_page_shows_an_active_project_tree_without_private_identifiers() {
         let workstream_id = WorkstreamId::new();
         let location_id = LocationId::new();
         let mut remote = row(workstream_id, NavigatorRuntimeStatus::Idle);
@@ -5800,17 +5892,88 @@ mod tests {
 
         assert!(rendered.contains("observer review needed"));
         assert!(rendered.contains("available"));
-        assert!(rendered.contains("1 Workstream"));
+        assert!(rendered.contains("project"));
+        assert!(rendered.contains("1 active"));
+        assert!(rendered.contains("└─"));
         assert!(!rendered.contains(&workstream_id.to_string()));
         assert!(!rendered.contains(&location_id.to_string()));
     }
 
     #[test]
-    fn observer_removal_explains_when_live_workstreams_prevent_it() {
+    fn host_removal_lets_the_user_choose_disconnect_or_offboard() {
+        let mut remote = row(WorkstreamId::new(), NavigatorRuntimeStatus::Parked);
+        remote.host = NavigatorHost::Remote {
+            alias: "snap".to_owned(),
+            reachability: RemoteHostReachability::Reachable,
+        };
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
-            workstreams: vec![row(WorkstreamId::new(), NavigatorRuntimeStatus::Starting)],
+            workstreams: vec![remote],
+            hosts: vec![
+                NavigatorHostOverview {
+                    alias: "local".to_owned(),
+                    reachability: RemoteHostReachability::Reachable,
+                    observer_status: ObserverStatus::Ready,
+                },
+                NavigatorHostOverview {
+                    alias: "snap".to_owned(),
+                    reachability: RemoteHostReachability::Reachable,
+                    observer_status: ObserverStatus::Ready,
+                },
+            ],
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
+        });
+        view.select_page(NavigatorPage::Hosts);
+        view.select_next();
+
+        forget_selected_host(&mut view);
+
+        assert!(matches!(
+            view.modal,
+            Some(NavigatorModal::SelectHostRemoval {
+                ref alias,
+                offboard: false,
+                ..
+            }) if alias == "snap"
+        ));
+        view.toggle_host_removal_mode();
+        assert!(matches!(
+            view.modal,
+            Some(NavigatorModal::SelectHostRemoval { offboard: true, .. })
+        ));
+
+        let (_, lines) = navigator_modal_content(view.modal.clone().unwrap());
+        let rendered = lines
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect::<String>();
+        assert!(rendered.contains("disconnect: forget WSNav registration; keep observer"));
+        assert!(rendered.contains("offboard: remove observer, then forget registration"));
+
+        view.dismiss_modal();
+        view.select_previous();
+        forget_selected_host(&mut view);
+        assert_eq!(view.modal, None);
+        assert_eq!(
+            view.message.as_deref(),
+            Some("the local Host is protected and cannot be forgotten")
+        );
+    }
+
+    #[test]
+    fn offboarding_refuses_to_remove_an_observer_while_a_runtime_is_live() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let mut remote_workstream = row(WorkstreamId::new(), NavigatorRuntimeStatus::Working);
+        remote_workstream.host = NavigatorHost::Remote {
+            alias: "snap".to_owned(),
+            reachability: RemoteHostReachability::Reachable,
+        };
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![remote_workstream],
             hosts: vec![NavigatorHostOverview {
-                alias: "local".to_owned(),
+                alias: "snap".to_owned(),
                 reachability: RemoteHostReachability::Reachable,
                 observer_status: ObserverStatus::Ready,
             }],
@@ -5818,23 +5981,14 @@ mod tests {
             unresolved_operation_count: 0,
             unresolved_operations: Vec::new(),
         });
-        view.select_page(NavigatorPage::Hosts);
+        let mut monitor = RemoteMonitor::new();
 
-        remove_selected_host_observer(&mut view);
+        offboard_host(&root, &mut monitor, &mut view, "snap", 1, 1, 0);
 
-        assert_eq!(view.modal, None);
         assert_eq!(
             view.message.as_deref(),
-            Some("park 1 live Workstream before removing the observer")
+            Some("park live Workstreams before offboarding this host")
         );
-
-        view.snapshot.workstreams[0].runtime_status = NavigatorRuntimeStatus::Parked;
-        remove_selected_host_observer(&mut view);
-
-        assert!(matches!(
-            view.modal,
-            Some(NavigatorModal::ConfirmRemoveObserver { ref alias }) if alias == "local"
-        ));
     }
 
     #[test]
@@ -6014,6 +6168,23 @@ mod tests {
         assert!(project_compact.contains("Esc workstreams"));
         assert!(project_compact.contains(". hosts"));
         assert!(!project_compact.contains("n new"));
+
+        view.select_page(NavigatorPage::Hosts);
+        let host_compact = view
+            .compact_key_lines(80)
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect::<String>();
+        assert!(host_compact.contains("a add"));
+        assert!(host_compact.contains("x remove"));
+        assert!(!host_compact.contains("v verify"));
+
+        let host_help = help_lines(NavigatorPage::Hosts, false, false, WorkstreamScope::Active)
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect::<String>();
+        assert!(host_help.contains("add, verify, and set up a remote SSH host"));
+        assert!(host_help.contains("disconnect or offboard the selected remote Host"));
 
         let workstream_help = help_lines(
             NavigatorPage::Workstreams,

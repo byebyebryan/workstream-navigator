@@ -724,8 +724,9 @@ canonical rename, and exact local/remote unresolved-operation reconciliation.
 D7.3 now exposes bounded host-owned ProjectLocations with active/archived
 counts, supports starting at a selected retained location, and registers
 existing local or SSH checkouts through navigator-local forms. D7.4 now adds
-host registration, health verification, observer lifecycle status, explicit
-activation/review, exact removal, and client-only forget from the Hosts list.
+an active-Project tree per host plus streamlined host onboarding: add verifies,
+registers, prepares the observer, and opens native review; removal explicitly
+chooses client-only disconnect or guarded observer offboarding.
 D7 makes ordinary WSNav administration available through the navigator without
 turning it into a task manager or replacing the provider surface.
 
@@ -749,9 +750,10 @@ Scope:
 - add Project inventory and local/remote ProjectLocation registration without
   cloning, syncing, deleting, or exposing remote repository paths, including
   the empty-navigator flow and starting at a selected ProjectLocation;
-- add Host registration, health, verification, observer activation, and
-  exact observer removal plus client-only forget, while protecting the local
-  host and leaving remote state untouched;
+- add Host registration that verifies, prepares, and opens native observer
+  review as one flow; render active Projects per host; and offer explicit
+  client-only disconnect or guarded exact-observer offboarding while protecting
+  the local host and leaving retained remote state untouched;
 - keep bare and explicit `wsnav navigator` as the host-local observer
   activation entry point, retaining setup/update commands only as hidden
   diagnostics; and
@@ -789,14 +791,16 @@ Delivery slices:
    a selected location without requiring an existing active row. Location
    inventory, counts, starting from a retained archived source, and
    navigator-local local/SSH checkout registration are complete.
-5. **D7.4 - Host management.** Register, verify, activate, remove the exact
-   observer from, and forget SSH hosts through the navigator while preserving
-   client/host ownership boundaries. Carry the native review boundary proven
-   in D7.0 through the remote Hosts-page flow.
+5. **D7.4 - Host management.** Add SSH hosts through a single
+   verify/prepare/native-review flow, show their active Project trees, and
+   choose either client-only disconnect or guarded observer offboarding through
+   the navigator. Preserve client/host ownership boundaries and carry the
+   native review boundary proven in D7.0 through the remote Hosts-page flow.
 6. **D7.5 - Integrated acceptance.** Exercise fresh local and remote setup,
-   Project registration, Workstream lifecycle/recovery, observer removal, and
-   host forget/re-register using only the two-pane TUI after installation,
-   without provider-pane management traffic or remote Runtime interference.
+   Project registration, Workstream lifecycle/recovery, guarded observer
+   offboarding, and host disconnect/re-register using only the two-pane TUI
+   after installation, without provider-pane management traffic or remote
+   Runtime interference.
 
 Exit gate:
 
@@ -818,8 +822,8 @@ Exit gate:
 - a greenfield post-install acceptance uses bare `wsnav` for local observer
   approval, first Project registration, SSH host and remote-location
   registration, Workstream start/fork/rename/park/recover/acknowledge/archive/
-  restore, unresolved-operation recovery, observer removal, and host
-  forget/re-register without entering another `wsnav` shell command;
+  restore, unresolved-operation recovery, guarded observer offboarding, and
+  host disconnect/re-register without entering another `wsnav` shell command;
 - the native provider result and input surface remain untouched until the user
   explicitly chooses a Workstream or observer-review action; and
 - formatting, tests, lint, package checks, and `git diff --check` pass.

@@ -1126,8 +1126,7 @@ Required interactions:
   Codex or deleting its retained state;
 - list and recover exact unresolved Start or Fork operations;
 - inspect and register ProjectLocations on local or SSH hosts;
-- inspect, register, verify, activate, remove the exact observer from, and
-  forget SSH host registrations;
+- add or remove SSH host registrations without leaving the navigator;
 - acknowledge result or recovery attention without injecting provider traffic.
 
 The normal human workflow begins with bare `wsnav` and requires no later
@@ -1175,21 +1174,25 @@ of the Project's Workstreams are active. It never deletes or mutates the host
 registry, Git checkout, worktree, or Codex history; this is intentional
 visibility cleanup, not permanent Project deletion.
 
-The Hosts page renders each host's reachability, retained Workstream and
-location counts, and observer state inline. Its direct keys can register,
-verify, activate, remove the exact owned observer from, and forget an SSH host.
-Observer removal retains the existing fail-closed profile ownership and
-live-Runtime guards. Forget is client-catalog-only: it
-removes the alias and local Project associations but does not contact the host,
-stop a Runtime, delete remote state, or uninstall anything. Its confirmation
+The Hosts page renders each host's reachability and observer state, followed by
+a bounded tree of its active Projects and their active Workstream counts. `a`
+adds a remote SSH host: WSNav verifies and registers it, prepares its exact
+observer profile, then opens the native Codex hook review in the right pane.
+The user alone approves that profile in Codex; preparation never writes trust
+state. `x` first asks whether to disconnect or offboard a selected remote Host.
+Disconnect is client-catalog-only: it removes the alias and local Project
+associations but does not contact the host, stop a Runtime, delete remote state,
+or uninstall anything. Offboard first removes only WSNav's exact observer
+profile, then performs that same client-catalog removal. It refuses while a
+managed Runtime is live or when the remote host cannot be reached. The choice
 shows retained Workstream, ProjectLocation, and unresolved-operation counts so
-the visibility effect is explicit. The protected local host cannot be
-forgotten. If an observer review is required, its native profile-selected
-Codex TUI runs in the right provider pane through the same local or SSH terminal
-boundary and leaves no Workstream behind. Remote review uses a one-shot remote
-endpoint that returns after the native Codex TUI exits; the local provider pane
-then resumes its own blank wait state, so no SSH review connection becomes a
-second remote persistence layer.
+the visibility effect is explicit. The protected local Host cannot be removed.
+If an observer review is required, its native profile-selected Codex TUI runs
+in the right provider pane through the same local or SSH terminal boundary and
+leaves no Workstream behind. Remote review uses a one-shot remote endpoint that
+returns after the native Codex TUI exits; the local provider pane then resumes
+its own blank wait state, so no SSH review connection becomes a second remote
+persistence layer.
 
 Navigator page changes, forms, and finite management actions leave the current
 provider attachment and focus unchanged. Only an explicit Workstream primary

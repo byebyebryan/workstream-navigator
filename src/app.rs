@@ -18,7 +18,7 @@ use crate::{
     presentation::{AttachmentPhase, Presentation},
     provider::codex::app_server::EphemeralAppServer,
     provider::codex::hooks::drain_and_parse,
-    provider::codex::profile::ObserverProfile,
+    provider::codex::profile::{OBSERVER_PROFILE_SCHEMA_VERSION, ObserverProfile},
     runtime::{
         LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
         await_launch_release, is_direct_provider_hook,
@@ -1020,6 +1020,10 @@ fn doctor(root: &StateRoot, registry: &HostRegistry) -> Result<(), AppError> {
         println!("observer: not installed");
         return Ok(());
     };
+    if integration.ownership.profile_schema_version != OBSERVER_PROFILE_SCHEMA_VERSION {
+        println!("observer: update required");
+        return Ok(());
+    }
     let manager = observer_profile(root)?;
     match manager.install(
         integration.ownership.owner_id.clone(),

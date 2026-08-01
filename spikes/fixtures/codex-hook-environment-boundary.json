@@ -1,0 +1,26 @@
+{
+  "study": "codex-hook-environment-boundary",
+  "provider": {
+    "id": "codex",
+    "version": "0.146.0",
+    "contract_fingerprint": "codex-profile-hook-environment-sanitization-v1"
+  },
+  "status": "falsified",
+  "reason": "managed-launch-authority-environment-not-retained-by-live-codex-process",
+  "assertions": {
+    "installed_observer_declaration_trusted": true,
+    "private_tmux_received_authority_environment": true,
+    "live_codex_retained_authority_environment": false,
+    "accepted_session_start_transition_observed": false,
+    "runtime_remained_starting": true,
+    "ordinary_tmux_mutated": false,
+    "unmanaged_provider_session_changed": false
+  },
+  "privacy_audit": {
+    "provider_or_workstream_identifiers_committed": false,
+    "prompt_or_result_content_committed": false,
+    "terminal_data_committed": false,
+    "paths_or_process_ids_committed": false,
+    "credentials_or_raw_payloads_committed": false
+  }
+}

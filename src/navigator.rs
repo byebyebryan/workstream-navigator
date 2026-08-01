@@ -46,7 +46,7 @@ use crate::{
     },
     state::{
         ClientCatalog, ClientHost, ClientHostTransport, ClientProjectLocation, HostIdentity,
-        HostRegistry, StateError, StateRoot, WorkstreamOverview,
+        HostRegistry, IntegrationLifecycle, StateError, StateRoot, WorkstreamOverview,
     },
     transport::{HostClient, RemoteExecutable, SshDestination, SshEndpoint, SystemCommandRunner},
 };
@@ -1461,6 +1461,7 @@ pub fn run_local_navigator(
     let mut remote = RemoteMonitor::new();
     let snapshot = combined_snapshot(root, &mut remote, None)?;
     let mut view = NavigatorView::new(snapshot);
+    let mut observer_needs_review = initialize_observer_activation_message(root, &mut view);
     let mut terminal = TerminalSession::enter()?;
     let mut last_refresh = Instant::now();
     let mut last_animation = Instant::now();
@@ -1535,12 +1536,13 @@ pub fn run_local_navigator(
             }
         }
         if last_refresh.elapsed() >= Duration::from_millis(500) {
-            let selected_host = view.selected_host_alias().map(str::to_owned);
-            match combined_snapshot(root, &mut remote, selected_host.as_deref()) {
-                Ok(snapshot) => view.replace_snapshot(snapshot),
-                Err(error) => view.set_message(action_message(&error)),
-            }
-            refresh_attachment_status(&presentation, &mut view);
+            refresh_navigator(
+                root,
+                &presentation,
+                &mut remote,
+                &mut view,
+                &mut observer_needs_review,
+            );
             last_refresh = Instant::now();
         }
         if last_animation.elapsed() >= Duration::from_millis(100) {
@@ -1553,6 +1555,43 @@ pub fn run_local_navigator(
     outcome?;
     close?;
     Ok(())
+}
+
+fn initialize_observer_activation_message(root: &StateRoot, view: &mut NavigatorView) -> bool {
+    let pending = observer_review_pending(root);
+    if pending {
+        view.set_message(
+            "approve the observer hooks in the native Codex pane with /hooks, then exit Codex",
+        );
+    }
+    pending
+}
+
+fn refresh_navigator(
+    root: &StateRoot,
+    presentation: &Presentation,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+    observer_needs_review: &mut bool,
+) {
+    let selected_host = view.selected_host_alias().map(str::to_owned);
+    match combined_snapshot(root, remote, selected_host.as_deref()) {
+        Ok(snapshot) => view.replace_snapshot(snapshot),
+        Err(error) => view.set_message(action_message(&error)),
+    }
+    refresh_attachment_status(presentation, view);
+    let now_pending = observer_review_pending(root);
+    if *observer_needs_review && !now_pending {
+        view.set_message("observer ready; native Workstreams can now start");
+    }
+    *observer_needs_review = now_pending;
+}
+
+fn observer_review_pending(root: &StateRoot) -> bool {
+    HostRegistry::open(root)
+        .ok()
+        .and_then(|registry| registry.codex_integration().ok().flatten())
+        .is_none_or(|integration| integration.lifecycle != IntegrationLifecycle::Ready)
 }
 
 fn activate_selected(

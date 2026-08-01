@@ -2,8 +2,10 @@
 
 Date: 2026-07-31
 
-Status: D0 through D6.9 complete; the former environment-based lifecycle
-observer is retired in favor of static-profile plus direct-ancestry authority.
+Status: D0 through D6.9 complete; D7 implementation is ready for its bounded
+native acceptance. The former environment-based lifecycle observer is retired
+in favor of static-profile plus direct-ancestry authority and navigator-owned
+native activation.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -45,6 +47,7 @@ This document owns sequencing, exit gates, and progress.
 | D6.5 | Project-marker collision correction | Complete |
 | D6.6 | Project-label accent refinement | Complete |
 | D6.9 | Codex observer authority repair | Complete |
+| D7 | Navigator-owned observer activation | In progress |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](spikes/0009-codex-hook-environment-boundary.md)
@@ -709,6 +712,36 @@ Exit gate:
 - a live host update parks all managed Runtimes, performs the explicit native
   `/hooks` review, and records fresh lifecycle activity without provider-pane
   output.
+
+## D7 - Navigator-owned observer activation
+
+Implementation status: ready for native acceptance. A fresh host-local `wsnav`
+now reconciles its exact observer profile before normal work, then hosts any
+necessary native Codex trust review in the navigator's temporary right pane
+instead of exposing a separate setup workflow.
+
+Scope:
+
+- make bare and explicit `wsnav navigator` the host-local activation entry
+  point, while retaining setup/update commands only as hidden diagnostics;
+- create an absent exact profile or migrate an exact legacy declaration only
+  while no managed Runtime is live;
+- run the native profile-selected `/hooks` review in the navigator's blank
+  provider pane with a disposable cwd, never in a Workstream or existing agent
+  session;
+- show activation guidance in the navigator, silently verify native trust when
+  the temporary TUI exits, and leave the pane blank afterward; and
+- retain fail-closed handling of a foreign or modified profile, untrusted
+  review, a failed native TUI, and any live managed Runtime.
+
+Exit gate:
+
+- tests cover fresh activation, untrusted-ready reconciliation, live-runtime
+  refusal, hidden diagnostics, and shell-free temporary-pane launch;
+- a disposable native acceptance proves the review occurs in the right pane,
+  leaves no Workstream/runtime behind, and marks the exact profile ready only
+  after native approval; and
+- formatting, tests, lint, package checks, and `git diff --check` pass.
 
 ## Deferred beyond V1
 

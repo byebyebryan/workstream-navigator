@@ -94,22 +94,22 @@ wsnav host doctor <alias>
 ```
 
 The observer profile owns its exact hook executable path. On a fresh host,
-install the final executable before running `wsnav setup`. If an existing
-development install moves from a build-tree symlink to the stable installed
-path, first park every managed Workstream on that host, install the new binary,
-then run `wsnav update-observer` followed by `wsnav setup` and complete Codex's
-native hook review again. Profile updates deliberately refuse to run while a
-managed Runtime is live.
+install the final executable, then open `wsnav`; it creates the exact profile
+and presents Codex's native hook review in the navigator's right pane. If an
+existing development install moves from a build-tree symlink to the stable
+installed path, first park every managed Workstream on that host, install the
+new binary, then open a fresh `wsnav` and complete the native review again.
+Profile updates deliberately refuse to run while a managed Runtime is live.
 
 ## First local project
 
-Setup is an explicit once-per-host native Codex trust action; it does not infer
-or register the current directory. Then register the Git checkout you want
-WSNav to manage explicitly:
+The first `wsnav` on a host activates and reviews its observer; it does not
+infer or register the current directory. Then register the Git checkout you
+want WSNav to manage explicitly:
 
 ```console
-# once on this host; complete Codex's native hook review
-wsnav setup
+# once on this host; approve the exact hook entries in the native right pane
+wsnav
 
 # from the checkout, or supply another explicit Git checkout path
 wsnav register "$PWD"

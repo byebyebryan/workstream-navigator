@@ -282,6 +282,21 @@ impl Presentation {
         self.finish_attachment_start(status, result)
     }
 
+    /// Replaces the blank provider pane with the local temporary native Codex
+    /// observer-review surface. This is not a Workstream attachment and never
+    /// records provider output in presentation state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact owned presentation pane cannot be
+    /// replaced.
+    pub fn start_observer_review(&self) -> Result<(), PresentationError> {
+        self.invoke(
+            None,
+            self.provider_respawn_for_command(self.observer_review_command()),
+        )
+    }
+
     fn provider_respawn_arguments(
         &self,
         workstream_id: WorkstreamId,
@@ -503,6 +518,15 @@ impl Presentation {
             "--state-root".into(),
             self.state_root.clone().into_os_string(),
             "_provider_wait".into(),
+        ]
+    }
+
+    fn observer_review_command(&self) -> Vec<OsString> {
+        vec![
+            self.executable.clone().into_os_string(),
+            "--state-root".into(),
+            self.state_root.clone().into_os_string(),
+            "_observer_review".into(),
         ]
     }
 
@@ -855,6 +879,28 @@ mod tests {
                 .any(|argument| argument == "_provider_attach")
         );
         assert_eq!(command.len(), 11);
+    }
+
+    #[test]
+    fn observer_review_uses_only_the_owned_provider_pane_and_direct_arguments() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        let presentation = Presentation {
+            paths,
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+
+        let command = presentation.observer_review_command();
+
+        assert_eq!(command[0], "/workspace/wsnav");
+        assert_eq!(command[1], "--state-root");
+        assert_eq!(command[3], "_observer_review");
+        assert!(
+            command
+                .iter()
+                .all(|argument| argument != "sh" && argument != "/bin/sh")
+        );
     }
 
     #[test]

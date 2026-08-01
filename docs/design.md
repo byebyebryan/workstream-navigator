@@ -66,8 +66,8 @@ its completed visible result.
   managed worktrees for additional workstreams.
 - Activity and durable result attention for Workstream Navigator-started Codex
   sessions.
-- Explicit setup, native trust review, status, and exact removal of one
-  observer-only Codex profile on each managed host.
+- Navigator-owned observer activation, native trust review, status, and exact
+  removal of one observer-only Codex profile on each managed host.
 - Reconnection after local UI or SSH loss.
 - Recovery after the host tmux runtime disappears, using the provider's native
   session identity.
@@ -399,29 +399,32 @@ unsupported rather than copying, parsing, or synthesizing the user's profile.
 Session-scoped hook injection or explicit profile composition may be studied
 later. This does not affect ordinary Codex use of any profile.
 
-The profile is installed only by an explicit setup action. Its generated file
-starts with a human-readable managed marker, but write and removal authority
-comes from a private host record containing an owner ID, schema version,
-canonical profile path, absolute WSNav hook executable path, and exact
-generated-declaration hash. Creation and replacement use a mode-`0600`
-temporary file plus atomic rename. An existing unowned path, a missing
-ownership record, or a changed WSNav declaration is never overwritten or
-removed automatically.
+Opening `wsnav` is the explicit host-local activation intent. Before a fresh
+navigator presentation opens normal work, it verifies the observer. It may
+create an absent exact owned profile or atomically migrate an exact legacy
+declaration only when no WSNav Runtime is live. Its generated file starts with
+a human-readable managed marker, but write and removal authority comes from a
+private host record containing an owner ID, schema version, canonical profile
+path, absolute WSNav hook executable path, and exact generated-declaration
+hash. Creation and replacement use a mode-`0600` temporary file plus atomic
+rename. An existing unowned path, a missing ownership record, a modified
+declaration, or any live Runtime is never overwritten, replaced, or removed
+automatically.
 
 The hook definition is reviewed and trusted through Codex's native `/hooks`
 UI. WSNav never writes Codex's trust database and never passes
-`--dangerously-bypass-hook-trust`. Setup opens a native profile-selected trust
-review process in one private WSNav tmux server and an empty disposable cwd.
-It keeps the real `CODEX_HOME` so native trust persists, but it does not load a
-project configuration or project hooks. The review process is not a managed
-Runtime and deliberately has no observer authority: an invoked hook drains and
-does nothing. The operator trusts the exact generated command in `/hooks` and
-exits without submitting a prompt. On exit, `wsnav setup` verifies the complete
-native trust record and records the observer ready automatically. If review was
-declined, cancelled, or incomplete, it remains `trust_pending`, setup fails
-closed with a retry instruction, and no managed launch is enabled. Setup is
-host-only: it neither inspects the current cwd nor creates a ProjectLocation,
-Checkout, or Workstream. A blank current Codex landing screen emits no
+`--dangerously-bypass-hook-trust`. When trust is missing, the fresh navigator
+replaces only its blank right pane with a temporary native, profile-selected
+Codex review process in an empty disposable cwd. The navigator remains visible;
+the operator uses the normal `/hooks` UI, trusts the exact generated command,
+and exits without submitting a prompt. That temporary process is not a managed
+Runtime or Workstream and deliberately has no observer authority: an invoked
+hook drains and does nothing. On exit, WSNav silently verifies the complete
+native trust record and returns the right pane to its blank state. If review is
+declined, cancelled, or incomplete, it remains `trust_pending`; managed launch
+remains fail-closed and opening a new fresh navigator reruns the review. The
+activation process neither inspects the current cwd nor creates a
+ProjectLocation, Checkout, or Workstream. A blank Codex landing screen emits no
 `SessionStart`, so no stronger passive activation signal is fabricated. The
 first managed `SessionStart` must instead pass the normal provider-side
 corroboration gate. Whether an unprompted review process leaves any native
@@ -446,13 +449,14 @@ unrelated failing hook will preserve the native UI. `doctor` reports detected
 overlap or failures when Codex exposes enough information, without silently
 mutating the user's configuration.
 
-Profile update or removal requires no live WSNav-managed Codex Runtime. An
-explicit `wsnav update-observer` first validates the old exact declaration,
-atomically replaces it, and discards its co-located native trust suffix. A
-declaration-changing update returns the integration to `trust_pending` until
-native review succeeds again; an exact no-op preserves trust. Removal deletes
-only an exactly owned profile whose WSNav declaration is unchanged and whose
-only suffix is the validated native trust state, plus its WSNav ownership
+Profile update or removal requires no live WSNav-managed Codex Runtime. The
+next fresh host-local `wsnav` validates an exact legacy declaration, atomically
+replaces it, and discards its co-located native trust suffix before entering the
+same native review. A declaration-changing update returns the integration to
+`trust_pending` until native review succeeds again; an exact no-op preserves
+trust. The hidden diagnostic update command follows the same rule. Removal
+deletes only an exactly owned profile whose WSNav declaration is unchanged and
+whose only suffix is the validated native trust state, plus its WSNav ownership
 record. It leaves base configuration, other profiles, user and project hooks,
 plugins, history, credentials, and all state outside the dedicated profile
 untouched.

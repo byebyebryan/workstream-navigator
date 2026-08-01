@@ -67,7 +67,8 @@ struct Cli {
 enum Commands {
     /// Open the local two-pane Workstream Navigator presentation.
     Navigator,
-    /// Install the owned observer profile and complete native hook review.
+    /// Internal direct observer setup and native hook review.
+    #[command(hide = true)]
     Setup {
         /// Install without opening the native review TUI. This test-only escape
         /// hatch never marks the observer ready.
@@ -81,6 +82,7 @@ enum Commands {
     /// Inspect the exact observer ownership and trust lifecycle without changing it.
     Doctor,
     /// Replace an exact owned observer declaration and require fresh native trust.
+    #[command(hide = true)]
     UpdateObserver,
     /// Remove only the exact unchanged owned observer profile after all runtimes stop.
     RemoveObserver,
@@ -138,6 +140,10 @@ enum Commands {
     /// Internal blank provider-pane placeholder before an exact attachment is selected.
     #[command(name = "_provider_wait", hide = true)]
     ProviderWait,
+    /// Internal temporary native Codex observer-review surface. It is not a
+    /// Workstream and must never emit diagnostics into the provider pane.
+    #[command(name = "_observer_review", hide = true)]
+    ObserverReview,
     /// Internal local provider-pane attachment helper. It intentionally keeps
     /// all navigator diagnostics out of the native provider surface.
     #[command(name = "_provider_attach", hide = true)]
@@ -247,6 +253,7 @@ const fn is_provider_surface_command(command: Option<&Commands>) -> bool {
         Some(
             Commands::ProviderAttach { .. }
                 | Commands::ProviderRemoteAttach { .. }
+                | Commands::ObserverReview
                 | Commands::RemoteAttach { .. }
                 | Commands::RuntimeLaunch { .. }
         )
@@ -286,6 +293,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
                 .map_err(AppError::Navigator);
         }
         Commands::ProviderWait => return provider_wait(),
+        Commands::ObserverReview => return observer_review(&root),
         Commands::ProviderAttach {
             workstream_id,
             presentation_socket,
@@ -398,6 +406,7 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
         Commands::Navigator
         | Commands::NavigatorPane { .. }
         | Commands::ProviderWait
+        | Commands::ObserverReview
         | Commands::ProviderAttach { .. }
         | Commands::ProviderRemoteAttach { .. }
         | Commands::Hook
@@ -440,9 +449,17 @@ fn runtime_launch(
 }
 
 fn navigator(root: &StateRoot) -> Result<(), AppError> {
+    let activation = {
+        let mut registry = HostRegistry::open(root)?;
+        prepare_observer_activation(root, &mut registry)?
+    };
     let (presentation, fresh) = Presentation::open_or_create(root.base())?;
     if fresh {
         presentation.start()?;
+    }
+    if activation == ObserverActivation::ReviewRequired && fresh {
+        presentation.start_observer_review()?;
+        presentation.focus_provider()?;
     }
     match presentation.attach() {
         // A normal tmux detach leaves the private presentation available for a
@@ -954,43 +971,106 @@ fn fork_workstream(
 }
 
 fn setup(root: &StateRoot, registry: &mut HostRegistry, skip_review: bool) -> Result<(), AppError> {
+    match prepare_observer_activation(root, registry)? {
+        ObserverActivation::Ready => {
+            println!("observer profile is already ready");
+            Ok(())
+        }
+        ObserverActivation::ReviewRequired if skip_review => {
+            println!("observer profile installed; native hook trust remains pending");
+            Ok(())
+        }
+        ObserverActivation::ReviewRequired => {
+            native_trust_review(root)?;
+            let integration = registry
+                .codex_integration()?
+                .ok_or(AppError::ObserverNotInstalled)?;
+            let manager = observer_profile(root)?;
+            if finalize_native_trust(registry, &manager, &integration.ownership)? {
+                println!("observer profile is ready");
+                Ok(())
+            } else {
+                Err(AppError::NativeTrustReviewIncomplete)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ObserverActivation {
+    Ready,
+    ReviewRequired,
+}
+
+/// Reconciles the exact observer declaration before native work can begin.
+///
+/// `wsnav` itself is the explicit user intent for this bounded setup action.
+/// It never trusts a hook, rewrites an unowned declaration, or changes a
+/// profile while a managed Runtime is live.
+fn prepare_observer_activation(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+) -> Result<ObserverActivation, AppError> {
     let manager = observer_profile(root)?;
+    prepare_observer_activation_with_manager(registry, &manager)
+}
+
+fn prepare_observer_activation_with_manager(
+    registry: &mut HostRegistry,
+    manager: &ObserverProfile,
+) -> Result<ObserverActivation, AppError> {
     let existing = registry.codex_integration()?;
-    let ownership = manager.install(
-        uuid::Uuid::new_v4().to_string(),
-        existing.as_ref().map(|integration| &integration.ownership),
-    )?;
-    let lifecycle = existing
-        .as_ref()
-        .map_or(IntegrationLifecycle::TrustPending, |integration| {
-            integration.lifecycle
-        });
-    registry.record_codex_integration(ownership.clone(), lifecycle)?;
-    if lifecycle == IntegrationLifecycle::Ready && manager.verify_native_trust(&ownership).is_ok() {
-        println!("observer profile is already ready");
-        return Ok(());
+    let Some(integration) = existing else {
+        if registry.has_live_runtime()? {
+            return Err(AppError::LiveRuntimePreventsObserverActivation);
+        }
+        let ownership = manager.install(uuid::Uuid::new_v4().to_string(), None)?;
+        registry.record_codex_integration(ownership, IntegrationLifecycle::TrustPending)?;
+        return Ok(ObserverActivation::ReviewRequired);
+    };
+
+    if integration.ownership.profile_schema_version != OBSERVER_PROFILE_SCHEMA_VERSION {
+        if registry.has_live_runtime()? {
+            return Err(AppError::LiveRuntimePreventsObserverActivation);
+        }
+        let ownership = manager.update(&integration.ownership)?;
+        registry.replace_codex_integration(
+            &integration.ownership,
+            ownership,
+            IntegrationLifecycle::TrustPending,
+        )?;
+        return Ok(ObserverActivation::ReviewRequired);
     }
-    if lifecycle == IntegrationLifecycle::Ready {
-        registry.record_codex_integration(ownership.clone(), IntegrationLifecycle::TrustPending)?;
+
+    let ownership = match manager.install(
+        integration.ownership.owner_id.clone(),
+        Some(&integration.ownership),
+    ) {
+        Ok(ownership) => ownership,
+        Err(crate::provider::codex::profile::ProfileError::OwnershipMismatch) => {
+            if registry.has_live_runtime()? {
+                return Err(AppError::LiveRuntimePreventsObserverActivation);
+            }
+            let ownership = manager.update(&integration.ownership)?;
+            registry.replace_codex_integration(
+                &integration.ownership,
+                ownership,
+                IntegrationLifecycle::TrustPending,
+            )?;
+            return Ok(ObserverActivation::ReviewRequired);
+        }
+        Err(error) => return Err(AppError::Profile(error)),
+    };
+    if finalize_native_trust(registry, manager, &ownership)? {
+        return Ok(ObserverActivation::Ready);
     }
-    if skip_review {
-        println!("observer profile installed; native hook trust remains pending");
-        return Ok(());
+    if registry.has_live_runtime()? {
+        return Err(AppError::LiveRuntimePreventsObserverActivation);
     }
-    if finalize_native_trust(registry, &manager, &ownership)? {
-        println!("observer profile is ready");
-        return Ok(());
+    if integration.lifecycle != IntegrationLifecycle::TrustPending {
+        registry.record_codex_integration(ownership, IntegrationLifecycle::TrustPending)?;
     }
-    println!(
-        "review the exact observer hook in Codex's native /hooks UI, then exit Codex without submitting a prompt"
-    );
-    native_trust_review(root)?;
-    if finalize_native_trust(registry, &manager, &ownership)? {
-        println!("observer profile is ready");
-        Ok(())
-    } else {
-        Err(AppError::NativeTrustReviewIncomplete)
-    }
+    Ok(ObserverActivation::ReviewRequired)
 }
 
 fn update_observer(root: &StateRoot, registry: &mut HostRegistry) -> Result<(), AppError> {
@@ -1010,7 +1090,7 @@ fn update_observer(root: &StateRoot, registry: &mut HostRegistry) -> Result<(), 
         ownership,
         IntegrationLifecycle::TrustPending,
     )?;
-    println!("observer profile updated; complete native hook review again with wsnav setup");
+    println!("observer profile updated; open a fresh wsnav to complete native hook review");
     Ok(())
 }
 
@@ -1089,6 +1169,43 @@ fn finalize_native_trust(
         Err(crate::provider::codex::profile::ProfileError::NativeTrustPending) => Ok(false),
         Err(error) => Err(AppError::Profile(error)),
     }
+}
+
+/// Runs only in the presentation's provider pane. Native Codex owns every
+/// visible byte while the user reviews the exact hook declaration. After exit,
+/// this helper silently reconciles native trust and returns the pane to its
+/// blank wait state.
+fn observer_review(root: &StateRoot) -> Result<(), AppError> {
+    let _ = native_trust_review_in_provider_pane(root);
+    let _ = reconcile_observer_review(root);
+    provider_wait()
+}
+
+fn reconcile_observer_review(root: &StateRoot) -> Result<(), AppError> {
+    let mut registry = HostRegistry::open(root)?;
+    let integration = registry
+        .codex_integration()?
+        .ok_or(AppError::ObserverNotInstalled)?;
+    let manager = observer_profile(root)?;
+    let _ = finalize_native_trust(&mut registry, &manager, &integration.ownership)?;
+    Ok(())
+}
+
+fn native_trust_review_in_provider_pane(root: &StateRoot) -> Result<(), AppError> {
+    let review_root = root.base().join("review");
+    fs::create_dir_all(&review_root).map_err(AppError::Io)?;
+    let review_cwd = review_root.join(uuid::Uuid::new_v4().to_string());
+    fs::create_dir(&review_cwd).map_err(AppError::Io)?;
+    let result = Command::new("codex")
+        .args(["--profile", "wsnav-observer", "-C"])
+        .arg(&review_cwd)
+        .status()
+        .map_err(AppError::Io);
+    let remove = fs::remove_dir_all(&review_cwd).map_err(AppError::Io);
+    let _ = fs::remove_dir(&review_root);
+    result?;
+    remove?;
+    Ok(())
 }
 
 fn native_trust_review(root: &StateRoot) -> Result<(), AppError> {
@@ -1463,16 +1580,18 @@ enum AppError {
     NoBinding(WorkstreamId),
     #[error("CODEX_HOME cannot be determined")]
     CodexHomeUnavailable,
-    #[error("observer profile is not installed; run wsnav setup")]
+    #[error("observer profile is not installed; open wsnav to activate it")]
     ObserverNotInstalled,
     #[error(
-        "native hook trust remains pending; rerun wsnav setup and approve the exact observer hooks in Codex"
+        "native hook trust remains pending; open wsnav and approve the exact observer hooks in Codex"
     )]
     NativeTrustReviewIncomplete,
     #[error("observer profile removal is refused while a managed runtime is live")]
     LiveRuntimePreventsRemoval,
     #[error("observer profile update is refused while a managed runtime is live")]
     LiveRuntimePreventsUpdate,
+    #[error("observer activation is refused while a managed runtime is live")]
+    LiveRuntimePreventsObserverActivation,
     #[error(transparent)]
     Repository(#[from] crate::repository::RepositoryError),
     #[error(transparent)]
@@ -1617,17 +1736,22 @@ mod tests {
         .unwrap();
         assert!(is_provider_surface_command(launch.command.as_ref()));
 
+        let review = Cli::try_parse_from(["wsnav", "_observer_review"]).unwrap();
+        assert!(is_provider_surface_command(review.command.as_ref()));
+
         let user = Cli::try_parse_from(["wsnav", "attach", "00000000-0000-0000-0000-000000000001"])
             .unwrap();
         assert!(!is_provider_surface_command(user.command.as_ref()));
     }
 
     #[test]
-    fn manual_trust_reconciliation_is_not_part_of_the_normal_cli() {
+    fn observer_activation_and_manual_reconciliation_are_hidden_from_normal_cli_help() {
         let help = Cli::command().render_help().to_string();
 
-        assert!(help.contains("setup"));
+        assert!(!help.contains("setup"));
+        assert!(!help.contains("update-observer"));
         assert!(!help.contains("trust-observer"));
+        assert!(!help.contains("_observer_review"));
     }
 
     #[test]
@@ -1676,6 +1800,111 @@ mod tests {
             registry.codex_integration().unwrap().unwrap().lifecycle,
             IntegrationLifecycle::Ready
         );
+    }
+
+    #[test]
+    fn navigator_activation_creates_one_owned_profile_and_requires_native_review() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let manager = test_observer_profile(temporary.path(), &root);
+
+        let activation = prepare_observer_activation_with_manager(&mut registry, &manager).unwrap();
+
+        assert_eq!(activation, ObserverActivation::ReviewRequired);
+        assert!(manager.path().is_file());
+        assert_eq!(
+            registry.codex_integration().unwrap().unwrap().lifecycle,
+            IntegrationLifecycle::TrustPending
+        );
+    }
+
+    #[test]
+    fn navigator_activation_reopens_missing_native_trust_without_a_separate_setup_command() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let manager = test_observer_profile(temporary.path(), &root);
+        let ownership = manager.install("owner".to_owned(), None).unwrap();
+        registry
+            .record_codex_integration(ownership, IntegrationLifecycle::Ready)
+            .unwrap();
+
+        let activation = prepare_observer_activation_with_manager(&mut registry, &manager).unwrap();
+
+        assert_eq!(activation, ObserverActivation::ReviewRequired);
+        assert_eq!(
+            registry.codex_integration().unwrap().unwrap().lifecycle,
+            IntegrationLifecycle::TrustPending
+        );
+    }
+
+    #[test]
+    fn navigator_activation_migrates_an_exact_prior_executable_before_review() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let previous = ObserverProfile::new(
+            temporary.path().join("codex-home"),
+            temporary.path().join("bin/wsnav-old"),
+            root.base(),
+        );
+        let ownership = previous.install("owner".to_owned(), None).unwrap();
+        registry
+            .record_codex_integration(ownership, IntegrationLifecycle::Ready)
+            .unwrap();
+        let manager = test_observer_profile(temporary.path(), &root);
+
+        let activation = prepare_observer_activation_with_manager(&mut registry, &manager).unwrap();
+
+        assert_eq!(activation, ObserverActivation::ReviewRequired);
+        let integration = registry.codex_integration().unwrap().unwrap();
+        assert_eq!(integration.lifecycle, IntegrationLifecycle::TrustPending);
+        assert_eq!(
+            integration.ownership.hook_executable,
+            temporary.path().join("bin/wsnav")
+        );
+        assert_eq!(
+            std::fs::read_to_string(manager.path()).unwrap(),
+            manager.rendered()
+        );
+    }
+
+    #[test]
+    fn navigator_activation_never_replaces_a_profile_while_a_runtime_is_live() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let manager = test_observer_profile(temporary.path(), &root);
+        let ownership = manager.install("owner".to_owned(), None).unwrap();
+        registry
+            .record_codex_integration(ownership, IntegrationLifecycle::TrustPending)
+            .unwrap();
+        let workstream = registry
+            .register_external_workstream(
+                temporary.path().join("checkout"),
+                "repository".to_owned(),
+                "commit".to_owned(),
+            )
+            .unwrap();
+        registry.reserve_runtime(workstream.workstream_id).unwrap();
+
+        assert!(matches!(
+            prepare_observer_activation_with_manager(&mut registry, &manager),
+            Err(AppError::LiveRuntimePreventsObserverActivation)
+        ));
+        assert_eq!(
+            registry.codex_integration().unwrap().unwrap().lifecycle,
+            IntegrationLifecycle::TrustPending
+        );
+    }
+
+    fn test_observer_profile(root: &Path, state_root: &StateRoot) -> ObserverProfile {
+        ObserverProfile::new(
+            root.join("codex-home"),
+            root.join("bin/wsnav"),
+            state_root.base(),
+        )
     }
 
     fn complete_native_trust_suffix(manager: &ObserverProfile) -> String {

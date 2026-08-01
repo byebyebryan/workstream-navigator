@@ -959,10 +959,10 @@ pub enum ActionError {
     Io(std::io::Error),
     #[error("workstream {0} has no runtime")]
     NoRuntime(WorkstreamId),
-    #[error("observer profile is not installed; run wsnav setup")]
+    #[error("observer profile is not installed; open wsnav to activate it")]
     ObserverNotInstalled,
     #[error(
-        "observer profile trust is pending; run wsnav setup and complete native Codex /hooks review"
+        "observer profile trust is pending; open wsnav and complete native Codex /hooks review"
     )]
     ObserverNotReady,
     #[error("private runtime probe is ambiguous; refusing to create another Codex process")]

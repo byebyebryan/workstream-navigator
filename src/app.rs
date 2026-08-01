@@ -354,7 +354,7 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
     match command {
         Commands::Setup { skip_review } => setup(root, &mut registry, skip_review),
         Commands::TrustObserver => trust_observer(root, &mut registry),
-        Commands::Doctor => doctor(root, &registry),
+        Commands::Doctor => doctor(root, &mut registry),
         Commands::UpdateObserver => update_observer(root, &mut registry),
         Commands::RemoveObserver => remove_observer(root, &mut registry),
         Commands::Register { checkout } => register(&mut registry, &checkout),
@@ -1094,7 +1094,8 @@ fn update_observer(root: &StateRoot, registry: &mut HostRegistry) -> Result<(), 
     Ok(())
 }
 
-fn doctor(root: &StateRoot, registry: &HostRegistry) -> Result<(), AppError> {
+fn doctor(root: &StateRoot, registry: &mut HostRegistry) -> Result<(), AppError> {
+    actions::reconcile_observer_trust(root, registry)?;
     let integration = registry.codex_integration()?;
     let Some(integration) = integration else {
         println!("observer: not installed");

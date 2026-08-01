@@ -507,6 +507,7 @@ pub fn start(
     if workstream_lifecycle(registry, workstream_id)? == WorkstreamLifecycle::RecoveryRequired {
         return Err(ActionError::NativeRecoveryRequired);
     }
+    reconcile_observer_trust(root, registry)?;
     let integration = registry
         .codex_integration()?
         .ok_or(ActionError::ObserverNotInstalled)?;
@@ -595,6 +596,7 @@ pub fn recover(
     if workstream_lifecycle(registry, workstream_id)? != WorkstreamLifecycle::RecoveryRequired {
         return Err(ActionError::NativeRecoveryUnavailable);
     }
+    reconcile_observer_trust(root, registry)?;
     let integration = registry
         .codex_integration()?
         .ok_or(ActionError::ObserverNotInstalled)?;
@@ -951,6 +953,52 @@ fn observer_profile(root: &crate::state::StateRoot) -> Result<ObserverProfile, A
     Ok(ObserverProfile::new(codex_home, executable, root.base()))
 }
 
+/// Reconciles a completed native `/hooks` review into the durable observer
+/// lifecycle before a managed native action begins.
+///
+/// Codex owns the trust record in the exact observer-profile suffix. This
+/// function only records that already-verified native decision; it never
+/// installs, changes, or trusts a hook declaration itself.
+///
+/// # Errors
+///
+/// Returns an error when the owned observer profile cannot be verified or the
+/// resulting lifecycle transition cannot be recorded atomically.
+pub fn reconcile_observer_trust(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+) -> Result<(), ActionError> {
+    let manager = observer_profile(root)?;
+    reconcile_observer_trust_with_manager(registry, &manager)
+}
+
+fn reconcile_observer_trust_with_manager(
+    registry: &mut HostRegistry,
+    manager: &ObserverProfile,
+) -> Result<(), ActionError> {
+    let Some(integration) = registry.codex_integration()? else {
+        return Ok(());
+    };
+
+    match manager.verify_native_trust(&integration.ownership) {
+        Ok(()) if integration.lifecycle == IntegrationLifecycle::TrustPending => {
+            registry
+                .record_codex_integration(integration.ownership, IntegrationLifecycle::Ready)?;
+        }
+        Err(ProfileError::NativeTrustPending)
+            if integration.lifecycle == IntegrationLifecycle::Ready =>
+        {
+            registry.record_codex_integration(
+                integration.ownership,
+                IntegrationLifecycle::TrustPending,
+            )?;
+        }
+        Ok(()) | Err(ProfileError::NativeTrustPending) => {}
+        Err(error) => return Err(ActionError::Profile(error)),
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum ActionError {
     #[error("CODEX_HOME cannot be determined")]
@@ -995,6 +1043,7 @@ pub enum ActionError {
 mod tests {
     use std::{
         cell::Cell,
+        fmt::Write as _,
         fs,
         path::{Path, PathBuf},
         process::{Command, Stdio},
@@ -1045,6 +1094,46 @@ mod tests {
             )
             .unwrap();
         (temporary, registry, registered.workstream_id)
+    }
+
+    #[test]
+    fn completed_native_review_promotes_pending_observer_before_a_managed_action() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = crate::state::StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut registry = crate::state::HostRegistry::open(&root).unwrap();
+        let manager = ObserverProfile::new(
+            temporary.path().join("codex-home"),
+            temporary.path().join("bin/wsnav"),
+            root.base(),
+        );
+        let ownership = manager.install("owner".to_owned(), None).unwrap();
+        registry
+            .record_codex_integration(ownership, IntegrationLifecycle::TrustPending)
+            .unwrap();
+
+        reconcile_observer_trust_with_manager(&mut registry, &manager).unwrap();
+        assert_eq!(
+            registry.codex_integration().unwrap().unwrap().lifecycle,
+            IntegrationLifecycle::TrustPending
+        );
+
+        let mut trust = String::from("\n[hooks.state]\n");
+        for hook in ["session_start", "user_prompt_submit", "stop", "session_end"] {
+            let key =
+                serde_json::to_string(&format!("{}:{hook}:0:0", manager.path().display())).unwrap();
+            writeln!(
+                trust,
+                "\n[hooks.state.{key}]\ntrusted_hash = \"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\""
+            )
+            .unwrap();
+        }
+        fs::write(manager.path(), format!("{}{}", manager.rendered(), trust)).unwrap();
+
+        reconcile_observer_trust_with_manager(&mut registry, &manager).unwrap();
+        assert_eq!(
+            registry.codex_integration().unwrap().unwrap().lifecycle,
+            IntegrationLifecycle::Ready
+        );
     }
 
     fn git(repository: &Path, arguments: &[&str]) {

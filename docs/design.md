@@ -379,6 +379,12 @@ Workstream Navigator installs one narrowly scoped profile named
 launches add `--profile wsnav-observer`; ordinary Codex launches do not. This
 uses the user's existing `CODEX_HOME`, not an isolated or copied home.
 
+The generated hook command carries the canonical private host state root as a
+static, quoted command argument. It never relies on a launch environment value
+to locate Runtime authority: Codex 0.146.0 sanitizes arbitrary launch values
+before it runs ordinary command hooks. The argument is part of the exact owned
+profile declaration and trust hash, not user or provider input.
+
 Codex loads the normal system and user configuration, overlays the selected
 profile, then applies trusted project configuration and explicit CLI
 overrides. The WSNav profile contains only the hook feature setting and the
@@ -468,8 +474,21 @@ The hook is deliberately passive:
 - it emits no stdout, model context, provider warning, or management message;
 - it exits successfully when observation cannot be recorded, leaving the
   navigator `unknown` instead of disrupting Codex; and
-- its environment, ancestry, session, runtime generation, cwd, and binding
-  revision are checked before an observation is accepted.
+- it finds one private Runtime through the static state-root argument, then
+  requires the hook's direct Codex parent PID, process-birth value, and cwd to
+  match exactly one current Runtime record; and
+- its session, runtime generation, cwd, and binding revision are checked
+  before an observation is accepted.
+
+The pre-refactor launch-environment authority mechanism is falsified by
+[Spike 0009](spikes/0009-codex-hook-environment-boundary.md): it must remain
+fail-closed and cannot supply lifecycle status. [Spike
+0010](spikes/0010-codex-hook-ancestry-authority.md) proves the static-argument
+plus direct-parent candidate only. Until that candidate is implemented with
+the normal transactional binding and App Server corroboration gates,
+observer-derived status, attention, cutover, and exact-fork preconditions are
+not a production capability. No shell-wrapper ancestry fallback is allowed;
+that would admit an agent tool-shell forgery.
 
 Hook evidence can update status and bind an observed native session inside an
 already managed runtime. It cannot authorize workstream creation, fork,
@@ -477,8 +496,9 @@ parking, provider input, Git mutation, or focus.
 
 A ProviderBinding is stronger than an untrusted hook claim. A `SessionStart`
 first agrees with a pending launch or the one accepted native transition, then
-must agree with the recorded runtime generation, pane, cwd, process birth and
-ancestry. Before it changes durable binding state, WSNav performs one bounded,
+must agree with the recorded runtime generation, pane, cwd, provider PID,
+process birth, and direct ancestry. Before it changes durable binding state,
+WSNav performs one bounded,
 read-only `thread/read(includeTurns=false)` over a new App Server stdio
 connection and requires the returned `thread.id` to equal the hooked ID. Events
 that cannot be corroborated may leave status `unknown`, but cannot replace a
@@ -699,7 +719,7 @@ Checkout
 
 Runtime
   runtime_id, workstream_id, provider, tmux_generation,
-  tmux_session, cwd, process_birth, lifecycle, revision
+  tmux_session, cwd, provider_pid, process_birth, lifecycle, revision
 
 ProviderBinding
   binding_id, runtime_id, native_session_id, start_source,

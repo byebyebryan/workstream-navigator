@@ -1,0 +1,28 @@
+{
+  "study": "codex-hook-ancestry-authority",
+  "provider": {
+    "id": "codex",
+    "version": "codex-cli 0.146.0",
+    "contract_fingerprint": "codex-hook-parent-pid-birth-cwd-v1"
+  },
+  "status": "pass",
+  "reason": "ancestry-record-authority-proven",
+  "assertions": {
+    "trusted_hook_source_reused": true,
+    "codex_environment_sanitized": true,
+    "two_private_runtimes_exactly_matched": true,
+    "repeated_native_clear_rebinding": true,
+    "external_shell_forgery_rejected": true,
+    "agent_shell_forgery_rejected": true,
+    "stale_runtime_record_rejected": true,
+    "ordinary_tmux_unchanged": true,
+    "cleanup_complete": true
+  },
+  "privacy_audit": {
+    "provider_or_workstream_identifiers_committed": false,
+    "prompt_or_result_content_committed": false,
+    "terminal_data_committed": false,
+    "paths_or_process_ids_committed": false,
+    "credentials_or_raw_payloads_committed": false
+  }
+}

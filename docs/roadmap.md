@@ -2,7 +2,9 @@
 
 Date: 2026-07-31
 
-Status: D0 through D6.6 complete
+Status: D0 through D6.6 complete; the environment-based lifecycle observer is
+falsified in live use and its replacement authority design is pending an
+explicit implementation checkpoint.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -43,6 +45,15 @@ This document owns sequencing, exit gates, and progress.
 | D6.4 | Navigator grouping and visual-hierarchy polish | Complete |
 | D6.5 | Project-marker collision correction | Complete |
 | D6.6 | Project-label accent refinement | Complete |
+
+The completed checkpoints describe the source-installed operator-beta at the
+time of their acceptance. [Spike 0009](spikes/0009-codex-hook-environment-boundary.md)
+subsequently falsified its launch-environment observer authority. [Spike
+0010](spikes/0010-codex-hook-ancestry-authority.md) validates a strict
+PID-plus-birth-plus-cwd candidate on Codex 0.146.0, but no production rework is
+included in those completed checkpoints. Observer-dependent lifecycle features
+remain blocked until a separately scoped implementation and live acceptance
+checkpoint lands.
 
 ## D0 - Contract kernel
 

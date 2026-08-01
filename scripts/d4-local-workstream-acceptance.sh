@@ -107,20 +107,15 @@ sleep 1
 
 grep -F '"lastTurnId":"settled-turn"' "$fork_request" >/dev/null
 grep -F '"threadId":"source-session"' "$fork_request" >/dev/null
+grep -F "\"cwd\":\"$repository\"" "$fork_request" >/dev/null
 destination_status="$("$wsnav_bin" --state-root "$state_root" status "$destination_workstream_id")"
 grep -F 'lifecycle: Idle' <<<"$destination_status" >/dev/null
 grep -F 'private runtime: live' <<<"$destination_status" >/dev/null
 source_status_after="$("$wsnav_bin" --state-root "$state_root" status "$source_workstream_id")"
 grep -F 'lifecycle: Working' <<<"$source_status_after" >/dev/null
 
-shopt -s nullglob
-destination_checkouts=("$state_root"/worktrees/*/"$destination_workstream_id")
-(( ${#destination_checkouts[@]} == 1 ))
-destination_checkout="${destination_checkouts[0]}"
-test -f "$destination_checkout/committed.txt"
-test ! -e "$destination_checkout/source-only.txt"
 test -f "$repository/source-only.txt"
-test "$(git -C "$repository" rev-parse HEAD)" = "$(git -C "$destination_checkout" rev-parse HEAD)"
+test ! -e "$state_root/worktrees"
 
 "$wsnav_bin" --state-root "$state_root" park "$destination_workstream_id"
 "$wsnav_bin" --state-root "$state_root" park "$source_workstream_id"

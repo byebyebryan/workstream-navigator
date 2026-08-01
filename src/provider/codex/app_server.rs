@@ -130,7 +130,7 @@ impl EphemeralAppServer {
     /// turn. This is intentionally non-idempotent: callers must persist their
     /// recovery plan before invoking it and must never retry an ambiguous call.
     ///
-    /// The destination checkout is passed only as the provider's requested
+    /// The registered project root is passed only as the provider's requested
     /// working directory. Native `codex -C … resume` remains authoritative for
     /// the destination TUI cwd.
     ///

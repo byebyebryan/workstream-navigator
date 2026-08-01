@@ -14,4 +14,3 @@ pub mod repository;
 pub mod runtime;
 pub mod state;
 pub mod transport;
-pub mod worktree;

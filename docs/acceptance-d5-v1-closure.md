@@ -2,8 +2,13 @@
 
 Date: 2026-07-30
 
-Status: pass — disposable recovery/fresh-install gates and the bounded
-operator-run local/remote native-Codex acceptance passed.
+Status: superseded for filesystem behavior — retained lifecycle and recovery
+evidence. The 2026-08-01 project-root-only contract retires the separate
+managed-checkout assertions below; it does not alter the recorded provider or
+private-tmux observations.
+
+Original status: pass — disposable recovery/fresh-install gates and the
+bounded operator-run local/remote native-Codex acceptance passed.
 
 ## Automated recovery and installation evidence
 
@@ -38,9 +43,10 @@ dependency policy checks, script/fixture linting, and diff checks.
   one native Codex Workstream on each host, and completed harmless turns through
   direct native terminal attachment. Both resulting bindings and result tips
   were observed without injecting navigator traffic into either provider pane.
-- A local settled source forked to a distinct managed Checkout and native
-  thread. The source remained live with its own unseen result while the
-  destination completed a divergent native turn.
+- A local settled source forked to a distinct native thread. The original
+  separate-managed-Checkout observation is retired; the source remained live
+  with its own unseen result while the destination completed a divergent native
+  turn.
 - The destination's exact private tmux server was deliberately stopped. A
   status refresh marked only that Workstream `recovery_required`, retaining its
   prior binding and result attention. `recover` opened the exact native
@@ -52,10 +58,9 @@ dependency policy checks, script/fixture linting, and diff checks.
   confirmed its completed history. This proves the normal reconnect path;
   D3's cached-unavailable behavior remains separately covered by automated and
   bounded live evidence.
-- All three acceptance Runtimes were parked. Their Checkouts remained clean and
-  retained, as V1 deliberately has no destructive Workstream retirement. The
-  ordinary tmux fingerprints on both hosts were unchanged, and an unrelated
-  pre-existing remote Runtime remained live and unchanged.
+- All three acceptance Runtimes were parked. The ordinary tmux fingerprints on
+  both hosts were unchanged, and an unrelated pre-existing remote Runtime
+  remained live and unchanged.
 - The regular observer integration was pre-existing and remains in place;
   removal is intentionally unsafe while unrelated Runtimes exist. Exact
   observer removal is instead proven by the isolated D5 fresh-install gate.

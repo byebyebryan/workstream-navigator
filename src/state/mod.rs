@@ -9,9 +9,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::domain::{
-    AttentionState, CheckoutId, Clock, CompoundOperation, DomainError, HostId, IdGenerator,
-    LocationId, OperationId, OperationKind, OperationPhase, ProjectId, RandomIdGenerator, Revision,
-    RuntimeId, RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle, WorkstreamOrigin,
+    AttentionState, Clock, CompoundOperation, DomainError, HostId, IdGenerator, LocationId,
+    OperationId, OperationKind, OperationPhase, ProjectId, RandomIdGenerator, Revision, RuntimeId,
+    RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle, WorkstreamOrigin,
 };
 use crate::protocol::{Capabilities, HelloResponse};
 use crate::provider::codex::hooks::{HookObservation, LifecycleEvent};
@@ -23,7 +23,7 @@ use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 /// The newest host-registry schema this build can open or create.
 ///
 /// This is safe release-probe metadata; it is not a host-state observation.
-pub const HOST_SCHEMA_VERSION: i64 = 7;
+pub const HOST_SCHEMA_VERSION: i64 = 8;
 const CLIENT_SCHEMA_VERSION: i64 = 4;
 const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
@@ -48,22 +48,10 @@ const HOST_SCHEMA_SQL: &str = "
     );
     CREATE TABLE project_locations (
         location_id TEXT PRIMARY KEY,
-        repository_identity TEXT NOT NULL,
         repository_path TEXT NOT NULL,
         repository_display_name TEXT NOT NULL,
         remote_identity_fingerprint TEXT,
         remote_identity_display TEXT,
-        default_base_ref TEXT NOT NULL,
-        managed_worktree_root TEXT NOT NULL,
-        revision INTEGER NOT NULL CHECK (revision > 0)
-    );
-    CREATE TABLE checkouts (
-        checkout_id TEXT PRIMARY KEY,
-        path TEXT NOT NULL UNIQUE,
-        ownership TEXT NOT NULL,
-        branch TEXT,
-        creation_commit TEXT,
-        repository_identity TEXT NOT NULL,
         revision INTEGER NOT NULL CHECK (revision > 0)
     );
     CREATE TABLE workstreams (
@@ -71,12 +59,17 @@ const HOST_SCHEMA_SQL: &str = "
         location_id TEXT NOT NULL REFERENCES project_locations(location_id),
         origin TEXT NOT NULL,
         source_workstream_id TEXT REFERENCES workstreams(workstream_id),
-        checkout_id TEXT NOT NULL UNIQUE REFERENCES checkouts(checkout_id),
         lifecycle TEXT NOT NULL,
         archived_at_millis INTEGER,
         last_activity_sequence INTEGER NOT NULL CHECK (last_activity_sequence >= 0),
         last_activity_at_millis INTEGER NOT NULL CHECK (last_activity_at_millis >= 0),
         revision INTEGER NOT NULL CHECK (revision > 0)
+    );
+    CREATE TABLE independent_creation_requests (
+        request_key TEXT PRIMARY KEY,
+        source_workstream_id TEXT NOT NULL REFERENCES workstreams(workstream_id),
+        source_revision INTEGER NOT NULL CHECK (source_revision > 0),
+        workstream_id TEXT NOT NULL UNIQUE REFERENCES workstreams(workstream_id)
     );
     CREATE TABLE runtimes (
         runtime_id TEXT PRIMARY KEY,
@@ -205,7 +198,6 @@ impl StateRoot {
 #[derive(Debug)]
 pub struct HostRegistry {
     connection: Connection,
-    managed_worktrees_root: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -267,53 +259,33 @@ impl ClientHost {
     }
 }
 
-/// One V1 external checkout and its initial workstream registration.
+/// One registered project root and its initial Workstream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalWorkstream {
     pub location_id: LocationId,
-    pub checkout_id: CheckoutId,
     pub workstream_id: WorkstreamId,
-    pub checkout_path: PathBuf,
-    pub repository_identity: String,
-    pub default_base_ref: String,
-    pub managed_worktree_root: PathBuf,
 }
 
-/// One legacy `ProjectLocation` whose repository presentation metadata has not
-/// yet been inspected by a finite control path.
+/// One registered `ProjectLocation` whose presentation metadata has not yet
+/// been inspected by a finite control path.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PendingRepositoryMetadata {
     pub location_id: LocationId,
     pub repository_path: PathBuf,
 }
 
-/// Private Git metadata for creating one sibling Workstream from a registered
-/// `ProjectLocation`. It is never returned by snapshots or the SSH protocol.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkstreamGitLocation {
-    pub repository_path: PathBuf,
-    pub default_base_ref: String,
-    pub source_revision: Revision,
-}
-
-/// The persisted target of one non-destructive Git-backed Workstream creation.
+/// The persisted target of one native Codex fork.
 ///
-/// The fields are host-private: they are never placed into a remote snapshot or
-/// navigator row. The plan exists before Git is invoked so recovery can inspect
-/// one exact path/branch/commit without guessing or scanning user worktrees.
+/// The project root is the exact launch directory for the destination. It is
+/// host-private and never returned by snapshots or the SSH protocol.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManagedWorkstreamPlan {
+pub struct ForkPlan {
     pub operation: CompoundOperation,
     pub workstream_id: WorkstreamId,
-    pub checkout_id: CheckoutId,
     pub location_id: LocationId,
     pub origin: WorkstreamOrigin,
     pub source_workstream_id: WorkstreamId,
-    pub repository_path: PathBuf,
-    pub repository_identity: String,
-    pub worktree_path: PathBuf,
-    pub branch: String,
-    pub base_commit: String,
+    pub project_root: PathBuf,
     pub source_runtime_id: Option<RuntimeId>,
     pub source_native_session_id: Option<String>,
     pub last_settled_turn_id: Option<String>,
@@ -323,21 +295,21 @@ pub struct ManagedWorkstreamPlan {
     pub fork_attempted_at_millis: Option<i64>,
 }
 
-/// One committed managed Workstream record returned after an exact Git effect.
+/// One committed Workstream record returned after an independent creation or
+/// exact provider fork.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManagedWorkstream {
+pub struct CreatedWorkstream {
     pub workstream_id: WorkstreamId,
-    pub checkout_id: CheckoutId,
     pub location_id: LocationId,
     pub origin: WorkstreamOrigin,
     pub source_workstream_id: WorkstreamId,
     pub revision: Revision,
 }
 
-/// The exact durable state returned before any managed Git effect.
+/// The exact durable state returned before a provider fork effect.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ManagedWorkstreamPreparation {
-    pub plan: ManagedWorkstreamPlan,
+pub struct ForkPreparation {
+    pub plan: ForkPlan,
     /// `true` only when this call atomically recorded the external-effect plan.
     /// A later caller must reconcile the recorded plan rather than run Git again.
     pub newly_prepared: bool,
@@ -345,7 +317,7 @@ pub struct ManagedWorkstreamPreparation {
 
 /// Bounded operator-visible state for one unresolved creation operation.
 ///
-/// Request keys, checkout paths, provider identifiers, and raw effect evidence
+/// Request keys, project paths, provider identifiers, and raw effect evidence
 /// remain host-private. The opaque operation ID is enough to reopen the exact
 /// durable plan through the explicit recovery action.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -357,18 +329,13 @@ pub struct OperationOverview {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct PersistedManagedWorktreePlan {
+struct PersistedForkPlan {
     schema_version: u8,
     workstream_id: WorkstreamId,
-    checkout_id: CheckoutId,
     location_id: LocationId,
     origin: WorkstreamOrigin,
     source_workstream_id: WorkstreamId,
-    repository_path: PathBuf,
-    repository_identity: String,
-    worktree_path: PathBuf,
-    branch: String,
-    base_commit: String,
+    project_root: PathBuf,
     source_runtime_id: Option<RuntimeId>,
     source_native_session_id: Option<String>,
     last_settled_turn_id: Option<String>,
@@ -378,45 +345,35 @@ struct PersistedManagedWorktreePlan {
     fork_attempted_at_millis: Option<i64>,
 }
 
-impl PersistedManagedWorktreePlan {
+impl PersistedForkPlan {
     fn encode(&self) -> Result<String, StateError> {
-        serde_json::to_string(self).map_err(StateError::ManagedWorktreePlanEncoding)
+        serde_json::to_string(self).map_err(StateError::ForkPlanEncoding)
     }
 
     fn decode(value: Option<&str>) -> Result<Self, StateError> {
-        let value = value.ok_or(StateError::MissingManagedWorktreePlan)?;
-        let plan: Self =
-            serde_json::from_str(value).map_err(StateError::InvalidManagedWorktreePlan)?;
+        let value = value.ok_or(StateError::MissingForkPlan)?;
+        let plan: Self = serde_json::from_str(value).map_err(StateError::InvalidForkPlan)?;
         if plan.schema_version != 1
-            || !is_managed_branch(&plan.branch)
-            || !is_git_commit(&plan.base_commit)
-            || plan.repository_path.as_os_str().is_empty()
-            || plan.worktree_path.as_os_str().is_empty()
-            || plan.repository_identity.is_empty()
+            || plan.project_root.as_os_str().is_empty()
             || plan
                 .source_native_name
                 .as_deref()
                 .is_some_and(|name| name.len() > 512 || name.contains(['\n', '\r']))
             || plan.fork_attempted_at_millis.is_some_and(|time| time < 0)
         {
-            return Err(StateError::InvalidManagedWorktreePlanShape);
+            return Err(StateError::InvalidForkPlanShape);
         }
         Ok(plan)
     }
 
-    fn public_plan(&self, operation: CompoundOperation) -> ManagedWorkstreamPlan {
-        ManagedWorkstreamPlan {
+    fn public_plan(&self, operation: CompoundOperation) -> ForkPlan {
+        ForkPlan {
             operation,
             workstream_id: self.workstream_id,
-            checkout_id: self.checkout_id,
             location_id: self.location_id,
             origin: self.origin,
             source_workstream_id: self.source_workstream_id,
-            repository_path: self.repository_path.clone(),
-            repository_identity: self.repository_identity.clone(),
-            worktree_path: self.worktree_path.clone(),
-            branch: self.branch.clone(),
-            base_commit: self.base_commit.clone(),
+            project_root: self.project_root.clone(),
             source_runtime_id: self.source_runtime_id,
             source_native_session_id: self.source_native_session_id.clone(),
             last_settled_turn_id: self.last_settled_turn_id.clone(),
@@ -464,10 +421,9 @@ pub struct WorkstreamOverview {
     pub project_display_name: String,
     pub remote_identity_fingerprint: Option<String>,
     pub remote_identity_display: Option<String>,
-    pub checkout_path: PathBuf,
     pub lifecycle: WorkstreamLifecycle,
     /// Archive is an independent visibility state. It preserves all lifecycle,
-    /// Runtime, binding, attention, checkout, and lineage records.
+    /// Runtime, binding, attention, project, and lineage records.
     pub archived_at_millis: Option<i64>,
     pub last_activity_sequence: i64,
     /// Wall-clock time of the most recent observed native conversation activity.
@@ -486,7 +442,6 @@ struct PersistedWorkstreamOverview {
     project_display_name: String,
     remote_identity_fingerprint: Option<String>,
     remote_identity_display: Option<String>,
-    checkout_path: String,
     lifecycle: String,
     archived_at_millis: Option<i64>,
     activity_sequence: i64,
@@ -547,10 +502,7 @@ impl HostRegistry {
         configure_connection(&connection)?;
         migrate_host_schema(&mut connection, root.base())?;
         initialize_host_identity(&connection, id_generator)?;
-        Ok(Self {
-            connection,
-            managed_worktrees_root: root.base().join("worktrees"),
-        })
+        Ok(Self { connection })
     }
 
     /// Returns the stable identity and generation of this host registry.
@@ -756,68 +708,58 @@ impl HostRegistry {
         }
     }
 
-    /// Registers one existing local checkout as an external initial workstream.
+    /// Registers one existing Git project root as an external initial Workstream.
     ///
     /// # Errors
     ///
-    /// Returns an error if an input field is unsafe, the checkout path already
+    /// Returns an error if an input field is unsafe, the project path already
     /// exists in registry state, or the transaction cannot be committed.
-    pub fn register_external_workstream(
+    pub fn register_project_root(
         &mut self,
-        checkout_path: PathBuf,
-        repository_identity: String,
-        default_base_ref: String,
+        project_root: &Path,
     ) -> Result<ExternalWorkstream, StateError> {
-        let display_name = checkout_path
+        let display_name = project_root
             .file_name()
             .and_then(|name| name.to_str())
             .filter(|name| !name.trim().is_empty())
             .unwrap_or("local project")
             .to_owned();
-        let repository_path = checkout_path.clone();
-        self.register_external_workstream_with_metadata(
-            checkout_path,
-            &repository_path,
-            repository_identity,
-            default_base_ref,
-            &display_name,
-            None,
-            None,
-        )
+        self.register_external_workstream_with_metadata(project_root, &display_name, None, None)
     }
 
-    /// Registers an external checkout with separately discovered project-level
+    #[cfg(test)]
+    #[allow(clippy::needless_pass_by_value, clippy::missing_errors_doc)]
+    pub fn register_external_workstream(
+        &mut self,
+        project_root: PathBuf,
+        _legacy_repository_identity: String,
+        _legacy_base_ref: String,
+    ) -> Result<ExternalWorkstream, StateError> {
+        self.register_project_root(&project_root)
+    }
+
+    /// Registers a project root with separately discovered project-level
     /// repository metadata.
     ///
     /// # Errors
     ///
-    /// Returns an error if an input field is unsafe, the checkout path already
+    /// Returns an error if an input field is unsafe, the project path already
     /// exists in registry state, or the transaction cannot be committed.
     #[allow(clippy::too_many_arguments)]
     pub fn register_external_workstream_with_metadata(
         &mut self,
-        checkout_path: PathBuf,
-        repository_path: &Path,
-        repository_identity: String,
-        default_base_ref: String,
+        project_root: &Path,
         repository_display_name: &str,
         remote_identity_fingerprint: Option<&str>,
         remote_identity_display: Option<&str>,
     ) -> Result<ExternalWorkstream, StateError> {
-        validate_registry_text("repository identity", &repository_identity)?;
-        validate_registry_text("default base ref", &default_base_ref)?;
         validate_project_display_name(repository_display_name)?;
         validate_repository_fingerprint(remote_identity_fingerprint)?;
         validate_remote_identity_display(remote_identity_display)?;
         let location_id = LocationId::new();
         let registration = ExternalWorkstream {
             location_id,
-            checkout_id: CheckoutId::new(),
             workstream_id: WorkstreamId::new(),
-            checkout_path,
-            repository_identity,
-            default_base_ref,
-            managed_worktree_root: self.managed_worktrees_root.join(location_id.to_string()),
         };
         let transaction = self
             .connection
@@ -827,33 +769,16 @@ impl HostRegistry {
         transaction
             .execute(
                 "INSERT INTO project_locations (
-                    location_id, repository_identity, repository_path,
+                    location_id, repository_path,
                     repository_display_name, remote_identity_fingerprint,
-                    remote_identity_display, default_base_ref,
-                    managed_worktree_root, revision
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1)",
+                    remote_identity_display, revision
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
                 params![
                     registration.location_id.to_string(),
-                    registration.repository_identity,
-                    repository_path.to_string_lossy(),
+                    project_root.to_string_lossy(),
                     repository_display_name,
                     remote_identity_fingerprint.unwrap_or(""),
                     remote_identity_display.unwrap_or(""),
-                    registration.default_base_ref,
-                    registration.managed_worktree_root.to_string_lossy(),
-                ],
-            )
-            .map_err(StateError::Sqlite)?;
-        transaction
-            .execute(
-                "INSERT INTO checkouts (
-                    checkout_id, path, ownership, branch, creation_commit,
-                    repository_identity, revision
-                 ) VALUES (?1, ?2, 'external', NULL, NULL, ?3, 1)",
-                params![
-                    registration.checkout_id.to_string(),
-                    registration.checkout_path.to_string_lossy(),
-                    registration.repository_identity,
                 ],
             )
             .map_err(StateError::Sqlite)?;
@@ -861,13 +786,12 @@ impl HostRegistry {
             .execute(
                 "INSERT INTO workstreams (
                     workstream_id, location_id, origin, source_workstream_id,
-                    checkout_id, lifecycle, last_activity_sequence,
+                    lifecycle, last_activity_sequence,
                     last_activity_at_millis, revision
-                 ) VALUES (?1, ?2, 'external', NULL, ?3, 'open', ?4, ?5, 1)",
+                 ) VALUES (?1, ?2, 'external', NULL, 'open', ?3, ?4, 1)",
                 params![
                     registration.workstream_id.to_string(),
                     registration.location_id.to_string(),
-                    registration.checkout_id.to_string(),
                     activity_sequence,
                     0_i64,
                 ],
@@ -958,92 +882,125 @@ impl HostRegistry {
         }
     }
 
-    /// Returns the exact host-private Git location configuration for an
-    /// existing Workstream. The source revision lets callers resolve the
-    /// configured ref first, then fail closed if a concurrent lifecycle update
-    /// changes the source before durable preparation.
+    /// Creates a fresh Workstream at the source Project's registered root.
+    /// The request key deduplicates an interrupted remote request without
+    /// creating a branch, worktree, or repository side effect.
+    ///
+    /// An archived source is still a retained `ProjectLocation` and may seed a
+    /// new independent Workstream without restoring or resuming the source.
     ///
     /// # Errors
     ///
-    /// Returns an error when the Workstream or its registered location is
-    /// missing, malformed, or cannot be queried.
-    pub fn workstream_git_location(
-        &self,
-        workstream_id: WorkstreamId,
-    ) -> Result<WorkstreamGitLocation, StateError> {
-        self.workstream_git_location_with_archived(workstream_id, false)
-    }
-
-    /// Returns the configured Git location for an independent Workstream
-    /// start. An archived source remains a retained `ProjectLocation` and is
-    /// therefore a valid base for this one operation; it is not reopened,
-    /// resumed, or otherwise made active by the lookup.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the Workstream or its registered location is
-    /// missing or malformed.
-    pub fn workstream_git_location_for_start(
-        &self,
-        workstream_id: WorkstreamId,
-    ) -> Result<WorkstreamGitLocation, StateError> {
-        self.workstream_git_location_with_archived(workstream_id, true)
-    }
-
-    fn workstream_git_location_with_archived(
-        &self,
-        workstream_id: WorkstreamId,
-        include_archived: bool,
-    ) -> Result<WorkstreamGitLocation, StateError> {
-        let location: (String, String, i64, Option<i64>) = self
+    /// Returns an error when the source is unknown or stale, request-key reuse
+    /// conflicts, or the atomic state change cannot commit.
+    pub fn create_independent_workstream(
+        &mut self,
+        request_key: &str,
+        source_workstream_id: WorkstreamId,
+        expected_source_revision: Revision,
+    ) -> Result<CreatedWorkstream, StateError> {
+        let transaction = self
             .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        if let Some(existing) = transaction
             .query_row(
-                "SELECT project_locations.repository_path,
-                        project_locations.default_base_ref,
-                        workstreams.revision,
-                        workstreams.archived_at_millis
-                 FROM workstreams
-                 JOIN project_locations ON project_locations.location_id = workstreams.location_id
-                 WHERE workstreams.workstream_id = ?1",
-                [workstream_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                "SELECT source_workstream_id, source_revision, workstream_id
+                 FROM independent_creation_requests WHERE request_key = ?1",
+                [request_key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(StateError::Sqlite)?
-            .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
-        if location.3.is_some() && !include_archived {
-            return Err(StateError::WorkstreamArchived(workstream_id));
+        {
+            let source = Uuid::parse_str(&existing.0)
+                .map(WorkstreamId::from)
+                .map_err(StateError::InvalidPersistedUuid)?;
+            if source != source_workstream_id
+                || Revision::try_from(existing.1)? != expected_source_revision
+            {
+                return Err(StateError::OperationRequestMismatch);
+            }
+            let created = created_workstream_from_record(
+                &transaction,
+                Uuid::parse_str(&existing.2)
+                    .map(WorkstreamId::from)
+                    .map_err(StateError::InvalidPersistedUuid)?,
+            )?;
+            transaction.commit().map_err(StateError::Sqlite)?;
+            return Ok(created);
         }
-        Ok(WorkstreamGitLocation {
-            repository_path: PathBuf::from(location.0),
-            default_base_ref: location.1,
-            source_revision: Revision::try_from(location.2)?,
-        })
+
+        let source = load_fork_source(&transaction, source_workstream_id, true)?;
+        if source.revision != expected_source_revision {
+            return Err(StateError::Domain(DomainError::RevisionConflict {
+                expected: expected_source_revision,
+                current: source.revision,
+            }));
+        }
+        let workstream_id = WorkstreamId::new();
+        let activity_sequence = next_activity_sequence(&transaction)?;
+        transaction
+            .execute(
+                "INSERT INTO workstreams (
+                    workstream_id, location_id, origin, source_workstream_id,
+                    lifecycle, last_activity_sequence, last_activity_at_millis, revision
+                 ) VALUES (?1, ?2, 'independent', ?3, 'open', ?4, 0, 1)",
+                params![
+                    workstream_id.to_string(),
+                    source.location_id.to_string(),
+                    source_workstream_id.to_string(),
+                    activity_sequence,
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        transaction
+            .execute(
+                "INSERT INTO independent_creation_requests (
+                    request_key, source_workstream_id, source_revision, workstream_id
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    request_key,
+                    source_workstream_id.to_string(),
+                    expected_source_revision.value(),
+                    workstream_id.to_string(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        let created = CreatedWorkstream {
+            workstream_id,
+            location_id: source.location_id,
+            origin: WorkstreamOrigin::Independent,
+            source_workstream_id,
+            revision: Revision::INITIAL,
+        };
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(created)
     }
 
-    /// Atomically records the exact managed worktree plan before any Git
-    /// command is permitted. Reusing a request key returns the original plan
-    /// and never allocates a second branch, path, checkout, or Workstream ID.
-    ///
-    /// The caller must resolve `base_commit` with Git before calling this
-    /// method. It is intentionally an exact commit rather than a moving ref.
+    /// Atomically records the exact native-fork plan before Codex is called.
+    /// Reusing a request key returns the original destination and cannot fork
+    /// a second provider thread.
     ///
     /// # Errors
     ///
     /// Returns an error for a stale/unknown source, unavailable settled fork
-    /// boundary, malformed base commit, request mismatch, or state failure.
-    pub fn prepare_managed_workstream(
+    /// boundary, request mismatch, or state failure.
+    pub fn prepare_fork(
         &mut self,
         request_key: String,
         kind: OperationKind,
         source_workstream_id: WorkstreamId,
         expected_source_revision: Revision,
-        base_commit: String,
-    ) -> Result<ManagedWorkstreamPreparation, StateError> {
-        if !matches!(kind, OperationKind::Start | OperationKind::Fork)
-            || !is_git_commit(&base_commit)
-        {
-            return Err(StateError::InvalidManagedWorktreePlanShape);
+    ) -> Result<ForkPreparation, StateError> {
+        if kind != OperationKind::Fork {
+            return Err(StateError::InvalidForkPlanShape);
         }
         let expected_revisions_json = serde_json::json!({
             "source_workstream_id": source_workstream_id,
@@ -1061,21 +1018,16 @@ impl HostRegistry {
             {
                 return Err(StateError::OperationRequestMismatch);
             }
-            let plan = PersistedManagedWorktreePlan::decode(operation.effect_watermark.as_deref())?;
+            let plan = PersistedForkPlan::decode(operation.effect_watermark.as_deref())?;
             transaction.commit().map_err(StateError::Sqlite)?;
-            return Ok(ManagedWorkstreamPreparation {
+            return Ok(ForkPreparation {
                 plan: plan.public_plan(operation),
                 newly_prepared: false,
             });
         }
 
-        let plan = managed_worktree_plan_for_source(
-            &transaction,
-            kind,
-            source_workstream_id,
-            expected_source_revision,
-            base_commit,
-        )?;
+        let plan =
+            fork_plan_for_source(&transaction, source_workstream_id, expected_source_revision)?;
         let mut operation = CompoundOperation::new(request_key, kind, expected_revisions_json)?;
         operation.transition(
             OperationPhase::ExternalEffectStarted,
@@ -1100,42 +1052,10 @@ impl HostRegistry {
             )
             .map_err(StateError::Sqlite)?;
         transaction.commit().map_err(StateError::Sqlite)?;
-        Ok(ManagedWorkstreamPreparation {
+        Ok(ForkPreparation {
             plan: plan.public_plan(operation),
             newly_prepared: true,
         })
-    }
-
-    /// Commits one exact, already-inspected managed worktree effect. This adds
-    /// no Runtime and launches no provider process; callers start the returned
-    /// Workstream through the normal explicit start path.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the durable plan is stale, mismatched, incomplete,
-    /// or cannot be atomically recorded as a managed Checkout and Workstream.
-    pub fn commit_managed_workstream(
-        &mut self,
-        prepared: &ManagedWorkstreamPlan,
-    ) -> Result<ManagedWorkstream, StateError> {
-        self.commit_managed_workstream_with_destination(prepared, None, false)
-    }
-
-    /// Commits a Start plan only after the explicit recovery action has
-    /// rechecked its exact external Git effect.
-    ///
-    /// Ordinary creation paths deliberately cannot use this method: a
-    /// recovery-required phase is not permission to retry or guess.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the recovered plan no longer matches its durable
-    /// operation or cannot be atomically committed.
-    pub fn commit_recovered_managed_workstream(
-        &mut self,
-        prepared: &ManagedWorkstreamPlan,
-    ) -> Result<ManagedWorkstream, StateError> {
-        self.commit_managed_workstream_with_destination(prepared, None, true)
     }
 
     /// Commits a confirmed provider fork together with its destination
@@ -1146,20 +1066,16 @@ impl HostRegistry {
     ///
     /// Returns an error when the plan is not a fork, the provider identifier is
     /// unsafe, or the combined durable commit cannot be completed exactly once.
-    pub fn commit_forked_managed_workstream(
+    pub fn commit_fork(
         &mut self,
-        prepared: &ManagedWorkstreamPlan,
+        prepared: &ForkPlan,
         destination_native_session_id: &str,
-    ) -> Result<ManagedWorkstream, StateError> {
+    ) -> Result<CreatedWorkstream, StateError> {
         if prepared.origin != WorkstreamOrigin::Fork {
-            return Err(StateError::ManagedWorktreePlanMismatch);
+            return Err(StateError::ForkPlanMismatch);
         }
         validate_provider_metadata(destination_native_session_id)?;
-        self.commit_managed_workstream_with_destination(
-            prepared,
-            Some(destination_native_session_id),
-            false,
-        )
+        self.commit_fork_with_destination(prepared, Some(destination_native_session_id), false)
     }
 
     /// Commits a Fork plan only after explicit recovery has found exactly one
@@ -1169,44 +1085,39 @@ impl HostRegistry {
     ///
     /// Returns an error when the destination identifier is invalid, the plan
     /// is stale, or the exact recovered effect cannot be atomically committed.
-    pub fn commit_recovered_forked_managed_workstream(
+    pub fn commit_recovered_fork(
         &mut self,
-        prepared: &ManagedWorkstreamPlan,
+        prepared: &ForkPlan,
         destination_native_session_id: &str,
-    ) -> Result<ManagedWorkstream, StateError> {
+    ) -> Result<CreatedWorkstream, StateError> {
         if prepared.origin != WorkstreamOrigin::Fork {
-            return Err(StateError::ManagedWorktreePlanMismatch);
+            return Err(StateError::ForkPlanMismatch);
         }
         validate_provider_metadata(destination_native_session_id)?;
-        self.commit_managed_workstream_with_destination(
-            prepared,
-            Some(destination_native_session_id),
-            true,
-        )
+        self.commit_fork_with_destination(prepared, Some(destination_native_session_id), true)
     }
 
-    fn commit_managed_workstream_with_destination(
+    fn commit_fork_with_destination(
         &mut self,
-        prepared: &ManagedWorkstreamPlan,
+        prepared: &ForkPlan,
         destination_native_session_id: Option<&str>,
         allow_recovery_required: bool,
-    ) -> Result<ManagedWorkstream, StateError> {
+    ) -> Result<CreatedWorkstream, StateError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
         let mut operation = load_operation_by_id(&transaction, prepared.operation.id)?
             .ok_or(StateError::UnknownOperation(prepared.operation.id))?;
-        let persisted =
-            PersistedManagedWorktreePlan::decode(operation.effect_watermark.as_deref())?;
+        let persisted = PersistedForkPlan::decode(operation.effect_watermark.as_deref())?;
         if operation.id != prepared.operation.id
             || operation.kind != prepared.operation.kind
             || persisted.public_plan(prepared.operation.clone()) != *prepared
         {
-            return Err(StateError::ManagedWorktreePlanMismatch);
+            return Err(StateError::ForkPlanMismatch);
         }
         if operation.phase == OperationPhase::Committed {
-            let created = managed_workstream_from_outcome(
+            let created = created_workstream_from_fork_outcome(
                 &transaction,
                 &operation,
                 &persisted,
@@ -1218,14 +1129,12 @@ impl HostRegistry {
         if operation.phase != OperationPhase::ExternalEffectStarted
             && !(allow_recovery_required && operation.phase == OperationPhase::RecoveryRequired)
         {
-            return Err(StateError::ManagedWorktreeOperationUnavailable);
+            return Err(StateError::ForkOperationUnavailable);
         }
-        if matches!(persisted.origin, WorkstreamOrigin::Fork)
-            != destination_native_session_id.is_some()
-        {
-            return Err(StateError::ManagedWorktreePlanMismatch);
+        if persisted.origin != WorkstreamOrigin::Fork || destination_native_session_id.is_none() {
+            return Err(StateError::ForkPlanMismatch);
         }
-        insert_managed_workstream_records(&transaction, &persisted, destination_native_session_id)?;
+        insert_fork_records(&transaction, &persisted, destination_native_session_id)?;
         commit_managed_operation(
             &transaction,
             &mut operation,
@@ -1233,20 +1142,17 @@ impl HostRegistry {
             destination_native_session_id,
         )?;
         transaction.commit().map_err(StateError::Sqlite)?;
-        Ok(managed_workstream_from_plan(&persisted))
+        Ok(created_workstream_from_fork_plan(&persisted))
     }
 
-    /// Marks an unresolved managed Git operation as recovery-required without
-    /// changing any existing Checkout, branch, or Workstream.
+    /// Marks an unresolved provider fork as recovery-required without changing
+    /// any existing project files or Workstream.
     ///
     /// # Errors
     ///
     /// Returns an error when the prepared operation is stale, already terminal,
     /// or cannot transition atomically.
-    pub fn mark_managed_workstream_recovery(
-        &mut self,
-        prepared: &ManagedWorkstreamPlan,
-    ) -> Result<(), StateError> {
+    pub fn mark_fork_recovery(&mut self, prepared: &ForkPlan) -> Result<(), StateError> {
         if prepared.operation.phase == OperationPhase::RecoveryRequired {
             return Ok(());
         }
@@ -1258,7 +1164,7 @@ impl HostRegistry {
             None,
         )?;
         if operation.kind != prepared.operation.kind {
-            return Err(StateError::ManagedWorktreePlanMismatch);
+            return Err(StateError::ForkPlanMismatch);
         }
         Ok(())
     }
@@ -1271,12 +1177,9 @@ impl HostRegistry {
     ///
     /// Returns an error when the prepared plan is stale, not a pending fork,
     /// already has a provider attempt marker, or cannot be updated exactly.
-    pub fn record_managed_fork_attempt(
-        &mut self,
-        prepared: &ManagedWorkstreamPlan,
-    ) -> Result<ManagedWorkstreamPlan, StateError> {
+    pub fn record_fork_attempt(&mut self, prepared: &ForkPlan) -> Result<ForkPlan, StateError> {
         if prepared.origin != WorkstreamOrigin::Fork {
-            return Err(StateError::ManagedWorktreePlanMismatch);
+            return Err(StateError::ForkPlanMismatch);
         }
         let transaction = self
             .connection
@@ -1284,8 +1187,7 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?;
         let operation = load_operation_by_id(&transaction, prepared.operation.id)?
             .ok_or(StateError::UnknownOperation(prepared.operation.id))?;
-        let mut persisted =
-            PersistedManagedWorktreePlan::decode(operation.effect_watermark.as_deref())?;
+        let mut persisted = PersistedForkPlan::decode(operation.effect_watermark.as_deref())?;
         if operation != prepared.operation
             || persisted.public_plan(operation.clone()) != *prepared
             || !matches!(
@@ -1294,7 +1196,7 @@ impl HostRegistry {
             )
             || persisted.fork_attempted_at_millis.is_some()
         {
-            return Err(StateError::ManagedWorktreeOperationUnavailable);
+            return Err(StateError::ForkOperationUnavailable);
         }
         persisted.fork_attempted_at_millis = Some(SystemClock.now_millis()?);
         let next_revision = operation.revision.next();
@@ -1336,18 +1238,8 @@ impl HostRegistry {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
-        let (checkout_path, workstream_lifecycle, archived_at_millis): (String, String, Option<i64>) = transaction
-            .query_row(
-                "SELECT checkouts.path, workstreams.lifecycle, workstreams.archived_at_millis FROM workstreams
-                 JOIN checkouts ON checkouts.checkout_id = workstreams.checkout_id
-                 WHERE workstreams.workstream_id = ?1
-                   AND workstreams.lifecycle IN ('open', 'parked')",
-                [workstream_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(StateError::Sqlite)?
-            .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
+        let (project_root, workstream_lifecycle, archived_at_millis) =
+            open_workstream_project_root(&transaction, workstream_id)?;
         if archived_at_millis.is_some() {
             return Err(StateError::WorkstreamArchived(workstream_id));
         }
@@ -1371,7 +1263,7 @@ impl HostRegistry {
             let next = RuntimeRecord {
                 tmux_generation: generation,
                 tmux_session: format!("wsnav-{}", current.runtime_id),
-                cwd: PathBuf::from(checkout_path),
+                cwd: PathBuf::from(&project_root),
                 process_birth: None,
                 status: RuntimeStatus::Starting,
                 revision: current.revision.next(),
@@ -1400,7 +1292,7 @@ impl HostRegistry {
                 workstream_id,
                 tmux_generation: generation,
                 tmux_session: format!("wsnav-{runtime_id}"),
-                cwd: PathBuf::from(checkout_path),
+                cwd: PathBuf::from(project_root),
                 process_birth: None,
                 status: RuntimeStatus::Starting,
                 revision: Revision::INITIAL,
@@ -1447,10 +1339,12 @@ impl HostRegistry {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
-        let (checkout_path, archived_at_millis): (String, Option<i64>) = transaction
+        let (project_root, archived_at_millis): (String, Option<i64>) = transaction
             .query_row(
-                "SELECT checkouts.path, workstreams.archived_at_millis FROM workstreams
-                 JOIN checkouts ON checkouts.checkout_id = workstreams.checkout_id
+                "SELECT project_locations.repository_path, workstreams.archived_at_millis
+                 FROM workstreams
+                 JOIN project_locations
+                   ON project_locations.location_id = workstreams.location_id
                  WHERE workstreams.workstream_id = ?1
                    AND workstreams.lifecycle = 'recovery_required'",
                 [workstream_id.to_string()],
@@ -1475,7 +1369,7 @@ impl HostRegistry {
         let next = RuntimeRecord {
             tmux_generation: Uuid::new_v4().to_string(),
             tmux_session: format!("wsnav-{}", current.runtime_id),
-            cwd: PathBuf::from(checkout_path),
+            cwd: PathBuf::from(project_root),
             process_birth: None,
             status: RuntimeStatus::Starting,
             revision: current.revision.next(),
@@ -1528,7 +1422,7 @@ impl HostRegistry {
     /// Reads one exact persisted Runtime by its opaque identity.
     ///
     /// This is used only to validate an explicit native terminal attachment.
-    /// It does not expose checkout paths or tmux details to a remote caller.
+    /// It does not expose project paths or tmux details to a remote caller.
     ///
     /// # Errors
     ///
@@ -1686,7 +1580,7 @@ impl HostRegistry {
     }
 
     /// Hides one exact Workstream from the active navigator scope without
-    /// deleting its Runtime, provider binding, attention, checkout, or
+    /// deleting its Runtime, provider binding, attention, project files, or
     /// lineage. The caller is responsible for any necessary Runtime park
     /// before this durable visibility transition.
     ///
@@ -1777,7 +1671,7 @@ impl HostRegistry {
     }
 
     /// Returns one deterministic bounded Workstream page ordered by latest
-    /// activity, checkout, and opaque Workstream identity.
+    /// activity, project root, and opaque Workstream identity.
     ///
     /// # Errors
     ///
@@ -1801,7 +1695,6 @@ impl HostRegistry {
                         project_locations.repository_display_name,
                         project_locations.remote_identity_fingerprint,
                         project_locations.remote_identity_display,
-                        checkouts.path,
                         workstreams.lifecycle,
                         workstreams.archived_at_millis,
                         workstreams.last_activity_sequence,
@@ -1809,9 +1702,8 @@ impl HostRegistry {
                  FROM workstreams
                  JOIN project_locations
                    ON project_locations.location_id = workstreams.location_id
-                 JOIN checkouts ON checkouts.checkout_id = workstreams.checkout_id
                  ORDER BY workstreams.last_activity_sequence DESC,
-                          checkouts.path, workstreams.workstream_id
+                          project_locations.repository_path, workstreams.workstream_id
                  LIMIT ?1 OFFSET ?2",
             )
             .map_err(StateError::Sqlite)?;
@@ -1824,12 +1716,11 @@ impl HostRegistry {
                     project_display_name: row.get(3)?,
                     remote_identity_fingerprint: row.get(4)?,
                     remote_identity_display: row.get(5)?,
-                    checkout_path: row.get(6)?,
-                    lifecycle: row.get(7)?,
-                    archived_at_millis: row.get(8)?,
-                    activity_sequence: row.get(9)?,
-                    activity_at_millis: row.get(10)?,
-                    revision: row.get(11)?,
+                    lifecycle: row.get(6)?,
+                    archived_at_millis: row.get(7)?,
+                    activity_sequence: row.get(8)?,
+                    activity_at_millis: row.get(9)?,
+                    revision: row.get(10)?,
                 })
             })
             .map_err(StateError::Sqlite)?
@@ -1886,7 +1777,6 @@ impl HostRegistry {
             remote_identity_display: base
                 .remote_identity_display
                 .filter(|display| !display.is_empty()),
-            checkout_path: PathBuf::from(base.checkout_path),
             lifecycle,
             archived_at_millis: base.archived_at_millis,
             last_activity_sequence: base.activity_sequence,
@@ -1901,7 +1791,7 @@ impl HostRegistry {
 
     /// Lists only durable creation operations that still require an explicit
     /// operator decision. This is presentation metadata, not provider or
-    /// checkout discovery.
+    /// project-root discovery.
     ///
     /// # Errors
     ///
@@ -1948,17 +1838,14 @@ impl HostRegistry {
             .collect()
     }
 
-    /// Loads the one host-private managed-worktree plan owned by an explicit
-    /// operation ID. It never scans worktrees or provider history.
+    /// Loads the one host-private provider-fork plan owned by an explicit
+    /// operation ID. It never scans Git state or provider history.
     ///
     /// # Errors
     ///
     /// Returns an error when the operation is unknown, has no valid managed
     /// plan, or contains malformed persisted state.
-    pub fn managed_workstream_plan(
-        &self,
-        operation_id: OperationId,
-    ) -> Result<ManagedWorkstreamPlan, StateError> {
+    pub fn fork_plan(&self, operation_id: OperationId) -> Result<ForkPlan, StateError> {
         let operation = self
             .connection
             .query_row(
@@ -1971,7 +1858,7 @@ impl HostRegistry {
             .optional()
             .map_err(StateError::Sqlite)?
             .ok_or(StateError::UnknownOperation(operation_id))?;
-        let plan = PersistedManagedWorktreePlan::decode(operation.effect_watermark.as_deref())?;
+        let plan = PersistedForkPlan::decode(operation.effect_watermark.as_deref())?;
         Ok(plan.public_plan(operation))
     }
 
@@ -2130,7 +2017,7 @@ impl HostRegistry {
     }
 
     /// Records that an owned private Runtime disappeared without a deliberate
-    /// park or verified native end. Its provider binding and checkout are
+    /// park or verified native end. Its provider binding and project files are
     /// retained, but neither a blank start nor a stale hook may continue it.
     ///
     /// This operation is idempotent after the first transition so cleanup of a
@@ -2198,7 +2085,7 @@ impl HostRegistry {
     }
 
     /// Records an explicit user park after the exact private tmux server has
-    /// stopped. Provider history and the checkout are retained, while the
+    /// stopped. Provider history and project files are retained, while the
     /// Workstream's durable lifecycle becomes `parked`.
     ///
     /// # Errors
@@ -2586,12 +2473,31 @@ impl HostRegistry {
     }
 }
 
-struct ManagedWorkstreamSource {
+fn open_workstream_project_root(
+    transaction: &rusqlite::Transaction<'_>,
+    workstream_id: WorkstreamId,
+) -> Result<(String, String, Option<i64>), StateError> {
+    transaction
+        .query_row(
+            "SELECT project_locations.repository_path,
+                    workstreams.lifecycle, workstreams.archived_at_millis
+             FROM workstreams
+             JOIN project_locations
+               ON project_locations.location_id = workstreams.location_id
+             WHERE workstreams.workstream_id = ?1
+               AND workstreams.lifecycle IN ('open', 'parked')",
+            [workstream_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?
+        .ok_or(StateError::UnknownOpenWorkstream(workstream_id))
+}
+
+struct ForkSource {
     location_id: LocationId,
     revision: Revision,
-    repository_path: PathBuf,
-    repository_identity: String,
-    managed_worktree_root: PathBuf,
+    project_root: PathBuf,
     runtime_id: Option<RuntimeId>,
     runtime_lifecycle: Option<String>,
     native_session_id: Option<String>,
@@ -2599,71 +2505,94 @@ struct ManagedWorkstreamSource {
     native_name: Option<String>,
 }
 
-fn managed_worktree_plan_for_source(
+fn fork_plan_for_source(
     transaction: &rusqlite::Transaction<'_>,
-    kind: OperationKind,
     source_workstream_id: WorkstreamId,
     expected_source_revision: Revision,
-    base_commit: String,
-) -> Result<PersistedManagedWorktreePlan, StateError> {
-    let source = load_managed_workstream_source(
-        transaction,
-        source_workstream_id,
-        kind == OperationKind::Start,
-    )?;
+) -> Result<PersistedForkPlan, StateError> {
+    let source = load_fork_source(transaction, source_workstream_id, false)?;
     if source.revision != expected_source_revision {
         return Err(StateError::Domain(DomainError::RevisionConflict {
             expected: expected_source_revision,
             current: source.revision,
         }));
     }
-    validate_registry_text("repository identity", &source.repository_identity)?;
-    if source.managed_worktree_root.as_os_str().is_empty() {
-        return Err(StateError::InvalidManagedWorktreePlanShape);
+    if source.project_root.as_os_str().is_empty() {
+        return Err(StateError::InvalidForkPlanShape);
     }
-    let (source_native_session_id, last_settled_turn_id) = if kind == OperationKind::Fork {
-        fork_boundary(&source)?
-    } else {
-        (None, None)
-    };
+    let (source_native_session_id, last_settled_turn_id) = fork_boundary(&source)?;
     let workstream_id = WorkstreamId::new();
-    Ok(PersistedManagedWorktreePlan {
+    Ok(PersistedForkPlan {
         schema_version: 1,
         workstream_id,
-        checkout_id: CheckoutId::new(),
         location_id: source.location_id,
-        origin: if kind == OperationKind::Fork {
-            WorkstreamOrigin::Fork
-        } else {
-            WorkstreamOrigin::Independent
-        },
+        origin: WorkstreamOrigin::Fork,
         source_workstream_id,
-        repository_path: source.repository_path,
-        repository_identity: source.repository_identity,
-        worktree_path: source.managed_worktree_root.join(workstream_id.to_string()),
-        branch: format!("wsnav/workstream/{workstream_id}"),
-        base_commit,
+        project_root: source.project_root,
         source_runtime_id: source.runtime_id,
         source_native_session_id,
         last_settled_turn_id,
-        source_native_name: (kind == OperationKind::Fork)
-            .then_some(source.native_name)
-            .flatten(),
+        source_native_name: source.native_name,
         fork_attempted_at_millis: None,
     })
 }
 
-fn load_managed_workstream_source(
+fn created_workstream_from_record(
+    transaction: &rusqlite::Transaction<'_>,
+    workstream_id: WorkstreamId,
+) -> Result<CreatedWorkstream, StateError> {
+    let record = transaction
+        .query_row(
+            "SELECT location_id, origin, source_workstream_id, revision
+             FROM workstreams WHERE workstream_id = ?1",
+            [workstream_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?
+        .ok_or(StateError::ForkCommitMissing)?;
+    let location_id = Uuid::parse_str(&record.0)
+        .map(LocationId::from)
+        .map_err(StateError::InvalidPersistedUuid)?;
+    let source_workstream_id = record
+        .2
+        .as_deref()
+        .ok_or(StateError::ForkPlanMismatch)
+        .and_then(|value| {
+            Uuid::parse_str(value)
+                .map(WorkstreamId::from)
+                .map_err(StateError::InvalidPersistedUuid)
+        })?;
+    let origin = match record.1.as_str() {
+        "independent" => WorkstreamOrigin::Independent,
+        "fork" => WorkstreamOrigin::Fork,
+        _ => return Err(StateError::ForkPlanMismatch),
+    };
+    Ok(CreatedWorkstream {
+        workstream_id,
+        location_id,
+        origin,
+        source_workstream_id,
+        revision: Revision::try_from(record.3)?,
+    })
+}
+
+fn load_fork_source(
     transaction: &rusqlite::Transaction<'_>,
     workstream_id: WorkstreamId,
     include_archived: bool,
-) -> Result<ManagedWorkstreamSource, StateError> {
+) -> Result<ForkSource, StateError> {
     let source = transaction
         .query_row(
             "SELECT workstreams.location_id, workstreams.revision,
                     project_locations.repository_path,
-                    project_locations.repository_identity,
-                    project_locations.managed_worktree_root,
                     workstreams.archived_at_millis,
                     runtimes.runtime_id, runtimes.lifecycle,
                     provider_bindings.native_session_id,
@@ -2680,48 +2609,42 @@ fn load_managed_workstream_source(
                     row.get::<_, String>(0)?,
                     row.get::<_, i64>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<String>>(8)?,
-                    row.get::<_, Option<String>>(9)?,
-                    row.get::<_, Option<String>>(10)?,
                 ))
             },
         )
         .optional()
         .map_err(StateError::Sqlite)?
         .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
-    if source.5.is_some() && !include_archived {
+    if source.3.is_some() && !include_archived {
         return Err(StateError::WorkstreamArchived(workstream_id));
     }
-    Ok(ManagedWorkstreamSource {
+    Ok(ForkSource {
         location_id: Uuid::parse_str(&source.0)
             .map(LocationId::from)
             .map_err(StateError::InvalidPersistedUuid)?,
         revision: Revision::try_from(source.1)?,
-        repository_path: PathBuf::from(source.2),
-        repository_identity: source.3,
-        managed_worktree_root: PathBuf::from(source.4),
+        project_root: PathBuf::from(source.2),
         runtime_id: source
-            .6
+            .4
             .as_deref()
             .map(Uuid::parse_str)
             .transpose()
             .map_err(StateError::InvalidPersistedUuid)?
             .map(RuntimeId::from),
-        runtime_lifecycle: source.7,
-        native_session_id: source.8,
-        last_settled_turn_id: source.9,
-        native_name: source.10,
+        runtime_lifecycle: source.5,
+        native_session_id: source.6,
+        last_settled_turn_id: source.7,
+        native_name: source.8,
     })
 }
 
-fn fork_boundary(
-    source: &ManagedWorkstreamSource,
-) -> Result<(Option<String>, Option<String>), StateError> {
+fn fork_boundary(source: &ForkSource) -> Result<(Option<String>, Option<String>), StateError> {
     let runtime_is_live = matches!(
         source.runtime_lifecycle.as_deref(),
         Some("idle" | "working" | "attention")
@@ -2742,40 +2665,24 @@ fn fork_boundary(
     Ok((Some(session_id), Some(settled_turn_id)))
 }
 
-fn insert_managed_workstream_records(
+fn insert_fork_records(
     transaction: &rusqlite::Transaction<'_>,
-    plan: &PersistedManagedWorktreePlan,
+    plan: &PersistedForkPlan,
     destination_native_session_id: Option<&str>,
 ) -> Result<(), StateError> {
     let activity_sequence = next_activity_sequence(transaction)?;
     transaction
         .execute(
-            "INSERT INTO checkouts (
-                checkout_id, path, ownership, branch, creation_commit,
-                repository_identity, revision
-             ) VALUES (?1, ?2, 'managed', ?3, ?4, ?5, 1)",
-            params![
-                plan.checkout_id.to_string(),
-                plan.worktree_path.to_string_lossy(),
-                plan.branch,
-                plan.base_commit,
-                plan.repository_identity,
-            ],
-        )
-        .map_err(StateError::Sqlite)?;
-    transaction
-        .execute(
             "INSERT INTO workstreams (
                 workstream_id, location_id, origin, source_workstream_id,
-                checkout_id, lifecycle, last_activity_sequence,
+                lifecycle, last_activity_sequence,
                 last_activity_at_millis, revision
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, 0, 1)",
+             ) VALUES (?1, ?2, ?3, ?4, 'open', ?5, 0, 1)",
             params![
                 plan.workstream_id.to_string(),
                 plan.location_id.to_string(),
                 workstream_origin_text(plan.origin),
                 plan.source_workstream_id.to_string(),
-                plan.checkout_id.to_string(),
                 activity_sequence,
             ],
         )
@@ -2788,7 +2695,7 @@ fn insert_managed_workstream_records(
 
 fn insert_pending_fork_runtime(
     transaction: &rusqlite::Transaction<'_>,
-    plan: &PersistedManagedWorktreePlan,
+    plan: &PersistedForkPlan,
     destination_native_session_id: &str,
 ) -> Result<(), StateError> {
     let runtime_id = RuntimeId::new();
@@ -2805,7 +2712,7 @@ fn insert_pending_fork_runtime(
                 plan.workstream_id.to_string(),
                 runtime_generation,
                 tmux_session,
-                plan.worktree_path.to_string_lossy(),
+                plan.project_root.to_string_lossy(),
             ],
         )
         .map_err(StateError::Sqlite)?;
@@ -2832,7 +2739,7 @@ fn insert_pending_fork_runtime(
 fn commit_managed_operation(
     transaction: &rusqlite::Transaction<'_>,
     operation: &mut CompoundOperation,
-    plan: &PersistedManagedWorktreePlan,
+    plan: &PersistedForkPlan,
     destination_native_session_id: Option<&str>,
 ) -> Result<(), StateError> {
     let outcome = serde_json::json!({
@@ -2867,10 +2774,9 @@ fn commit_managed_operation(
     Ok(())
 }
 
-fn managed_workstream_from_plan(plan: &PersistedManagedWorktreePlan) -> ManagedWorkstream {
-    ManagedWorkstream {
+fn created_workstream_from_fork_plan(plan: &PersistedForkPlan) -> CreatedWorkstream {
+    CreatedWorkstream {
         workstream_id: plan.workstream_id,
-        checkout_id: plan.checkout_id,
         location_id: plan.location_id,
         origin: plan.origin,
         source_workstream_id: plan.source_workstream_id,
@@ -3253,7 +3159,7 @@ impl ClientCatalog {
     }
 
     /// Hides every client-visible location in one Project. Host registries,
-    /// checkouts, runtimes, and provider sessions remain untouched.
+    /// project files, runtimes, and provider sessions remain untouched.
     ///
     /// # Errors
     ///
@@ -3524,65 +3430,23 @@ fn initialize_host_identity(
     Ok(())
 }
 
-fn migrate_host_schema(connection: &mut Connection, state_root: &Path) -> Result<(), StateError> {
+fn migrate_host_schema(connection: &mut Connection, _state_root: &Path) -> Result<(), StateError> {
     let current: i64 = connection
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(StateError::Sqlite)?;
     if current > HOST_SCHEMA_VERSION {
         return Err(StateError::UnsupportedSchemaVersion(current));
     }
-    let transaction = connection.transaction().map_err(StateError::Sqlite)?;
-    match current {
-        0 => transaction
-            .execute_batch(HOST_SCHEMA_SQL)
-            .map_err(StateError::Sqlite)?,
-        1 => transaction
-            .execute_batch(
-                "ALTER TABLE workstreams
-                 ADD COLUMN last_activity_sequence INTEGER NOT NULL DEFAULT 0
-                 CHECK (last_activity_sequence >= 0);
-                 ALTER TABLE workstreams
-                 ADD COLUMN last_activity_at_millis INTEGER NOT NULL DEFAULT 0
-                 CHECK (last_activity_at_millis >= 0);",
-            )
-            .map_err(StateError::Sqlite)?,
-        2 => transaction
-            .execute_batch(
-                "ALTER TABLE workstreams
-                 ADD COLUMN last_activity_at_millis INTEGER NOT NULL DEFAULT 0
-                 CHECK (last_activity_at_millis >= 0);",
-            )
-            .map_err(StateError::Sqlite)?,
-        3 => {
-            let mut statement = transaction
-                .prepare(
-                    "SELECT location_id FROM project_locations
-                     WHERE managed_worktree_root = ''",
-                )
-                .map_err(StateError::Sqlite)?;
-            let location_ids = statement
-                .query_map([], |row| row.get::<_, String>(0))
-                .map_err(StateError::Sqlite)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(StateError::Sqlite)?;
-            drop(statement);
-            for location_id in location_ids {
-                let root = state_root.join("worktrees").join(&location_id);
-                transaction
-                    .execute(
-                        "UPDATE project_locations SET managed_worktree_root = ?1
-                         WHERE location_id = ?2 AND managed_worktree_root = ''",
-                        params![root.to_string_lossy(), location_id],
-                    )
-                    .map_err(StateError::Sqlite)?;
-            }
-        }
-        4..=6 => {}
-        HOST_SCHEMA_VERSION => return Ok(()),
-        _ => return Err(StateError::UnsupportedSchemaVersion(current)),
+    if current == HOST_SCHEMA_VERSION {
+        return Ok(());
     }
-    ensure_host_repository_metadata_columns(&transaction)?;
-    ensure_workstream_archive_column(&transaction)?;
+    if current != 0 {
+        return Err(StateError::HostStateResetRequired(current));
+    }
+    let transaction = connection.transaction().map_err(StateError::Sqlite)?;
+    transaction
+        .execute_batch(HOST_SCHEMA_SQL)
+        .map_err(StateError::Sqlite)?;
     transaction
         .execute(&format!("PRAGMA user_version = {HOST_SCHEMA_VERSION}"), [])
         .map_err(StateError::Sqlite)?;
@@ -3593,113 +3457,6 @@ fn migrate_host_schema(connection: &mut Connection, state_root: &Path) -> Result
         )
         .map_err(StateError::Sqlite)?;
     transaction.commit().map_err(StateError::Sqlite)
-}
-
-fn ensure_workstream_archive_column(
-    transaction: &rusqlite::Transaction<'_>,
-) -> Result<(), StateError> {
-    let table_exists: bool = transaction
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM sqlite_master
-                WHERE type = 'table' AND name = 'workstreams'
-             )",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(StateError::Sqlite)?;
-    if !table_exists {
-        return Ok(());
-    }
-    let exists: bool = transaction
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM pragma_table_info('workstreams')
-                WHERE name = 'archived_at_millis'
-             )",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(StateError::Sqlite)?;
-    if !exists {
-        transaction
-            .execute_batch("ALTER TABLE workstreams ADD COLUMN archived_at_millis INTEGER;")
-            .map_err(StateError::Sqlite)?;
-    }
-    Ok(())
-}
-
-fn ensure_host_repository_metadata_columns(
-    transaction: &rusqlite::Transaction<'_>,
-) -> Result<(), StateError> {
-    let table_exists: bool = transaction
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM sqlite_master
-                WHERE type = 'table' AND name = 'project_locations'
-             )",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(StateError::Sqlite)?;
-    if !table_exists {
-        return Ok(());
-    }
-    let display_exists: bool = transaction
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM pragma_table_info('project_locations')
-                WHERE name = 'repository_display_name'
-             )",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(StateError::Sqlite)?;
-    if !display_exists {
-        transaction
-            .execute_batch(
-                "ALTER TABLE project_locations
-                 ADD COLUMN repository_display_name TEXT NOT NULL DEFAULT '';",
-            )
-            .map_err(StateError::Sqlite)?;
-    }
-    let fingerprint_exists: bool = transaction
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM pragma_table_info('project_locations')
-                WHERE name = 'remote_identity_fingerprint'
-             )",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(StateError::Sqlite)?;
-    if !fingerprint_exists {
-        transaction
-            .execute_batch(
-                "ALTER TABLE project_locations
-                 ADD COLUMN remote_identity_fingerprint TEXT;",
-            )
-            .map_err(StateError::Sqlite)?;
-    }
-    let remote_display_exists: bool = transaction
-        .query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM pragma_table_info('project_locations')
-                WHERE name = 'remote_identity_display'
-             )",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(StateError::Sqlite)?;
-    if !remote_display_exists {
-        transaction
-            .execute_batch(
-                "ALTER TABLE project_locations
-                 ADD COLUMN remote_identity_display TEXT;",
-            )
-            .map_err(StateError::Sqlite)?;
-    }
-    Ok(())
 }
 
 fn migrate_client_schema(connection: &mut Connection) -> Result<(), StateError> {
@@ -3949,77 +3706,37 @@ fn load_operation_by_id(
 }
 
 #[derive(Deserialize)]
-struct ManagedWorkstreamOutcome {
+struct ForkOutcome {
     workstream_id: WorkstreamId,
     destination_native_session_id: Option<String>,
 }
 
-fn managed_workstream_from_outcome(
+fn created_workstream_from_fork_outcome(
     transaction: &rusqlite::Transaction<'_>,
     operation: &CompoundOperation,
-    plan: &PersistedManagedWorktreePlan,
+    plan: &PersistedForkPlan,
     expected_destination_native_session_id: Option<&str>,
-) -> Result<ManagedWorkstream, StateError> {
+) -> Result<CreatedWorkstream, StateError> {
     let outcome = operation
         .outcome_json
         .as_deref()
-        .ok_or(StateError::MissingManagedWorktreeOutcome)?;
-    let outcome: ManagedWorkstreamOutcome =
-        serde_json::from_str(outcome).map_err(StateError::InvalidManagedWorktreeOutcome)?;
+        .ok_or(StateError::MissingForkOutcome)?;
+    let outcome: ForkOutcome =
+        serde_json::from_str(outcome).map_err(StateError::InvalidForkOutcome)?;
     if outcome.workstream_id != plan.workstream_id
         || outcome.destination_native_session_id.as_deref()
             != expected_destination_native_session_id
     {
-        return Err(StateError::ManagedWorktreePlanMismatch);
+        return Err(StateError::ForkPlanMismatch);
     }
-    let record = transaction
-        .query_row(
-            "SELECT checkout_id, location_id, origin, source_workstream_id, revision
-             FROM workstreams WHERE workstream_id = ?1",
-            [plan.workstream_id.to_string()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, i64>(4)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(StateError::Sqlite)?
-        .ok_or(StateError::ManagedWorktreeCommitMissing)?;
-    let checkout_id = Uuid::parse_str(&record.0)
-        .map(CheckoutId::from)
-        .map_err(StateError::InvalidPersistedUuid)?;
-    let location_id = Uuid::parse_str(&record.1)
-        .map(LocationId::from)
-        .map_err(StateError::InvalidPersistedUuid)?;
-    let source_workstream_id = record
-        .3
-        .as_deref()
-        .ok_or(StateError::ManagedWorktreePlanMismatch)
-        .and_then(|value| {
-            Uuid::parse_str(value)
-                .map(WorkstreamId::from)
-                .map_err(StateError::InvalidPersistedUuid)
-        })?;
-    if checkout_id != plan.checkout_id
-        || location_id != plan.location_id
-        || source_workstream_id != plan.source_workstream_id
-        || record.2 != workstream_origin_text(plan.origin)
+    let created = created_workstream_from_record(transaction, plan.workstream_id)?;
+    if created.location_id != plan.location_id
+        || created.source_workstream_id != plan.source_workstream_id
+        || created.origin != plan.origin
     {
-        return Err(StateError::ManagedWorktreePlanMismatch);
+        return Err(StateError::ForkPlanMismatch);
     }
-    Ok(ManagedWorkstream {
-        workstream_id: plan.workstream_id,
-        checkout_id,
-        location_id,
-        origin: plan.origin,
-        source_workstream_id,
-        revision: Revision::try_from(record.4)?,
-    })
+    Ok(created)
 }
 
 fn row_to_operation(row: &rusqlite::Row<'_>) -> rusqlite::Result<CompoundOperation> {
@@ -4617,21 +4334,6 @@ fn validate_provider_metadata(value: &str) -> Result<(), StateError> {
     Ok(())
 }
 
-fn is_managed_branch(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 256
-        && value.starts_with("wsnav/")
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"/-_.".contains(&byte))
-        && !value.contains("..")
-        && !value.ends_with(['.', '/'])
-}
-
-fn is_git_commit(value: &str) -> bool {
-    (40..=128).contains(&value.len()) && value.bytes().all(|byte| byte.is_ascii_hexdigit())
-}
-
 fn validate_project_display_name(value: &str) -> Result<(), StateError> {
     if value.trim().is_empty() || value.chars().count() > 128 || value.contains(['\0', '\n', '\r'])
     {
@@ -4732,24 +4434,24 @@ pub enum StateError {
     InvalidRegistryField(&'static str),
     #[error("provider metadata is invalid")]
     InvalidProviderMetadata,
-    #[error("managed worktree plan could not be encoded")]
-    ManagedWorktreePlanEncoding(serde_json::Error),
-    #[error("managed worktree plan is missing from its operation")]
-    MissingManagedWorktreePlan,
-    #[error("managed worktree plan is invalid")]
-    InvalidManagedWorktreePlan(serde_json::Error),
-    #[error("managed worktree plan has an invalid shape")]
-    InvalidManagedWorktreePlanShape,
-    #[error("managed worktree plan does not match the durable operation")]
-    ManagedWorktreePlanMismatch,
-    #[error("managed worktree operation is not ready to commit")]
-    ManagedWorktreeOperationUnavailable,
-    #[error("managed worktree operation committed without its expected Workstream")]
-    ManagedWorktreeCommitMissing,
-    #[error("managed worktree operation outcome is missing")]
-    MissingManagedWorktreeOutcome,
-    #[error("managed worktree operation outcome is invalid")]
-    InvalidManagedWorktreeOutcome(serde_json::Error),
+    #[error("provider fork plan could not be encoded")]
+    ForkPlanEncoding(serde_json::Error),
+    #[error("provider fork plan is missing from its operation")]
+    MissingForkPlan,
+    #[error("provider fork plan is invalid")]
+    InvalidForkPlan(serde_json::Error),
+    #[error("provider fork plan has an invalid shape")]
+    InvalidForkPlanShape,
+    #[error("provider fork plan does not match the durable operation")]
+    ForkPlanMismatch,
+    #[error("provider fork operation is not ready to commit")]
+    ForkOperationUnavailable,
+    #[error("provider fork operation committed without its expected Workstream")]
+    ForkCommitMissing,
+    #[error("provider fork operation outcome is missing")]
+    MissingForkOutcome,
+    #[error("provider fork operation outcome is invalid")]
+    InvalidForkOutcome(serde_json::Error),
     #[error("request key was reused with different workstream intent")]
     OperationRequestMismatch,
     #[error("the source Workstream has no live exact settled conversation boundary")]
@@ -4777,6 +4479,10 @@ pub enum StateError {
     Sqlite(#[from] rusqlite::Error),
     #[error("unsupported schema version {0}")]
     UnsupportedSchemaVersion(i64),
+    #[error(
+        "host state schema {0} belongs to the retired worktree-managed design; reset this host state and re-register projects"
+    )]
+    HostStateResetRequired(i64),
     #[error("unknown operation {0}")]
     UnknownOperation(OperationId),
     #[error("workstream {0} is unknown or not open")]
@@ -5056,44 +4762,24 @@ mod tests {
             .unwrap();
         assert_eq!(archived.archived_at_millis, Some(1_234));
         assert_eq!(archived.lifecycle, before.lifecycle);
-        assert_eq!(archived.checkout_path, before.checkout_path);
+        assert_eq!(
+            archived.project_repository_path,
+            before.project_repository_path
+        );
         assert_eq!(archived.attention, before.attention);
         assert_eq!(archived.revision, archived_revision);
         assert!(matches!(
             registry.reserve_runtime(registered.workstream_id),
             Err(StateError::WorkstreamArchived(id)) if id == registered.workstream_id
         ));
-        assert!(matches!(
-            registry.workstream_git_location(registered.workstream_id),
-            Err(StateError::WorkstreamArchived(id)) if id == registered.workstream_id
-        ));
-        assert_eq!(
-            registry
-                .workstream_git_location_for_start(registered.workstream_id)
-                .unwrap()
-                .repository_path,
-            PathBuf::from("/disposable/repository")
-        );
-        let prepared = registry
-            .prepare_managed_workstream(
-                "archived-location-start".to_owned(),
-                OperationKind::Start,
+        let independent = registry
+            .create_independent_workstream(
+                "archived-location-start",
                 registered.workstream_id,
                 archived_revision,
-                "a".repeat(40),
             )
             .unwrap();
-        assert_eq!(prepared.plan.source_workstream_id, registered.workstream_id);
-        assert!(matches!(
-            registry.prepare_managed_workstream(
-                "archived-location-fork".to_owned(),
-                OperationKind::Fork,
-                registered.workstream_id,
-                archived_revision,
-                "b".repeat(40),
-            ),
-            Err(StateError::WorkstreamArchived(id)) if id == registered.workstream_id
-        ));
+        assert_eq!(independent.source_workstream_id, registered.workstream_id);
         assert!(matches!(
             registry.restore_workstream(registered.workstream_id, before.revision),
             Err(StateError::Domain(DomainError::RevisionConflict { .. }))
@@ -5335,107 +5021,35 @@ mod tests {
     }
 
     #[test]
-    fn host_registry_migrates_repository_metadata_as_pending() {
+    fn legacy_metadata_schema_requires_an_explicit_reset() {
         let temporary = tempfile::tempdir().unwrap();
         let root = StateRoot::create(temporary.path()).unwrap();
-        let legacy_sql = HOST_SCHEMA_SQL
-            .replace("        repository_display_name TEXT NOT NULL,\n", "")
-            .replace("        remote_identity_fingerprint TEXT,\n", "");
         let connection = Connection::open(root.host_database_path()).unwrap();
-        connection.execute_batch(&legacy_sql).unwrap();
-        connection
-            .execute(
-                "INSERT INTO host_identity VALUES (1, ?1, 'generation', 4)",
-                [HostId::new().to_string()],
-            )
-            .unwrap();
-        let location_id = LocationId::new();
-        connection
-            .execute(
-                "INSERT INTO project_locations (
-                    location_id, repository_identity, repository_path,
-                    default_base_ref, managed_worktree_root, revision
-                 ) VALUES (?1, '/repo/.git', '/repo', ?2, '/state/worktrees/location', 1)",
-                params![location_id.to_string(), "a".repeat(40)],
-            )
-            .unwrap();
         connection
             .execute_batch("PRAGMA user_version = 4;")
             .unwrap();
         drop(connection);
 
-        let mut registry = HostRegistry::open(&root).unwrap();
-        assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
-        assert_eq!(
-            registry.pending_repository_metadata().unwrap(),
-            vec![PendingRepositoryMetadata {
-                location_id,
-                repository_path: PathBuf::from("/repo"),
-            }]
-        );
-        let fingerprint = format!("git-remote-v1:{}", "c".repeat(64));
-        registry
-            .record_repository_metadata(
-                location_id,
-                Path::new("/primary/repo"),
-                "repo",
-                Some(&fingerprint),
-                Some("github.com/owner/repo"),
-            )
-            .unwrap();
-        assert!(registry.pending_repository_metadata().unwrap().is_empty());
+        assert!(matches!(
+            HostRegistry::open(&root),
+            Err(StateError::HostStateResetRequired(4))
+        ));
     }
 
     #[test]
-    fn host_registry_migrates_v6_remote_display_as_pending() {
+    fn legacy_remote_metadata_schema_requires_an_explicit_reset() {
         let temporary = tempfile::tempdir().unwrap();
         let root = StateRoot::create(temporary.path()).unwrap();
-        let legacy_sql = HOST_SCHEMA_SQL.replace("        remote_identity_display TEXT,\n", "");
         let connection = Connection::open(root.host_database_path()).unwrap();
-        connection.execute_batch(&legacy_sql).unwrap();
-        connection
-            .execute(
-                "INSERT INTO host_identity VALUES (1, ?1, 'generation', 6)",
-                [HostId::new().to_string()],
-            )
-            .unwrap();
-        let location_id = LocationId::new();
-        let fingerprint = format!("git-remote-v1:{}", "d".repeat(64));
-        connection
-            .execute(
-                "INSERT INTO project_locations (
-                    location_id, repository_identity, repository_path,
-                    repository_display_name, remote_identity_fingerprint,
-                    default_base_ref, managed_worktree_root, revision
-                 ) VALUES (?1, '/repo/.git', '/repo', 'repo', ?2, ?3,
-                           '/state/worktrees/location', 1)",
-                params![location_id.to_string(), fingerprint, "a".repeat(40)],
-            )
-            .unwrap();
         connection
             .execute_batch("PRAGMA user_version = 6;")
             .unwrap();
         drop(connection);
 
-        let mut registry = HostRegistry::open(&root).unwrap();
-        assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
-        assert_eq!(
-            registry.pending_repository_metadata().unwrap(),
-            vec![PendingRepositoryMetadata {
-                location_id,
-                repository_path: PathBuf::from("/repo"),
-            }]
-        );
-        registry
-            .record_repository_metadata(
-                location_id,
-                Path::new("/repo"),
-                "repo",
-                Some(&format!("git-remote-v1:{}", "d".repeat(64))),
-                Some("github.com/owner/repo"),
-            )
-            .unwrap();
-        assert!(registry.pending_repository_metadata().unwrap().is_empty());
+        assert!(matches!(
+            HostRegistry::open(&root),
+            Err(StateError::HostStateResetRequired(6))
+        ));
     }
 
     #[test]
@@ -5674,7 +5288,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_host_schema_migrates_activity_ordering_metadata() {
+    fn v1_host_schema_requires_an_explicit_reset() {
         let temporary = tempfile::tempdir().unwrap();
         let root = StateRoot::create(temporary.path()).unwrap();
         let connection = Connection::open(root.host_database_path()).unwrap();
@@ -5701,40 +5315,14 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let registry = HostRegistry::open(&root).unwrap();
-        assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
-        let connection = Connection::open(root.host_database_path()).unwrap();
-        let activity_column: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('workstreams')
-                 WHERE name = 'last_activity_sequence'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let activity_time_column: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('workstreams')
-                 WHERE name = 'last_activity_at_millis'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let recorded_version: i64 = connection
-            .query_row(
-                "SELECT schema_version FROM host_identity WHERE singleton = 1",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        assert_eq!(activity_column, 1);
-        assert_eq!(activity_time_column, 1);
-        assert_eq!(recorded_version, HOST_SCHEMA_VERSION);
+        assert!(matches!(
+            HostRegistry::open(&root),
+            Err(StateError::HostStateResetRequired(1))
+        ));
     }
 
     #[test]
-    fn v2_host_schema_adds_unknown_activity_time_without_inventing_one() {
+    fn pre_worktree_free_host_schema_requires_an_explicit_reset() {
         let temporary = tempfile::tempdir().unwrap();
         let root = StateRoot::create(temporary.path()).unwrap();
         let connection = Connection::open(root.host_database_path()).unwrap();
@@ -5762,71 +5350,31 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let registry = HostRegistry::open(&root).unwrap();
-        assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
-        let connection = Connection::open(root.host_database_path()).unwrap();
-        let default_value: String = connection
-            .query_row(
-                "SELECT dflt_value FROM pragma_table_info('workstreams')
-                 WHERE name = 'last_activity_at_millis'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        assert_eq!(default_value, "0");
+        assert!(matches!(
+            HostRegistry::open(&root),
+            Err(StateError::HostStateResetRequired(2))
+        ));
     }
 
     #[test]
-    fn v3_host_schema_backfills_the_managed_worktree_root() {
+    fn legacy_host_state_is_never_mutated_to_adopt_the_worktree_free_design() {
         let temporary = tempfile::tempdir().unwrap();
         let root = StateRoot::create(temporary.path()).unwrap();
-        let mut registry = HostRegistry::open(&root).unwrap();
-        let registered = registry
-            .register_external_workstream(
-                PathBuf::from("/disposable/repository"),
-                "common-dir-identity".to_owned(),
-                "deadbeef".to_owned(),
-            )
-            .unwrap();
-        drop(registry);
         let connection = Connection::open(root.host_database_path()).unwrap();
-        connection
-            .execute(
-                "UPDATE project_locations SET managed_worktree_root = '' WHERE location_id = ?1",
-                [registered.location_id.to_string()],
-            )
-            .unwrap();
+        connection.execute_batch(HOST_SCHEMA_SQL).unwrap();
         connection
             .execute_batch("PRAGMA user_version = 3;")
             .unwrap();
         drop(connection);
 
-        let mut registry = HostRegistry::open(&root).unwrap();
-        let prepared = registry
-            .prepare_managed_workstream(
-                "migration-root".to_owned(),
-                OperationKind::Start,
-                registered.workstream_id,
-                Revision::INITIAL,
-                "a".repeat(40),
-            )
-            .unwrap();
-
-        assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
-        assert_eq!(
-            prepared.plan.worktree_path.parent(),
-            Some(
-                root.base()
-                    .join("worktrees")
-                    .join(registered.location_id.to_string())
-                    .as_path()
-            )
-        );
+        assert!(matches!(
+            HostRegistry::open(&root),
+            Err(StateError::HostStateResetRequired(3))
+        ));
     }
 
     #[test]
-    fn v5_host_schema_adds_archive_visibility_without_losing_workstreams() {
+    fn later_legacy_host_schema_also_requires_a_reset() {
         let temporary = tempfile::tempdir().unwrap();
         let root = StateRoot::create(temporary.path()).unwrap();
         let legacy_sql = HOST_SCHEMA_SQL.replace("        archived_at_millis INTEGER,\n", "");
@@ -5843,18 +5391,10 @@ mod tests {
             .unwrap();
         drop(connection);
 
-        let registry = HostRegistry::open(&root).unwrap();
-        assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
-        let connection = Connection::open(root.host_database_path()).unwrap();
-        let archived_column: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM pragma_table_info('workstreams')
-                 WHERE name = 'archived_at_millis'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(archived_column, 1);
+        assert!(matches!(
+            HostRegistry::open(&root),
+            Err(StateError::HostStateResetRequired(5))
+        ));
     }
 
     #[test]
@@ -5902,7 +5442,25 @@ mod tests {
     }
 
     #[test]
-    fn managed_workstream_plan_is_durable_and_deduplicated_before_git() {
+    fn fresh_host_state_has_no_checkout_or_worktree_ownership_tables() {
+        let (_temporary, registry) = registry();
+        for table in ["checkouts", "managed_worktrees"] {
+            let exists: bool = registry
+                .connection
+                .query_row(
+                    "SELECT EXISTS(
+                        SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+                     )",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert!(!exists, "unexpected retired ownership table {table}");
+        }
+    }
+
+    #[test]
+    fn provider_fork_plan_is_durable_and_deduplicated_at_the_project_root() {
         let (_temporary, mut registry) = registry();
         let registered = registry
             .register_external_workstream(
@@ -5911,85 +5469,19 @@ mod tests {
                 "deadbeef".to_owned(),
             )
             .unwrap();
-        let first = registry
-            .prepare_managed_workstream(
+        assert!(matches!(
+            registry.prepare_fork(
                 "independent-1".to_owned(),
                 OperationKind::Start,
                 registered.workstream_id,
                 Revision::INITIAL,
-                "a".repeat(40),
-            )
-            .unwrap();
-        let repeated = registry
-            .prepare_managed_workstream(
-                "independent-1".to_owned(),
-                OperationKind::Start,
-                registered.workstream_id,
-                Revision::INITIAL,
-                "b".repeat(40),
-            )
-            .unwrap();
-
-        assert!(first.newly_prepared);
-        assert!(!repeated.newly_prepared);
-        assert_eq!(first.plan, repeated.plan);
-        assert_eq!(
-            first.plan.operation.phase,
-            OperationPhase::ExternalEffectStarted
-        );
-        assert_eq!(first.plan.origin, WorkstreamOrigin::Independent);
-        assert_eq!(first.plan.source_native_session_id, None);
-        assert_eq!(
-            first.plan.worktree_path.parent(),
-            Some(registered.managed_worktree_root.as_path())
-        );
+            ),
+            Err(StateError::InvalidForkPlanShape)
+        ));
     }
 
     #[test]
-    fn managed_workstream_commit_records_one_owned_checkout_without_runtime() {
-        let (_temporary, mut registry) = registry();
-        let registered = registry
-            .register_external_workstream(
-                PathBuf::from("/disposable/repository"),
-                "common-dir-identity".to_owned(),
-                "deadbeef".to_owned(),
-            )
-            .unwrap();
-        let prepared = registry
-            .prepare_managed_workstream(
-                "independent-commit".to_owned(),
-                OperationKind::Start,
-                registered.workstream_id,
-                Revision::INITIAL,
-                "a".repeat(40),
-            )
-            .unwrap();
-        let committed = registry.commit_managed_workstream(&prepared.plan).unwrap();
-        let replayed = registry.commit_managed_workstream(&prepared.plan).unwrap();
-        let overview = registry
-            .workstream_overviews()
-            .unwrap()
-            .into_iter()
-            .find(|overview| overview.workstream_id == committed.workstream_id)
-            .unwrap();
-        let ownership: String = registry
-            .connection
-            .query_row(
-                "SELECT ownership FROM checkouts WHERE checkout_id = ?1",
-                [committed.checkout_id.to_string()],
-                |row| row.get(0),
-            )
-            .unwrap();
-
-        assert_eq!(committed, replayed);
-        assert_eq!(committed.origin, WorkstreamOrigin::Independent);
-        assert_eq!(committed.source_workstream_id, registered.workstream_id);
-        assert_eq!(overview.checkout_path, prepared.plan.worktree_path);
-        assert!(overview.runtime.is_none());
-        assert_eq!(ownership, "managed");
-    }
-
-    #[test]
+    #[allow(clippy::too_many_lines)]
     fn fork_requires_one_live_source_binding_with_a_settled_turn() {
         let (_temporary, mut registry) = registry();
         let registered = registry
@@ -6000,12 +5492,11 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            registry.prepare_managed_workstream(
+            registry.prepare_fork(
                 "fork-no-boundary".to_owned(),
                 OperationKind::Fork,
                 registered.workstream_id,
                 Revision::INITIAL,
-                "a".repeat(40),
             ),
             Err(StateError::ForkBoundaryUnavailable)
         ));
@@ -6059,12 +5550,11 @@ mod tests {
             .unwrap()
             .revision;
         let prepared = registry
-            .prepare_managed_workstream(
+            .prepare_fork(
                 "fork-settled".to_owned(),
                 OperationKind::Fork,
                 registered.workstream_id,
                 source_revision,
-                "a".repeat(40),
             )
             .unwrap();
 
@@ -6079,7 +5569,7 @@ mod tests {
             Some("settled-turn")
         );
         let created = registry
-            .commit_forked_managed_workstream(&prepared.plan, "destination-session")
+            .commit_fork(&prepared.plan, "destination-session")
             .unwrap();
         let destination_runtime = registry
             .runtime_for_workstream(created.workstream_id)
@@ -6091,12 +5581,16 @@ mod tests {
             .unwrap();
 
         assert_eq!(destination_runtime.status, RuntimeStatus::Stopped);
+        assert_eq!(
+            destination_runtime.cwd,
+            PathBuf::from("/disposable/repository")
+        );
         assert_eq!(destination_binding.start_source, "resume");
         assert_eq!(destination_binding.native_session_id, "destination-session");
     }
 
     #[test]
-    fn unresolved_managed_worktree_operation_remains_recovery_required() {
+    fn only_provider_forks_can_create_a_recoverable_operation() {
         let (_temporary, mut registry) = registry();
         let registered = registry
             .register_external_workstream(
@@ -6105,85 +5599,15 @@ mod tests {
                 "deadbeef".to_owned(),
             )
             .unwrap();
-        let prepared = registry
-            .prepare_managed_workstream(
-                "independent-recovery".to_owned(),
-                OperationKind::Start,
-                registered.workstream_id,
-                Revision::INITIAL,
-                "a".repeat(40),
-            )
-            .unwrap();
-        registry
-            .mark_managed_workstream_recovery(&prepared.plan)
-            .unwrap();
-        let replay = registry
-            .prepare_managed_workstream(
-                "independent-recovery".to_owned(),
-                OperationKind::Start,
-                registered.workstream_id,
-                Revision::INITIAL,
-                "a".repeat(40),
-            )
-            .unwrap();
-
-        assert_eq!(
-            replay.plan.operation.phase,
-            OperationPhase::RecoveryRequired
-        );
         assert!(matches!(
-            registry.commit_managed_workstream(&replay.plan),
-            Err(StateError::ManagedWorktreeOperationUnavailable)
-        ));
-    }
-
-    #[test]
-    fn explicit_recovery_exposes_and_commits_only_the_exact_start_plan() {
-        let (_temporary, mut registry) = registry();
-        let registered = registry
-            .register_external_workstream(
-                PathBuf::from("/disposable/repository"),
-                "common-dir-identity".to_owned(),
-                "deadbeef".to_owned(),
-            )
-            .unwrap();
-        let prepared = registry
-            .prepare_managed_workstream(
-                "private-request-key".to_owned(),
+            registry.prepare_fork(
+                "independent-recovery".to_owned(),
                 OperationKind::Start,
                 registered.workstream_id,
                 Revision::INITIAL,
-                "a".repeat(40),
-            )
-            .unwrap();
-        registry
-            .mark_managed_workstream_recovery(&prepared.plan)
-            .unwrap();
-
-        let operations = registry.unresolved_operation_overviews().unwrap();
-        assert_eq!(operations.len(), 1);
-        assert_eq!(operations[0].operation_id, prepared.plan.operation.id);
-        assert_eq!(operations[0].kind, OperationKind::Start);
-        assert_eq!(operations[0].phase, OperationPhase::RecoveryRequired);
-
-        let recovered_plan = registry
-            .managed_workstream_plan(prepared.plan.operation.id)
-            .unwrap();
-        assert_eq!(
-            recovered_plan.operation.phase,
-            OperationPhase::RecoveryRequired
-        );
-        let created = registry
-            .commit_recovered_managed_workstream(&recovered_plan)
-            .unwrap();
-
-        assert_eq!(created.workstream_id, prepared.plan.workstream_id);
-        assert!(
-            registry
-                .unresolved_operation_overviews()
-                .unwrap()
-                .is_empty()
-        );
+            ),
+            Err(StateError::InvalidForkPlanShape)
+        ));
     }
 
     #[test]
@@ -6232,22 +5656,19 @@ mod tests {
             .unwrap()
             .revision;
         let prepared = registry
-            .prepare_managed_workstream(
+            .prepare_fork(
                 "fork-attempt".to_owned(),
                 OperationKind::Fork,
                 registered.workstream_id,
                 source_revision,
-                "a".repeat(40),
             )
             .unwrap();
 
-        let marked = registry
-            .record_managed_fork_attempt(&prepared.plan)
-            .unwrap();
+        let marked = registry.record_fork_attempt(&prepared.plan).unwrap();
         assert!(marked.fork_attempted_at_millis.is_some());
         assert!(matches!(
-            registry.record_managed_fork_attempt(&marked),
-            Err(StateError::ManagedWorktreeOperationUnavailable)
+            registry.record_fork_attempt(&marked),
+            Err(StateError::ForkOperationUnavailable)
         ));
     }
 
@@ -6366,10 +5787,7 @@ mod tests {
         let fingerprint = format!("git-remote-v1:{}", "a".repeat(64));
         let registered = registry
             .register_external_workstream_with_metadata(
-                PathBuf::from("/disposable/repository"),
                 Path::new("/disposable/repository"),
-                "common-dir-identity".to_owned(),
-                "deadbeef".to_owned(),
                 "repository",
                 Some(&fingerprint),
                 Some("github.com/owner/repository"),

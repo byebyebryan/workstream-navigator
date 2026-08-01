@@ -2,7 +2,12 @@
 
 Date: 2026-07-31
 
-Status: passed
+Status: superseded for selected-worktree cwd behavior — retained identity evidence
+
+> The 2026-08-01 project-root-only correction normalizes linked-worktree input
+> to the primary project root and does not retain the selected worktree as a
+> Workstream cwd. Remote fingerprinting and presentation-only cross-host
+> grouping remain current; the old schema migration result does not.
 
 ## Hypothesis
 

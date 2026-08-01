@@ -63,7 +63,6 @@ opaque_id!(HostId);
 opaque_id!(ProjectId);
 opaque_id!(LocationId);
 opaque_id!(WorkstreamId);
-opaque_id!(CheckoutId);
 opaque_id!(RuntimeId);
 opaque_id!(BindingId);
 opaque_id!(OperationId);

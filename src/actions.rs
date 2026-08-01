@@ -26,7 +26,6 @@ use crate::{
         LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
     },
     state::{HostRegistry, IntegrationLifecycle, ProviderBinding, StateError},
-    worktree::{GitWorktree, ManagedWorktree, SystemGitWorktree, WorktreeEvidence},
 };
 
 const PARK_CONFIRM_TIMEOUT: Duration = Duration::from_millis(500);
@@ -39,34 +38,33 @@ pub enum StartOutcome {
     AlreadyLive,
 }
 
-/// Creates an independent managed Checkout from a Workstream's configured
-/// project base, then starts its first native Codex Runtime. The retained
-/// source may be archived: archive changes navigator visibility only and does
-/// not revoke the host-owned `ProjectLocation` used as this exact Git base.
+/// Creates an independent Workstream at a registered project's root, then
+/// starts its first native Codex Runtime. The retained source may be archived:
+/// archive changes navigator visibility only and does not revoke its project.
 ///
-/// The source identifies only a `ProjectLocation` and expected revision. No
-/// source checkout files, branch, provider conversation, or prompt data is
-/// copied into the destination.
+/// The source selects a `ProjectLocation` and expected revision only. This
+/// action never invokes Git or copies files; Codex owns any worktree workflow
+/// it chooses to perform after the native session starts.
 ///
 /// # Errors
 ///
-/// Returns an error when the source revision is stale, the configured base is
-/// unavailable, Git evidence is ambiguous, observer setup prevents the native
-/// start, or the managed operation requires recovery.
+/// Returns an error when the source revision is stale or observer setup
+/// prevents the native start.
 pub fn start_independent_workstream(
     root: &crate::state::StateRoot,
     registry: &mut HostRegistry,
     source_workstream_id: WorkstreamId,
     expected_revision: Option<Revision>,
-    request_key: String,
+    request_key: &str,
 ) -> Result<WorkstreamId, ActionError> {
-    let created = create_managed_workstream(
-        registry,
-        source_workstream_id,
-        expected_revision,
+    let source = workstream_overview(registry, source_workstream_id)?;
+    if expected_revision.is_some_and(|expected| expected != source.revision) {
+        return Err(ActionError::WorkstreamRevisionConflict);
+    }
+    let created = registry.create_independent_workstream(
         request_key,
-        OperationKind::Start,
-        &SystemGitWorktree,
+        source_workstream_id,
+        source.revision,
     )?;
     let _ = start(
         root,
@@ -77,16 +75,17 @@ pub fn start_independent_workstream(
     Ok(created.workstream_id)
 }
 
-/// Creates a managed checkout and forks an active Codex Workstream at its last
-/// completed turn, without interrupting or waiting for the source's current
-/// turn. The provider fork is recorded before it is sent and is never retried
-/// after an ambiguous result.
+/// Forks an active Codex Workstream at its last completed turn without
+/// interrupting or waiting for the source's current turn. The destination
+/// starts at the same registered project root; this action never creates or
+/// validates a Git worktree. The provider fork is recorded before it is sent
+/// and is never retried after an ambiguous result.
 ///
 /// # Errors
 ///
 /// Returns an error when the selected source lacks a live settled boundary,
-/// Git or provider evidence is not exact, observer setup prevents the
-/// destination launch, or recovery is required instead of a retry.
+/// provider evidence is not exact, observer setup prevents the destination
+/// launch, or recovery is required instead of a retry.
 pub fn fork_workstream(
     root: &crate::state::StateRoot,
     registry: &mut HostRegistry,
@@ -94,46 +93,41 @@ pub fn fork_workstream(
     expected_revision: Option<Revision>,
     request_key: String,
 ) -> Result<WorkstreamId, ActionError> {
-    let prepared = prepare_managed_worktree(
-        registry,
-        source_workstream_id,
-        expected_revision,
+    let source = active_workstream_overview(registry, source_workstream_id)?;
+    if expected_revision.is_some_and(|expected| expected != source.revision) {
+        return Err(ActionError::WorkstreamRevisionConflict);
+    }
+    let prepared = registry.prepare_fork(
         request_key,
         OperationKind::Fork,
-        &SystemGitWorktree,
+        source_workstream_id,
+        source.revision,
     )?;
     if prepared.plan.operation.phase == OperationPhase::Committed {
         let _ = start(root, registry, prepared.plan.workstream_id, None)?;
         return Ok(prepared.plan.workstream_id);
     }
     if prepared.plan.operation.phase == OperationPhase::RecoveryRequired {
-        return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+        return Err(ActionError::ForkRecoveryRequired);
     }
 
     let provider_fork_already_attempted = prepared.plan.fork_attempted_at_millis.is_some();
-    if provider_fork_already_attempted {
-        // A recorded provider attempt has already crossed the only fork-call
-        // boundary. The source may now legitimately be parked or replaced;
-        // reconcile only the destination after confirming its checkout.
-        ensure_managed_worktree_evidence(registry, &prepared, &SystemGitWorktree)?;
-    } else {
+    if !provider_fork_already_attempted {
         if ensure_live_fork_source(root, registry, &prepared.plan).is_err() {
-            let _ = registry.mark_managed_workstream_recovery(&prepared.plan);
-            return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+            let _ = registry.mark_fork_recovery(&prepared.plan);
+            return Err(ActionError::ForkRecoveryRequired);
         }
-        ensure_managed_worktree_evidence(registry, &prepared, &SystemGitWorktree)?;
-        // The source can park, clear, or be replaced while Git creates the
-        // target; check the exact same Runtime/binding evidence again before
-        // the one permitted provider fork call.
+        // The source can park, clear, or be replaced between the initial
+        // snapshot and the one permitted provider fork call.
         if ensure_live_fork_source(root, registry, &prepared.plan).is_err() {
-            let _ = registry.mark_managed_workstream_recovery(&prepared.plan);
-            return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+            let _ = registry.mark_fork_recovery(&prepared.plan);
+            return Err(ActionError::ForkRecoveryRequired);
         }
     }
     let prepared_plan = if provider_fork_already_attempted {
         prepared.plan
     } else {
-        registry.record_managed_fork_attempt(&prepared.plan)?
+        registry.record_fork_attempt(&prepared.plan)?
     };
     let source_session_id = prepared_plan
         .source_native_session_id
@@ -155,7 +149,7 @@ pub fn fork_workstream(
         match app_server.fork_thread(
             source_session_id,
             settled_turn_id,
-            &prepared_plan.worktree_path,
+            &prepared_plan.project_root,
         ) {
             Ok(destination) => Ok(destination),
             Err(_) => reconcile_fork(
@@ -169,7 +163,7 @@ pub fn fork_workstream(
     let destination = match destination_result {
         Ok(destination) => destination,
         Err(error) => {
-            let _ = registry.mark_managed_workstream_recovery(&prepared_plan);
+            let _ = registry.mark_fork_recovery(&prepared_plan);
             return Err(error);
         }
     };
@@ -181,8 +175,7 @@ pub fn fork_workstream(
     {
         let _ = app_server.set_thread_name(&destination.native_session_id, &name);
     }
-    let created = registry
-        .commit_forked_managed_workstream(&prepared_plan, &destination.native_session_id)?;
+    let created = registry.commit_fork(&prepared_plan, &destination.native_session_id)?;
     let _ = start(
         root,
         registry,
@@ -192,10 +185,9 @@ pub fn fork_workstream(
     Ok(created.workstream_id)
 }
 
-/// Reopens one exact interrupted Start or Fork operation without its original
-/// request key. Recovery is always evidence-led: it never recreates a missing
-/// Git effect, and a recorded provider fork attempt is reconciled rather than
-/// retried.
+/// Reopens one exact interrupted Fork operation without its original request
+/// key. Recovery is always evidence-led: a recorded provider fork attempt is
+/// reconciled rather than retried.
 ///
 /// # Errors
 ///
@@ -207,61 +199,40 @@ pub fn recover_managed_operation(
     registry: &mut HostRegistry,
     operation_id: OperationId,
 ) -> Result<WorkstreamId, ActionError> {
-    let plan = registry.managed_workstream_plan(operation_id)?;
+    let plan = registry.fork_plan(operation_id)?;
     if !matches!(
         plan.operation.phase,
         OperationPhase::ExternalEffectStarted
             | OperationPhase::AwaitingReconciliation
             | OperationPhase::RecoveryRequired
     ) {
-        return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+        return Err(ActionError::ForkRecoveryRequired);
     }
-    match plan.operation.kind {
-        OperationKind::Start => recover_independent_operation(root, registry, &plan),
-        OperationKind::Fork => recover_fork_operation(root, registry, plan),
+    if plan.operation.kind != OperationKind::Fork {
+        return Err(ActionError::ForkRecoveryRequired);
     }
-}
-
-fn recover_independent_operation(
-    root: &crate::state::StateRoot,
-    registry: &mut HostRegistry,
-    plan: &crate::state::ManagedWorkstreamPlan,
-) -> Result<WorkstreamId, ActionError> {
-    if plan.origin != crate::domain::WorkstreamOrigin::Independent {
-        return Err(ActionError::ManagedWorkstreamRecoveryRequired);
-    }
-    ensure_recorded_managed_worktree_evidence(registry, plan, &SystemGitWorktree)?;
-    let created = registry.commit_recovered_managed_workstream(plan)?;
-    let _ = start(
-        root,
-        registry,
-        created.workstream_id,
-        Some(created.revision),
-    )?;
-    Ok(created.workstream_id)
+    recover_fork_operation(root, registry, plan)
 }
 
 fn recover_fork_operation(
     root: &crate::state::StateRoot,
     registry: &mut HostRegistry,
-    plan: crate::state::ManagedWorkstreamPlan,
+    plan: crate::state::ForkPlan,
 ) -> Result<WorkstreamId, ActionError> {
     if plan.origin != crate::domain::WorkstreamOrigin::Fork {
-        return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+        return Err(ActionError::ForkRecoveryRequired);
     }
-    ensure_recorded_managed_worktree_evidence(registry, &plan, &SystemGitWorktree)?;
-
     let provider_fork_already_attempted = plan.fork_attempted_at_millis.is_some();
     let prepared = if provider_fork_already_attempted {
         plan
     } else {
         if ensure_live_fork_source(root, registry, &plan).is_err() {
-            require_managed_operation_recovery(registry, &plan);
-            return Err(ActionError::ManagedWorkstreamRecoveryRequired);
+            require_fork_recovery(registry, &plan);
+            return Err(ActionError::ForkRecoveryRequired);
         }
         // The marker is the exact boundary after which no path may issue a
         // second provider fork. A recovered unmarked plan may cross it once.
-        registry.record_managed_fork_attempt(&plan)?
+        registry.record_fork_attempt(&plan)?
     };
     let source_session_id = prepared
         .source_native_session_id
@@ -275,7 +246,7 @@ fn recover_fork_operation(
     let destination = if provider_fork_already_attempted {
         reconcile_fork(&app_server, &prepared, source_session_id, settled_turn_id)
     } else {
-        match app_server.fork_thread(source_session_id, settled_turn_id, &prepared.worktree_path) {
+        match app_server.fork_thread(source_session_id, settled_turn_id, &prepared.project_root) {
             Ok(destination) => Ok(destination),
             Err(_) => reconcile_fork(&app_server, &prepared, source_session_id, settled_turn_id),
         }
@@ -283,12 +254,11 @@ fn recover_fork_operation(
     let destination = match destination {
         Ok(destination) => destination,
         Err(error) => {
-            require_managed_operation_recovery(registry, &prepared);
+            require_fork_recovery(registry, &prepared);
             return Err(error);
         }
     };
-    let created = registry
-        .commit_recovered_forked_managed_workstream(&prepared, &destination.native_session_id)?;
+    let created = registry.commit_recovered_fork(&prepared, &destination.native_session_id)?;
     let _ = start(
         root,
         registry,
@@ -300,22 +270,22 @@ fn recover_fork_operation(
 
 fn reconcile_fork(
     app_server: &EphemeralAppServer,
-    prepared: &crate::state::ManagedWorkstreamPlan,
+    prepared: &crate::state::ForkPlan,
     source_session_id: &str,
     settled_turn_id: &str,
 ) -> Result<crate::provider::codex::app_server::ForkedThread, ActionError> {
     let attempted_at_millis = prepared
         .fork_attempted_at_millis
-        .ok_or(ActionError::ManagedWorkstreamRecoveryRequired)?;
+        .ok_or(ActionError::ForkRecoveryRequired)?;
     match app_server.reconcile_fork(source_session_id, settled_turn_id, attempted_at_millis) {
         Ok(ForkReconciliation::Found(destination)) => Ok(destination),
         Ok(ForkReconciliation::Absent | ForkReconciliation::Ambiguous) | Err(_) => {
             // Do not invoke `thread/fork` again. This durable operation is now
             // operator-recovery-only until exact provider evidence exists.
             // The original plan has the operation revision, which remains
-            // current after `record_managed_fork_attempt` only through the
+            // current after `record_fork_attempt` only through the
             // updated `prepared` value passed here.
-            Err(ActionError::ManagedWorkstreamRecoveryRequired)
+            Err(ActionError::ForkRecoveryRequired)
         }
     }
 }
@@ -323,7 +293,7 @@ fn reconcile_fork(
 fn ensure_live_fork_source(
     root: &crate::state::StateRoot,
     registry: &HostRegistry,
-    prepared: &crate::state::ManagedWorkstreamPlan,
+    prepared: &crate::state::ForkPlan,
 ) -> Result<(), ActionError> {
     let runtime_id = prepared
         .source_runtime_id
@@ -376,130 +346,9 @@ fn provisional_fork_name(source_native_name: Option<&str>) -> Option<String> {
     .then(|| format!("{source_native_name} · fork"))
 }
 
-fn create_managed_workstream(
-    registry: &mut HostRegistry,
-    source_workstream_id: WorkstreamId,
-    expected_revision: Option<Revision>,
-    request_key: String,
-    kind: OperationKind,
-    git: &dyn GitWorktree,
-) -> Result<crate::state::ManagedWorkstream, ActionError> {
-    if kind != OperationKind::Start {
-        return Err(ActionError::ManagedWorkstreamKindUnavailable);
-    }
-    let prepared = prepare_managed_worktree(
-        registry,
-        source_workstream_id,
-        expected_revision,
-        request_key,
-        kind,
-        git,
-    )?;
-    if prepared.plan.operation.phase == OperationPhase::Committed {
-        return registry
-            .commit_managed_workstream(&prepared.plan)
-            .map_err(Into::into);
-    }
-    ensure_managed_worktree_evidence(registry, &prepared, git)?;
-    registry
-        .commit_managed_workstream(&prepared.plan)
-        .map_err(Into::into)
-}
-
-fn prepare_managed_worktree(
-    registry: &mut HostRegistry,
-    source_workstream_id: WorkstreamId,
-    expected_revision: Option<Revision>,
-    request_key: String,
-    kind: OperationKind,
-    git: &dyn GitWorktree,
-) -> Result<crate::state::ManagedWorkstreamPreparation, ActionError> {
-    let overview = if kind == OperationKind::Start {
-        workstream_overview(registry, source_workstream_id)?
-    } else {
-        active_workstream_overview(registry, source_workstream_id)?
-    };
-    if expected_revision.is_some_and(|expected| expected != overview.revision) {
-        return Err(ActionError::WorkstreamRevisionConflict);
-    }
-    let location = if kind == OperationKind::Start {
-        registry.workstream_git_location_for_start(source_workstream_id)?
-    } else {
-        registry.workstream_git_location(source_workstream_id)?
-    };
-    if expected_revision.is_some_and(|expected| expected != location.source_revision) {
-        return Err(ActionError::WorkstreamRevisionConflict);
-    }
-    let base_commit = git.resolve_commit(&location.repository_path, &location.default_base_ref)?;
-    registry
-        .prepare_managed_workstream(
-            request_key,
-            kind,
-            source_workstream_id,
-            location.source_revision,
-            base_commit,
-        )
-        .map_err(Into::into)
-}
-
-fn ensure_managed_worktree_evidence(
-    registry: &mut HostRegistry,
-    prepared: &crate::state::ManagedWorkstreamPreparation,
-    git: &dyn GitWorktree,
-) -> Result<(), ActionError> {
-    if prepared.plan.operation.phase == OperationPhase::RecoveryRequired {
-        return Err(ActionError::ManagedWorkstreamRecoveryRequired);
-    }
-    if prepared.plan.operation.phase != OperationPhase::ExternalEffectStarted {
-        return Err(ActionError::ManagedWorkstreamRecoveryRequired);
-    }
-    if prepared.newly_prepared {
-        let worktree = ManagedWorktree {
-            repository: prepared.plan.repository_path.clone(),
-            path: prepared.plan.worktree_path.clone(),
-            branch: prepared.plan.branch.clone(),
-            base_commit: prepared.plan.base_commit.clone(),
-        };
-        // A nonzero Git exit after the external effect began is not enough to
-        // retry. Exact durable evidence below is the only safe way to commit.
-        let _ = git.create(&worktree);
-    }
-    ensure_recorded_managed_worktree_evidence(registry, &prepared.plan, git)
-}
-
-fn ensure_recorded_managed_worktree_evidence(
-    registry: &mut HostRegistry,
-    prepared: &crate::state::ManagedWorkstreamPlan,
-    git: &dyn GitWorktree,
-) -> Result<(), ActionError> {
-    if !matches!(
-        prepared.operation.phase,
-        OperationPhase::ExternalEffectStarted | OperationPhase::RecoveryRequired
-    ) {
-        return Err(ActionError::ManagedWorkstreamRecoveryRequired);
-    }
-    let worktree = ManagedWorktree {
-        repository: prepared.repository_path.clone(),
-        path: prepared.worktree_path.clone(),
-        branch: prepared.branch.clone(),
-        base_commit: prepared.base_commit.clone(),
-    };
-    let evidence = git.evidence(&worktree);
-    match evidence {
-        Ok(WorktreeEvidence::Exact) => Ok(()),
-        Ok(WorktreeEvidence::Absent | WorktreeEvidence::Mismatch) | Err(_) => {
-            require_managed_operation_recovery(registry, prepared);
-            Err(ActionError::ManagedWorkstreamRecoveryRequired)
-        }
-    }
-}
-
-fn require_managed_operation_recovery(
-    registry: &mut HostRegistry,
-    prepared: &crate::state::ManagedWorkstreamPlan,
-) {
+fn require_fork_recovery(registry: &mut HostRegistry, prepared: &crate::state::ForkPlan) {
     if prepared.operation.phase != OperationPhase::RecoveryRequired {
-        let _ = registry.mark_managed_workstream_recovery(prepared);
+        let _ = registry.mark_fork_recovery(prepared);
     }
 }
 
@@ -814,7 +663,7 @@ fn runtime_launch_program(
     Ok(wrapped)
 }
 
-/// Parks one live Runtime while preserving its provider history and checkout.
+/// Parks one live Runtime while preserving provider history and project files.
 ///
 /// # Errors
 ///
@@ -1148,12 +997,10 @@ pub enum ActionError {
     WorkstreamAlreadyArchived,
     #[error("workstream revision changed; refresh before acting")]
     WorkstreamRevisionConflict,
-    #[error("managed Workstream operation requires recovery; Git was not retried")]
-    ManagedWorkstreamRecoveryRequired,
+    #[error("managed Workstream fork requires provider recovery")]
+    ForkRecoveryRequired,
     #[error("fork source is no longer the exact live settled Workstream")]
     ForkSourceUnavailable,
-    #[error("requested managed Workstream action is not available")]
-    ManagedWorkstreamKindUnavailable,
     #[error(transparent)]
     Profile(#[from] ProfileError),
     #[error(transparent)]
@@ -1161,64 +1008,25 @@ pub enum ActionError {
     #[error(transparent)]
     Runtime(#[from] crate::runtime::RuntimeError),
     #[error(transparent)]
-    Worktree(#[from] crate::worktree::WorktreeError),
-    #[error(transparent)]
     State(#[from] StateError),
 }
 
 #[cfg(test)]
 mod tests {
     use std::{
-        cell::Cell,
         fmt::Write as _,
         fs,
         path::{Path, PathBuf},
-        process::{Command, Stdio},
     };
 
     use super::*;
-
-    struct FakeGit {
-        create_calls: Cell<u8>,
-        evidence: WorktreeEvidence,
-    }
-
-    impl GitWorktree for FakeGit {
-        fn resolve_commit(
-            &self,
-            _repository: &Path,
-            _reference: &str,
-        ) -> Result<String, crate::worktree::WorktreeError> {
-            Ok("a".repeat(40))
-        }
-
-        fn create(
-            &self,
-            _worktree: &ManagedWorktree,
-        ) -> Result<(), crate::worktree::WorktreeError> {
-            self.create_calls
-                .set(self.create_calls.get().saturating_add(1));
-            Ok(())
-        }
-
-        fn evidence(
-            &self,
-            _worktree: &ManagedWorktree,
-        ) -> Result<WorktreeEvidence, crate::worktree::WorktreeError> {
-            Ok(self.evidence)
-        }
-    }
 
     fn registry() -> (tempfile::TempDir, crate::state::HostRegistry, WorkstreamId) {
         let temporary = tempfile::tempdir().unwrap();
         let root = crate::state::StateRoot::create(temporary.path()).unwrap();
         let mut registry = crate::state::HostRegistry::open(&root).unwrap();
         let registered = registry
-            .register_external_workstream(
-                PathBuf::from("/disposable/repository"),
-                "common-dir".to_owned(),
-                "main".to_owned(),
-            )
+            .register_project_root(Path::new("/disposable/repository"))
             .unwrap();
         (temporary, registry, registered.workstream_id)
     }
@@ -1301,20 +1109,6 @@ mod tests {
         assert_eq!(restored.archived_at_millis, None);
         assert!(restored.runtime.is_none());
         assert_eq!(restored.revision, restored_revision);
-    }
-
-    fn git(repository: &Path, arguments: &[&str]) {
-        assert!(
-            Command::new("git")
-                .arg("-C")
-                .arg(repository)
-                .args(arguments)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .unwrap()
-                .success()
-        );
     }
 
     #[test]
@@ -1401,11 +1195,7 @@ mod tests {
         let root = crate::state::StateRoot::create(temporary.path()).unwrap();
         let mut registry = crate::state::HostRegistry::open(&root).unwrap();
         let registered = registry
-            .register_external_workstream(
-                PathBuf::from("/disposable/repository"),
-                "common-dir".to_owned(),
-                "main".to_owned(),
-            )
+            .register_project_root(Path::new("/disposable/repository"))
             .unwrap();
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
         registry
@@ -1473,113 +1263,54 @@ mod tests {
     }
 
     #[test]
-    fn independent_creation_commits_only_exact_git_evidence_and_never_retries() {
+    fn independent_creation_reuses_its_request_without_a_git_effect() {
         let (_temporary, mut registry, source) = registry();
-        let git = FakeGit {
-            create_calls: Cell::new(0),
-            evidence: WorktreeEvidence::Exact,
-        };
-
-        let first = create_managed_workstream(
-            &mut registry,
-            source,
-            Some(Revision::INITIAL),
-            "independent-action".to_owned(),
-            OperationKind::Start,
-            &git,
-        )
-        .unwrap();
-        let replay = create_managed_workstream(
-            &mut registry,
-            source,
-            None,
-            "independent-action".to_owned(),
-            OperationKind::Start,
-            &git,
-        )
-        .unwrap();
+        let first = registry
+            .create_independent_workstream("independent-action", source, Revision::INITIAL)
+            .unwrap();
+        let replay = registry
+            .create_independent_workstream("independent-action", source, Revision::INITIAL)
+            .unwrap();
 
         assert_eq!(first, replay);
-        assert_eq!(git.create_calls.get(), 1);
+        let overview = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == first.workstream_id)
+            .unwrap();
+        assert_eq!(
+            overview.project_repository_path,
+            PathBuf::from("/disposable/repository")
+        );
     }
 
     #[test]
-    fn ambiguous_git_evidence_marks_the_operation_for_recovery_without_retry() {
-        let (_temporary, mut registry, source) = registry();
-        let git = FakeGit {
-            create_calls: Cell::new(0),
-            evidence: WorktreeEvidence::Absent,
-        };
-
-        assert!(matches!(
-            create_managed_workstream(
-                &mut registry,
-                source,
-                Some(Revision::INITIAL),
-                "independent-ambiguous".to_owned(),
-                OperationKind::Start,
-                &git,
-            ),
-            Err(ActionError::ManagedWorkstreamRecoveryRequired)
-        ));
-        assert!(matches!(
-            create_managed_workstream(
-                &mut registry,
-                source,
-                None,
-                "independent-ambiguous".to_owned(),
-                OperationKind::Start,
-                &git,
-            ),
-            Err(ActionError::ManagedWorkstreamRecoveryRequired)
-        ));
-        assert_eq!(git.create_calls.get(), 1);
-    }
-
-    #[test]
-    fn independent_creation_uses_the_recorded_commit_without_copying_source_files() {
+    fn independent_creation_keeps_the_project_root_without_touching_files() {
         let temporary = tempfile::tempdir().unwrap();
         let repository = temporary.path().join("repository");
         fs::create_dir(&repository).unwrap();
-        git(&repository, &["init", "-b", "main"]);
-        git(
-            &repository,
-            &["config", "user.email", "wsnav@example.invalid"],
-        );
-        git(&repository, &["config", "user.name", "WSNav Test"]);
-        fs::write(repository.join("committed.txt"), "base\n").unwrap();
-        git(&repository, &["add", "committed.txt"]);
-        git(&repository, &["commit", "-m", "base"]);
         fs::write(repository.join("source-only.txt"), "do not copy\n").unwrap();
 
         let root = crate::state::StateRoot::create(temporary.path().join("state")).unwrap();
         let mut registry = crate::state::HostRegistry::open(&root).unwrap();
-        let registered = registry
-            .register_external_workstream(
-                repository.clone(),
-                repository.join(".git").to_string_lossy().into_owned(),
-                "HEAD".to_owned(),
+        let registered = registry.register_project_root(&repository).unwrap();
+        let created = registry
+            .create_independent_workstream(
+                "independent-system-git",
+                registered.workstream_id,
+                Revision::INITIAL,
             )
             .unwrap();
-        let created = create_managed_workstream(
-            &mut registry,
-            registered.workstream_id,
-            Some(Revision::INITIAL),
-            "independent-system-git".to_owned(),
-            OperationKind::Start,
-            &SystemGitWorktree,
-        )
-        .unwrap();
-        let destination = registry
+        let destination_root = registry
             .workstream_overviews()
             .unwrap()
             .into_iter()
             .find(|overview| overview.workstream_id == created.workstream_id)
             .unwrap()
-            .checkout_path;
+            .project_repository_path;
 
-        assert!(destination.join("committed.txt").is_file());
-        assert!(!destination.join("source-only.txt").exists());
+        assert_eq!(destination_root, repository);
         assert!(repository.join("source-only.txt").is_file());
         assert_eq!(created.origin, crate::domain::WorkstreamOrigin::Independent);
     }

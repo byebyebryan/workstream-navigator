@@ -33,13 +33,14 @@ its completed visible result.
    manager-owned prompt box, plan router, session wizard, or model picker.
 3. **Keep the completed result visible.** Workstream Navigator never writes
    status, routing, synthesis, or completion traffic into the provider pane.
-4. **Make workstreams explicit.** A workstream is an independent filesystem and
-   runtime lane, not a task record or a synonym for a provider chat.
+4. **Make workstreams explicit.** A workstream is an independent provider and
+   runtime lane at a registered project root, not a task record, filesystem
+   owner, or synonym for a provider chat.
 5. **Treat hosts as locations, not agents.** Local and SSH hosts use the same
    runtime contract. V1 does not transfer repositories, chats, or task context
    between hosts.
 6. **Fail visibly and conservatively.** Unknown provider identity, runtime
-   ownership, worktree ownership, or remote state becomes `unknown`,
+   ownership, provider identity, or remote state becomes `unknown`,
    `unreachable`, or `recovery required`; it is never guessed.
 7. **Keep provider history canonical.** Workstream Navigator stores provider
    identifiers needed for exact resume, but no prompts, responses, tool output,
@@ -67,12 +68,10 @@ its completed visible result.
   the default operational home rather than a generic management dashboard.
 - Reversible Workstream archive and restore for removing inactive work from the
   ordinary navigator without deleting provider history or Git state.
-- Independent workstreams created from a project location's configured default
-  Git base.
-- Conversation-forked workstreams whose filesystem also starts independently
-  from that configured default base.
-- One external checkout for an initial workstream and conservatively owned
-  managed worktrees for additional workstreams.
+- Independent workstreams started at a registered project root.
+- Conversation-forked workstreams that retain the same registered project root.
+- Read-only Git registration and optional remote fingerprinting for Project
+  grouping; no Git lifecycle ownership.
 - Activity and durable result attention for Workstream Navigator-started Codex
   sessions.
 - Navigator-owned observer activation, native trust review, status, and exact
@@ -87,7 +86,7 @@ its completed visible result.
 
 ### Explicitly outside V1
 
-- Importing or controlling arbitrary existing Codex sessions or worktrees.
+- Importing or controlling arbitrary existing Codex sessions.
 - A persisted `Task` entity, assignments, priorities, plans, schedules, queues,
   dependencies, or task-context transfer.
 - Automatic plan detection, plan acceptance inference, prompt interception, or
@@ -104,14 +103,13 @@ its completed visible result.
 - Transcript storage, transcript rendering, history search, or project memory.
 - A custom PTY server, terminal emulator, browser UI, desktop UI, or mobile UI.
 - A public network service or always-running remote daemon.
-- Cloning repositories, synchronizing checkouts, moving a live workstream
+- Cloning repositories, managing worktrees, synchronizing repositories, moving a live workstream
   between hosts, or transferring chats between hosts.
 - Automatic Git fetch, pull, commit, merge, rebase, reset, stash, push,
   cherry-pick, or conflict resolution.
-- Copying uncommitted files or source-only commits into a forked workstream.
-- Hard deletion of Workstream records, native provider sessions, external or
-  managed checkouts, or managed branches. Archive is visibility and retention,
-  not cleanup authority.
+- Copying files, commits, branches, or worktrees between Workstreams.
+- Hard deletion of Workstream records, native provider sessions, or project
+  files. Archive is visibility and retention, not cleanup authority.
 - Automatic remote installation, upgrade, repository cloning, or host-wide
   teardown from the Hosts page.
 - Claude or broad provider parity.
@@ -129,9 +127,8 @@ It does not mean that one workstream migrates between them.
 | --- | --- | --- |
 | `Host` | A local or SSH-reachable machine with `wsnav`, tmux, Git, and Codex capabilities | Workstream Navigator client catalog plus host handshake |
 | `Project` | A logical repository-shaped grouping shown by the navigator | Workstream Navigator |
-| `ProjectLocation` | One registered Git repository and worktree root on one host | That host's Workstream Navigator registry |
-| `Workstream` | One independent checkout, runtime lane, and current provider-session binding | That host's Workstream Navigator registry |
-| `Checkout` | An external checkout or a Workstream Navigator-created Git worktree | Git plus the host registry's ownership record |
+| `ProjectLocation` | One registered Git project's canonical root on one host | That host's Workstream Navigator registry |
+| `Workstream` | One runtime lane and current provider-session binding at its ProjectLocation root | That host's Workstream Navigator registry |
 | `Runtime` | One provider process in one private tmux server, session, window, and pane | tmux and live process evidence |
 | `ProviderSession` | A Codex chat/session referenced by its native identifier | Codex |
 | `ConversationTip` | The current native thread plus its latest accepted settled turn | Workstream Navigator binding plus Codex identities |
@@ -145,7 +142,8 @@ many native chats over time without becoming a task manager.
 The Workstream ID is stable; its ConversationTip moves. A native `/new`,
 `/clear`, or managed cutover may replace thread A with thread B without
 replacing the Workstream. A Workstream fork creates a new Workstream ID,
-Checkout, Runtime, and ConversationTip while retaining explicit ancestry.
+Runtime, and ConversationTip while retaining explicit ancestry at the same
+ProjectLocation root.
 
 There is no separate Workstream label in V1. The current tip's native
 `thread.name` is the canonical display name and exact resume still relies on
@@ -370,7 +368,7 @@ Every managed host owns:
 - one stable host identity;
 - zero or more runtime-private tmux sockets and server generations, one for
   each live Runtime;
-- the workstream, checkout, Start/Fork recovery, binding, and attention records
+- the Workstream, ProjectLocation, Fork recovery, binding, and attention records
   for work physically running on that host.
 
 Every newly created Runtime derives its private tmux directory and session name
@@ -504,8 +502,9 @@ Production sessions use the user's normal Codex home, authentication,
 configuration, plugins, skills, models, permissions, and native history.
 Temporary Codex homes remain test-only.
 
-Every live Workstream runs one dedicated native `codex -C <checkout>` or
-`codex -C <checkout> resume <thread-id>` process in its own host tmux session.
+Every live Workstream runs one dedicated native `codex -C <project-root>` or
+`codex -C <project-root> resume <thread-id>` process in its own host tmux
+session.
 The TUI owns that process's runtime for its entire lifetime. Workstream
 Navigator never launches a managed TUI with `codex --remote`.
 
@@ -565,7 +564,7 @@ native trust record and returns the right pane to its blank state. If review is
 declined, cancelled, or incomplete, it remains `trust_pending`; managed launch
 remains fail-closed and opening a new fresh navigator reruns the review. The
 activation process neither inspects the current cwd nor creates a
-ProjectLocation, Checkout, or Workstream. A blank Codex landing screen emits no
+ProjectLocation or Workstream. A blank Codex landing screen emits no
 `SessionStart`, so no stronger passive activation signal is fabricated. The
 first managed `SessionStart` must instead pass the normal provider-side
 corroboration gate. Whether an unprompted review process leaves any native
@@ -721,9 +720,9 @@ persists `preview`, turns, items, transcript paths, or the raw response.
 Codex's native CLI and ephemeral App Server divide the action boundary:
 
 - fresh work uses `codex`;
-- recovery uses `codex -C <checkout> resume <session-id>`;
+- recovery uses `codex -C <project-root> resume <session-id>`;
 - a Workstream fork uses App Server `thread/fork`, then starts the resulting
-  thread through `codex -C <destination-checkout> resume <destination-id>`;
+  thread through `codex -C <project-root> resume <destination-id>`;
 - chat naming uses native `/rename` or App Server `thread/name/set`, both
   changing the same Codex-owned field.
 
@@ -763,8 +762,8 @@ Resolution prefers a current non-empty native name, then a current-binding
 cache when refresh is unavailable, then transition context, and finally a
 synthetic lifecycle fallback. An unavailable observation never becomes
 `unnamed` or `untitled`; those displays require `known_empty`. Fallbacks never
-expose a workstream or provider identifier. Branch, worktree, host, and cwd
-remain secondary context rather than naming authority.
+expose a workstream or provider identifier. Git state, host, and cwd remain
+secondary context rather than naming authority.
 
 An exact thread ID, not any displayed text, remains identity and action
 authority. Names and computed fallbacks need not be unique.
@@ -809,7 +808,11 @@ and a later `SessionStart(source=resume)` rebinds it.
 
 ## Durable state
 
-V1 uses fresh SQLite schemas with no migration from Agent Switchboard.
+V1 uses fresh SQLite schemas with no migration from Agent Switchboard. The
+worktree-free schema is intentionally a breaking host-state boundary: a host
+database from the retired worktree-managed design fails closed and requires an
+explicit state reset and project re-registration. WSNav never silently deletes
+or mutates that state.
 
 ### Client catalog
 
@@ -822,11 +825,10 @@ The local client catalog contains only:
 - mappings from those local presentation records to exact host locations; and
 - local UI preferences.
 
-The client catalog is not authority for a remote runtime, worktree, provider
+The client catalog is not authority for a remote runtime, Git state, provider
 binding, or mutation. Losing it does not stop local or remote work. A readable
 host alias and one stable Project label identify each row. The Project label is
-derived from repository registration metadata, never from a generated managed
-Workstream checkout.
+derived from repository registration metadata, never from a generated path.
 
 Host actions address opaque Location and Workstream IDs, not a replicated
 project catalog. A host may expose a bounded opaque fingerprint and a
@@ -852,17 +854,12 @@ CodexIntegration
   hook_executable_path, generated_content_hash, lifecycle, revision
 
 ProjectLocation
-  location_id, repository_identity, repository_path,
-  repository_display_name, remote_identity_fingerprint?, remote_identity_display?,
-  default_base_ref, managed_worktree_root, revision
+  location_id, repository_path, repository_display_name,
+  remote_identity_fingerprint?, remote_identity_display?, revision
 
 Workstream
   workstream_id, location_id, origin,
-  source_workstream_id?, checkout_id, lifecycle, archived_at?, revision
-
-Checkout
-  checkout_id, path, ownership, branch?, creation_commit?,
-  repository_identity, revision
+  source_workstream_id?, lifecycle, archived_at?, revision
 
 Runtime
   runtime_id, workstream_id, provider, tmux_generation,
@@ -894,8 +891,7 @@ environment dump is persisted.
 
 ### State relationships
 
-- One open Workstream owns exactly one Checkout.
-- One managed Checkout has exactly one open Workstream owner.
+- One Workstream references exactly one ProjectLocation root.
 - One host has at most one owned `wsnav-observer` CodexIntegration.
 - One Workstream has at most one live Runtime.
 - One Runtime has one current ProviderBinding.
@@ -919,7 +915,7 @@ environment dump is persisted.
 - Runtime status and Workstream lifecycle are separate.
 - Archive visibility is separate from Workstream lifecycle. An archived
   Workstream retains `parked` or `recovery_required`, its exact binding,
-  AttentionState, Checkout, and lineage; restore never starts a Runtime
+  AttentionState, ProjectLocation, and lineage; restore never starts a Runtime
   automatically.
 
 Every accepted settled turn marks the Workstream's AttentionState as unseen
@@ -957,65 +953,36 @@ starting | idle | working | attention | stopped | unknown | unreachable
 
 `unreachable` is a transport observation, not proof that a runtime stopped.
 
-## Git and worktree policy
+## Git project-root policy
 
-A ProjectLocation references one local, non-bare Git repository with a stable
-common-directory identity and a configured `default_base_ref`. Registration
-normalizes the selected path to its containing worktree root. It separately
-records the primary worktree returned by bounded `git worktree list
---porcelain` as the repository command path, so an externally created linked
-worktree can be the initial Workstream without becoming the Project identity.
+Registration performs bounded, read-only Git discovery without contacting a
+network. It normalizes a supplied repository path, linked worktree, or child
+directory to the repository's primary non-bare worktree. That canonical path
+is the registered `ProjectLocation` root and the launch cwd for every WSNav
+Workstream at that location.
 
-Registration also inspects local Git configuration without contacting a
-network. One unambiguous canonical fetch remote is normalized across common
-SSH and HTTP transport spellings, stripped of credentials and transport-only
-user information, and persisted only as a versioned SHA-256 fingerprint plus a
-bounded `host/path` display label and repository display name. `origin` is
-preferred; an unambiguous sole fetch remote is the fallback. Local paths,
-`file:` remotes, multiple conflicting URLs, or missing remotes produce neither
-label nor fingerprint and therefore no automatic cross-host grouping. A remote
-named `upstream` is not treated as stronger than `origin`, because a fork and
-its parent may intentionally be separate Projects.
+Registration may also derive one unambiguous canonical fetch-remote fingerprint
+and a credential-free `host/path` display label. `origin` is preferred; one
+unambiguous sole fetch remote is the fallback. Local paths, `file:` remotes,
+missing remotes, and conflicting remotes produce neither label nor fingerprint
+and therefore no automatic cross-host grouping.
 
-The first Workstream may use an existing checkout with `external` ownership.
-Additional V1 Workstreams use `managed` worktrees below the configured
-Workstream Navigator root.
+After registration, WSNav performs no Git lifecycle operation. It never creates
+or removes worktrees or branches; resolves commits; fetches, pulls, commits,
+merges, rebases, resets, stashes, pushes, cherry-picks, or copies files. New
+and forked Workstreams both launch at the same registered project root. If a
+task needs an isolated worktree, the user or Codex creates and manages it inside
+the native session using the provider's normal workflow.
 
-Before creating an independent or forked Workstream, the host resolves
-`default_base_ref` to one exact locally available commit. It does not fetch.
-The Start or Fork operation records that commit before creating the branch or
-worktree.
-
-Conversation and filesystem lineage are deliberately separate:
+Conversation lineage remains explicit:
 
 ```text
-provider lineage:   source Codex session -> forked Codex session
-filesystem lineage: project default-base commit -> new managed worktree
+source Codex session -> forked Codex session
 ```
 
-A fork does not copy source-only commits, staged files, unstaged files,
-untracked files, ignored files, build output, processes, or credentials. The
-navigator must make that distinction visible.
-
-Workstream Navigator never stashes or force-removes. Managed worktree removal
-is outside V1: parking a Workstream stops its Runtime but preserves its checkout,
-branch, provider binding, and registry record. Workstream Navigator does not
-delete external or managed checkouts, remove branches, or decide whether work
-was merged.
-
-Archiving follows the same retention boundary. A live Workstream is explicitly
-parked before it becomes hidden from the ordinary navigator; a partial archive
-therefore remains visibly parked and can be retried. Archive preserves the
-Checkout and branch regardless of cleanliness and never invokes Git cleanup.
-
-`doctor` may report preserved managed worktrees and their recorded ownership.
-Any cleanup uses ordinary user-directed Git tooling outside Workstream
-Navigator.
-
-Managed branches use an implementation-owned collision-resistant namespace
-derived from the opaque Workstream ID. Users are not asked to name branches in
-the ordinary path. Exact spelling is an implementation detail covered by
-creation and collision tests, not a user-facing naming authority.
+It makes no claim about filesystem lineage. Parking and archiving stop or hide
+the Runtime while preserving provider history and the registered ProjectLocation;
+they never inspect or change project files.
 
 ## Core workflows
 
@@ -1034,8 +1001,8 @@ If the runtime is stopped but the native session binding is known, the user
 chooses Resume:
 
 ```text
-host creates a fresh dedicated tmux session in the recorded checkout
--> launches native codex -C <recorded-checkout> resume with the exact session ID
+host creates a fresh dedicated tmux session at the recorded project root
+-> launches native codex -C <project-root> resume with the exact session ID
 -> SessionStart(source=resume) confirms the binding
 -> navigator attaches the provider pane
 ```
@@ -1044,9 +1011,7 @@ host creates a fresh dedicated tmux session in the recorded checkout
 
 ```text
 user selects ProjectLocation and Start Workstream
--> host resolves the exact default-base commit
--> durable Start operation reserves Workstream, Checkout, and Runtime IDs
--> host creates the managed branch and worktree
+-> host records a new Workstream at the same ProjectLocation root
 -> host launches a blank native Codex TUI in dedicated tmux
 -> SessionStart confirms the native session
 -> navigator focuses the new Workstream
@@ -1068,11 +1033,10 @@ state.” It does not fork partial model output or current filesystem state.
 source Codex turn may still be running
 -> user explicitly selects Fork Workstream
 -> host validates the source binding and last settled provider boundary
--> host resolves the ProjectLocation default base to an exact commit
--> durable Fork operation creates an independent managed worktree
+-> durable Fork operation records the provider-only cutover plan at the same project root
 -> ephemeral App Server forks source through exact lastTurnId and requests destination cwd
 -> if source has a native name, host sets a bounded provisional fork name
--> host launches native codex -C <destination-worktree> resume for the returned destination thread ID
+-> host launches native codex -C <project-root> resume for the returned destination thread ID
 -> destination SessionStart confirms the new native session
 -> source runtime continues unchanged
 -> navigator may focus destination; source completion only raises attention
@@ -1126,15 +1090,15 @@ Required interactions:
 - one action to focus or reconnect a Workstream;
 - register the first local ProjectLocation from the empty navigator without a
   shell command or cwd inference;
-- Start Workstream from a selected Workstream or ProjectLocation using project
-  defaults;
+- Start Workstream from a selected Workstream or ProjectLocation at its
+  registered root;
 - Fork Workstream from an exact managed source;
 - inspect bounded Workstream status and rename the current tip through Codex's
   canonical thread-name field;
 - park/resume without deleting provider history;
 - archive a Workstream out of the active list and restore it without starting
   Codex or deleting its retained state;
-- list and recover exact unresolved Start or Fork operations;
+- list and recover exact unresolved Fork operations;
 - inspect and register ProjectLocations on local or SSH hosts;
 - add or remove SSH host registrations without leaving the navigator;
 - acknowledge result or recovery attention without injecting provider traffic.
@@ -1155,14 +1119,14 @@ Active/Archived visibility and `Recent`/`By project`/`By host` grouping are
 independent presentation axes. Archiving a working Runtime requires explicit
 confirmation because parking it interrupts the current provider turn.
 
-The Workstreams Recovery page lists bounded unresolved Start and Fork
+The Workstreams Recovery page lists bounded unresolved Fork
 operations that cannot safely appear as ordinary Workstream rows. It provides
 the same exact revision-guarded reconciliation as the direct recovery command;
 request keys, paths, provider identifiers, and raw evidence remain hidden.
 
 The Projects page reflects the ownership boundary explicitly: a logical
 client-side Project contains one or more host-owned ProjectLocations. Adding a
-remote location sends one bounded structured checkout path to that host for
+remote location sends one bounded structured project path to that host for
 local Git inspection; paths are never interpolated into SSH shell syntax or
 returned in public snapshots. Permanent Project deletion, manual repository
 cleanup, and automatic cross-host merge/split remain outside D7.
@@ -1174,8 +1138,8 @@ remote host for narrow terminals; the fingerprint remains hidden and
 grouping-only. `n` starts a Workstream from the selected
 Project. When it has more than one host location, a navigator-local picker asks
 where to start; a single-location Project starts directly. `a` adds an existing
-checkout through the navigator-local host picker and bounded checkout-path
-entry. On an empty Projects list, `n` opens that same add flow. The selected
+project path through the navigator-local host picker and bounded path entry. On
+an empty Projects list, `n` opens that same add flow. The selected
 host alone receives that path for local Git inspection; no path is written into
 provider panes, returned by the SSH control response, or shown in Workstream
 snapshots. Matching credential-free repository fingerprints associate locations
@@ -1184,7 +1148,7 @@ into one logical Project.
 `x` removes an archived Project from this navigator only after confirmation. It
 records the selected locations as hidden client inventory and refuses while any
 of the Project's Workstreams are active. It never deletes or mutates the host
-registry, Git checkout, worktree, or Codex history; this is intentional
+registry, Git state, project files, or Codex history; this is intentional
 visibility cleanup, not permanent Project deletion.
 
 The Hosts page renders each host's reachability and observer state, followed by
@@ -1240,9 +1204,8 @@ while using the same host/runtime contracts.
 | Ephemeral App Server mutation is ambiguous | Reconcile exact persisted effects; never retry a non-idempotent fork unless absence is proven, otherwise require recovery |
 | Another client or direct tmux client attaches | Show the same tmux-managed screen; do not create a lease or detach either client; simultaneous input may interleave |
 | Navigator crashes during focus switch | Focus is ephemeral; no durable runtime or Workstream mutation is implied |
-| Client disconnects during Start or Fork | Reopen the exact CompoundOperation and reconcile recorded external effects |
-| Git worktree creation is partial | Record `recovery_required`; never guess ownership or delete uncertain paths |
-| Managed checkout is dirty | Preserve it; V1 has no worktree or branch removal action |
+| Client disconnects during Start or Fork | Start is already committed locally; reopen the exact Fork operation only when provider cutover is unresolved |
+| Project Git state changes | Leave it entirely to Codex or the user; WSNav neither validates nor changes it |
 | Host protocol versions differ | Reject mutation and show an actionable compatibility diagnostic |
 | Registered host ID or registry generation changes unexpectedly | Preserve the cached view, reject mutation, and require explicit client-side reset and registration |
 | `wsnav-observer` is absent, foreign, modified, disabled, or awaiting trust | Preserve existing Runtime attachment; block new observer-dependent launch and report the exact setup or native `/hooks` action |
@@ -1254,12 +1217,11 @@ result/attention persistence gap.
 
 ### Durable operation recovery
 
-An unresolved Start or Fork is visible through an explicit local or remote
+An unresolved Fork is visible through an explicit local or remote
 operation list. It exposes only an opaque operation ID, kind, phase, and
-safe-to-display outcome state; request keys, checkout paths, provider IDs, and
+safe-to-display outcome state; request keys, project paths, provider IDs, and
 raw operation evidence remain host-private. `recover-operation <id>` reopens
-only that recorded plan. A Start checks its exact Git evidence and may commit
-the already-created Workstream. A Fork with no recorded provider-attempt marker
+only that recorded Fork plan. A Fork with no recorded provider-attempt marker
 may continue to the one permitted fork call; after that marker exists it may
 only reconcile exact provider lineage and can never call `thread/fork` again.
 Zero or multiple candidates remain visible as recovery-required. The navigator
@@ -1321,9 +1283,9 @@ creation effect before a destination Workstream can safely exist.
   known binding.
 - Every Runtime carries a generation and process-birth fingerprint so stale
   hooks and attachments cannot silently bind to a replacement process.
-- V1 exposes no destructive Git action. Managed worktree and branch creation
-  revalidate repository identity, exact base commit, destination ownership, and
-  collision freedom before the effect.
+- V1 exposes no Git mutation. Project registration is read-only discovery;
+  every later Git decision stays inside the native Codex session or ordinary
+  user tooling.
 
 ## Proposed Rust structure
 
@@ -1332,7 +1294,7 @@ src/
 ├── main.rs               CLI entrypoint
 ├── app.rs                top-level command orchestration
 ├── domain/               pure IDs, entities, statuses, invariants
-├── state/                SQLite schema, revisions, and Start/Fork recovery
+├── state/                SQLite schema, revisions, and provider-Fork recovery
 ├── protocol/             versioned host request/response frames
 ├── host/
 │   ├── local.rs          direct host adapter
@@ -1347,9 +1309,7 @@ src/
 │       ├── profile.rs    observer profile ownership and native trust setup
 │       ├── app_server.rs ephemeral stdio metadata/name/fork client
 │       └── hooks.rs      passive lifecycle event handling
-├── git/
-│   ├── repository.rs     repository identity and base resolution
-│   └── worktree.rs       create and verify managed worktrees
+├── repository.rs         read-only project-root and remote identity discovery
 ├── tui/                  minimal navigator state, rendering, input, mouse
 └── internal/             hidden remote, hook, and snapshot entrypoints
 ```
@@ -1384,7 +1344,7 @@ Spikes 0006-0008 settled the remaining provider-facing prerequisites:
   compare-and-set field; and
 - a running native source can be forked exactly through its last settled turn,
   recovered after an unread response without retry, and resumed in an
-  independent default-base worktree while both native Workstreams diverge.
+  same registered project root while both native Workstreams diverge.
 
 The implemented checkpoints and their acceptance records corroborate the
 following behavior without widening the product:
@@ -1398,11 +1358,10 @@ following behavior without widening the product:
    settled-turn, and sticky attention atomically. Native `/new`, `/fork`, and
    compact remain Codex-owned workflow; missed events and races fail closed.
 3. **Cold recovery:** loss of an exact private runtime followed by
-   `codex -C <checkout> resume <session-id>` restores the same native history
+   `codex -C <project-root> resume <session-id>` restores the same native history
    and creates one new runtime generation.
-4. **Worktree ownership:** independent and forked Workstreams create
-   collision-free managed worktrees from one exact default-base commit and
-   expose no removal action.
+4. **Project-root preservation:** independent and forked Workstreams launch at
+   the registered project root; WSNav performs no Git mutation or validation.
 5. **Multi-host protocol:** local and SSH adapters return the same semantic
    results through bounded polling, reject version or host-generation mismatch,
    survive disconnect, tolerate multiple tmux attachments, and never mutate an
@@ -1442,7 +1401,7 @@ of each checkpoint.
   exact removal contracts.
 - Scoped observer hook plus normal user and trusted-project configuration
   preservation.
-- Local project location, external initial checkout, start, attach, status,
+- Local project location, external initial project registration, start, attach, status,
   tip naming, attention, park, and exact resume.
 - No TUI requirement yet; CLI acceptance first.
 
@@ -1462,10 +1421,10 @@ of each checkpoint.
 
 ### D4 — Workstreams and forks
 
-- Managed worktree creation from exact default base.
-- Independent Workstream action.
-- Exact-turn App Server conversation fork into a separately based worktree,
-  followed by native TUI resume.
+- Independent Workstream action at the registered project root.
+- Exact-turn App Server conversation fork at that same project root, followed
+  by native TUI resume. Git branches and worktrees remain a native user/Codex
+  concern rather than a WSNav operation.
 
 ### D5 — Recovery and V1 acceptance
 
@@ -1524,8 +1483,9 @@ The reconciled design settles these potentially expansive questions:
   reset and re-registration rather than adoption, merge, or reconciliation;
 - status propagation uses bounded adaptive snapshot polling rather than a
   long-lived watch transport;
-- durable compound-operation recovery is limited to Start and Fork;
-- V1 parks Workstreams but never removes their worktrees or branches;
+- durable compound-operation recovery is limited to Fork; independent
+  Workstream creation is transactional before native launch;
+- V1 parks Workstreams but never operates on Git worktrees or branches;
 - managed Codex launches select the exactly owned `wsnav-observer` profile over
   the normal user configuration while ordinary launches remain untouched;
   composing another selected profile is deferred;

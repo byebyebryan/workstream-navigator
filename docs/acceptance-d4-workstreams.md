@@ -2,7 +2,13 @@
 
 Date: 2026-07-30
 
-Status: pass — disposable coverage and bounded native-Codex acceptance
+Status: superseded for filesystem behavior — retained provider-fork evidence
+
+> The 2026-08-01 project-root-only correction retires WSNav-managed branches
+> and worktrees. This record remains evidence for exact settled-turn provider
+> forks, native result preservation, and private tmux isolation only. Current
+> D4 acceptance requires source and destination to retain the same registered
+> project root and forbids WSNav Git mutation.
 
 ## Automated contract evidence
 
@@ -12,13 +18,12 @@ Status: pass — disposable coverage and bounded native-Codex acceptance
   server.
 - The source has one completed turn followed by a running turn. The captured
   provider request is required to name the completed turn only.
-- The destination checkout is created from the project's recorded base commit;
-  source-only uncommitted content is absent from it. The source checkout stays
-  intact.
-- Managed branch/worktree ownership, provisional name behavior, exact
-  destination resume, request idempotency, lost-response reconciliation, and
-  stale/ambiguous recovery paths have parser, state, action, and transport
-  coverage.
+- Under the current contract, source and destination retain the registered
+  project root; no WSNav-created filesystem is permitted. The source project
+  stays intact.
+- Exact destination resume, request idempotency, lost-response reconciliation,
+  and stale/ambiguous recovery paths have parser, state, action, and transport
+  coverage. Retired branch/worktree ownership checks are not current evidence.
 
 ## Recorded native-Codex acceptance
 
@@ -27,8 +32,9 @@ Status: pass — disposable coverage and bounded native-Codex acceptance
   Workstream Navigator did not alter any normal Codex configuration.
 - A completed source turn became a bound native conversation with visible
   unseen-result attention. An explicit fork created a distinct native provider
-  thread and distinct managed checkout, then resumed it in a directly
-  interactive destination TUI. The source result remained untouched.
+  thread and resumed it in a directly interactive destination TUI. The source
+  result remained untouched. The original run's separate managed-checkout
+  observation is retired and not a current requirement.
 - The destination completed an independent native turn. Its resulting tip was
   distinct from the source tip while both Workstreams retained their own
   attention state.
@@ -37,9 +43,9 @@ Status: pass — disposable coverage and bounded native-Codex acceptance
   exact-once provider-attempt marker. The source continued without interruption
   and later advanced to a newer settled tip, proving that the second destination
   was created from the earlier settled prefix rather than the running turn.
-- Both forked checkouts were clean and at the recorded project base. Every
-  managed runtime was parked at completion; no provider history or checkout was
-  deleted.
+- Every managed runtime was parked at completion; no provider history was
+  deleted. The original separate-checkout retention observation is historical
+  only.
 - The ordinary tmux fingerprint was unchanged before the run, after both forks,
   and after parking all managed runtimes. All provider sessions ran only on
   private WSNav tmux sockets.
@@ -50,10 +56,9 @@ Status: pass — disposable coverage and bounded native-Codex acceptance
 ## Retention and privacy
 
 The operator chose to reuse an existing observer integration and normal host
-state. The resulting clean managed Workstreams and their parked native threads
-remain intentionally available for inspection and exact resume: V1 has no
-destructive managed-worktree retirement action. This is not a full-uninstall
-or clean-host residue claim; that belongs to D5.
+state. The resulting parked native threads remain intentionally available for
+inspection and exact resume. This is not a full-uninstall or clean-host residue
+claim; that belongs to D5.
 
 The recorded fixture contains only boolean assertions and the provider
 contract fingerprint. It excludes provider identifiers, prompts, responses,

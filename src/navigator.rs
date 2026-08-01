@@ -2402,7 +2402,7 @@ impl NavigatorView {
         });
         if self.visible_workstream_indexes().is_empty() {
             let empty_label = if self.snapshot.workstreams.is_empty() {
-                "No Workstreams yet · n registers a checkout".to_owned()
+                "No Workstreams yet · n adds a Project".to_owned()
             } else {
                 format!(
                     "No {} Workstreams",
@@ -2696,13 +2696,13 @@ fn navigator_modal_content(modal: NavigatorModal) -> (String, Vec<Line<'static>>
         } => project_location_picker_modal(locations, selected, key),
         NavigatorModal::RegisterCheckout { host, value } => (
             if host.is_remote() {
-                " Register remote checkout ".to_owned()
+                " Add remote Project ".to_owned()
             } else {
-                " Register local checkout ".to_owned()
+                " Add local Project ".to_owned()
             },
             vec![
                 Line::raw(format!(
-                    "Enter an existing Git checkout on {}:",
+                    "Enter an existing Git project on {}:",
                     host.alias()
                 )),
                 Line::from(Span::styled(
@@ -2788,7 +2788,7 @@ fn forget_project_modal(
                 },
                 if location_count == 1 { "" } else { "s" },
             )),
-            Line::raw("Retains host state, Git checkouts, and native Codex history."),
+            Line::raw("Retains host state, Git project files, and native Codex history."),
             confirmation_line("remove", key),
         ],
     )
@@ -2799,7 +2799,7 @@ fn registration_host_picker_modal(
     selected: usize,
     key: Style,
 ) -> (String, Vec<Line<'static>>) {
-    let mut lines = vec![Line::raw("Choose the host that owns this checkout:")];
+    let mut lines = vec![Line::raw("Choose the host that owns this Project:")];
     lines.extend(hosts.into_iter().enumerate().map(|(index, host)| {
         let marker = if index == selected { "> " } else { "  " };
         let availability = if host.is_reachable() {
@@ -2824,7 +2824,7 @@ fn registration_host_picker_modal(
         Span::styled("Esc", key),
         Span::raw(" cancel"),
     ]));
-    (" Register checkout · choose host ".to_owned(), lines)
+    (" Add Project · choose host ".to_owned(), lines)
 }
 
 fn project_location_picker_modal(
@@ -2967,7 +2967,7 @@ fn help_lines(
                 ]),
                 Line::from(vec![
                     Span::styled("a", key),
-                    Span::raw("          add an existing checkout"),
+                    Span::raw("          add an existing Project"),
                 ]),
                 Line::from(vec![
                     Span::styled("x", key),
@@ -4104,7 +4104,7 @@ fn confirm_navigator_modal(
                     value: String::new(),
                 });
             } else {
-                view.set_message("no registered host is available for checkout registration");
+                view.set_message("no registered host is available for Project registration");
             }
         }
         Some(NavigatorModal::SelectProjectLocation {
@@ -4144,7 +4144,7 @@ fn confirm_navigator_modal(
         }
         Some(NavigatorModal::RegisterCheckout { host, value }) if value.trim().is_empty() => {
             view.modal = Some(NavigatorModal::RegisterCheckout { host, value });
-            view.set_message("enter an existing Git checkout path");
+            view.set_message("enter an existing Git project path");
         }
         Some(NavigatorModal::RegisterCheckout { host, value }) => {
             register_checkout(root, remote, view, &host, &value);
@@ -4284,7 +4284,7 @@ fn activate_selected(
     view: &mut NavigatorView,
 ) {
     let Some(selected) = view.selected().cloned() else {
-        view.set_message("no Workstream is registered; run wsnav register /path/to/git-checkout");
+        view.set_message("no Workstream is registered; add a Git Project first");
         return;
     };
     if selected.archived {
@@ -4438,7 +4438,9 @@ fn archive_workstream(
             view.clear_attached(selected);
             remote.request_soon(selected.host.alias());
             refresh_view(root, remote, view);
-            view.set_message("Workstream archived; provider history and checkout are retained");
+            view.set_message(
+                "Workstream archived; provider history and Project files are retained",
+            );
         }
         Err(error) => view.set_message(action_message(&error)),
     }
@@ -4657,7 +4659,7 @@ fn register_checkout(
     checkout: &str,
 ) {
     if host.is_remote() && !host.is_reachable() {
-        view.set_message("remote host is unavailable; checkout registration was not sent");
+        view.set_message("remote host is unavailable; Project registration was not sent");
         return;
     }
     let executable = match std::env::current_exe() {
@@ -4684,18 +4686,16 @@ fn register_checkout(
                 remote.request_soon(host.alias());
                 refresh_view(root, remote, view);
                 if view.select_project_for_workstream(host.alias(), workstream_id) {
-                    view.set_message("checkout registered; select this Project to start Codex");
+                    view.set_message("Project registered; select it to start Codex");
                 } else if host.is_remote() {
-                    view.set_message(
-                        "remote checkout registered; waiting for its bounded snapshot",
-                    );
+                    view.set_message("remote Project registered; waiting for its bounded snapshot");
                 } else {
-                    view.set_message("checkout registration completed; refresh the Project view");
+                    view.set_message("Project registration completed; refresh the Project view");
                 }
             }
             Err(error) => view.set_message(action_message(&error)),
         },
-        Ok(_) => view.set_message("checkout registration is unavailable"),
+        Ok(_) => view.set_message("Project registration is unavailable"),
         Err(error) => view.set_message(action_message(&error)),
     }
 }
@@ -5224,7 +5224,7 @@ mod tests {
     }
 
     #[test]
-    fn checkout_registration_uses_a_navigator_local_host_picker_and_path_entry() {
+    fn project_registration_uses_a_navigator_local_host_picker_and_path_entry() {
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: Vec::new(),
             hosts: vec![
@@ -5265,7 +5265,7 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
-        assert!(rendered.contains("Register remote checkout"));
+        assert!(rendered.contains("Add remote Project"));
         assert!(rendered.contains("snap"));
         assert!(rendered.contains("/private/checkout"));
         assert!(!rendered.contains("provider pane"));
@@ -5825,12 +5825,12 @@ mod tests {
     }
 
     #[test]
-    fn empty_navigator_requires_an_explicit_checkout_registration() {
+    fn empty_navigator_requires_an_explicit_project_registration() {
         let view = NavigatorView::new(LocalNavigatorSnapshot::default());
 
         assert_eq!(
             view.footer_status(),
-            "No Workstreams yet · n registers a checkout"
+            "No Workstreams yet · n adds a Project"
         );
     }
 
@@ -6475,7 +6475,7 @@ mod tests {
         assert!(!compact.contains("No Workstreams"));
         assert_eq!(
             view.footer_status(),
-            "No Workstreams yet · n registers a checkout"
+            "No Workstreams yet · n adds a Project"
         );
         assert_eq!(view.workstream_title(), "Workstreams");
         view.cycle_workstream_scope();

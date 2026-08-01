@@ -2,7 +2,7 @@
 //!
 //! The protocol deliberately contains only durable navigator metadata. It
 //! never transports a provider prompt, response, terminal capture, or hook
-//! payload. A checkout path may appear only in the one bounded registration
+//! payload. A project path may appear only in the one bounded registration
 //! request sent to its selected host; it is never returned in a response.
 
 use serde::{Deserialize, Serialize};
@@ -102,7 +102,7 @@ pub enum HostAction {
     /// Remove only an exact unchanged WSNav-owned observer profile after every
     /// managed Runtime on that host has stopped.
     RemoveObserver,
-    /// Register one existing checkout only on this host. The bounded path is
+    /// Register one existing Git project only on this host. The bounded path is
     /// request-only and is never included in a response or snapshot.
     RegisterCheckout { checkout_path: String },
     AcknowledgeAttention {
@@ -114,7 +114,7 @@ pub enum HostAction {
         expected_revision: i64,
     },
     /// Hide a Workstream from the active navigator scope without deleting its
-    /// retained provider or checkout state.
+    /// retained provider or project state.
     Archive {
         workstream_id: WorkstreamId,
         expected_revision: i64,
@@ -141,7 +141,7 @@ pub enum HostAction {
     },
     /// Reconcile one explicitly selected unresolved creation operation.
     RecoverOperation { operation_id: OperationId },
-    /// Create a sibling managed checkout from the registered project base.
+    /// Start a fresh Workstream at the registered project root.
     NewWorkstream {
         source_workstream_id: WorkstreamId,
         expected_revision: i64,
@@ -422,7 +422,7 @@ pub struct SnapshotWorkstream {
     pub location_id: LocationId,
     /// Bounded project label derived from the registered repository basename
     /// on the host. This is presentation metadata, never a repository or
-    /// checkout path.
+    /// project path.
     pub project_display_name: String,
     /// Opaque credential-free canonical fetch-remote identity. `None` keeps
     /// this host location separate in the client Project catalog.

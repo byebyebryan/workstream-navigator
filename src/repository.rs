@@ -1,9 +1,9 @@
 //! Bounded, read-only Git repository registration metadata.
 //!
-//! A selected checkout, its shared repository command path, and its optional
-//! cross-host presentation identity are deliberately separate. Remote URLs are
-//! normalized in memory and discarded; only a versioned SHA-256 fingerprint
-//! and credential-free canonical display label are returned to callers.
+//! A supplied Git path is normalized to its primary project root. Remote URLs
+//! are normalized in memory and discarded; only a versioned SHA-256
+//! fingerprint and credential-free canonical display label are returned to
+//! callers.
 
 use std::{
     collections::BTreeSet,
@@ -24,18 +24,13 @@ const MAX_REMOTE_URL_BYTES: usize = 4096;
 const MAX_REMOTE_DISPLAY_BYTES: usize = 256;
 const FINGERPRINT_VERSION: &str = "git-remote-v1";
 
-/// Exact host-private metadata for one external Workstream registration.
+/// Exact host-private metadata for one project-root registration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RepositoryRegistration {
-    /// Root of the exact external worktree selected by the operator.
-    pub checkout_path: PathBuf,
-    /// Primary worktree used as the stable project-level Git command anchor.
-    pub repository_path: PathBuf,
-    /// Absolute common Git directory. This never crosses the host protocol.
-    pub repository_identity: String,
-    /// Exact commit selected as the location's default managed-worktree base.
-    pub default_base_ref: String,
-    /// Bounded label derived from the primary worktree basename.
+    /// Canonical primary Git worktree used as the project root for every
+    /// Navigator-launched Codex session.
+    pub project_root: PathBuf,
+    /// Bounded label derived from the project-root basename.
     pub display_name: String,
     /// Opaque identity of one unambiguous canonical fetch remote.
     pub remote_identity_fingerprint: Option<String>,
@@ -45,10 +40,10 @@ pub struct RepositoryRegistration {
 
 /// Inspects a local non-bare Git checkout without contacting a network.
 ///
-/// `checkout` may name the worktree root or any directory below it. The
-/// selected worktree remains the external Workstream checkout, while the first
-/// non-bare entry from `git worktree list --porcelain` becomes the project-level
-/// command path.
+/// `checkout` may name a worktree root or any directory below it. The first
+/// non-bare entry from `git worktree list --porcelain` becomes the project root
+/// for Navigator sessions. This is registration discovery only: Navigator
+/// never creates, removes, or otherwise manages Git worktrees.
 ///
 /// # Errors
 ///
@@ -58,22 +53,15 @@ pub fn inspect(checkout: &Path) -> Result<RepositoryRegistration, RepositoryErro
     let checkout = checkout
         .canonicalize()
         .map_err(RepositoryError::Canonicalize)?;
-    let checkout_path = PathBuf::from(git_single_line(
+    let selected_worktree = PathBuf::from(git_single_line(
         &checkout,
         ["rev-parse", "--path-format=absolute", "--show-toplevel"],
     )?);
-    let checkout_path = checkout_path
-        .canonicalize()
-        .map_err(RepositoryError::Canonicalize)?;
-    let common_dir = PathBuf::from(git_single_line(
-        &checkout_path,
-        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?);
-    let common_dir = common_dir
+    let selected_worktree = selected_worktree
         .canonicalize()
         .map_err(RepositoryError::Canonicalize)?;
     let worktrees = run_git(
-        &checkout_path,
+        &selected_worktree,
         [
             OsString::from("worktree"),
             OsString::from("list"),
@@ -83,18 +71,10 @@ pub fn inspect(checkout: &Path) -> Result<RepositoryRegistration, RepositoryErro
     if !worktrees.status.success() {
         return Err(RepositoryError::GitRejected);
     }
-    let repository_path = primary_worktree(&worktrees.stdout)?
+    let project_root = primary_worktree(&worktrees.stdout)?
         .canonicalize()
         .map_err(RepositoryError::Canonicalize)?;
-    let default_base_ref = git_single_line(&checkout_path, ["rev-parse", "HEAD"])?;
-    if !(40..=128).contains(&default_base_ref.len())
-        || !default_base_ref
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit())
-    {
-        return Err(RepositoryError::InvalidGitOutput);
-    }
-    let display_name = repository_path
+    let display_name = project_root
         .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.trim().is_empty())
@@ -102,13 +82,10 @@ pub fn inspect(checkout: &Path) -> Result<RepositoryRegistration, RepositoryErro
         .chars()
         .take(64)
         .collect::<String>();
-    let remote_identity = discover_remote_identity(&checkout_path)?;
+    let remote_identity = discover_remote_identity(&project_root)?;
 
     Ok(RepositoryRegistration {
-        checkout_path,
-        repository_path,
-        repository_identity: common_dir.to_string_lossy().into_owned(),
-        default_base_ref,
+        project_root,
         display_name,
         remote_identity_fingerprint: remote_identity
             .as_ref()
@@ -129,7 +106,7 @@ pub fn refresh_pending_metadata(registry: &mut HostRegistry) -> Result<(), State
         if let Ok(metadata) = inspect(&pending.repository_path) {
             registry.record_repository_metadata(
                 pending.location_id,
-                &metadata.repository_path,
+                &metadata.project_root,
                 &metadata.display_name,
                 metadata.remote_identity_fingerprint.as_deref(),
                 metadata.remote_identity_display.as_deref(),
@@ -493,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn linked_worktree_registration_separates_checkout_and_primary_repository() {
+    fn linked_worktree_registration_normalizes_to_the_primary_project_root() {
         let temporary = tempfile::tempdir().unwrap();
         let repository = temporary.path().join("cubey");
         let linked = temporary.path().join("cubey-worktree1");
@@ -525,13 +502,11 @@ mod tests {
 
         let registration = inspect(&linked.join("nested")).unwrap();
 
-        assert_eq!(registration.checkout_path, linked.canonicalize().unwrap());
         assert_eq!(
-            registration.repository_path,
+            registration.project_root,
             repository.canonicalize().unwrap()
         );
         assert_eq!(registration.display_name, "cubey");
-        assert!(registration.repository_identity.ends_with("cubey/.git"));
         assert!(registration.remote_identity_fingerprint.is_some());
         assert_eq!(
             registration.remote_identity_display.as_deref(),

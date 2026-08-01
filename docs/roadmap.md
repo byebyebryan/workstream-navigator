@@ -1,5 +1,15 @@
 # Workstream Navigator V1 Roadmap
 
+## 2026-08-01 design correction — project-root-only workstreams
+
+The earlier D4/D6.1 worktree-management scope is retired. WSNav now registers a
+canonical project root, launches every independent and forked Workstream at
+that same root, and leaves all Git worktree/branch/file decisions to the user
+or Codex inside the native session. The prior worktree evidence remains
+historical only; it is not a current product commitment. Host schema 8 is a
+clean breaking boundary and requires explicit reset/re-registration instead of
+an automatic migration from the retired schema.
+
 Date: 2026-08-01
 
 Status: D0 through D7 complete. D7 combines bounded native local/SSH observer
@@ -253,39 +263,33 @@ Exit gate:
 
 Complete the explicit parallel-workstream actions.
 
-Implementation status: complete. The disposable local harness and a bounded
-native-Codex run both passed. See the [D4 Workstream and fork
-acceptance](acceptance-d4-workstreams.md) and its [sanitized
-fixture](../spikes/fixtures/d4-local-codex-workstream-fork.json).
+Implementation status: superseded by the project-root-only correction above.
+The retained provider-fork acceptance evidence remains useful for settled-turn
+lineage and result preservation, but not filesystem behavior.
 
 Scope:
 
-- collision-free managed branches and worktrees from one recorded
-  `default_base_ref` commit;
-- independent Workstream creation;
+- independent Workstream creation at the registered project root;
 - exact settled-prefix App Server conversation fork from a running source;
 - bounded provisional native fork naming;
-- destination native resume in its independent checkout; and
+- destination native resume at the same registered project root; and
 - lost-response fork reconciliation without retrying an ambiguous
   non-idempotent provider operation.
 
 Exit gate:
 
-- independent and forked Workstreams have distinct IDs, Checkouts, Runtimes,
-  and ConversationTips;
+- independent and forked Workstreams have distinct IDs, Runtimes, and
+  ConversationTips while retaining the ProjectLocation root;
 - a fork sees the last settled source turn and never the source's running turn;
 - the source continues unchanged while the destination diverges;
 - zero or multiple recovery candidates remain `recovery_required`; and
-- dirty, external, shared, mismatched, or ambiguously owned worktrees are
-  preserved.
+- WSNav never creates, validates, or changes Git worktrees.
 
 The disposable local harness (`scripts/d4-local-workstream-acceptance.sh`) and
 parser/state/transport tests drive a source with one completed turn followed by
 an in-progress turn, assert that the provider request names only the completed
-turn, prove the destination worktree contains the recorded base but not
-source-only files, and compare the ordinary tmux fingerprint before and after
-cleanup. The native run corroborated the same contract against the installed
-Codex App Server and direct provider TUI.
+turn and keeps the registered root as its cwd, and compare the ordinary tmux
+fingerprint before and after cleanup.
 
 ## D5 - Recovery and V1 acceptance
 
@@ -450,19 +454,20 @@ Exit gate:
 
 ## D6.1 - Repository identity and cross-host Project grouping polish
 
-Implementation status: complete. Linked-checkout normalization, canonical
-remote fingerprinting and safe origin labels, client-side cross-host Project
-grouping, development schema migration, and the full repository gate passed. See the
-[D6.1 project-identity acceptance](acceptance-d6.1-project-identity.md).
+Implementation status: revised. Canonical remote fingerprinting, safe origin
+labels, and client-side cross-host Project grouping remain current. Linked
+worktree input is normalized to the primary project root rather than retained
+as a separate workstream cwd; the development schema migration is superseded
+by the explicit host-state reset boundary.
 
-Refine the accepted operator beta without changing provider, Runtime, or
-worktree ownership. Make the existing client-side Project concept useful when
+Refine the accepted operator beta without changing provider or Runtime
+ownership. Make the existing client-side Project concept useful when
 the same repository is registered at different paths or on different hosts.
 
 Scope:
 
-- normalize new registrations to the selected Git worktree root while keeping
-  the primary worktree as a separate stable repository command path;
+- normalize new registrations, including linked-worktree input, to the primary
+  Git project root;
 - derive one credential-free, transport-normalized fetch-remote fingerprint
   and safe `host/path` display label through bounded local Git inspection
   without network access;
@@ -470,15 +475,14 @@ Scope:
   repository name through a versioned host snapshot;
 - reuse a client Project ID when exact fingerprints match, while keeping
   missing or ambiguous identities separate;
-- migrate current development schemas without importing the Python prototype
-  or weakening matching-build remote checks; and
+- fail closed on retired development schemas without importing the Python
+  prototype or weakening matching-build remote checks; and
 - retain per-host Location and Workstream authority beneath the presentation
   grouping.
 
 Exit gate:
 
-- linked-worktree registration records the selected checkout and primary
-  repository path separately;
+- linked-worktree registration launches at the primary project root;
 - SSH and HTTPS spellings of the same fetch remote group across host locations;
 - forks with different `origin` remotes, ambiguous remotes, local-path remotes,
   and repositories without remotes do not group automatically;

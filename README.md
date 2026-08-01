@@ -13,8 +13,8 @@ forks. D5 through D5.2 close the implemented V1 with runtime and operation
 recovery, fresh-install/package verification, remote release diagnostics,
 bounded control I/O, presentation correctness, and combined local/remote
 native-Codex acceptance. D6 records the final [source-installed operator-beta
-validation][D6 acceptance], and D6.1 adds accepted linked-worktree identity and
-cross-host Project grouping polish, documented in the [D6.1 project-identity
+validation][D6 acceptance], and D6.1 adds repository identity and cross-host
+Project grouping polish, documented in the [D6.1 project-identity
 acceptance][D6.1 acceptance]. D6.2 makes navigator controls discoverable
 without adding another terminal surface, and D6.3 orders local and remote rows
 by visible activity recency. D6.4 adds quiet host/Project grouping views, and
@@ -23,8 +23,12 @@ navigator-owned observer activation work into a complete terminal-first
 workflow: the Workstreams home, Projects and Hosts management pages,
 archive/restore, recovery, Project registration, and guarded SSH host
 onboarding/offboarding are all available without leaving the navigator. The
-Rust implementation does not preserve compatibility with the earlier Python
-prototype.
+current project-root-only correction removes WSNav-owned Git worktree and
+branch lifecycle: independent and forked sessions both start at the registered
+Project root, while Codex or the user manages any task worktree. This clean
+break uses host schema 8; state from the retired worktree-managed design must
+be explicitly reset and Projects re-registered. The Rust implementation does
+not preserve compatibility with the earlier Python prototype.
 
 The frozen prototype remains available as implementation evidence in
 [agent-switchboard-python-reference][].
@@ -55,7 +59,8 @@ cargo run -- --help
 The approved clean-slate V1 architecture is documented in [V1 design][]. It
 keeps the native Codex workflow canonical, uses dedicated tmux runtimes and SSH
 for attachment, and limits Workstream Navigator to hosts, project locations,
-workstreams, status, and conservative worktree operations.
+workstreams, status, and provider-native lifecycle actions while leaving Git
+worktree management to Codex or the user.
 
 The approved implementation sequence through D7 and its checkpoint acceptance
 gates are tracked in the [V1 roadmap][].
@@ -109,8 +114,8 @@ Profile updates deliberately refuse to run while a managed Runtime is live.
 
 The first `wsnav` on a host activates and reviews its observer; it does not
 infer or register the current directory. After native approval, use the
-Projects page (`,`) and `a` to add the Git checkout you want WSNav to manage.
-The navigator asks for the host and checkout path without sending management
+Projects page (`,`) and `a` to add the Git project you want WSNav to use.
+The navigator asks for the host and project path without sending management
 text to a provider pane:
 
 ```console
@@ -122,11 +127,12 @@ wsnav
 diagnosis; it is not required for ordinary setup.
 
 An empty navigator opens the same add flow rather than guessing a project from
-the process working directory. Registration accepts a main
-checkout, an externally created linked worktree, or a directory below either.
-WSNav normalizes the selected checkout root separately from the repository's
-primary worktree, so the selected Workstream keeps its own filesystem while
-later managed Workstreams remain repository siblings.
+the process working directory. Registration accepts a main checkout, an
+externally created linked worktree, or a directory below either and normalizes
+it to the repository's primary root. Every Workstream for that ProjectLocation
+starts at that root; WSNav does not create or manage worktrees, branches,
+commits, or file copies. Use Codex or ordinary Git tooling inside the native
+session when a task needs a worktree.
 
 When a registered checkout has one unambiguous network fetch remote, the
 Projects page also shows its credential-free normalized label, such as
@@ -144,10 +150,10 @@ changes organization only, never the underlying Workstream or native session.
 ## Workstreams
 
 Select a registered Workstream in the navigator and press `n` to start a fresh
-managed Workstream from that project's recorded base, or press `f` to fork the
-selected live Codex Workstream at its last completed turn. The source is not
-interrupted; its current turn may continue while the destination opens in an
-independent worktree. The direct equivalents are:
+Workstream at that Project's root, or press `f` to fork the selected live Codex
+Workstream at its last completed turn. The source is not interrupted; its
+current turn may continue while the destination opens at that same project
+root. The direct equivalents are:
 
 ```console
 wsnav new-workstream <source-workstream-id>
@@ -162,7 +168,7 @@ corroborated native `resume`; it never replaces it with a blank thread.
 
 The remote equivalents are `wsnav host new` and `wsnav host fork`, each with
 the selected source revision. The normal navigator supplies that revision and
-the opaque request key automatically. Fork is unavailable until a managed
+the opaque request key automatically. Fork is unavailable until the selected
 source has an exact settled native turn; use `n` for an unrelated fresh start.
 
 ## SSH hosts
@@ -185,7 +191,7 @@ while managed Runtimes are live or the host is unreachable.
 
 When registered locations on different hosts have the same unambiguous
 canonical fetch remote, WSNav presents them as one logical Project while
-retaining separate host-owned Workstreams and checkouts. SSH and HTTPS
+retaining separate host-owned Workstreams and project roots. SSH and HTTPS
 spellings of the same remote match. Repositories with missing, local-path, or
 ambiguous remotes remain separate; WSNav never transmits the raw remote URL or
 credentials.

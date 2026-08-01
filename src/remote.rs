@@ -217,7 +217,7 @@ fn apply(root: &StateRoot, registry: &mut HostRegistry, action: HostAction) -> R
             registry,
             source_workstream_id,
             expected_revision,
-            request_key,
+            &request_key,
         ),
         HostAction::ForkWorkstream {
             source_workstream_id,
@@ -242,13 +242,10 @@ fn applied(revision: i64) -> ResponseEnvelope {
 
 fn apply_register_checkout(registry: &mut HostRegistry, checkout_path: &str) -> ResponseEnvelope {
     let Ok(repository) = crate::repository::inspect(Path::new(checkout_path)) else {
-        return rejected("checkout is unavailable");
+        return rejected("project is unavailable");
     };
     match registry.register_external_workstream_with_metadata(
-        repository.checkout_path,
-        &repository.repository_path,
-        repository.repository_identity,
-        repository.default_base_ref,
+        &repository.project_root,
         &repository.display_name,
         repository.remote_identity_fingerprint.as_deref(),
         repository.remote_identity_display.as_deref(),
@@ -260,7 +257,7 @@ fn apply_register_checkout(registry: &mut HostRegistry, checkout_path: &str) -> 
                 revision: Revision::INITIAL.value(),
             },
         },
-        Err(_) => rejected("checkout registration is unavailable"),
+        Err(_) => rejected("project registration is unavailable"),
     }
 }
 
@@ -269,7 +266,7 @@ fn apply_new_workstream(
     registry: &mut HostRegistry,
     source_workstream_id: WorkstreamId,
     expected_revision: i64,
-    request_key: String,
+    request_key: &str,
 ) -> ResponseEnvelope {
     apply_created_workstream(
         &crate::actions::start_independent_workstream(
@@ -331,7 +328,7 @@ fn apply_created_workstream(
         Err(crate::actions::ActionError::WorkstreamRevisionConflict) => {
             rejected("revision conflict; refresh this host")
         }
-        Err(crate::actions::ActionError::ManagedWorkstreamRecoveryRequired) => {
+        Err(crate::actions::ActionError::ForkRecoveryRequired) => {
             rejected("workstream outcome needs recovery")
         }
         Err(crate::actions::ActionError::ForkSourceUnavailable) => {
@@ -859,26 +856,32 @@ mod tests {
         let root = StateRoot::create(temporary.path().join("state")).unwrap();
         let operation_id = {
             let mut registry = HostRegistry::open(&root).unwrap();
-            let source = registry
-                .register_external_workstream(
-                    PathBuf::from("/private/repository"),
-                    "common-dir".to_owned(),
-                    "deadbeef".to_owned(),
-                )
-                .unwrap();
-            let prepared = registry
-                .prepare_managed_workstream(
+            let (prepared, _) = registry
+                .create_or_get_operation(
                     "private-request-key".to_owned(),
-                    crate::domain::OperationKind::Start,
-                    source.workstream_id,
-                    Revision::INITIAL,
-                    "a".repeat(40),
+                    crate::domain::OperationKind::Fork,
+                    "{}".to_owned(),
                 )
                 .unwrap();
             registry
-                .mark_managed_workstream_recovery(&prepared.plan)
+                .transition_operation(
+                    prepared.id,
+                    prepared.revision,
+                    crate::domain::OperationPhase::ExternalEffectStarted,
+                    None,
+                    None,
+                )
                 .unwrap();
-            prepared.plan.operation.id
+            registry
+                .transition_operation(
+                    prepared.id,
+                    prepared.revision.next(),
+                    crate::domain::OperationPhase::RecoveryRequired,
+                    None,
+                    None,
+                )
+                .unwrap();
+            prepared.id
         };
         let request = RequestEnvelope {
             version: CURRENT_PROTOCOL_VERSION,
@@ -959,9 +962,6 @@ mod tests {
             project_display_name: "dms-power-status".to_owned(),
             remote_identity_fingerprint: Some(format!("git-remote-v1:{}", "a".repeat(64))),
             remote_identity_display: Some("github.com/owner/dms-power-status".to_owned()),
-            checkout_path: PathBuf::from(
-                "/private/state/worktrees/location/00000000-0000-0000-0000-000000000001",
-            ),
             lifecycle: WorkstreamLifecycle::Open,
             archived_at_millis: Some(1_234),
             last_activity_sequence: 1,

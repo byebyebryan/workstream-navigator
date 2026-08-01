@@ -1,4 +1,8 @@
-use std::{fs, path::PathBuf, process::Command};
+use std::{
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use wsnav::{
     domain::WorkstreamId,
@@ -160,11 +164,7 @@ fn local_subprocess_assembles_multiple_bounded_snapshot_pages() {
         let mut registry = HostRegistry::open(&root).unwrap();
         for index in 0..33 {
             registry
-                .register_external_workstream(
-                    PathBuf::from(format!("/disposable/repository-{index:02}")),
-                    format!("common-dir-{index:02}"),
-                    "deadbeef".to_owned(),
-                )
+                .register_project_root(Path::new(&format!("/disposable/repository-{index:02}")))
                 .unwrap();
         }
     }

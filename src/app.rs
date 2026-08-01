@@ -86,9 +86,9 @@ enum Commands {
     UpdateObserver,
     /// Remove only the exact unchanged owned observer profile after all runtimes stop.
     RemoveObserver,
-    /// Register one existing Git checkout as the initial external workstream.
+    /// Register one existing Git project as the initial Workstream location.
     Register { checkout: PathBuf },
-    /// Create and start an independent managed Workstream from one registered project location.
+    /// Create and start an independent Workstream from one registered project location.
     NewWorkstream { source_workstream_id: String },
     /// Fork one live Workstream at its last completed native Codex turn.
     ForkWorkstream { source_workstream_id: String },
@@ -98,7 +98,7 @@ enum Commands {
     Recover { workstream_id: String },
     /// Attach this terminal directly to a live native Codex runtime.
     Attach { workstream_id: String },
-    /// Park a runtime without deleting its checkout or Codex session history.
+    /// Park a runtime without deleting project files or Codex session history.
     Park { workstream_id: String },
     /// Hide a Workstream from the ordinary navigator without deleting retained state.
     Archive {
@@ -222,7 +222,7 @@ enum HostCommands {
     Operations { alias: String },
     /// Verify a remote executable's stateless release probe and registered host identity.
     Doctor { alias: String },
-    /// Register one existing Git checkout on a verified SSH host.
+    /// Register one existing Git project on a verified SSH host.
     RegisterCheckout { alias: String, checkout: String },
     /// Install or reconcile a remote exact observer profile before native review.
     PrepareObserver { alias: String },
@@ -1126,10 +1126,7 @@ fn provider_wait() -> Result<(), AppError> {
 fn register(registry: &mut HostRegistry, checkout: &Path) -> Result<(), AppError> {
     let repository = crate::repository::inspect(checkout)?;
     let registered = registry.register_external_workstream_with_metadata(
-        repository.checkout_path,
-        &repository.repository_path,
-        repository.repository_identity,
-        repository.default_base_ref,
+        &repository.project_root,
         &repository.display_name,
         repository.remote_identity_fingerprint.as_deref(),
         repository.remote_identity_display.as_deref(),
@@ -1143,12 +1140,13 @@ fn new_workstream(
     registry: &mut HostRegistry,
     source_workstream_id: WorkstreamId,
 ) -> Result<(), AppError> {
+    let request_key = uuid::Uuid::new_v4().to_string();
     let workstream_id = actions::start_independent_workstream(
         root,
         registry,
         source_workstream_id,
         None,
-        uuid::Uuid::new_v4().to_string(),
+        &request_key,
     )?;
     println!("started independent workstream {workstream_id}");
     Ok(())

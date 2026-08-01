@@ -3355,7 +3355,13 @@ fn workstream_item(
     let thread_style = Style::default().fg(Color::White);
     let (context_prefix, thread_prefix) = tree_prefix(tree_branch);
     ListItem::new(vec![
-        workstream_context_line(row, context, context_prefix, project_colors),
+        workstream_context_line(
+            row,
+            context,
+            context_prefix,
+            project_colors,
+            available_width,
+        ),
         Line::from(thread_line(
             row,
             indicator,
@@ -3380,6 +3386,7 @@ fn workstream_context_line(
     context: WorkstreamRowContext,
     prefix: &str,
     project_colors: &BTreeMap<ProjectId, Color>,
+    available_width: u16,
 ) -> Line<'static> {
     let host = || {
         Span::styled(
@@ -3398,12 +3405,14 @@ fn workstream_context_line(
         )
     };
     match context {
-        WorkstreamRowContext::Recent => Line::from(vec![
-            Span::raw(prefix.to_owned()),
-            project(),
-            Span::styled(" · ", Style::default().fg(Color::Gray)),
-            host(),
-        ]),
+        WorkstreamRowContext::Recent => recent_context_line(
+            prefix,
+            &row.project_label,
+            row.project_id,
+            row.host.alias(),
+            project_colors,
+            available_width,
+        ),
         WorkstreamRowContext::Host => Line::from(vec![
             Span::raw(prefix.to_owned()),
             project_marker(row.project_id, project_colors),
@@ -3412,6 +3421,54 @@ fn workstream_context_line(
         ]),
         WorkstreamRowContext::Project => Line::from(vec![Span::raw(prefix.to_owned()), host()]),
     }
+}
+
+/// A Recent row is intentionally project-first. The host is useful location
+/// evidence, but secondary to finding the right workstream, so it occupies a
+/// bounded right-aligned column rather than competing with the Project name.
+fn recent_context_line(
+    prefix: &str,
+    project_label: &str,
+    project_id: ProjectId,
+    host_alias: &str,
+    project_colors: &BTreeMap<ProjectId, Color>,
+    available_width: u16,
+) -> Line<'static> {
+    const MIN_PROJECT_WIDTH: usize = 4;
+    const MAX_HOST_WIDTH: usize = 12;
+
+    let prefix_width = Line::raw(prefix).width();
+    let content_width = usize::from(available_width).saturating_sub(prefix_width);
+    let host_budget = content_width
+        .saturating_sub(MIN_PROJECT_WIDTH.saturating_add(1))
+        .min(MAX_HOST_WIDTH);
+    let host = truncate_display_width(host_alias, host_budget);
+    let host_width = Line::raw(&host).width();
+    let project_budget = content_width
+        .saturating_sub(host_width.saturating_add(1))
+        .max(MIN_PROJECT_WIDTH);
+    let project = truncate_display_width(project_label, project_budget);
+    let used_width = prefix_width + Line::raw(&project).width() + host_width;
+    let padding = usize::from(available_width)
+        .saturating_sub(used_width)
+        .max(1);
+
+    Line::from(vec![
+        Span::raw(prefix.to_owned()),
+        Span::styled(
+            project,
+            Style::default()
+                .fg(project_accent(project_id, project_colors))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" ".repeat(padding)),
+        Span::styled(
+            host,
+            Style::default()
+                .fg(host_color(host_alias))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
 }
 
 fn project_marker(
@@ -3549,6 +3606,31 @@ fn truncate_display(value: &str, maximum: usize) -> String {
         result.pop();
         result.push('…');
     }
+    result
+}
+
+/// Truncates to terminal-cell width while retaining a visible ellipsis. It is
+/// used only where a label is aligned against the far edge of the navigator.
+fn truncate_display_width(value: &str, maximum: usize) -> String {
+    if maximum == 0 {
+        return String::new();
+    }
+    if Line::raw(value).width() <= maximum {
+        return value.to_owned();
+    }
+    if maximum == 1 {
+        return "…".to_owned();
+    }
+
+    let mut result = String::new();
+    for character in value.chars() {
+        let character_width = Line::raw(character.to_string()).width();
+        if Line::raw(&result).width() + character_width > maximum.saturating_sub(1) {
+            break;
+        }
+        result.push(character);
+    }
+    result.push('…');
     result
 }
 
@@ -5509,7 +5591,7 @@ mod tests {
     }
 
     #[test]
-    fn recent_context_uses_one_neutral_separator_between_color_axes() {
+    fn recent_context_right_aligns_the_secondary_host_label() {
         let snapshot = LocalNavigatorSnapshot {
             workstreams: vec![NavigatorWorkstream {
                 project_label: "project".to_owned(),
@@ -5523,24 +5605,62 @@ mod tests {
         let row = &snapshot.workstreams[0];
         let project_colors = visible_project_colors(&snapshot);
 
-        let line =
-            workstream_context_line(row, WorkstreamRowContext::Recent, "   ", &project_colors);
+        let line = workstream_context_line(
+            row,
+            WorkstreamRowContext::Recent,
+            "   ",
+            &project_colors,
+            30,
+        );
 
-        assert_eq!(
-            line.spans
-                .iter()
-                .filter(|span| span.content.as_ref() == " · ")
-                .count(),
-            1
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert_eq!(line.width(), 30);
+        assert!(rendered.starts_with("   project"));
+        assert!(rendered.ends_with("local"));
+        assert_eq!(line.spans[3].style.fg, Some(Color::LightBlue));
+        assert!(!rendered.contains(" · "));
+        assert!(!rendered.contains('•'));
+    }
+
+    #[test]
+    fn recent_context_preserves_a_project_prefix_when_a_host_is_long() {
+        let snapshot = LocalNavigatorSnapshot {
+            workstreams: vec![NavigatorWorkstream {
+                host: NavigatorHost::Remote {
+                    alias: "remote-terminal".to_owned(),
+                    reachability: RemoteHostReachability::Reachable,
+                },
+                project_label: "project with a long name".to_owned(),
+                ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
+            }],
+            hosts: Vec::new(),
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
+        };
+        let row = &snapshot.workstreams[0];
+        let project_colors = visible_project_colors(&snapshot);
+
+        let line = workstream_context_line(
+            row,
+            WorkstreamRowContext::Recent,
+            "   ",
+            &project_colors,
+            16,
         );
-        assert_eq!(
-            line.spans
-                .iter()
-                .map(|span| span.content.as_ref())
-                .collect::<String>(),
-            "   project · local"
-        );
-        assert!(!line.spans.iter().any(|span| span.content.as_ref() == "•"));
+        let rendered = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(line.width(), 16);
+        assert!(rendered.starts_with("   pro…"));
+        assert!(rendered.ends_with("remote-…"));
     }
 
     #[test]

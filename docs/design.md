@@ -2,8 +2,8 @@
 
 Date: 2026-08-01
 
-Status: implemented operator-beta contract through D6.9 with approved D7
-workflow-management direction; no compatibility contract
+Status: implemented operator-beta contract through D7; no compatibility
+contract
 
 ## Product thesis
 

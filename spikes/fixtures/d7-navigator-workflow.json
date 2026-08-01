@@ -1,0 +1,37 @@
+{
+  "study": "d7-navigator-workflow",
+  "provider": {
+    "id": "codex-native-tui",
+    "package_version": "0.1.0",
+    "control_abi": 1,
+    "protocol_version": 13,
+    "host_schema_version": 6
+  },
+  "status": "pass",
+  "assertions": {
+    "bare_local_launch_opened_native_observer_review": true,
+    "remote_host_activation_opened_native_observer_review": true,
+    "observer_ready_only_after_native_approval": true,
+    "live_runtime_guard_is_visible_before_observer_removal": true,
+    "acknowledgement_uses_current_attention_revision": true,
+    "client_only_host_forget_and_reregister_preserves_remote_state": true,
+    "local_and_ssh_archive_restore_preserve_retained_workstreams": true,
+    "disposable_ssh_project_registration_returns_no_repository_path": true,
+    "disposable_fork_and_exact_native_recovery_gates_pass": true,
+    "full_repository_gate_passes": true
+  },
+  "isolation": {
+    "ordinary_tmux_server_used": false,
+    "temporary_remote_and_client_artifacts_removed": true,
+    "provider_pane_received_management_output": false,
+    "remote_observer_review_created_no_second_persistence_layer": true,
+    "existing_test_workstreams_retained_and_stopped": true
+  },
+  "privacy_audit": {
+    "provider_or_workstream_identifiers_committed": false,
+    "prompt_response_or_title_content_committed": false,
+    "terminal_data_or_repository_paths_committed": false,
+    "process_identifiers_or_credentials_committed": false,
+    "raw_hook_or_app_server_payloads_committed": false
+  }
+}

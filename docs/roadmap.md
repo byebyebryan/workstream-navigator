@@ -2,9 +2,9 @@
 
 Date: 2026-08-01
 
-Status: D0 through D6.9 complete. D7.1 through D7.4 are implemented and
-automatically validated. D7.0 observer activation and D7.5 integrated native
-acceptance remain pending; D7 is not yet complete.
+Status: D0 through D7 complete. D7 combines bounded native local/SSH observer
+review with automated navigator, lifecycle, recovery, and host-control
+acceptance; it does not widen V1 into a task manager or provider replacement.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -714,9 +714,9 @@ Exit gate:
 
 ## D7 - Navigator workflow and lifecycle management
 
-Implementation status: D7.1 through D7.4 are implemented. Observer activation
-and the complete two-pane local/remote lifecycle still require bounded native
-acceptance before this checkpoint can close.
+Implementation status: complete. D7.0 through D7.5 passed the bounded native
+local/SSH observer reviews and the integrated disposable/reversible navigator
+acceptance. See the [D7 navigator workflow acceptance](acceptance-d7-navigator-workflow.md).
 D7.1 supplies the Workstreams, Projects, and Hosts navigation foundation;
 D7.2 now supplies revision-guarded archive/restore through local and SSH host
 contracts, Active/Archived navigator scopes, bounded Workstream status,

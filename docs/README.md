@@ -6,10 +6,10 @@
 - [V1 roadmap](roadmap.md) owns delivery order, checkpoint status, and exit
   gates. D0 through D7.6 are complete; the source remains an operator beta,
   not a tagged distribution.
-- The top-level [README](../README.md) is the current operator and
-  source-install guide. `wsnav --help` and `wsnav host doctor <alias>` remain
-  the authoritative runtime command and compatibility checks for an installed
-  build.
+- The top-level [README](../README.md) is the product landing page and
+  source-install quick start. `wsnav --help` and `wsnav host doctor <alias>`
+  remain the authoritative runtime command and compatibility checks for an
+  installed build.
 
 ## Evidence and research
 

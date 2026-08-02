@@ -28,8 +28,10 @@ branch lifecycle: independent and forked sessions both start at the registered
 Project root, while Codex or the user manages any task worktree. That clean
 break used host schema 8; state from the retired worktree-managed design must
 be explicitly reset and Projects re-registered. The current schema 9 adds only
-the host-private Project-browser root and migrates cleanly from schema 8. The
-Rust implementation does not preserve compatibility with the earlier Python
+the host-private Project-browser root and migrates cleanly from schema 8. D7.6
+finishes ordinary Project registration with a host-private directory browser,
+so normal setup no longer requires a typed checkout path. The Rust
+implementation does not preserve compatibility with the earlier Python
 prototype.
 
 The frozen prototype remains available as implementation evidence in
@@ -64,8 +66,10 @@ for attachment, and limits Workstream Navigator to hosts, project locations,
 workstreams, status, and provider-native lifecycle actions while leaving Git
 worktree management to Codex or the user.
 
-The approved implementation sequence through D7 and its checkpoint acceptance
-gates are tracked in the [V1 roadmap][].
+The approved implementation sequence through D7.6 and its checkpoint
+acceptance gates are tracked in the [V1 roadmap][]. See the [documentation
+map][] for the distinction between the current product contract and dated
+acceptance evidence.
 
 The accepted local Codex CLI slice and its sanitized native acceptance evidence
 are documented in [D1 local native-Codex acceptance][D1 acceptance]. The run
@@ -228,7 +232,7 @@ probe leaves cached remote rows visible but disables their actions until the
 operator resolves the installation. The Hosts page distinguishes a matching
 build from a bounded problem such as SSH/`wsnav` unavailable, timeout, malformed
 probe, or explicit ABI/protocol/schema mismatch (for example,
-`protocol 14 ≠ 15`); it does not expose raw SSH output or paths.
+`protocol 15 ≠ 16`); it does not expose raw SSH output or paths.
 
 For a nonstandard SSH destination or executable path, keep the same short
 command and supply only the difference:
@@ -236,13 +240,6 @@ command and supply only the difference:
 ```console
 wsnav register-remote build --destination agent@build.example --executable /opt/wsnav/bin/wsnav
 ```
-
-The navigator polls the registered host with bounded one-shot control calls
-and keeps its last accepted state visible while the host is unavailable. Enter
-on a remote row starts or resumes it when necessary, then opens a direct
-`ssh -tt` provider attachment in the provider pane. `wsnav host reset snap`
-is required after an intentional host-registry replacement or capability
-change; Workstream Navigator never silently adopts it.
 
 ## Decision studies
 
@@ -256,6 +253,7 @@ its accepted provider contract. See [Spike 0001][], [Spike 0002][], [Spike
 [agent-switchboard-python-reference]: https://github.com/byebyebryan/agent-switchboard-python-reference
 [V1 design]: docs/design.md
 [V1 roadmap]: docs/roadmap.md
+[documentation map]: docs/README.md
 [D1 acceptance]: docs/acceptance-d1-local-codex.md
 [D2 acceptance]: docs/acceptance-d2-local-navigator.md
 [D3 acceptance]: docs/acceptance-d3-control-plane.md

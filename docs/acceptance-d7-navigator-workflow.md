@@ -6,6 +6,11 @@ Status: pass — native observer review occurred once per host; remaining
 navigator and host lifecycle evidence ran through isolated or reversible
 automation.
 
+Historical evidence note: this file records the D7.5 candidate. The current
+contract, including D7.6's host-private Project browser and later navigator
+presentation refinements, is in the [design](design.md),
+[roadmap](roadmap.md), and [operator guide](../README.md).
+
 ## Native evidence
 
 - A bare local `wsnav` launch installed the exact observer profile only after

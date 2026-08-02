@@ -2,8 +2,13 @@
 
 Date: 2026-08-01
 
-Status: implemented operator-beta contract through D7; no compatibility
+Status: implemented operator-beta contract through D7.6; no compatibility
 contract
+
+The design is the current product and architecture contract. Dated acceptance,
+spike, and study records preserve the evidence and limitations of the candidate
+they tested; their historical version numbers, test counts, and presentation
+details do not supersede this contract.
 
 ## Product thesis
 

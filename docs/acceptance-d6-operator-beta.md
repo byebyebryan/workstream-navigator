@@ -5,6 +5,12 @@ Date: 2026-07-31
 Status: pass — the exact candidate completed the repository, release-parity,
 local-presentation, and SSH-native smoke gates without widening V1.
 
+Historical evidence note: this file records the D6 candidate. Its candidate
+hash, protocol/schema values, and test counts are not the current runtime
+fingerprint; use the [design](design.md), [roadmap](roadmap.md), and
+`wsnav host doctor <alias>` for the current contract and installed-build
+compatibility.
+
 ## Evidence
 
 - The README, design, and roadmap describe the implemented D0-D6 product in

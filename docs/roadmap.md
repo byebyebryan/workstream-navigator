@@ -12,9 +12,10 @@ an automatic migration from the retired schema.
 
 Date: 2026-08-01
 
-Status: D0 through D7.5 are complete. D7.6 is an active source-level
-registration-flow refinement: it adds host-private Project browsing without
-widening V1 into a task manager or provider replacement.
+Status: D0 through D7.6 are complete. V1 remains a source-installed
+operator beta; no next delivery slice is approved. D7.6 adds host-private
+Project browsing without widening V1 into a task manager or provider
+replacement.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -55,9 +56,11 @@ This document owns sequencing, exit gates, and progress.
 | D6.4 | Navigator grouping and visual-hierarchy polish | Complete |
 | D6.5 | Project-marker collision correction | Complete |
 | D6.6 | Project-label accent refinement | Complete |
+| D6.7 | Compact context hierarchy refinement | Complete |
+| D6.8 | Activity-age hierarchy refinement | Complete |
 | D6.9 | Codex observer authority repair | Complete |
-| D7 | Navigator workflow and lifecycle management | Complete through D7.5 |
-| D7.6 | Host-private Project directory browser | In progress |
+| D7 | Navigator workflow and lifecycle management | Complete through D7.6 |
+| D7.6 | Host-private Project directory browser | Complete |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](spikes/0009-codex-hook-environment-boundary.md)
@@ -501,7 +504,10 @@ Exit gate:
 Implementation status: complete. The navigator keeps a compact footer and
 renders its complete shortcut reference only within its own Ratatui pane. The
 full automated repository gate passed without changing any Runtime, provider,
-or presentation-tmux ownership boundary.
+or presentation-tmux ownership boundary. Later D7 presentation refinement
+keeps that reference at the bottom of the pane, keyboard-only, and omits
+self-close and mouse instructions; the original centered-overlay wording below
+is retained as the historical D6.2 delivery shape.
 
 Polish the existing navigator without adding a workflow, new durable state, or
 another terminal surface. The full control reference must be easy to discover
@@ -557,8 +563,10 @@ Exit gate:
 
 Implementation status: complete. The navigator now has local-only Recent,
 host, and Project views with quiet dual-axis context cues, group-header-safe
-selection, and deterministic terminal coverage. No durable or provider-facing
-behavior changed.
+selection, and deterministic terminal coverage. Later navigation refinement
+cycles the current `Recent`, `By project`, `By host`, and `Archived` views with
+`Left`/`Right`; the original `v` delivery wording below is historical. No
+durable or provider-facing behavior changed.
 
 Make multi-host and multi-Project navigation easier to scan without adding a
 dashboard, a new durable preference, or a second control surface. The native
@@ -727,11 +735,12 @@ local/SSH observer reviews and the integrated disposable/reversible navigator
 acceptance. See the [D7 navigator workflow acceptance](acceptance-d7-navigator-workflow.md).
 D7.1 supplies the Workstreams, Projects, and Hosts navigation foundation;
 D7.2 now supplies revision-guarded archive/restore through local and SSH host
-contracts, Active/Archived navigator scopes, bounded Workstream status,
+contracts, the Archived navigator view, bounded Workstream status,
 canonical rename, and exact local/remote unresolved-operation reconciliation.
 D7.3 now exposes bounded host-owned ProjectLocations with active/archived
-counts, supports starting at a selected retained location, and registers
-existing local or SSH checkouts through navigator-local forms. D7.4 now adds
+counts and registers existing local or SSH checkouts through navigator-local
+forms. New Workstreams remain a Workstreams-home action, keeping Projects
+strictly for Project management. D7.4 now adds
 an active-Project tree per host plus streamlined host onboarding: add verifies,
 registers, prepares the observer, and opens native review; removal explicitly
 chooses client-only disconnect or guarded observer offboarding.
@@ -752,12 +761,12 @@ Scope:
   a `?`-toggled single-column expanded reference at the bottom of the pane;
 - add reversible Workstream archive/restore as a visibility concern separate
   from runtime lifecycle, preserving provider binding, attention, lineage,
-  checkout, branch, and native history;
+  Project location, and native history;
 - expose bounded Workstream status, canonical rename, attention acknowledgement,
   and exact unresolved-operation recovery through the Workstreams page;
 - add Project inventory and local/remote ProjectLocation registration without
   cloning, syncing, deleting, or exposing remote repository paths, including
-  the empty-navigator flow and starting at a selected ProjectLocation;
+  the empty-navigator flow; Projects remain management-only surfaces;
 - add Host registration that verifies, prepares, and opens native observer
   review as one flow; render active Projects per host; and offer explicit
   client-only disconnect or guarded exact-observer offboarding while protecting
@@ -780,7 +789,7 @@ Delivery slices:
    and direct page-local keys without changing provider state. Refine the
    narrow Workstreams pane with two-line
    Recent rows, explicit two-line tree children in grouped views, the `Recent`
-   / `By project` / `By host` cycle, compact bottom key hints, and a
+   / `By project` / `By host` / `Archived` cycle, compact bottom key hints, and a
    single-column expanded reference while retaining the accepted Workstreams
    bindings. Each later stateful action owns its bounded text entry,
    confirmation, and non-blocking progress path; D7.1 deliberately does not
@@ -794,11 +803,12 @@ Delivery slices:
    candidates use a bounded source-scoped chooser. Archive/restore, scope
    selection, bounded status, canonical rename, and recovery are complete.
 4. **D7.3 - Project management.** List logical Projects and their host-owned
-   locations, show active/archived counts, register the first or an additional
-   existing checkout on a selected local or SSH host, and start a Workstream at
-   a selected location without requiring an existing active row. Location
-   inventory, counts, starting from a retained archived source, and
-   navigator-local local/SSH checkout registration are complete.
+   locations, show active/archived counts, and register the first or an
+   additional existing checkout on a selected local or SSH host. Projects stay
+   management-only; `n` on the Workstreams home creates an independent
+   Workstream from a selected active Workstream, while an empty navigator uses
+   the registration flow. Location inventory, counts, and navigator-local
+   local/SSH checkout registration are complete.
 5. **D7.4 - Host management.** Add SSH hosts through a single
    verify/prepare/native-review flow, show their active Project trees, and
    choose either client-only disconnect or guarded observer offboarding through
@@ -816,7 +826,7 @@ Delivery slices:
    label, relative cursor, and direct-child names; host-side registration
    reconstructs the chosen directory locally. The direct `register` and
    `host register-checkout` commands remain optional scripting and break-glass
-   paths.
+   paths. This slice is complete.
 
 Exit gate:
 

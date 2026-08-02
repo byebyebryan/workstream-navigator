@@ -1183,13 +1183,9 @@ impl NavigatorView {
     }
 
     fn visible_workstream_indexes(&self) -> Vec<usize> {
-        self.snapshot
-            .workstreams
-            .iter()
-            .enumerate()
-            .filter_map(|(index, workstream)| {
-                self.workstream_scope.includes(workstream).then_some(index)
-            })
+        self.list_entries()
+            .into_iter()
+            .filter_map(|entry| entry.workstream_index())
             .collect()
     }
 
@@ -5964,6 +5960,74 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn grouped_navigation_follows_rendered_row_order() {
+        let shared_project = ProjectId::new();
+        let other_project = ProjectId::new();
+        let newest_snap = WorkstreamId::new();
+        let middle_local = WorkstreamId::new();
+        let oldest_snap = WorkstreamId::new();
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            // Snapshot order is activity order: snap, local, snap. Both
+            // grouped views render snap's/shared project's two rows together.
+            workstreams: vec![
+                NavigatorWorkstream {
+                    host: NavigatorHost::Remote {
+                        alias: "snap".to_owned(),
+                        reachability: RemoteHostReachability::Reachable,
+                    },
+                    project_id: shared_project,
+                    project_label: "shared".to_owned(),
+                    ..row(newest_snap, NavigatorRuntimeStatus::Working)
+                },
+                NavigatorWorkstream {
+                    project_id: other_project,
+                    project_label: "other".to_owned(),
+                    ..row(middle_local, NavigatorRuntimeStatus::Idle)
+                },
+                NavigatorWorkstream {
+                    host: NavigatorHost::Remote {
+                        alias: "snap".to_owned(),
+                        reachability: RemoteHostReachability::Reachable,
+                    },
+                    project_id: shared_project,
+                    project_label: "shared".to_owned(),
+                    ..row(oldest_snap, NavigatorRuntimeStatus::Parked)
+                },
+            ],
+            hosts: Vec::new(),
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
+        });
+
+        for mode in [NavigatorViewMode::Host, NavigatorViewMode::Project] {
+            view.view_mode = mode;
+            view.select_row(0);
+            view.select_next();
+            assert_eq!(
+                view.selected().map(|row| row.workstream_id),
+                Some(oldest_snap)
+            );
+            view.select_next();
+            assert_eq!(
+                view.selected().map(|row| row.workstream_id),
+                Some(middle_local)
+            );
+            view.select_next();
+            assert_eq!(
+                view.selected().map(|row| row.workstream_id),
+                Some(newest_snap)
+            );
+
+            view.select_previous();
+            assert_eq!(
+                view.selected().map(|row| row.workstream_id),
+                Some(middle_local)
+            );
+        }
     }
 
     #[test]

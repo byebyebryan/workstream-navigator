@@ -589,6 +589,7 @@ fn operations(registry: &HostRegistry) -> Result<OperationsResponse, StateError>
         .map(|operation| OperationSnapshot {
             operation_id: operation.operation_id,
             kind: operation.kind,
+            source_workstream_id: operation.source_workstream_id,
             phase: operation.phase,
             revision: operation.revision.value(),
         })

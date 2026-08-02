@@ -41,7 +41,7 @@ use crate::{
     },
     presentation::{AttachmentPhase, AttachmentStatus, Presentation, PresentationError},
     process::{BoundedProcessError, output_bounded},
-    protocol::{ObserverStatus, ProjectDirectoriesResponse, ProjectDirectoryEntry},
+    protocol::{HostAction, ObserverStatus, ProjectDirectoriesResponse, ProjectDirectoryEntry},
     provider::codex::names::{NameContext, resolve_name},
     runtime::{
         LinuxProcessProbe, PrivateRuntime, RuntimeError, RuntimePaths, RuntimeProbe, SystemTmux,
@@ -234,13 +234,15 @@ pub struct LocalNavigatorSnapshot {
 }
 
 /// Opaque recovery metadata. Request keys, paths, provider identifiers, and
-/// effect evidence remain on the host; the operation ID is held only long
-/// enough for the navigator to issue exact recovery.
+/// effect evidence remain on the host. A Fork retains only its already-visible
+/// source Workstream ID, allowing a repeated Fork to reach its exact recovery
+/// path without exposing raw operation details.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NavigatorOperation {
     pub host: NavigatorHost,
     pub operation_id: OperationId,
     pub kind: OperationKind,
+    pub source_workstream_id: Option<WorkstreamId>,
     pub phase: OperationPhase,
     pub revision: Revision,
 }
@@ -286,6 +288,7 @@ pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, Naviga
             host: NavigatorHost::Local,
             operation_id: operation.operation_id,
             kind: operation.kind,
+            source_workstream_id: operation.source_workstream_id,
             phase: operation.phase,
             revision: operation.revision,
         })
@@ -686,6 +689,7 @@ impl RemoteMonitor {
                                 },
                                 operation_id: operation.operation_id,
                                 kind: operation.kind,
+                                source_workstream_id: operation.source_workstream_id,
                                 phase: operation.phase,
                                 revision,
                             }
@@ -927,7 +931,10 @@ impl NavigatorPage {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NavigatorDetail {
-    Recovery,
+    ForkRecovery {
+        host_alias: String,
+        source_workstream_id: WorkstreamId,
+    },
     Workstream {
         host_alias: String,
         workstream_id: WorkstreamId,
@@ -970,6 +977,10 @@ impl WorkstreamScope {
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum NavigatorModal {
     ConfirmArchive(NavigatorWorkstream),
+    ConfirmForkRecovery {
+        source: NavigatorWorkstream,
+        operation: NavigatorOperation,
+    },
     SelectHostRemoval {
         alias: String,
         workstream_count: usize,
@@ -1204,11 +1215,8 @@ impl NavigatorView {
     }
 
     fn selected_host_alias(&self) -> Option<&str> {
-        if matches!(self.detail, Some(NavigatorDetail::Recovery)) {
-            self.snapshot
-                .unresolved_operations
-                .get(self.selected_operation)
-                .map(|operation| operation.host.alias())
+        if let Some(NavigatorDetail::ForkRecovery { host_alias, .. }) = &self.detail {
+            Some(host_alias)
         } else if self.page == NavigatorPage::Hosts {
             self.selected_host.as_deref()
         } else {
@@ -1248,14 +1256,61 @@ impl NavigatorView {
         }
     }
 
-    fn open_recovery(&mut self) {
-        if self.snapshot.unresolved_operations.is_empty() {
-            self.set_message("no unresolved Workstream operations");
-        } else {
-            self.selected_operation = self
-                .selected_operation
-                .min(self.snapshot.unresolved_operations.len().saturating_sub(1));
-            self.detail = Some(NavigatorDetail::Recovery);
+    fn fork_recovery_operations(&self) -> Vec<&NavigatorOperation> {
+        let Some(NavigatorDetail::ForkRecovery {
+            host_alias,
+            source_workstream_id,
+        }) = &self.detail
+        else {
+            return Vec::new();
+        };
+        self.snapshot
+            .unresolved_operations
+            .iter()
+            .filter(|operation| {
+                operation.kind == OperationKind::Fork
+                    && operation.host.alias() == host_alias
+                    && operation.source_workstream_id == Some(*source_workstream_id)
+            })
+            .collect()
+    }
+
+    fn selected_fork_recovery_operation(&self) -> Option<&NavigatorOperation> {
+        self.fork_recovery_operations()
+            .get(self.selected_operation)
+            .copied()
+    }
+
+    fn begin_fork_recovery(&mut self, source: &NavigatorWorkstream) -> bool {
+        let operations = self
+            .snapshot
+            .unresolved_operations
+            .iter()
+            .filter(|operation| {
+                operation.kind == OperationKind::Fork
+                    && operation.host.alias() == source.host.alias()
+                    && operation.source_workstream_id == Some(source.workstream_id)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        match operations.as_slice() {
+            [] => false,
+            [operation] => {
+                self.modal = Some(NavigatorModal::ConfirmForkRecovery {
+                    source: source.clone(),
+                    operation: operation.clone(),
+                });
+                true
+            }
+            _ => {
+                self.selected_operation = 0;
+                self.detail = Some(NavigatorDetail::ForkRecovery {
+                    host_alias: source.host.alias().to_owned(),
+                    source_workstream_id: source.workstream_id,
+                });
+                self.set_message("choose the exact unfinished Fork to reconcile");
+                true
+            }
         }
     }
 
@@ -1481,7 +1536,9 @@ impl NavigatorView {
             self.selected_host = hosts.first().map(|host| host.alias.clone());
         }
         match &self.detail {
-            Some(NavigatorDetail::Recovery) if self.snapshot.unresolved_operations.is_empty() => {
+            Some(NavigatorDetail::ForkRecovery { .. })
+                if self.fork_recovery_operations().is_empty() =>
+            {
                 self.detail = None;
             }
             Some(NavigatorDetail::Workstream {
@@ -1498,10 +1555,10 @@ impl NavigatorView {
     }
 
     pub fn select_next(&mut self) {
-        if matches!(self.detail, Some(NavigatorDetail::Recovery)) {
-            if !self.snapshot.unresolved_operations.is_empty() {
-                self.selected_operation =
-                    (self.selected_operation + 1) % self.snapshot.unresolved_operations.len();
+        if matches!(self.detail, Some(NavigatorDetail::ForkRecovery { .. })) {
+            let recovery_count = self.fork_recovery_operations().len();
+            if recovery_count != 0 {
+                self.selected_operation = (self.selected_operation + 1) % recovery_count;
             }
             return;
         }
@@ -1543,12 +1600,13 @@ impl NavigatorView {
     }
 
     pub fn select_previous(&mut self) {
-        if matches!(self.detail, Some(NavigatorDetail::Recovery)) {
-            if !self.snapshot.unresolved_operations.is_empty() {
+        if matches!(self.detail, Some(NavigatorDetail::ForkRecovery { .. })) {
+            let recovery_count = self.fork_recovery_operations().len();
+            if recovery_count != 0 {
                 self.selected_operation = self
                     .selected_operation
                     .checked_sub(1)
-                    .unwrap_or(self.snapshot.unresolved_operations.len() - 1);
+                    .unwrap_or(recovery_count - 1);
             }
             return;
         }
@@ -1981,7 +2039,7 @@ impl NavigatorView {
         let last = help_lines(
             self.page,
             self.detail.is_some(),
-            matches!(self.detail, Some(NavigatorDetail::Recovery)),
+            matches!(self.detail, Some(NavigatorDetail::ForkRecovery { .. })),
             self.workstream_scope,
         )
         .len()
@@ -2039,7 +2097,9 @@ impl NavigatorView {
             Self::render_workstreams_parent(frame, areas[0])
         };
         match self.detail.clone() {
-            Some(NavigatorDetail::Recovery) => self.render_recovery_detail(frame, content_area),
+            Some(NavigatorDetail::ForkRecovery { .. }) => {
+                self.render_fork_recovery_detail(frame, content_area);
+            }
             Some(NavigatorDetail::Workstream {
                 host_alias,
                 workstream_id,
@@ -2227,11 +2287,10 @@ impl NavigatorView {
         );
     }
 
-    fn render_recovery_detail(&self, frame: &mut Frame<'_>, area: Rect) {
+    fn render_fork_recovery_detail(&self, frame: &mut Frame<'_>, area: Rect) {
         let lines = self
-            .snapshot
-            .unresolved_operations
-            .iter()
+            .fork_recovery_operations()
+            .into_iter()
             .enumerate()
             .map(|(index, operation)| {
                 let marker = if index == self.selected_operation {
@@ -2260,7 +2319,7 @@ impl NavigatorView {
             Paragraph::new(lines).block(
                 Block::default()
                     .borders(Borders::ALL)
-                    .title(" Recovery · Enter reconcile · Esc back "),
+                    .title(" Unfinished forks · Enter reconcile · Esc back "),
             ),
             area,
         );
@@ -2459,7 +2518,7 @@ impl NavigatorView {
         }
         let operation_hint = (self.snapshot.unresolved_operation_count > 0).then(|| {
             format!(
-                "! {} operation{} needs recovery",
+                "! {} unfinished Fork{}; press f on its source",
                 self.snapshot.unresolved_operation_count,
                 if self.snapshot.unresolved_operation_count == 1 {
                     ""
@@ -2538,7 +2597,7 @@ impl NavigatorView {
 
     fn compact_bindings(&self) -> Vec<(&'static str, &'static str)> {
         if let Some(detail) = &self.detail {
-            let enter = if matches!(detail, NavigatorDetail::Recovery) {
+            let enter = if matches!(detail, NavigatorDetail::ForkRecovery { .. }) {
                 "reconcile"
             } else {
                 "back"
@@ -2569,7 +2628,6 @@ impl NavigatorView {
                     WorkstreamScope::Archived => bindings.push(("u", "restore")),
                 }
                 bindings.extend([("s", "scope"), ("?", "keys")]);
-                bindings.insert(3, ("o", "recovery"));
                 bindings
             }
             NavigatorPage::Projects => vec![
@@ -2625,7 +2683,7 @@ impl NavigatorView {
             Paragraph::new(help_lines(
                 self.page,
                 self.detail.is_some(),
-                matches!(self.detail, Some(NavigatorDetail::Recovery)),
+                matches!(self.detail, Some(NavigatorDetail::ForkRecovery { .. })),
                 self.workstream_scope,
             ))
             .block(
@@ -2698,6 +2756,7 @@ fn navigator_modal_area(outer: Rect, modal: &NavigatorModal) -> Rect {
             .min(PROJECT_BROWSER_VIEWPORT_ROWS)
             .saturating_add(5),
         NavigatorModal::ConfirmArchive(_)
+        | NavigatorModal::ConfirmForkRecovery { .. }
         | NavigatorModal::SelectHostRemoval { .. }
         | NavigatorModal::ConfirmForgetProject { .. }
         | NavigatorModal::Rename { .. }
@@ -2741,6 +2800,25 @@ fn navigator_modal_content(
                     Span::styled("Esc/n", key),
                     Span::raw(" cancel"),
                 ]),
+            ],
+        ),
+        NavigatorModal::ConfirmForkRecovery { source, .. } => (
+            " Finish earlier Fork ".to_owned(),
+            vec![
+                Line::from(Span::styled(
+                    truncate_display(&source.display_name, 42),
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                Line::raw("An earlier Fork did not finish confirming its destination."),
+                Line::from(vec![
+                    Span::styled("Enter/y", key),
+                    Span::raw(" reconcile it   "),
+                    Span::styled("n", key),
+                    Span::raw(" start another Fork"),
+                ]),
+                Line::from(vec![Span::styled("Esc", key), Span::raw(" cancel")]),
             ],
         ),
         NavigatorModal::SelectHostRemoval {
@@ -3186,10 +3264,6 @@ fn workstream_help_lines(scope: WorkstreamScope, heading: Style, key: Style) -> 
         Line::from(vec![
             Span::styled("s", key),
             Span::raw("          switch active/archived scope"),
-        ]),
-        Line::from(vec![
-            Span::styled("o", key),
-            Span::raw("          recover an unresolved Start or Fork"),
         ]),
     ];
     if scope == WorkstreamScope::Active {
@@ -3987,9 +4061,10 @@ fn handle_navigator_key(
         }
         return false;
     }
-    if matches!(view.detail, Some(NavigatorDetail::Recovery)) && matches!(key.code, KeyCode::Enter)
+    if matches!(view.detail, Some(NavigatorDetail::ForkRecovery { .. }))
+        && matches!(key.code, KeyCode::Enter)
     {
-        recover_selected_operation(root, remote, view);
+        recover_selected_operation(root, presentation, remote, view);
         return false;
     }
     let workstreams = view.page() == NavigatorPage::Workstreams && view.detail.is_none();
@@ -4029,10 +4104,6 @@ fn handle_navigator_key(
         }
         KeyCode::Char('s') if workstreams => {
             view.cycle_workstream_scope();
-            false
-        }
-        KeyCode::Char('o') if workstreams => {
-            view.open_recovery();
             false
         }
         KeyCode::Down | KeyCode::Char('j') => {
@@ -4119,6 +4190,22 @@ fn handle_navigator_modal_key(
         view.dismiss_modal();
         return false;
     }
+    if matches!(key.code, KeyCode::Char('n'))
+        && matches!(view.modal, Some(NavigatorModal::ConfirmForkRecovery { .. }))
+    {
+        if let Some(NavigatorModal::ConfirmForkRecovery { source, .. }) = view.confirm_modal() {
+            create_workstream_from_source(
+                root,
+                presentation,
+                remote,
+                view,
+                &source,
+                CreationAction::Fork,
+                false,
+            );
+        }
+        return false;
+    }
     if matches!(key.code, KeyCode::Char('n')) && is_confirmation_modal(view.modal.as_ref()) {
         view.dismiss_modal();
         return false;
@@ -4166,6 +4253,7 @@ fn handle_navigator_modal_key(
         },
         Some(
             NavigatorModal::ConfirmArchive(_)
+            | NavigatorModal::ConfirmForkRecovery { .. }
             | NavigatorModal::SelectHostRemoval { .. }
             | NavigatorModal::ConfirmForgetProject { .. }
             | NavigatorModal::SelectRegistrationHost { .. }
@@ -4269,7 +4357,11 @@ fn handle_modal_picker_key(key: KeyCode, view: &mut NavigatorView) -> bool {
 fn is_confirmation_modal(modal: Option<&NavigatorModal>) -> bool {
     matches!(
         modal,
-        Some(NavigatorModal::ConfirmArchive(_) | NavigatorModal::ConfirmForgetProject { .. })
+        Some(
+            NavigatorModal::ConfirmArchive(_)
+                | NavigatorModal::ConfirmForkRecovery { .. }
+                | NavigatorModal::ConfirmForgetProject { .. }
+        )
     )
 }
 
@@ -4282,6 +4374,9 @@ fn confirm_navigator_modal(
     match view.confirm_modal() {
         Some(NavigatorModal::ConfirmArchive(workstream)) => {
             archive_workstream(root, remote, view, &workstream);
+        }
+        Some(NavigatorModal::ConfirmForkRecovery { operation, .. }) => {
+            recover_operation(root, presentation, remote, view, &operation);
         }
         Some(removal @ NavigatorModal::SelectHostRemoval { .. }) => {
             confirm_host_removal(root, remote, view, removal);
@@ -4642,46 +4737,46 @@ fn restore_selected(root: &StateRoot, remote: &mut RemoteMonitor, view: &mut Nav
 
 fn recover_selected_operation(
     root: &StateRoot,
+    presentation: &Presentation,
     remote: &mut RemoteMonitor,
     view: &mut NavigatorView,
 ) {
-    let Some(operation) = view
-        .snapshot
-        .unresolved_operations
-        .get(view.selected_operation)
-        .cloned()
-    else {
-        view.set_message("no unresolved Workstream operation is selected");
+    let Some(operation) = view.selected_fork_recovery_operation().cloned() else {
+        view.set_message("no unfinished Fork is selected");
         return;
     };
-    let executable = match std::env::current_exe() {
-        Ok(executable) => executable,
-        Err(error) => {
-            view.set_message(action_message(&error));
-            return;
-        }
-    };
-    let mut command = Command::new(executable);
-    command.arg("--state-root").arg(root.base());
-    if operation.host.is_remote() {
-        command
-            .arg("host")
-            .arg("recover-operation")
-            .arg(operation.host.alias())
-            .arg(operation.operation_id.to_string());
-    } else {
-        command
-            .arg("recover-operation")
-            .arg(operation.operation_id.to_string());
-    }
-    match output_bounded(&mut command, 1024, 1024).map_err(NavigatorError::from_action_process) {
-        Ok(output) if output.status.success() => {
+    recover_operation(root, presentation, remote, view, &operation);
+}
+
+fn recover_operation(
+    root: &StateRoot,
+    presentation: &Presentation,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+    operation: &NavigatorOperation,
+) {
+    match run_recovery_operation(root, operation) {
+        Ok(destination) => {
             remote.request_soon(operation.host.alias());
             refresh_view(root, remote, view);
             view.dismiss_detail();
-            view.set_message("recovery reconciled the exact recorded operation");
+            if view.select_workstream(operation.host.alias(), destination) {
+                activate_selected(root, presentation, remote, view);
+                return;
+            }
+            let attachment = if operation.host.is_remote() {
+                presentation.attach_remote_workstream(operation.host.alias(), destination)
+            } else {
+                presentation.attach_workstream(destination)
+            };
+            match attachment.and_then(|status| {
+                view.observe_attachment(&status);
+                presentation.focus_provider()
+            }) {
+                Ok(()) => view.set_message("earlier Fork reconciled and opened"),
+                Err(error) => view.set_message(action_message(&error)),
+            }
         }
-        Ok(_) => view.set_message("the exact operation remains unavailable for recovery"),
         Err(error) => view.set_message(action_message(&error)),
     }
 }
@@ -4730,7 +4825,7 @@ fn create_workstream_selected(
         }
         return;
     };
-    create_workstream_from_source(root, presentation, remote, view, &source, action);
+    create_workstream_from_source(root, presentation, remote, view, &source, action, true);
 }
 
 fn create_workstream_from_source(
@@ -4740,10 +4835,21 @@ fn create_workstream_from_source(
     view: &mut NavigatorView,
     source: &NavigatorWorkstream,
     action: CreationAction,
+    check_existing_fork: bool,
 ) {
+    if action == CreationAction::Fork && check_existing_fork && view.begin_fork_recovery(source) {
+        return;
+    }
     let destination = match run_creation_action(root, action, source) {
         Ok(workstream_id) => workstream_id,
         Err(error) => {
+            if action == CreationAction::Fork {
+                remote.request_soon(source.host.alias());
+                refresh_view(root, remote, view);
+                if view.begin_fork_recovery(source) {
+                    return;
+                }
+            }
             view.set_message(action_message(&error));
             return;
         }
@@ -5214,6 +5320,39 @@ fn run_creation_action(
         return Err(NavigatorError::ActionFailed);
     }
     parse_created_workstream(&output.stdout)
+}
+
+fn run_recovery_operation(
+    root: &StateRoot,
+    operation: &NavigatorOperation,
+) -> Result<WorkstreamId, NavigatorError> {
+    if operation.host.is_remote() {
+        if !operation.host.is_reachable() {
+            return Err(NavigatorError::RemoteHostUnavailable);
+        }
+        let endpoint = checked_navigator_ssh_endpoint(root, operation.host.alias())?;
+        return HostClient::new(SystemCommandRunner)
+            .create_ssh(
+                &endpoint,
+                HostAction::RecoverOperation {
+                    operation_id: operation.operation_id,
+                },
+            )
+            .map_err(Into::into);
+    }
+    let executable = std::env::current_exe().map_err(NavigatorError::CurrentExecutable)?;
+    let endpoint = LocalEndpoint {
+        executable,
+        state_root: root.base().to_path_buf(),
+    };
+    HostClient::new(SystemCommandRunner)
+        .create_local(
+            &endpoint,
+            HostAction::RecoverOperation {
+                operation_id: operation.operation_id,
+            },
+        )
+        .map_err(Into::into)
 }
 
 fn run_rename_action(
@@ -6052,45 +6191,59 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
 
-        assert!(rendered.contains("operation needs recovery"));
+        assert!(rendered.contains("unfinished Fork"));
         assert!(rendered.contains("No Workstreams yet"));
         assert!(rendered.contains("? keys"));
     }
 
     #[test]
-    fn recovery_page_shows_only_bounded_operation_identity_and_reconciles_selection() {
-        let local_operation_id = OperationId::new();
-        let remote_operation_id = OperationId::new();
+    fn repeated_fork_routes_only_matching_unfinished_forks_to_reconciliation() {
+        let source_id = WorkstreamId::new();
+        let unrelated_source_id = WorkstreamId::new();
+        let first_operation_id = OperationId::new();
+        let second_operation_id = OperationId::new();
+        let unrelated_operation_id = OperationId::new();
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
-            workstreams: Vec::new(),
+            workstreams: vec![row(source_id, NavigatorRuntimeStatus::Idle)],
             hosts: vec![NavigatorHostOverview {
                 alias: "snap".to_owned(),
                 reachability: RemoteHostReachability::Reachable,
                 observer_status: ObserverStatus::NotInstalled,
             }],
             unreachable_hosts: Vec::new(),
-            unresolved_operation_count: 2,
+            unresolved_operation_count: 3,
             unresolved_operations: vec![
                 NavigatorOperation {
                     host: NavigatorHost::Local,
-                    operation_id: local_operation_id,
-                    kind: OperationKind::Start,
+                    operation_id: first_operation_id,
+                    kind: OperationKind::Fork,
+                    source_workstream_id: Some(source_id),
                     phase: OperationPhase::AwaitingReconciliation,
                     revision: Revision::INITIAL,
+                },
+                NavigatorOperation {
+                    host: NavigatorHost::Local,
+                    operation_id: second_operation_id,
+                    kind: OperationKind::Fork,
+                    source_workstream_id: Some(source_id),
+                    phase: OperationPhase::RecoveryRequired,
+                    revision: Revision::INITIAL.next(),
                 },
                 NavigatorOperation {
                     host: NavigatorHost::Remote {
                         alias: "snap".to_owned(),
                         reachability: RemoteHostReachability::Reachable,
                     },
-                    operation_id: remote_operation_id,
+                    operation_id: unrelated_operation_id,
                     kind: OperationKind::Fork,
+                    source_workstream_id: Some(unrelated_source_id),
                     phase: OperationPhase::RecoveryRequired,
                     revision: Revision::INITIAL.next(),
                 },
             ],
         });
-        view.open_recovery();
+        let source = view.selected().unwrap().clone();
+        assert!(view.begin_fork_recovery(&source));
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
 
         terminal.draw(|frame| view.render(frame)).unwrap();
@@ -6102,19 +6255,59 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
-        assert!(rendered.contains("Recovery"));
-        assert!(rendered.contains("local · Start · awaiting reconciliation"));
-        assert!(rendered.contains("snap · Fork · recovery required"));
-        assert!(!rendered.contains(&local_operation_id.to_string()));
-        assert!(!rendered.contains(&remote_operation_id.to_string()));
+        assert!(rendered.contains("Unfinished forks"));
+        assert!(rendered.contains("local · Fork · awaiting reconciliation"));
+        assert!(rendered.contains("local · Fork · recovery required"));
+        assert!(!rendered.contains("snap · Fork"));
+        assert!(!rendered.contains(&first_operation_id.to_string()));
+        assert!(!rendered.contains(&second_operation_id.to_string()));
+        assert!(!rendered.contains(&unrelated_operation_id.to_string()));
         assert_eq!(view.selected_host_alias(), Some("local"));
 
         view.select_next();
         assert_eq!(view.selected_operation, 1);
-        assert_eq!(view.selected_host_alias(), Some("snap"));
+        assert_eq!(view.selected_host_alias(), Some("local"));
 
         view.replace_snapshot(LocalNavigatorSnapshot::default());
         assert_eq!(view.detail, None);
+    }
+
+    #[test]
+    fn repeated_fork_prompts_before_reconciling_one_exact_operation() {
+        let source_id = WorkstreamId::new();
+        let operation_id = OperationId::new();
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![row(source_id, NavigatorRuntimeStatus::Idle)],
+            hosts: Vec::new(),
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 1,
+            unresolved_operations: vec![NavigatorOperation {
+                host: NavigatorHost::Local,
+                operation_id,
+                kind: OperationKind::Fork,
+                source_workstream_id: Some(source_id),
+                phase: OperationPhase::RecoveryRequired,
+                revision: Revision::INITIAL,
+            }],
+        });
+        let source = view.selected().unwrap().clone();
+
+        assert!(view.begin_fork_recovery(&source));
+        assert!(matches!(
+            view.modal,
+            Some(NavigatorModal::ConfirmForkRecovery { ref operation, .. })
+                if operation.operation_id == operation_id
+        ));
+        let (title, lines) = navigator_modal_content(view.confirm_modal().unwrap(), 50);
+        let rendered = lines
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect::<String>();
+        assert_eq!(title, " Finish earlier Fork ");
+        assert!(rendered.contains("did not finish confirming its destination"));
+        assert!(rendered.contains("reconcile it"));
+        assert!(rendered.contains("start another Fork"));
+        assert!(!rendered.contains(&operation_id.to_string()));
     }
 
     #[test]
@@ -6366,7 +6559,7 @@ mod tests {
         .collect::<String>();
         assert!(full_help.contains("click a row to select"));
         assert!(full_help.contains("cycle recent/project/host"));
-        assert!(full_help.contains("recover an unresolved Start or Fork"));
+        assert!(!full_help.contains("recover an unresolved"));
         assert!(full_help.contains("close keys"));
         assert!(!rendered.contains("provider pane"));
     }

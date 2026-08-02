@@ -333,8 +333,9 @@ expanding the approved V1 product.
 
 Scope:
 
-- list and recover an exact unresolved Start or Fork CompoundOperation through
-  local CLI, SSH protocol, and navigator visibility;
+- recover an independently started Workstream through its normal open path,
+  and reconcile an exact unresolved Fork through local CLI, SSH protocol, and
+  navigator visibility;
 - preserve the exact-once Fork marker: recovery may reconcile a marked fork but
   never issue a second provider `thread/fork` call;
 - stateless remote release probe, safe state-schema incompatibility diagnostic,
@@ -348,8 +349,9 @@ Scope:
 
 Exit gate:
 
-- a simulated client loss after each Start/Fork effect can be recovered from a
-  visible opaque operation ID without its original request key;
+- a simulated client loss after independent Start resumes from its durable
+  Workstream row, while an unresolved Fork reconciles from its exact opaque
+  operation without its original request key;
 - a stale or missing remote executable is diagnosed before stateful control,
   while matching hosts continue to work through local-subprocess and SSH
   protocol paths;
@@ -786,11 +788,11 @@ Delivery slices:
 3. **D7.2 - Workstream lifecycle and recovery.** Add bounded status and
    canonical rename, preserve existing open/new/fork/park/acknowledge keys, add
    revision-guarded local/remote archive visibility and restore-without-start,
-   and make exact unresolved Start/Fork reconciliation available through the
-   Workstreams Recovery page. The page carries only an opaque operation handle
-   long enough to issue exact local or SSH reconciliation; its renderer exposes
-   host, operation kind, and phase only. Archive/restore, scope selection,
-   bounded status, canonical rename, and recovery are complete.
+   and make exact unresolved Fork reconciliation available by repeating `f` on
+   its source Workstream. That focused path holds the opaque operation handle
+   only long enough to issue exact local or SSH reconciliation; multiple
+   candidates use a bounded source-scoped chooser. Archive/restore, scope
+   selection, bounded status, canonical rename, and recovery are complete.
 4. **D7.3 - Project management.** List logical Projects and their host-owned
    locations, show active/archived counts, register the first or an additional
    existing checkout on a selected local or SSH host, and start a Workstream at

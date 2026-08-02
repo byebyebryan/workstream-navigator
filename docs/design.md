@@ -443,14 +443,16 @@ unreachable hosts back off. Action responses update local state immediately;
 the next complete snapshot reconciles it.
 
 All mutation commands use host-local SQLite transactions and optimistic
-revisions. Start and Fork additionally use durable request keys and recovery
-phases because they cross non-transactional Git, tmux, process, or provider
-boundaries. Concurrent hooks and clients may race, but only one transaction can
-commit a particular record revision.
+revisions. Independent Start commits its Workstream and private Runtime
+reservation before launching Codex, so reopening that Workstream automatically
+continues the normal start/resume path after a client loss. Fork additionally
+uses a durable request key and recovery phases because native provider thread
+creation is non-idempotent. Concurrent hooks and clients may race, but only one
+transaction can commit a particular record revision.
 
 Focus, attach, snapshot, and refresh are not durable operations. Rename is a
 repeatable provider setting. Park and Resume reconcile through the authoritative
-Runtime record plus live tmux/process probes. Only Start and Fork use the
+Runtime record plus live tmux/process probes. Only Fork uses the
 CompoundOperation journal.
 
 Resume transactionally reserves one new Runtime generation before launching
@@ -1119,7 +1121,7 @@ Required interactions:
 - park/resume without deleting provider history;
 - archive a Workstream out of the active list and restore it without starting
   Codex or deleting its retained state;
-- list and recover exact unresolved Fork operations;
+- route a repeated Fork to its exact unresolved operation and reconcile it;
 - inspect and register ProjectLocations on local or SSH hosts;
 - add or remove SSH host registrations without leaving the navigator;
 - acknowledge result or recovery attention without injecting provider traffic.
@@ -1140,10 +1142,14 @@ Active/Archived visibility and `Recent`/`By project`/`By host` grouping are
 independent presentation axes. Archiving a working Runtime requires explicit
 confirmation because parking it interrupts the current provider turn.
 
-The Workstreams Recovery page lists bounded unresolved Fork
-operations that cannot safely appear as ordinary Workstream rows. It provides
-the same exact revision-guarded reconciliation as the direct recovery command;
-request keys, paths, provider identifiers, and raw evidence remain hidden.
+An unfinished Fork belongs to its already-visible source Workstream rather than
+a normal global management page. Pressing `f` on that source opens a focused
+choice to reconcile the exact saved operation or deliberately start another
+Fork. If several unfinished Forks share the source, a bounded chooser lists
+only those candidates. The source Workstream ID is transient routing metadata,
+never rendered; request keys, paths, provider identifiers, and raw evidence
+remain hidden. A recovered destination opens directly in the native provider
+pane.
 
 The Projects page reflects the ownership boundary explicitly: a logical
 client-side Project contains one or more host-owned ProjectLocations. Adding a
@@ -1238,15 +1244,16 @@ result/attention persistence gap.
 
 ### Durable operation recovery
 
-An unresolved Fork is visible through an explicit local or remote
-operation list. It exposes only an opaque operation ID, kind, phase, and
-safe-to-display outcome state; request keys, project paths, provider IDs, and
-raw operation evidence remain host-private. `recover-operation <id>` reopens
-only that recorded Fork plan. A Fork with no recorded provider-attempt marker
-may continue to the one permitted fork call; after that marker exists it may
-only reconcile exact provider lineage and can never call `thread/fork` again.
-Zero or multiple candidates remain visible as recovery-required. The navigator
-does not hide an unresolved operation behind a generic Workstream row.
+An unresolved Fork remains host-private until the user repeats `f` on its
+source Workstream. WSNav then routes to the exact saved operation using the
+already-known source Workstream ID, without rendering that ID, request keys,
+project paths, provider IDs, or raw operation evidence. `recover-operation
+<id>` remains direct-CLI parity for diagnostics and break-glass use. A Fork
+with no recorded provider-attempt marker may continue to the one permitted fork
+call; after that marker exists it may only reconcile exact provider lineage and
+can never call `thread/fork` again. Zero or multiple candidates remain
+recovery-required; multiple candidates get a bounded source-scoped chooser,
+never automatic selection.
 
 This recovery path is intentionally separate from native Runtime recovery:
 `recover <workstream>` resumes a known Codex thread after a lost private tmux
@@ -1460,8 +1467,9 @@ tmux/provider state during automated tests.
 
 ### D5.1 — Operational closure
 
-- Product-surface recovery for unresolved Start and Fork operations after a
-  client or transport loss.
+- Automatic normal-open recovery for independently started Workstreams and
+  source-scoped recovery for unresolved Fork operations after a client or
+  transport loss.
 - Stateless remote release/schema compatibility probe and manual-upgrade
   diagnostics.
 - Streaming bounds for every local child-process output path.

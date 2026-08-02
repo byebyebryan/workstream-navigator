@@ -7,9 +7,11 @@ touching ordinary Codex state or the user's tmux server.
 
 ## Evidence
 
-- An unresolved Start or Fork is visible through the local, SSH protocol, and
-  navigator projections as an opaque operation ID. Explicit recovery reads the
-  durable plan without its original request key. State and action tests prove
+- A client loss during independent Start leaves its durable Workstream row for
+  normal open/recovery. An unresolved Fork is available through the local, SSH
+  protocol, and navigator projections as an opaque operation ID. Exact Fork
+  reconciliation reads the durable plan without its original request key. State
+  and action tests prove
   that a recorded fork-attempt marker permits reconciliation only, never a
   second `thread/fork` request.
 - The hidden `_probe` endpoint writes only release version, control ABI,

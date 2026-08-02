@@ -329,12 +329,14 @@ pub struct ForkPreparation {
 /// Bounded operator-visible state for one unresolved creation operation.
 ///
 /// Request keys, project paths, provider identifiers, and raw effect evidence
-/// remain host-private. The opaque operation ID is enough to reopen the exact
-/// durable plan through the explicit recovery action.
+/// remain host-private. A Fork additionally carries its already-visible source
+/// Workstream identity so the navigator can route a repeated Fork directly to
+/// its exact unfinished operation without displaying either identifier.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OperationOverview {
     pub operation_id: OperationId,
     pub kind: OperationKind,
+    pub source_workstream_id: Option<WorkstreamId>,
     pub phase: OperationPhase,
     pub revision: Revision,
 }
@@ -1915,7 +1917,7 @@ impl HostRegistry {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT operation_id, kind, phase, revision
+                "SELECT operation_id, kind, phase, effect_watermark, revision
                  FROM compound_operations
                  WHERE phase IN ('external_effect_started', 'awaiting_reconciliation', 'recovery_required')
                  ORDER BY operation_id
@@ -1928,7 +1930,8 @@ impl HostRegistry {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             })
             .map_err(StateError::Sqlite)?
@@ -1939,12 +1942,23 @@ impl HostRegistry {
         }
         operations
             .into_iter()
-            .map(|(operation_id, kind, phase, revision)| {
+            .map(|(operation_id, kind, phase, effect_watermark, revision)| {
+                let kind = operation_kind_from_text(&kind)?;
+                let source_workstream_id = if kind == OperationKind::Fork {
+                    effect_watermark
+                        .as_deref()
+                        .map(|effect| PersistedForkPlan::decode(Some(effect)))
+                        .transpose()?
+                        .map(|plan| plan.source_workstream_id)
+                } else {
+                    None
+                };
                 Ok(OperationOverview {
                     operation_id: Uuid::parse_str(&operation_id)
                         .map(OperationId::from)
                         .map_err(StateError::InvalidPersistedUuid)?,
-                    kind: operation_kind_from_text(&kind)?,
+                    kind,
+                    source_workstream_id,
                     phase: operation_phase_from_text(&phase)?,
                     revision: Revision::try_from(revision)?,
                 })
@@ -5866,6 +5880,13 @@ mod tests {
         assert_eq!(
             prepared.plan.last_settled_turn_id.as_deref(),
             Some("settled-turn")
+        );
+        let operations = registry.unresolved_operation_overviews().unwrap();
+        assert_eq!(operations.len(), 1);
+        assert_eq!(operations[0].kind, OperationKind::Fork);
+        assert_eq!(
+            operations[0].source_workstream_id,
+            Some(registered.workstream_id)
         );
         let created = registry
             .commit_fork(&prepared.plan, "destination-session")

@@ -13,7 +13,7 @@ use crate::domain::{
     RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 15;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 16;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -477,16 +477,23 @@ impl SnapshotResponse {
 }
 
 /// Bounded, opaque projection of one unresolved host-side creation operation.
+/// `source_workstream_id` is present only for a Fork and lets the navigator
+/// route a repeated Fork to its matching unfinished operation. It is never
+/// rendered and does not disclose provider or filesystem state.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct OperationSnapshot {
     pub operation_id: OperationId,
     pub kind: OperationKind,
+    pub source_workstream_id: Option<WorkstreamId>,
     pub phase: OperationPhase,
     pub revision: i64,
 }
 
 impl OperationSnapshot {
     fn validate(&self) -> Result<(), ProtocolError> {
+        if self.kind != OperationKind::Fork && self.source_workstream_id.is_some() {
+            return Err(ProtocolError::InvalidOperationSource);
+        }
         Revision::try_from(self.revision)
             .map(|_| ())
             .map_err(|_| ProtocolError::InvalidRevision)
@@ -669,6 +676,8 @@ pub enum ProtocolError {
     UnsupportedVersion(u16),
     #[error("revision must be positive")]
     InvalidRevision,
+    #[error("operation source is valid only for a Fork")]
+    InvalidOperationSource,
     #[error("thread name is invalid")]
     InvalidThreadName,
     #[error("project browser path is invalid")]
@@ -694,6 +703,22 @@ pub enum ProtocolError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn operation_source_is_accepted_only_for_a_fork() {
+        let snapshot = OperationSnapshot {
+            operation_id: OperationId::new(),
+            kind: OperationKind::Start,
+            source_workstream_id: Some(WorkstreamId::new()),
+            phase: OperationPhase::RecoveryRequired,
+            revision: 1,
+        };
+
+        assert!(matches!(
+            snapshot.validate(),
+            Err(ProtocolError::InvalidOperationSource)
+        ));
+    }
 
     #[test]
     fn unknown_versions_fail_closed() {

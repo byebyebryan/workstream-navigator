@@ -112,9 +112,9 @@ enum Commands {
     },
     /// Show one local runtime's durable record and live private-tmux probe.
     Status { workstream_id: String },
-    /// List unresolved Start and Fork operations without exposing request keys or provider data.
+    /// List unresolved Fork operations without exposing request keys or provider data.
     Operations,
-    /// Reopen one exact unresolved Start or Fork operation.
+    /// Reopen one exact unresolved Fork operation.
     RecoverOperation { operation_id: String },
     /// Rename the current managed Codex thread through its canonical name field.
     Rename {

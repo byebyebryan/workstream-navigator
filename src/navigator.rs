@@ -888,7 +888,6 @@ pub struct NavigatorView {
     selected_host: Option<String>,
     selected_operation: usize,
     view_mode: NavigatorViewMode,
-    workstream_scope: WorkstreamScope,
     attached: Option<(String, WorkstreamId)>,
     observed_attachment: Option<(uuid::Uuid, AttachmentPhase)>,
     rendered_offset: usize,
@@ -939,39 +938,6 @@ enum NavigatorDetail {
         host_alias: String,
         workstream_id: WorkstreamId,
     },
-}
-
-/// Active and archived Workstreams are separate navigator visibility scopes.
-/// This is local presentation state; archive authority remains revision-guarded
-/// on the selected host.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum WorkstreamScope {
-    #[default]
-    Active,
-    Archived,
-}
-
-impl WorkstreamScope {
-    const fn next(self) -> Self {
-        match self {
-            Self::Active => Self::Archived,
-            Self::Archived => Self::Active,
-        }
-    }
-
-    const fn label(self) -> &'static str {
-        match self {
-            Self::Active => "Active",
-            Self::Archived => "Archived",
-        }
-    }
-
-    const fn includes(self, workstream: &NavigatorWorkstream) -> bool {
-        match self {
-            Self::Active => !workstream.archived,
-            Self::Archived => workstream.archived,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1069,6 +1035,7 @@ enum NavigatorViewMode {
     Recent,
     Host,
     Project,
+    Archived,
 }
 
 impl NavigatorViewMode {
@@ -1076,15 +1043,17 @@ impl NavigatorViewMode {
         match self {
             Self::Recent => Self::Project,
             Self::Project => Self::Host,
-            Self::Host => Self::Recent,
+            Self::Host => Self::Archived,
+            Self::Archived => Self::Recent,
         }
     }
 
     const fn previous(self) -> Self {
         match self {
-            Self::Recent => Self::Host,
+            Self::Recent => Self::Archived,
             Self::Project => Self::Recent,
             Self::Host => Self::Project,
+            Self::Archived => Self::Host,
         }
     }
 
@@ -1093,7 +1062,19 @@ impl NavigatorViewMode {
             Self::Recent => "Recent",
             Self::Host => "By host",
             Self::Project => "By project",
+            Self::Archived => "Archived",
         }
+    }
+
+    const fn includes(self, workstream: &NavigatorWorkstream) -> bool {
+        match self {
+            Self::Archived => workstream.archived,
+            Self::Recent | Self::Host | Self::Project => !workstream.archived,
+        }
+    }
+
+    const fn is_archived(self) -> bool {
+        matches!(self, Self::Archived)
     }
 }
 
@@ -1153,7 +1134,6 @@ impl NavigatorView {
             selected_host: Some("local".to_owned()),
             selected_operation: 0,
             view_mode: NavigatorViewMode::Recent,
-            workstream_scope: WorkstreamScope::Active,
             attached: None,
             observed_attachment: None,
             rendered_offset: 0,
@@ -1202,7 +1182,7 @@ impl NavigatorView {
         self.snapshot
             .workstreams
             .get(snapshot_index)
-            .is_some_and(|workstream| self.workstream_scope.includes(workstream))
+            .is_some_and(|workstream| self.view_mode.includes(workstream))
     }
 
     fn visible_workstream_indexes(&self) -> Vec<usize> {
@@ -2048,7 +2028,7 @@ impl NavigatorView {
             self.page,
             self.detail.is_some(),
             matches!(self.detail, Some(NavigatorDetail::ForkRecovery { .. })),
-            self.workstream_scope,
+            self.view_mode,
         )
         .len()
         .saturating_sub(1);
@@ -2064,14 +2044,11 @@ impl NavigatorView {
 
     fn cycle_view_mode_next(&mut self) {
         self.view_mode = self.view_mode.next();
+        self.normalize_workstream_selection();
     }
 
     fn cycle_view_mode_previous(&mut self) {
         self.view_mode = self.view_mode.previous();
-    }
-
-    fn cycle_workstream_scope(&mut self) {
-        self.workstream_scope = self.workstream_scope.next();
         self.normalize_workstream_selection();
     }
 
@@ -2191,7 +2168,7 @@ impl NavigatorView {
             List::new(items)
                 .block(Block::default().borders(Borders::ALL).title(format!(
                     " {} · {} ",
-                    self.workstream_title(),
+                    "Workstreams",
                     self.view_mode().label()
                 )))
                 .highlight_style(selected_row_style()),
@@ -2344,7 +2321,7 @@ impl NavigatorView {
                 .workstreams
                 .iter()
                 .enumerate()
-                .filter(|(_, row)| self.workstream_scope.includes(row))
+                .filter(|(_, row)| self.view_mode.includes(row))
                 .map(|(snapshot_index, _)| NavigatorListEntry::Workstream {
                     snapshot_index,
                     context: WorkstreamRowContext::Recent,
@@ -2354,7 +2331,7 @@ impl NavigatorView {
             NavigatorViewMode::Host => {
                 let mut groups = Vec::<(String, Vec<usize>)>::new();
                 for (snapshot_index, row) in self.snapshot.workstreams.iter().enumerate() {
-                    if !self.workstream_scope.includes(row) {
+                    if !self.view_mode.includes(row) {
                         continue;
                     }
                     if let Some((_, indexes)) = groups
@@ -2390,7 +2367,7 @@ impl NavigatorView {
             NavigatorViewMode::Project => {
                 let mut groups = Vec::<(ProjectId, String, Vec<usize>)>::new();
                 for (snapshot_index, row) in self.snapshot.workstreams.iter().enumerate() {
-                    if !self.workstream_scope.includes(row) {
+                    if !self.view_mode.includes(row) {
                         continue;
                     }
                     if let Some((_, _, indexes)) = groups
@@ -2423,6 +2400,18 @@ impl NavigatorView {
                     })
                     .collect()
             }
+            NavigatorViewMode::Archived => self
+                .snapshot
+                .workstreams
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| self.view_mode.includes(row))
+                .map(|(snapshot_index, _)| NavigatorListEntry::Workstream {
+                    snapshot_index,
+                    context: WorkstreamRowContext::Recent,
+                    tree_branch: None,
+                })
+                .collect(),
         }
     }
 
@@ -2542,11 +2531,10 @@ impl NavigatorView {
         if self.visible_workstream_indexes().is_empty() {
             let empty_label = if self.snapshot.workstreams.is_empty() {
                 "No Workstreams yet · n adds a Project".to_owned()
+            } else if self.view_mode.is_archived() {
+                "No archived Workstreams".to_owned()
             } else {
-                format!(
-                    "No {} Workstreams",
-                    self.workstream_scope.label().to_ascii_lowercase()
-                )
+                "No active Workstreams".to_owned()
             };
             return format!(
                 "{empty_label}{}",
@@ -2613,9 +2601,11 @@ impl NavigatorView {
         }
         match self.page {
             NavigatorPage::Workstreams => {
-                let mut bindings = vec![("←/→", "view"), ("s", "scope")];
-                match self.workstream_scope {
-                    WorkstreamScope::Active => bindings.extend([
+                let mut bindings = vec![("←/→", "view")];
+                if self.view_mode.is_archived() {
+                    bindings.push(("u", "restore"));
+                } else {
+                    bindings.extend([
                         (
                             "n",
                             if self.snapshot.workstreams.is_empty() {
@@ -2629,8 +2619,7 @@ impl NavigatorView {
                         ("r", "rename"),
                         ("a", "ack"),
                         ("x", "archive"),
-                    ]),
-                    WorkstreamScope::Archived => bindings.push(("u", "restore")),
+                    ]);
                 }
                 bindings.extend([("i", "status"), ("?", "keys")]);
                 bindings
@@ -2687,7 +2676,7 @@ impl NavigatorView {
                 self.page,
                 self.detail.is_some(),
                 matches!(self.detail, Some(NavigatorDetail::ForkRecovery { .. })),
-                self.workstream_scope,
+                self.view_mode,
             ))
             .block(
                 Block::default()
@@ -2698,13 +2687,6 @@ impl NavigatorView {
             .scroll((self.help_scroll, 0)),
             area,
         );
-    }
-
-    fn workstream_title(&self) -> &'static str {
-        match self.workstream_scope {
-            WorkstreamScope::Active => "Workstreams",
-            WorkstreamScope::Archived => "Workstreams · Archived",
-        }
     }
 
     fn render_modal(frame: &mut Frame<'_>, modal: NavigatorModal) {
@@ -3151,7 +3133,7 @@ fn help_lines(
     page: NavigatorPage,
     showing_detail: bool,
     showing_recovery: bool,
-    workstream_scope: WorkstreamScope,
+    workstream_view: NavigatorViewMode,
 ) -> Vec<Line<'static>> {
     let heading = Style::default()
         .fg(Color::Cyan)
@@ -3187,7 +3169,7 @@ fn help_lines(
             ]),
         ]);
     } else if page == NavigatorPage::Workstreams {
-        lines.extend(workstream_help_lines(workstream_scope, heading, key));
+        lines.extend(workstream_help_lines(workstream_view, heading, key));
     } else {
         let mut page_lines = vec![
             Line::raw(""),
@@ -3225,13 +3207,17 @@ fn help_lines(
     lines
 }
 
-fn workstream_help_lines(scope: WorkstreamScope, heading: Style, key: Style) -> Vec<Line<'static>> {
+fn workstream_help_lines(
+    view_mode: NavigatorViewMode,
+    heading: Style,
+    key: Style,
+) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::raw(""),
         Line::from(Span::styled("Workstreams", heading)),
         Line::from(vec![
             Span::styled("←/→", key),
-            Span::raw("          cycle recent/project/host"),
+            Span::raw("          cycle recent/project/host/archived"),
         ]),
         Line::from(vec![
             Span::styled("Enter", key),
@@ -3241,16 +3227,17 @@ fn workstream_help_lines(scope: WorkstreamScope, heading: Style, key: Style) -> 
             Span::styled("i", key),
             Span::raw("          show bounded status"),
         ]),
-        Line::from(vec![
+    ];
+    if view_mode.is_archived() {
+        lines.push(Line::from(vec![
+            Span::styled("u", key),
+            Span::raw("          restore without starting Codex"),
+        ]));
+    } else {
+        lines.push(Line::from(vec![
             Span::styled("Tab", key),
             Span::raw("        focus native agent"),
-        ]),
-        Line::from(vec![
-            Span::styled("s", key),
-            Span::raw("          switch active/archived scope"),
-        ]),
-    ];
-    if scope == WorkstreamScope::Active {
+        ]));
         lines.extend([
             Line::from(vec![
                 Span::styled("n", key),
@@ -3274,11 +3261,6 @@ fn workstream_help_lines(scope: WorkstreamScope, heading: Style, key: Style) -> 
                 Span::raw("          acknowledge attention"),
             ]),
         ]);
-    } else {
-        lines.push(Line::from(vec![
-            Span::styled("u", key),
-            Span::raw("          restore without starting Codex"),
-        ]));
     }
     lines
 }
@@ -4090,10 +4072,6 @@ fn handle_navigator_key(
             view.cycle_view_mode_previous();
             false
         }
-        KeyCode::Char('s') if workstreams => {
-            view.cycle_workstream_scope();
-            false
-        }
         KeyCode::Down | KeyCode::Char('j') => {
             view.select_next();
             false
@@ -4102,7 +4080,7 @@ fn handle_navigator_key(
             view.select_previous();
             false
         }
-        KeyCode::Tab if workstreams && view.workstream_scope == WorkstreamScope::Active => {
+        KeyCode::Tab if workstreams && !view.view_mode.is_archived() => {
             if let Err(error) = presentation.focus_provider() {
                 view.set_message(action_message(&error));
             }
@@ -4141,13 +4119,19 @@ fn handle_workstream_action_key(
     remote: &mut RemoteMonitor,
     view: &mut NavigatorView,
 ) -> bool {
-    match (key, view.workstream_scope) {
-        (KeyCode::Char('a'), WorkstreamScope::Active) => acknowledge_selected(root, remote, view),
-        (KeyCode::Char('p'), WorkstreamScope::Active) => park_selected(root, remote, view),
-        (KeyCode::Char('x'), WorkstreamScope::Active) => archive_selected(root, remote, view),
-        (KeyCode::Char('r'), WorkstreamScope::Active) => rename_selected(view),
-        (KeyCode::Char('u'), WorkstreamScope::Archived) => restore_selected(root, remote, view),
-        (KeyCode::Char('n'), WorkstreamScope::Active) => {
+    if view.view_mode.is_archived() {
+        if key == KeyCode::Char('u') {
+            restore_selected(root, remote, view);
+            return true;
+        }
+        return false;
+    }
+    match key {
+        KeyCode::Char('a') => acknowledge_selected(root, remote, view),
+        KeyCode::Char('p') => park_selected(root, remote, view),
+        KeyCode::Char('x') => archive_selected(root, remote, view),
+        KeyCode::Char('r') => rename_selected(view),
+        KeyCode::Char('n') => {
             create_workstream_selected(
                 root,
                 presentation,
@@ -4156,7 +4140,7 @@ fn handle_workstream_action_key(
                 CreationAction::Independent,
             );
         }
-        (KeyCode::Char('f'), WorkstreamScope::Active) => {
+        KeyCode::Char('f') => {
             create_workstream_selected(root, presentation, remote, view, CreationAction::Fork);
         }
         _ => return false,
@@ -4705,7 +4689,7 @@ fn restore_selected(root: &StateRoot, remote: &mut RemoteMonitor, view: &mut Nav
         return;
     };
     if !selected.archived {
-        view.set_message("switch to the archived scope to restore this Workstream");
+        view.set_message("select Archived to restore this Workstream");
         return;
     }
     match run_action(
@@ -5453,7 +5437,7 @@ mod tests {
     }
 
     #[test]
-    fn workstream_scope_filters_rows_and_keeps_selection_in_scope() {
+    fn archived_view_filters_rows_and_keeps_selection_visible() {
         let active_id = WorkstreamId::new();
         let archived_id = WorkstreamId::new();
         let mut archived = row(archived_id, NavigatorRuntimeStatus::Parked);
@@ -5478,7 +5462,26 @@ mod tests {
             vec![0]
         );
 
-        view.cycle_workstream_scope();
+        view.cycle_view_mode_next();
+        assert_eq!(view.view_mode(), NavigatorViewMode::Project);
+        assert_eq!(
+            view.list_entries()
+                .iter()
+                .filter_map(NavigatorListEntry::workstream_index)
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+        view.cycle_view_mode_next();
+        assert_eq!(view.view_mode(), NavigatorViewMode::Host);
+        assert_eq!(
+            view.list_entries()
+                .iter()
+                .filter_map(NavigatorListEntry::workstream_index)
+                .collect::<Vec<_>>(),
+            vec![0]
+        );
+        view.cycle_view_mode_next();
+        assert_eq!(view.view_mode(), NavigatorViewMode::Archived);
         assert_eq!(
             view.selected().map(|row| row.workstream_id),
             Some(archived_id)
@@ -5491,7 +5494,8 @@ mod tests {
             vec![1]
         );
 
-        view.cycle_workstream_scope();
+        view.cycle_view_mode_next();
+        assert_eq!(view.view_mode(), NavigatorViewMode::Recent);
         assert_eq!(
             view.selected().map(|row| row.workstream_id),
             Some(active_id)
@@ -6344,8 +6348,9 @@ mod tests {
 
         assert_eq!(view.view_mode(), NavigatorViewMode::Recent);
         view.cycle_view_mode_previous();
-        assert_eq!(view.view_mode(), NavigatorViewMode::Host);
+        assert_eq!(view.view_mode(), NavigatorViewMode::Archived);
         view.cycle_view_mode_next();
+        assert_eq!(view.view_mode(), NavigatorViewMode::Recent);
         assert_eq!(
             view.selected().map(|row| row.workstream_id),
             Some(workstream_id)
@@ -6545,13 +6550,13 @@ mod tests {
             NavigatorPage::Workstreams,
             false,
             false,
-            WorkstreamScope::Active,
+            NavigatorViewMode::Recent,
         )
         .into_iter()
         .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
         .collect::<String>();
         assert!(full_help.contains("←/→"));
-        assert!(full_help.contains("cycle recent/project/host"));
+        assert!(full_help.contains("cycle recent/project/host/archived"));
         assert!(!full_help.contains("recover an unresolved"));
         assert!(!full_help.contains("Mouse"));
         assert!(!full_help.contains("click a row to select"));
@@ -6993,16 +6998,15 @@ mod tests {
         let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
         let compact = compact_keys(&view);
         assert!(compact.contains("←/→ view"));
-        assert!(compact.contains("s scope"));
         assert!(compact.contains("n register"));
         assert!(compact.contains("? keys"));
+        assert!(!compact.contains("s scope"));
         assert!(!compact.contains("Enter"));
         assert!(!compact.contains("Esc"));
         assert_bindings_in_order(
             &compact,
             &[
                 "←/→ view",
-                "s scope",
                 "n register",
                 "f fork",
                 "p park",
@@ -7016,10 +7020,12 @@ mod tests {
             view.footer_status(),
             "No Workstreams yet · n adds a Project"
         );
-        assert_eq!(view.workstream_title(), "Workstreams");
-        view.cycle_workstream_scope();
-        assert_eq!(view.workstream_title(), "Workstreams · Archived");
-        view.cycle_workstream_scope();
+        view.cycle_view_mode_next();
+        view.cycle_view_mode_next();
+        view.cycle_view_mode_next();
+        assert_eq!(view.view_mode(), NavigatorViewMode::Archived);
+        assert!(compact_keys(&view).contains("u restore"));
+        assert!(!compact_keys(&view).contains("n register"));
     }
 
     #[test]
@@ -7060,10 +7066,15 @@ mod tests {
             &["a add", "x remove", "r root", ", projects", ". workstreams"],
         );
 
-        let host_help = help_lines(NavigatorPage::Hosts, false, false, WorkstreamScope::Active)
-            .into_iter()
-            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
-            .collect::<String>();
+        let host_help = help_lines(
+            NavigatorPage::Hosts,
+            false,
+            false,
+            NavigatorViewMode::Recent,
+        )
+        .into_iter()
+        .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+        .collect::<String>();
         assert!(host_help.contains("add, verify, and set up a remote SSH host"));
         assert!(host_help.contains("disconnect or offboard the selected remote Host"));
     }
@@ -7075,13 +7086,14 @@ mod tests {
             NavigatorPage::Workstreams,
             false,
             false,
-            WorkstreamScope::Active,
+            NavigatorViewMode::Recent,
         );
         let workstream_help = workstream_help
             .into_iter()
             .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
             .collect::<String>();
         assert!(workstream_help.contains("x          archive"));
+        assert!(!workstream_help.contains("switch active/archived scope"));
         assert!(workstream_help.contains(",          Projects page"));
         assert!(workstream_help.contains(".          Hosts page"));
         assert!(!workstream_help.contains("1          Workstreams page"));
@@ -7099,11 +7111,24 @@ mod tests {
             .collect::<String>();
         assert!(rendered_help.contains("archive (confirms a working Runtime)"));
 
+        let archived_help = help_lines(
+            NavigatorPage::Workstreams,
+            false,
+            false,
+            NavigatorViewMode::Archived,
+        )
+        .into_iter()
+        .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+        .collect::<String>();
+        assert!(archived_help.contains("restore without starting Codex"));
+        assert!(!archived_help.contains("new Workstream"));
+        assert!(!archived_help.contains("focus native agent"));
+
         let expanded = help_lines(
             NavigatorPage::Workstreams,
             false,
             false,
-            WorkstreamScope::Active,
+            NavigatorViewMode::Recent,
         );
         assert!(expanded.iter().all(|line| {
             line.spans

@@ -227,8 +227,7 @@ management pages rather than a generic management landing page:
 
 ```text
 Workstreams
-├── Active / Archived
-├── Recent / By project / By host
+├── Recent / By project / By host / Archived
 ├── Recovery
 ├── Projects
 │   ├── Project list with inline locations
@@ -290,12 +289,13 @@ primary open/start/recover action, `n` starts a sibling, `f` forks, `p` parks,
 reference.
 New D7 actions receive page-local single-key bindings without reinterpreting
 those keys. Projects and Hosts may reuse letters because the active page and
-its visible footer make the scope explicit.
+its visible footer make the page explicit.
 
 Within the Workstreams page, right cycles the local-only `Recent`, `By project`,
-and `By host` views in that order; left moves in the reverse direction. These
-remain operational Workstream-browsing projections, not substitutes for the Project or Host
-configuration pages. `Recent` is the
+`By host`, and `Archived` views in that order; left moves in the reverse
+direction. The first three show active Workstreams; `Archived` is a flat,
+recency-ordered restore surface. These remain operational Workstream-browsing
+projections, not substitutes for the Project or Host configuration pages. `Recent` is the
 default global activity order. Grouped views retain that order by placing the
 group containing the newest visible activity first and keeping its Workstreams
 newest-first. Headers are non-actionable display rows; selection, mouse
@@ -1139,12 +1139,11 @@ Installing or upgrading local/remote executables, configuring SSH trust,
 cloning repositories, native Codex input and hook approval, and deferred Git
 cleanup remain external prerequisites or explicitly excluded operations.
 
-The Workstreams page owns Active and Archived scopes. Archive is the ordinary
-answer to accumulated test or inactive Workstreams; there is no hard-delete
-action. Projects disappear from the active operational view when they have no
-active Workstreams, but remain available through Projects and Archived views.
-Active/Archived visibility and `Recent`/`By project`/`By host` grouping are
-independent presentation axes. Archiving a working Runtime requires explicit
+The Workstreams page has three active views plus the separate `Archived` view.
+Archive is the ordinary answer to accumulated test or inactive Workstreams;
+there is no hard-delete action. Projects disappear from the active operational
+views when they have no active Workstreams, but remain available through
+Projects and `Archived`. Archiving a working Runtime requires explicit
 confirmation because parking it interrupts the current provider turn.
 
 An unfinished Fork belongs to its already-visible source Workstream rather than

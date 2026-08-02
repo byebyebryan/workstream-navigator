@@ -150,8 +150,8 @@ not sent to the navigator.
 The navigator footer stays compact during ordinary work. Press `?` for its
 keyboard reference; this opens only inside the navigator pane and never
 replaces or covers the native Codex pane. Press `←/→` to cycle its local
-`Recent`, `By project`, and `By host` views; this changes organization only,
-never the underlying Workstream or native session.
+`Recent`, `By project`, `By host`, and `Archived` views; this changes
+organization only, never the underlying Workstream or native session.
 
 ## Workstreams
 

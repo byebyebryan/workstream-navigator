@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Generate privacy-safe product captures from the deterministic navigator fixture.
+# Generate privacy-safe full-TUI captures and an animated hot-path tour.
 set -euo pipefail
 
 workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -15,3 +15,9 @@ cargo run --quiet --example capture_docs
 for capture in docs/media/screenshots/*.svg; do
     magick -background none "$capture" -strip "${capture%.svg}.png"
 done
+
+magick -delay 180 -loop 0 \
+    docs/media/screenshots/open-workstream.png \
+    docs/media/screenshots/fork-workstream.png \
+    docs/media/screenshots/park-and-resume.png \
+    -layers Optimize -strip docs/media/workstream-tour.gif

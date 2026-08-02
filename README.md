@@ -42,17 +42,21 @@ ordinary Git tooling inside the native session when a task needs them.
 The compact navigator remains a supporting surface; the adjacent native Codex
 pane keeps terminal focus and remains the place work happens.
 
-![Recent Workstreams view](docs/media/screenshots/workstreams.png)
+![Animated native-workflow tour](docs/media/workstream-tour.gif)
+
+The hot path stays short: open a Workstream, fork at its last completed native
+turn, or park it and resume the exact native thread later. The animation uses
+the real navigator renderer with safe fixture data and a clearly labelled
+Codex-pane representation; it contains no recorded provider session content.
 
 Workstreams are project-first, ordered by activity, and carry only the status
 needed to choose the next session. `n`, `f`, `p`, rename, archive, and the
 other navigator actions stay in the small left pane.
 
-![Conservative recovery and remote state](docs/media/screenshots/remote-recovery.png)
-
 Uncertain or unavailable state is visible rather than guessed: an exact native
 resume is required for recovery, and an unreachable host never becomes a false
-"stopped" session.
+"stopped" session. See the [full capture set](docs/media/README.md) for
+individual frames and generation details.
 
 ## Quick start
 

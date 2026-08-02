@@ -1,8 +1,9 @@
-//! Generates privacy-safe product captures from the real navigator renderer.
+//! Generates privacy-safe full-TUI product captures from the navigator renderer.
 //!
-//! The fixture contains fixed safe labels and no host paths, provider IDs,
-//! prompts, responses, or user-owned content. Run `scripts/capture-docs` from
-//! the repository root to refresh the committed SVG and PNG captures.
+//! The navigator pane is rendered by the real `NavigatorView::render` path. The
+//! adjacent Codex pane uses fixed demonstration text, never a captured provider
+//! screen, so the committed images cannot expose a user's prompts or results.
+//! Run `scripts/capture-docs` from the repository root to refresh the assets.
 
 use std::{
     error::Error,
@@ -28,46 +29,101 @@ use wsnav::{
     protocol::ObserverStatus,
 };
 
-const WIDTH: u16 = 42;
-const HEIGHT: u16 = 18;
+const NAVIGATOR_WIDTH: u16 = 42;
+const NAVIGATOR_HEIGHT: u16 = 18;
+const PROVIDER_WIDTH: u16 = 73;
 const CELL_WIDTH: u16 = 12;
 const CELL_HEIGHT: u16 = 21;
 const MARGIN: u16 = 18;
+const HEADER_HEIGHT: u16 = 42;
+const PANE_GUTTER: u16 = 24;
 const TERMINAL_BACKGROUND: &str = "#101418";
+const PROVIDER_BACKGROUND: &str = "#121820";
 
 type CaptureResult<T> = Result<T, Box<dyn Error>>;
+
+struct Capture<'a> {
+    name: &'a str,
+    step: &'a str,
+    snapshot: LocalNavigatorSnapshot,
+    provider: ProviderDemo<'a>,
+}
+
+struct ProviderDemo<'a> {
+    prompt: &'a str,
+    response: &'a [&'a str],
+    footer: &'a str,
+}
 
 fn main() -> CaptureResult<()> {
     let output_root = PathBuf::from("docs/media/screenshots");
     fs::create_dir_all(&output_root)?;
 
-    for (name, snapshot) in [
-        ("workstreams", workstreams_snapshot()),
-        ("remote-recovery", recovery_snapshot()),
-        ("first-project", first_project_snapshot()),
-    ] {
-        let mut terminal = Terminal::new(TestBackend::new(WIDTH, HEIGHT))?;
-        let mut view = NavigatorView::new(snapshot);
+    for capture in captures() {
+        let mut terminal = Terminal::new(TestBackend::new(NAVIGATOR_WIDTH, NAVIGATOR_HEIGHT))?;
+        let mut view = NavigatorView::new(capture.snapshot.clone());
         terminal.draw(|frame| view.render(frame))?;
-        write_svg(
-            &output_root.join(format!("{name}.svg")),
+        write_full_svg(
+            &output_root.join(format!("{}.svg", capture.name)),
             terminal.backend().buffer(),
+            &capture,
         )?;
     }
 
     Ok(())
 }
 
-fn workstreams_snapshot() -> LocalNavigatorSnapshot {
+fn captures() -> Vec<Capture<'static>> {
+    vec![
+        Capture {
+            name: "open-workstream",
+            step: "1 / 3  Open a Workstream",
+            snapshot: open_workstream_snapshot(),
+            provider: ProviderDemo {
+                prompt: "Polish the navigator presentation",
+                response: &[
+                    "I’ll keep the navigator narrow and leave this native pane",
+                    "directly interactive while I work through the presentation.",
+                ],
+                footer: "Ready · example workspace · Context 14% used",
+            },
+        },
+        Capture {
+            name: "fork-workstream",
+            step: "2 / 3  Fork from the settled turn",
+            snapshot: fork_workstream_snapshot(),
+            provider: ProviderDemo {
+                prompt: "Explore the alternate presentation in a new thread",
+                response: &[
+                    "This independent Workstream begins from the last completed",
+                    "native turn. The source can keep running without interruption.",
+                ],
+                footer: "Ready · example workspace · Context 4% used",
+            },
+        },
+        Capture {
+            name: "park-and-resume",
+            step: "3 / 3  Park safely, then resume natively",
+            snapshot: park_and_resume_snapshot(),
+            provider: ProviderDemo {
+                prompt: "Resume the parked workstream",
+                response: &[
+                    "The exact native thread resumes with its visible result and",
+                    "history intact. WSNav never reconstructs a transcript pane.",
+                ],
+                footer: "Ready · example workspace · Context 18% used",
+            },
+        },
+    ]
+}
+
+fn open_workstream_snapshot() -> LocalNavigatorSnapshot {
     let now = now_millis();
-    let navigator = project(1);
-    let notes = project(2);
-    let website = project(3);
     LocalNavigatorSnapshot {
         workstreams: vec![
             workstream(WorkstreamCapture {
                 value: 101,
-                project_id: navigator,
+                project_id: project(1),
                 host: NavigatorHost::Local,
                 project_label: "workstream-navigator",
                 display_name: "Polish the navigator presentation",
@@ -77,7 +133,7 @@ fn workstreams_snapshot() -> LocalNavigatorSnapshot {
             }),
             workstream(WorkstreamCapture {
                 value: 102,
-                project_id: notes,
+                project_id: project(2),
                 host: remote_host("snap"),
                 project_label: "release-notes",
                 display_name: "Review the remote release notes",
@@ -87,7 +143,7 @@ fn workstreams_snapshot() -> LocalNavigatorSnapshot {
             }),
             workstream(WorkstreamCapture {
                 value: 103,
-                project_id: website,
+                project_id: project(3),
                 host: NavigatorHost::Local,
                 project_label: "project-site",
                 display_name: "Explore a parallel direction",
@@ -101,10 +157,9 @@ fn workstreams_snapshot() -> LocalNavigatorSnapshot {
     }
 }
 
-fn recovery_snapshot() -> LocalNavigatorSnapshot {
+fn fork_workstream_snapshot() -> LocalNavigatorSnapshot {
     let now = now_millis();
     let navigator = project(1);
-    let website = project(3);
     LocalNavigatorSnapshot {
         workstreams: vec![
             workstream(WorkstreamCapture {
@@ -112,30 +167,73 @@ fn recovery_snapshot() -> LocalNavigatorSnapshot {
                 project_id: navigator,
                 host: NavigatorHost::Local,
                 project_label: "workstream-navigator",
-                display_name: "Native session needs recovery",
-                runtime_status: NavigatorRuntimeStatus::RecoveryRequired,
+                display_name: "Explore the alternate presentation",
+                runtime_status: NavigatorRuntimeStatus::Idle,
                 result_ready: false,
-                last_activity_at_millis: now.saturating_sub(4 * 60_000),
+                last_activity_at_millis: now.saturating_sub(8_000),
             }),
             workstream(WorkstreamCapture {
                 value: 202,
-                project_id: website,
-                host: remote_host("snap"),
-                project_label: "project-site",
-                display_name: "Remote host is temporarily unavailable",
-                runtime_status: NavigatorRuntimeStatus::Unknown,
+                project_id: navigator,
+                host: NavigatorHost::Local,
+                project_label: "workstream-navigator",
+                display_name: "Polish the navigator presentation",
+                runtime_status: NavigatorRuntimeStatus::Working,
                 result_ready: false,
-                last_activity_at_millis: now.saturating_sub(2 * 24 * 60 * 60_000),
+                last_activity_at_millis: now.saturating_sub(30_000),
+            }),
+            workstream(WorkstreamCapture {
+                value: 203,
+                project_id: project(2),
+                host: remote_host("snap"),
+                project_label: "release-notes",
+                display_name: "Review the remote release notes",
+                runtime_status: NavigatorRuntimeStatus::Attention,
+                result_ready: true,
+                last_activity_at_millis: now.saturating_sub(8 * 60_000),
             }),
         ],
         hosts: ready_hosts(),
-        unreachable_hosts: vec!["snap".to_owned()],
         ..LocalNavigatorSnapshot::default()
     }
 }
 
-fn first_project_snapshot() -> LocalNavigatorSnapshot {
+fn park_and_resume_snapshot() -> LocalNavigatorSnapshot {
+    let now = now_millis();
+    let navigator = project(1);
     LocalNavigatorSnapshot {
+        workstreams: vec![
+            workstream(WorkstreamCapture {
+                value: 301,
+                project_id: navigator,
+                host: NavigatorHost::Local,
+                project_label: "workstream-navigator",
+                display_name: "Polish the navigator presentation",
+                runtime_status: NavigatorRuntimeStatus::Idle,
+                result_ready: true,
+                last_activity_at_millis: now.saturating_sub(10_000),
+            }),
+            workstream(WorkstreamCapture {
+                value: 302,
+                project_id: navigator,
+                host: NavigatorHost::Local,
+                project_label: "workstream-navigator",
+                display_name: "Explore the alternate presentation",
+                runtime_status: NavigatorRuntimeStatus::Working,
+                result_ready: false,
+                last_activity_at_millis: now.saturating_sub(3 * 60_000),
+            }),
+            workstream(WorkstreamCapture {
+                value: 303,
+                project_id: project(2),
+                host: remote_host("snap"),
+                project_label: "release-notes",
+                display_name: "Review the remote release notes",
+                runtime_status: NavigatorRuntimeStatus::Parked,
+                result_ready: false,
+                last_activity_at_millis: now.saturating_sub(15 * 60_000),
+            }),
+        ],
         hosts: ready_hosts(),
         ..LocalNavigatorSnapshot::default()
     }
@@ -205,18 +303,64 @@ fn now_millis() -> i64 {
         .unwrap_or_default()
 }
 
-fn write_svg(path: &Path, buffer: &Buffer) -> CaptureResult<()> {
-    let pixel_width = WIDTH * CELL_WIDTH + MARGIN * 2;
-    let pixel_height = HEIGHT * CELL_HEIGHT + MARGIN * 2;
+fn write_full_svg(path: &Path, buffer: &Buffer, capture: &Capture<'_>) -> CaptureResult<()> {
+    let navigator_width = NAVIGATOR_WIDTH * CELL_WIDTH;
+    let provider_width = PROVIDER_WIDTH * CELL_WIDTH;
+    let content_height = NAVIGATOR_HEIGHT * CELL_HEIGHT;
+    let navigator_x = MARGIN;
+    let navigator_y = MARGIN + HEADER_HEIGHT;
+    let provider_x = navigator_x + navigator_width + PANE_GUTTER;
+    let canvas_width = provider_x + provider_width + MARGIN;
+    let canvas_height = navigator_y + content_height + MARGIN;
     let mut svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{pixel_width}\" height=\"{pixel_height}\" viewBox=\"0 0 {pixel_width} {pixel_height}\" role=\"img\" aria-label=\"Workstream Navigator capture\">\n<rect width=\"100%\" height=\"100%\" rx=\"12\" fill=\"{TERMINAL_BACKGROUND}\"/>\n"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{canvas_width}\" height=\"{canvas_height}\" viewBox=\"0 0 {canvas_width} {canvas_height}\" role=\"img\" aria-label=\"Workstream Navigator two-pane tour\">\n<rect width=\"100%\" height=\"100%\" rx=\"14\" fill=\"{TERMINAL_BACKGROUND}\"/>\n"
     );
 
-    for y in 0..HEIGHT {
-        for x in 0..WIDTH {
+    write_text(
+        &mut svg,
+        navigator_x,
+        29,
+        "Workstream Navigator",
+        "#e5e7eb",
+        18,
+        true,
+    )?;
+    write_text(&mut svg, provider_x, 29, capture.step, "#60a5fa", 16, false)?;
+    writeln!(
+        svg,
+        "<rect x=\"{provider_x}\" y=\"{navigator_y}\" width=\"{provider_width}\" height=\"{content_height}\" fill=\"{PROVIDER_BACKGROUND}\"/>"
+    )?;
+    let divider_x = provider_x - PANE_GUTTER / 2;
+    writeln!(
+        svg,
+        "<line x1=\"{divider_x}\" y1=\"{navigator_y}\" x2=\"{divider_x}\" y2=\"{}\" stroke=\"#334155\" stroke-width=\"2\"/>",
+        navigator_y + content_height
+    )?;
+
+    write_buffer(&mut svg, buffer, navigator_x, navigator_y)?;
+    write_provider_demo(
+        &mut svg,
+        provider_x,
+        navigator_y,
+        provider_width,
+        &capture.provider,
+    )?;
+    svg.push_str("</svg>\n");
+    fs::write(path, svg)?;
+    Ok(())
+}
+
+fn write_buffer(
+    svg: &mut String,
+    buffer: &Buffer,
+    origin_x: u16,
+    origin_y: u16,
+) -> CaptureResult<()> {
+    for y in 0..NAVIGATOR_HEIGHT {
+        for x in 0..NAVIGATOR_WIDTH {
             let cell = &buffer[(x, y)];
-            let pixel_x = MARGIN + x * CELL_WIDTH;
-            let pixel_y = MARGIN + y * CELL_HEIGHT;
+            let pixel_x = origin_x + x * CELL_WIDTH;
+            let pixel_y = origin_y + y * CELL_HEIGHT;
             if let Some(background) = color_css(cell.bg) {
                 writeln!(
                     svg,
@@ -228,21 +372,86 @@ fn write_svg(path: &Path, buffer: &Buffer) -> CaptureResult<()> {
                 continue;
             }
             let color = color_css(cell.fg).unwrap_or_else(|| "#d7dde8".to_owned());
-            let weight = if cell.modifier.contains(Modifier::BOLD) {
-                " font-weight=\"700\""
-            } else {
-                ""
-            };
-            let baseline = pixel_y + 16;
-            writeln!(
-                svg,
-                "<text x=\"{pixel_x}\" y=\"{baseline}\" fill=\"{color}\" font-family=\"JetBrains Mono, Iosevka, ui-monospace, monospace\" font-size=\"17\"{weight}>{}</text>",
-                escape_xml(symbol)
-            )?;
+            let weight = cell.modifier.contains(Modifier::BOLD);
+            write_text(svg, pixel_x, pixel_y + 16, symbol, &color, 17, weight)?;
         }
     }
-    svg.push_str("</svg>\n");
-    fs::write(path, svg)?;
+    Ok(())
+}
+
+fn write_provider_demo(
+    svg: &mut String,
+    provider_x: u16,
+    provider_y: u16,
+    provider_width: u16,
+    provider: &ProviderDemo<'_>,
+) -> CaptureResult<()> {
+    let text_x = provider_x + 28;
+    write_text(
+        svg,
+        text_x,
+        provider_y + 35,
+        "OpenAI Codex · privacy-safe demonstration",
+        "#f8fafc",
+        18,
+        true,
+    )?;
+    write_text(
+        svg,
+        text_x,
+        provider_y + 68,
+        "model: gpt-5.6-sol    directory: example workspace",
+        "#aab5c4",
+        15,
+        false,
+    )?;
+    writeln!(
+        svg,
+        "<line x1=\"{text_x}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"#334155\"/>",
+        provider_y + 88,
+        provider_x + provider_width - 28,
+        provider_y + 88
+    )?;
+    write_text(svg, text_x, provider_y + 126, "›", "#60a5fa", 22, true)?;
+    write_text(
+        svg,
+        text_x + 24,
+        provider_y + 126,
+        provider.prompt,
+        "#f8fafc",
+        17,
+        false,
+    )?;
+    let mut response_y = provider_y + 180;
+    for &line in provider.response {
+        write_text(svg, text_x, response_y, line, "#cbd5e1", 17, false)?;
+        response_y += 28;
+    }
+    let footer_y = provider_y + NAVIGATOR_HEIGHT * CELL_HEIGHT - 42;
+    writeln!(
+        svg,
+        "<rect x=\"{provider_x}\" y=\"{}\" width=\"{provider_width}\" height=\"42\" fill=\"#0f172a\"/>",
+        footer_y - 28
+    )?;
+    write_text(svg, text_x, footer_y, provider.footer, "#94a3b8", 15, false)?;
+    Ok(())
+}
+
+fn write_text(
+    svg: &mut String,
+    x: u16,
+    y: u16,
+    text: &str,
+    color: &str,
+    font_size: u16,
+    bold: bool,
+) -> CaptureResult<()> {
+    let weight = if bold { " font-weight=\"700\"" } else { "" };
+    writeln!(
+        svg,
+        "<text x=\"{x}\" y=\"{y}\" fill=\"{color}\" font-family=\"JetBrains Mono, Iosevka, ui-monospace, monospace\" font-size=\"{font_size}\"{weight}>{}</text>",
+        escape_xml(text)
+    )?;
     Ok(())
 }
 

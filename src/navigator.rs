@@ -2083,7 +2083,7 @@ impl NavigatorView {
         let content_area = if self.page == NavigatorPage::Workstreams {
             areas[0]
         } else {
-            Self::render_workstreams_parent(frame, areas[0])
+            self.render_workstreams_parent(frame, areas[0])
         };
         match self.detail.clone() {
             Some(NavigatorDetail::ForkRecovery { .. }) => {
@@ -2120,16 +2120,16 @@ impl NavigatorView {
     /// turning the navigator into a tabbed dashboard. The child block starts
     /// on the next row, so it reads as a temporary page floating over the
     /// Workstreams home rather than a sibling view.
-    fn render_workstreams_parent(frame: &mut Frame<'_>, area: Rect) -> Rect {
+    fn render_workstreams_parent(&self, frame: &mut Frame<'_>, area: Rect) -> Rect {
         if area.height < 4 {
             return area;
         }
         let parent = Rect::new(area.x, area.y, area.width, 1);
         frame.render_widget(
             Block::default()
-                .borders(Borders::TOP)
+                .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
                 .title(Line::from(Span::styled(
-                    " Workstreams ",
+                    format!(" Workstreams · {} ", self.view_mode().label()),
                     Style::default().fg(Color::Gray),
                 )))
                 .border_style(Style::default().fg(Color::Gray)),
@@ -2572,7 +2572,7 @@ impl NavigatorView {
         let bindings = self.compact_bindings();
         let mut rows = vec![Vec::<(&str, &str)>::new()];
         let mut row_width = 0_usize;
-        let maximum = usize::from(width);
+        let maximum = usize::from(width).saturating_sub(COMPACT_HINT_LEFT_INSET);
         for binding in bindings {
             let binding_width = binding.0.len() + 1 + binding.1.len();
             let separator_width = usize::from(!rows.last().unwrap().is_empty()) * 2;
@@ -3117,7 +3117,7 @@ fn confirmation_line(action: &'static str, key: Style) -> Line<'static> {
 fn binding_line(bindings: &[(&str, &str)]) -> Line<'static> {
     let key = Style::default().fg(Color::Yellow);
     let label = Style::default().fg(Color::Gray);
-    let mut spans = Vec::new();
+    let mut spans = vec![Span::raw(" ")];
     for (index, (shortcut, description)) in bindings.iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw("  "));
@@ -3266,6 +3266,7 @@ fn workstream_help_lines(
 }
 
 const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const COMPACT_HINT_LEFT_INSET: usize = 1;
 /// A bordered status frame with at most three wrapped content lines.
 const STATUS_BOX_HEIGHT: u16 = 5;
 
@@ -6651,6 +6652,26 @@ mod tests {
     }
 
     #[test]
+    fn management_parent_retains_the_current_workstreams_header() {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
+        view.select_page(NavigatorPage::Projects);
+        let mut terminal = Terminal::new(TestBackend::new(32, 12)).unwrap();
+
+        terminal.draw(|frame| view.render(frame)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let rendered = buffer
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert_eq!(buffer[(0, 0)].symbol(), "┌");
+        assert_eq!(buffer[(31, 0)].symbol(), "┐");
+        assert!(rendered.contains("Workstreams · Recent"));
+        assert!(rendered.contains("Projects"));
+    }
+
+    #[test]
     fn host_summary_groups_active_projects_and_omits_archived_workstreams() {
         let alpha = ProjectId::new();
         let beta = ProjectId::new();
@@ -6997,6 +7018,7 @@ mod tests {
     fn compact_workstream_controls_preserve_terminal_key_memory() {
         let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
         let compact = compact_keys(&view);
+        assert!(compact.starts_with(' '));
         assert!(compact.contains("←/→ view"));
         assert!(compact.contains("n register"));
         assert!(compact.contains("? keys"));

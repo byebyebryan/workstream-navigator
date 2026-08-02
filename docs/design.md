@@ -210,7 +210,8 @@ boundaries into at most two compact lines. It never lets terminal wrapping mix
 two bindings. On a terminal too short to preserve useful content, the strip
 collapses to `? keys`. It lists only distinctive actions: ordinary
 Enter/Esc behavior remains native terminal convention rather than consuming
-permanent hint space. Related actions remain adjacent in each page's strip.
+permanent hint space. Related actions remain adjacent in each page's strip. A
+one-cell inset keeps the hints visually separate from the Workstream list.
 
 `?` toggles an expanded shortcut reference at the bottom of the Ratatui
 navigator pane. The reference is page-specific and single-column, with one
@@ -247,10 +248,11 @@ page; either key otherwise switches directly to its management page. Projects
 does not start Workstreams: it only registers and removes Project locations,
 so `n` always means a new Workstream from the operational home. Project
 locations, Host health, and observer state render inline in their respective
-lists, so those pages have no detail drill-down. A thin `Workstreams` parent frame above the
-bordered Projects or Hosts child block makes that hierarchy visible without a
-dashboard or a global tab row. Project actions remain explicit page-local keys,
-as do Host actions.
+lists, so those pages have no detail drill-down. A thin `Workstreams · <view>`
+parent frame above the bordered Projects or Hosts child block retains the
+current operational view and makes that hierarchy visible without a dashboard
+or a global tab row. Project actions remain explicit page-local keys, as do
+Host actions.
 No page creates a tmux popup, overlays the provider pane, or replaces the
 native TUI.
 

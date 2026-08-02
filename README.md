@@ -40,7 +40,9 @@ ordinary Git tooling inside the native session when a task needs them.
 ## See it
 
 The compact navigator remains a supporting surface; the adjacent native Codex
-pane keeps terminal focus and remains the place work happens.
+pane keeps terminal focus and remains the place work happens. The tour uses the
+normal 141×60 presentation split: 32 columns for navigation, one divider, and
+the remaining 108 columns for Codex.
 
 ![Animated native-workflow tour](docs/media/workstream-tour.gif)
 

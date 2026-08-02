@@ -29,16 +29,19 @@ use wsnav::{
     protocol::ObserverStatus,
 };
 
-const NAVIGATOR_WIDTH: u16 = 42;
-const NAVIGATOR_HEIGHT: u16 = 18;
-const PROVIDER_WIDTH: u16 = 73;
+/// The normal presentation is a 141-column terminal with the navigator held
+/// to its deliberate 32-column tmux pane.  Keep the documentation captures at
+/// that shape so they demonstrate the usable product layout rather than a
+/// cropped illustration of the navigator alone.
+const TERMINAL_WIDTH: u16 = 141;
+const TERMINAL_HEIGHT: u16 = 60;
+const NAVIGATOR_WIDTH: u16 = 32;
+const PANE_DIVIDER_WIDTH: u16 = 1;
+const PROVIDER_WIDTH: u16 = TERMINAL_WIDTH - NAVIGATOR_WIDTH - PANE_DIVIDER_WIDTH;
 const CELL_WIDTH: u16 = 12;
 const CELL_HEIGHT: u16 = 21;
-const MARGIN: u16 = 18;
-const HEADER_HEIGHT: u16 = 42;
-const PANE_GUTTER: u16 = 24;
 const TERMINAL_BACKGROUND: &str = "#101418";
-const PROVIDER_BACKGROUND: &str = "#121820";
+const PROVIDER_BACKGROUND: &str = "#0b0f14";
 
 type CaptureResult<T> = Result<T, Box<dyn Error>>;
 
@@ -52,6 +55,7 @@ struct Capture<'a> {
 struct ProviderDemo<'a> {
     prompt: &'a str,
     response: &'a [&'a str],
+    activity: &'a [&'a str],
     footer: &'a str,
 }
 
@@ -60,7 +64,7 @@ fn main() -> CaptureResult<()> {
     fs::create_dir_all(&output_root)?;
 
     for capture in captures() {
-        let mut terminal = Terminal::new(TestBackend::new(NAVIGATOR_WIDTH, NAVIGATOR_HEIGHT))?;
+        let mut terminal = Terminal::new(TestBackend::new(NAVIGATOR_WIDTH, TERMINAL_HEIGHT))?;
         let mut view = NavigatorView::new(capture.snapshot.clone());
         terminal.draw(|frame| view.render(frame))?;
         write_full_svg(
@@ -85,6 +89,10 @@ fn captures() -> Vec<Capture<'static>> {
                     "I’ll keep the navigator narrow and leave this native pane",
                     "directly interactive while I work through the presentation.",
                 ],
+                activity: &[
+                    "• Ran wsnav status",
+                    "  Navigator layout is ready for the next native action.",
+                ],
                 footer: "Ready · example workspace · Context 14% used",
             },
         },
@@ -98,6 +106,10 @@ fn captures() -> Vec<Capture<'static>> {
                     "This independent Workstream begins from the last completed",
                     "native turn. The source can keep running without interruption.",
                 ],
+                activity: &[
+                    "• Created the alternate native thread from the settled turn",
+                    "  The original Workstream remains independently active.",
+                ],
                 footer: "Ready · example workspace · Context 4% used",
             },
         },
@@ -110,6 +122,10 @@ fn captures() -> Vec<Capture<'static>> {
                 response: &[
                     "The exact native thread resumes with its visible result and",
                     "history intact. WSNav never reconstructs a transcript pane.",
+                ],
+                activity: &[
+                    "• Resumed the parked native thread in this provider pane",
+                    "  The completed result remains visible until the next action.",
                 ],
                 footer: "Ready · example workspace · Context 18% used",
             },
@@ -306,35 +322,37 @@ fn now_millis() -> i64 {
 fn write_full_svg(path: &Path, buffer: &Buffer, capture: &Capture<'_>) -> CaptureResult<()> {
     let navigator_width = NAVIGATOR_WIDTH * CELL_WIDTH;
     let provider_width = PROVIDER_WIDTH * CELL_WIDTH;
-    let content_height = NAVIGATOR_HEIGHT * CELL_HEIGHT;
-    let navigator_x = MARGIN;
-    let navigator_y = MARGIN + HEADER_HEIGHT;
-    let provider_x = navigator_x + navigator_width + PANE_GUTTER;
-    let canvas_width = provider_x + provider_width + MARGIN;
-    let canvas_height = navigator_y + content_height + MARGIN;
+    let content_height = TERMINAL_HEIGHT * CELL_HEIGHT;
+    let divider_width = PANE_DIVIDER_WIDTH * CELL_WIDTH;
+    let navigator_x = 0;
+    let navigator_y = 0;
+    let divider_x = navigator_width;
+    let provider_x = navigator_width + divider_width;
+    let canvas_width = TERMINAL_WIDTH * CELL_WIDTH;
+    let canvas_height = content_height;
     let mut svg = format!(
-        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{canvas_width}\" height=\"{canvas_height}\" viewBox=\"0 0 {canvas_width} {canvas_height}\" role=\"img\" aria-label=\"Workstream Navigator two-pane tour\">\n<rect width=\"100%\" height=\"100%\" rx=\"14\" fill=\"{TERMINAL_BACKGROUND}\"/>\n"
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{canvas_width}\" height=\"{canvas_height}\" viewBox=\"0 0 {canvas_width} {canvas_height}\" role=\"img\" aria-label=\"Workstream Navigator in a 141 by 60 terminal\">\n<rect width=\"100%\" height=\"100%\" fill=\"{TERMINAL_BACKGROUND}\"/>\n"
     );
 
-    write_text(
-        &mut svg,
-        navigator_x,
-        29,
-        "Workstream Navigator",
-        "#e5e7eb",
-        18,
-        true,
-    )?;
-    write_text(&mut svg, provider_x, 29, capture.step, "#60a5fa", 16, false)?;
     writeln!(
         svg,
         "<rect x=\"{provider_x}\" y=\"{navigator_y}\" width=\"{provider_width}\" height=\"{content_height}\" fill=\"{PROVIDER_BACKGROUND}\"/>"
     )?;
-    let divider_x = provider_x - PANE_GUTTER / 2;
     writeln!(
         svg,
-        "<line x1=\"{divider_x}\" y1=\"{navigator_y}\" x2=\"{divider_x}\" y2=\"{}\" stroke=\"#334155\" stroke-width=\"2\"/>",
-        navigator_y + content_height
+        "<rect x=\"{divider_x}\" y=\"0\" width=\"{divider_width}\" height=\"{content_height}\" fill=\"#1b222c\"/>\n<line x1=\"{}\" y1=\"0\" x2=\"{}\" y2=\"{content_height}\" stroke=\"#475569\" stroke-width=\"1\"/>",
+        divider_x + divider_width / 2,
+        divider_x + divider_width / 2,
+    )?;
+    let step_x = provider_x + provider_width - 35 * CELL_WIDTH;
+    write_text(
+        &mut svg,
+        step_x,
+        CELL_HEIGHT - 5,
+        capture.step,
+        "#60a5fa",
+        14,
+        false,
     )?;
 
     write_buffer(&mut svg, buffer, navigator_x, navigator_y)?;
@@ -356,7 +374,7 @@ fn write_buffer(
     origin_x: u16,
     origin_y: u16,
 ) -> CaptureResult<()> {
-    for y in 0..NAVIGATOR_HEIGHT {
+    for y in 0..TERMINAL_HEIGHT {
         for x in 0..NAVIGATOR_WIDTH {
             let cell = &buffer[(x, y)];
             let pixel_x = origin_x + x * CELL_WIDTH;
@@ -386,12 +404,76 @@ fn write_provider_demo(
     provider_width: u16,
     provider: &ProviderDemo<'_>,
 ) -> CaptureResult<()> {
-    let text_x = provider_x + 28;
+    let text_x = provider_x + 2 * CELL_WIDTH;
+    let row_y = |row: u16| provider_y + row * CELL_HEIGHT + 16;
+    write_provider_header(svg, text_x, provider_x, provider_y, provider_width)?;
+    write_text(svg, text_x, row_y(10), "›", "#60a5fa", 22, true)?;
+    write_text(
+        svg,
+        text_x + 2 * CELL_WIDTH,
+        row_y(10),
+        provider.prompt,
+        "#f8fafc",
+        17,
+        false,
+    )?;
+    let mut response_row = 13;
+    for &line in provider.response {
+        write_text(svg, text_x, row_y(response_row), line, "#cbd5e1", 17, false)?;
+        response_row += 2;
+    }
+    response_row += 2;
+    for &line in provider.activity {
+        let color = if line.starts_with('•') {
+            "#60a5fa"
+        } else {
+            "#aab5c4"
+        };
+        write_text(svg, text_x, row_y(response_row), line, color, 16, false)?;
+        response_row += 2;
+    }
     write_text(
         svg,
         text_x,
-        provider_y + 35,
-        "OpenAI Codex · privacy-safe demonstration",
+        row_y(45),
+        "The native terminal remains the working surface.",
+        "#64748b",
+        15,
+        false,
+    )?;
+    write_text(svg, text_x, row_y(52), "›", "#60a5fa", 22, true)?;
+    write_text(
+        svg,
+        text_x + 2 * CELL_WIDTH,
+        row_y(52),
+        "Continue in the native Codex terminal…",
+        "#64748b",
+        17,
+        false,
+    )?;
+    write_provider_footer(
+        svg,
+        text_x,
+        provider_x,
+        provider_y,
+        provider_width,
+        provider.footer,
+    )
+}
+
+fn write_provider_header(
+    svg: &mut String,
+    text_x: u16,
+    provider_x: u16,
+    provider_y: u16,
+    provider_width: u16,
+) -> CaptureResult<()> {
+    let row_y = |row: u16| provider_y + row * CELL_HEIGHT + 16;
+    write_text(
+        svg,
+        text_x,
+        row_y(1),
+        "OpenAI Codex (demonstration)",
         "#f8fafc",
         18,
         true,
@@ -399,8 +481,26 @@ fn write_provider_demo(
     write_text(
         svg,
         text_x,
-        provider_y + 68,
-        "model: gpt-5.6-sol    directory: example workspace",
+        row_y(3),
+        "model:       gpt-5.6-sol xhigh    /model to change",
+        "#aab5c4",
+        15,
+        false,
+    )?;
+    write_text(
+        svg,
+        text_x,
+        row_y(4),
+        "directory:   example workspace",
+        "#aab5c4",
+        15,
+        false,
+    )?;
+    write_text(
+        svg,
+        text_x,
+        row_y(5),
+        "permissions: workspace-write",
         "#aab5c4",
         15,
         false,
@@ -408,32 +508,29 @@ fn write_provider_demo(
     writeln!(
         svg,
         "<line x1=\"{text_x}\" y1=\"{}\" x2=\"{}\" y2=\"{}\" stroke=\"#334155\"/>",
-        provider_y + 88,
-        provider_x + provider_width - 28,
-        provider_y + 88
+        provider_y + 7 * CELL_HEIGHT,
+        provider_x + provider_width - 2 * CELL_WIDTH,
+        provider_y + 7 * CELL_HEIGHT,
     )?;
-    write_text(svg, text_x, provider_y + 126, "›", "#60a5fa", 22, true)?;
-    write_text(
-        svg,
-        text_x + 24,
-        provider_y + 126,
-        provider.prompt,
-        "#f8fafc",
-        17,
-        false,
-    )?;
-    let mut response_y = provider_y + 180;
-    for &line in provider.response {
-        write_text(svg, text_x, response_y, line, "#cbd5e1", 17, false)?;
-        response_y += 28;
-    }
-    let footer_y = provider_y + NAVIGATOR_HEIGHT * CELL_HEIGHT - 42;
+    Ok(())
+}
+
+fn write_provider_footer(
+    svg: &mut String,
+    text_x: u16,
+    provider_x: u16,
+    provider_y: u16,
+    provider_width: u16,
+    footer: &str,
+) -> CaptureResult<()> {
+    let row_y = |row: u16| provider_y + row * CELL_HEIGHT + 16;
+    let footer_y = provider_y + (TERMINAL_HEIGHT - 2) * CELL_HEIGHT;
     writeln!(
         svg,
-        "<rect x=\"{provider_x}\" y=\"{}\" width=\"{provider_width}\" height=\"42\" fill=\"#0f172a\"/>",
-        footer_y - 28
+        "<rect x=\"{provider_x}\" y=\"{footer_y}\" width=\"{provider_width}\" height=\"{}\" fill=\"#111827\"/>",
+        2 * CELL_HEIGHT,
     )?;
-    write_text(svg, text_x, footer_y, provider.footer, "#94a3b8", 15, false)?;
+    write_text(svg, text_x, row_y(59), footer, "#94a3b8", 15, false)?;
     Ok(())
 }
 

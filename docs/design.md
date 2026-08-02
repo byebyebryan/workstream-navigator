@@ -208,13 +208,17 @@ there. The box never replaces the controls below it. The key strip keeps
 single-key terminal actions first-class and wraps only at complete action
 boundaries into at most two compact lines. It never lets terminal wrapping mix
 two bindings. On a terminal too short to preserve useful content, the strip
-collapses to `? keys`.
+collapses to `? keys`. It lists only distinctive actions: ordinary
+Enter/Esc behavior remains native terminal convention rather than consuming
+permanent hint space. Related actions remain adjacent in each page's strip.
 
 `?` toggles an expanded shortcut reference at the bottom of the Ratatui
-navigator pane. The reference is page-specific and single-column, with one key
-or mouse gesture per line. It scrolls if it exceeds the available height rather
-than pairing or wrapping entries into each other. `?`, `Esc`, or `q` collapses
-it. This is not a tmux popup, window, centered overlay, or provider overlay.
+navigator pane. The reference is page-specific and single-column, with one
+keyboard action per line. It omits mouse and self-closing reminders so ordinary
+pages fit without scrolling at the standard navigator height. It still scrolls
+if a terminal is unusually short rather than pairing or wrapping entries into
+each other. `?`, `Esc`, or `q` collapses it. This is not a tmux popup, window,
+centered overlay, or provider overlay.
 While expanded, all other navigator keyboard and mouse actions are inert, so
 help cannot accidentally activate or mutate a Workstream.
 

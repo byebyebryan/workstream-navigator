@@ -2596,19 +2596,12 @@ impl NavigatorView {
     }
 
     fn compact_bindings(&self) -> Vec<(&'static str, &'static str)> {
-        if let Some(detail) = &self.detail {
-            let enter = if matches!(detail, NavigatorDetail::ForkRecovery { .. }) {
-                "reconcile"
-            } else {
-                "back"
-            };
-            let mut bindings = vec![("Enter", enter), ("Esc", "back")];
-            bindings.push(("?", "keys"));
-            return bindings;
+        if self.detail.is_some() {
+            return vec![("?", "keys")];
         }
         match self.page {
             NavigatorPage::Workstreams => {
-                let mut bindings = vec![("v", "view"), ("Enter", "open"), ("i", "status")];
+                let mut bindings = vec![("v", "view"), ("s", "scope")];
                 match self.workstream_scope {
                     WorkstreamScope::Active => bindings.extend([
                         (
@@ -2622,29 +2615,27 @@ impl NavigatorView {
                         ("f", "fork"),
                         ("p", "park"),
                         ("r", "rename"),
-                        ("x", "archive"),
                         ("a", "ack"),
+                        ("x", "archive"),
                     ]),
                     WorkstreamScope::Archived => bindings.push(("u", "restore")),
                 }
-                bindings.extend([("s", "scope"), ("?", "keys")]);
+                bindings.extend([("i", "status"), ("?", "keys")]);
                 bindings
             }
             NavigatorPage::Projects => vec![
                 ("a", "add"),
                 ("x", "remove"),
                 (",", "workstreams"),
-                ("Esc", "workstreams"),
                 (".", "hosts"),
                 ("?", "keys"),
             ],
             NavigatorPage::Hosts => vec![
                 ("a", "add"),
-                ("r", "root"),
                 ("x", "remove"),
-                (".", "workstreams"),
-                ("Esc", "workstreams"),
+                ("r", "root"),
                 (",", "projects"),
+                (".", "workstreams"),
                 ("?", "keys"),
             ],
         }
@@ -3219,25 +3210,6 @@ fn help_lines(
         }
         lines.extend(page_lines);
     }
-    lines.extend([
-        Line::raw(""),
-        Line::from(Span::styled("Mouse", heading)),
-        Line::raw("click a row to select and focus the navigator"),
-        Line::raw("click empty navigator space to focus it"),
-        Line::raw(""),
-        Line::from(vec![
-            Span::styled("?", key),
-            Span::raw("          close keys"),
-        ]),
-        Line::from(vec![
-            Span::styled("Esc", key),
-            Span::raw("        close keys"),
-        ]),
-        Line::from(vec![
-            Span::styled("q", key),
-            Span::raw("          close keys"),
-        ]),
-    ]);
     lines
 }
 
@@ -6557,10 +6529,11 @@ mod tests {
         .into_iter()
         .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
         .collect::<String>();
-        assert!(full_help.contains("click a row to select"));
         assert!(full_help.contains("cycle recent/project/host"));
         assert!(!full_help.contains("recover an unresolved"));
-        assert!(full_help.contains("close keys"));
+        assert!(!full_help.contains("Mouse"));
+        assert!(!full_help.contains("click a row to select"));
+        assert!(!full_help.contains("close keys"));
         assert!(!rendered.contains("provider pane"));
     }
 
@@ -6994,17 +6967,28 @@ mod tests {
     }
 
     #[test]
-    fn compact_and_expanded_controls_preserve_terminal_key_memory() {
+    fn compact_workstream_controls_preserve_terminal_key_memory() {
         let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
-        let compact = view
-            .compact_key_lines(80)
-            .into_iter()
-            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
-            .collect::<String>();
+        let compact = compact_keys(&view);
         assert!(compact.contains("v view"));
-        assert!(compact.contains("Enter open"));
+        assert!(compact.contains("s scope"));
         assert!(compact.contains("n register"));
         assert!(compact.contains("? keys"));
+        assert!(!compact.contains("Enter"));
+        assert!(!compact.contains("Esc"));
+        assert_bindings_in_order(
+            &compact,
+            &[
+                "v view",
+                "s scope",
+                "n register",
+                "f fork",
+                "p park",
+                "r rename",
+                "a ack",
+                "x archive",
+            ],
+        );
         assert!(!compact.contains("No Workstreams"));
         assert_eq!(
             view.footer_status(),
@@ -7014,17 +6998,23 @@ mod tests {
         view.cycle_workstream_scope();
         assert_eq!(view.workstream_title(), "Workstreams · Archived");
         view.cycle_workstream_scope();
+    }
 
+    #[test]
+    fn compact_management_controls_keep_related_actions_adjacent() {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
         view.select_page(NavigatorPage::Projects);
-        let project_compact = view
-            .compact_key_lines(80)
-            .into_iter()
-            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
-            .collect::<String>();
+        let project_compact = compact_keys(&view);
         assert!(project_compact.contains("a add"));
+        assert!(project_compact.contains("x remove"));
         assert!(project_compact.contains(", workstreams"));
-        assert!(project_compact.contains("Esc workstreams"));
         assert!(project_compact.contains(". hosts"));
+        assert!(!project_compact.contains("Enter"));
+        assert!(!project_compact.contains("Esc"));
+        assert_bindings_in_order(
+            &project_compact,
+            &["a add", "x remove", ", workstreams", ". hosts"],
+        );
         assert!(!project_compact.contains("n start"));
         assert!(!project_compact.contains("n new"));
 
@@ -7036,14 +7026,17 @@ mod tests {
         assert_eq!(view.page(), NavigatorPage::Workstreams);
 
         view.select_page(NavigatorPage::Hosts);
-        let host_compact = view
-            .compact_key_lines(80)
-            .into_iter()
-            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
-            .collect::<String>();
+        let host_compact = compact_keys(&view);
         assert!(host_compact.contains("a add"));
         assert!(host_compact.contains("x remove"));
+        assert!(host_compact.contains("r root"));
         assert!(!host_compact.contains("v verify"));
+        assert!(!host_compact.contains("Enter"));
+        assert!(!host_compact.contains("Esc"));
+        assert_bindings_in_order(
+            &host_compact,
+            &["a add", "x remove", "r root", ", projects", ". workstreams"],
+        );
 
         let host_help = help_lines(NavigatorPage::Hosts, false, false, WorkstreamScope::Active)
             .into_iter()
@@ -7051,7 +7044,11 @@ mod tests {
             .collect::<String>();
         assert!(host_help.contains("add, verify, and set up a remote SSH host"));
         assert!(host_help.contains("disconnect or offboard the selected remote Host"));
+    }
 
+    #[test]
+    fn expanded_controls_preserve_terminal_key_memory() {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
         let workstream_help = help_lines(
             NavigatorPage::Workstreams,
             false,
@@ -7115,7 +7112,7 @@ mod tests {
         assert!(rendered.contains("Status"));
         assert!(rendered.contains("an intentionally long"));
         assert!(rendered.contains("navigator action result"));
-        assert!(rendered.contains("Enter open"));
+        assert!(rendered.contains("v view"));
     }
 
     #[test]
@@ -7462,6 +7459,21 @@ mod tests {
             acknowledgement_revision(Some(&attention)),
             Some(attention.revision)
         );
+    }
+
+    fn assert_bindings_in_order(bindings: &str, expected: &[&str]) {
+        let positions = expected
+            .iter()
+            .map(|binding| bindings.find(binding).expect("expected compact binding"))
+            .collect::<Vec<_>>();
+        assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    fn compact_keys(view: &NavigatorView) -> String {
+        view.compact_key_lines(80)
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect()
     }
 
     fn row(

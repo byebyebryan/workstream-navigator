@@ -23,6 +23,18 @@ const MAX_TMUX_OUTPUT_BYTES: usize = 16 * 1024;
 const LAUNCH_BARRIER_FILE: &str = "launch.ready";
 const LAUNCH_BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
 const LAUNCH_BARRIER_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const RUNTIME_TMUX_CONFIG: &str = concat!(
+    "set -g status off\n",
+    "set -g mouse on\n",
+    "set -g default-terminal tmux-256color\n",
+    "set-environment -g COLORTERM truecolor\n",
+    // A Runtime is commonly attached through the presentation tmux server.
+    // Preserve RGB prompt styling and modified keys through that nested hop.
+    "set -g extended-keys always\n",
+    "set -g extended-keys-format csi-u\n",
+    "set -as terminal-features ',xterm-ghostty:RGB:extkeys'\n",
+    "set -as terminal-features ',tmux-256color:RGB:extkeys'\n",
+);
 
 /// A private runtime server's owned paths and stable tmux session name.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -529,8 +541,7 @@ fn create_private_runtime_directory(path: &Path) -> Result<(), RuntimeError> {
 }
 
 fn write_tmux_config(path: &Path) -> Result<(), RuntimeError> {
-    const CONFIG: &str = "set -g status off\nset -g mouse on\nset -g default-terminal tmux-256color\nset-environment -g COLORTERM truecolor\n";
-    fs::write(path, CONFIG).map_err(|source| RuntimeError::Io {
+    fs::write(path, RUNTIME_TMUX_CONFIG).map_err(|source| RuntimeError::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -844,6 +855,20 @@ mod tests {
                 "-t".to_owned(),
                 paths.session_name,
             ]
+        );
+    }
+
+    #[test]
+    fn runtime_config_preserves_ghostty_rgb_and_extended_keys() {
+        assert!(RUNTIME_TMUX_CONFIG.contains("set -g default-terminal tmux-256color"));
+        assert!(RUNTIME_TMUX_CONFIG.contains("set-environment -g COLORTERM truecolor"));
+        assert!(RUNTIME_TMUX_CONFIG.contains("set -g extended-keys always"));
+        assert!(RUNTIME_TMUX_CONFIG.contains("set -g extended-keys-format csi-u"));
+        assert!(
+            RUNTIME_TMUX_CONFIG.contains("set -as terminal-features ',xterm-ghostty:RGB:extkeys'")
+        );
+        assert!(
+            RUNTIME_TMUX_CONFIG.contains("set -as terminal-features ',tmux-256color:RGB:extkeys'")
         );
     }
 

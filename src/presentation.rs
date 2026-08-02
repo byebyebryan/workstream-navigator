@@ -27,7 +27,21 @@ const PREFERRED_PROVIDER_PANE_WIDTH: u16 = 96;
 const MAX_TMUX_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_ATTACHMENT_STATUS_BYTES: u64 = 4 * 1024;
 const ATTACHMENT_STATUS_FILE: &str = "attachment.json";
-const PRESENTATION_TMUX_CONFIG: &str = "set -g status off\nset -g mouse on\nset -g remain-on-exit on\nset -g default-terminal tmux-256color\nset-environment -g COLORTERM truecolor\nbind-key -n MouseUp1Pane select-pane -t = \\; send-keys -M\n";
+const PRESENTATION_TMUX_CONFIG: &str = concat!(
+    "set -g status off\n",
+    "set -g mouse on\n",
+    "set -g remain-on-exit on\n",
+    "set -g default-terminal tmux-256color\n",
+    "set-environment -g COLORTERM truecolor\n",
+    // The provider pane is a nested tmux client. Keep RGB styling and
+    // modified keys intact both from Ghostty into this presentation and from
+    // this presentation into the provider Runtime.
+    "set -g extended-keys always\n",
+    "set -g extended-keys-format csi-u\n",
+    "set -as terminal-features ',xterm-ghostty:RGB:extkeys'\n",
+    "set -as terminal-features ',tmux-256color:RGB:extkeys'\n",
+    "bind-key -n MouseUp1Pane select-pane -t = \\; send-keys -M\n",
+);
 
 /// Ephemeral provider-pane attempt metadata read only by the local navigator.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -841,6 +855,22 @@ mod tests {
         assert!(
             PRESENTATION_TMUX_CONFIG
                 .contains("bind-key -n MouseUp1Pane select-pane -t = \\; send-keys -M")
+        );
+    }
+
+    #[test]
+    fn presentation_config_preserves_ghostty_rgb_and_extended_keys() {
+        assert!(PRESENTATION_TMUX_CONFIG.contains("set -g default-terminal tmux-256color"));
+        assert!(PRESENTATION_TMUX_CONFIG.contains("set-environment -g COLORTERM truecolor"));
+        assert!(PRESENTATION_TMUX_CONFIG.contains("set -g extended-keys always"));
+        assert!(PRESENTATION_TMUX_CONFIG.contains("set -g extended-keys-format csi-u"));
+        assert!(
+            PRESENTATION_TMUX_CONFIG
+                .contains("set -as terminal-features ',xterm-ghostty:RGB:extkeys'")
+        );
+        assert!(
+            PRESENTATION_TMUX_CONFIG
+                .contains("set -as terminal-features ',tmux-256color:RGB:extkeys'")
         );
     }
 

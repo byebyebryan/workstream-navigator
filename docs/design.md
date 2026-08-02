@@ -238,8 +238,11 @@ Workstreams
 
 Workstreams is the default page and retains the product's ordinary switching
 workflow. Projects and Hosts are inventory/configuration pages, reached by
-their contextual `,` and `.` keys rather than a persistent tab bar. `Esc`
-returns from either management list to the ordinary Workstreams page. Project
+their contextual `,` and `.` keys rather than a persistent tab bar. Pressing
+the current page's key again, or `Esc`, returns to the ordinary Workstreams
+page; either key otherwise switches directly to its management page. Projects
+does not start Workstreams: it only registers and removes Project locations,
+so `n` always means a new Workstream from the operational home. Project
 locations, Host health, and observer state render inline in their respective
 lists, so those pages have no detail drill-down. A thin `Workstreams` parent frame above the
 bordered Projects or Hosts child block makes that hierarchy visible without a

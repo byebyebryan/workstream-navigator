@@ -991,10 +991,6 @@ enum NavigatorModal {
         hosts: Vec<NavigatorHost>,
         selected: usize,
     },
-    SelectProjectLocation {
-        locations: Vec<NavigatorProjectLocation>,
-        selected: usize,
-    },
     ProjectBrowser {
         host: NavigatorHost,
         directories: ProjectDirectoriesResponse,
@@ -1232,6 +1228,15 @@ impl NavigatorView {
         }
     }
 
+    fn toggle_management_page(&mut self, page: NavigatorPage) {
+        debug_assert_ne!(page, NavigatorPage::Workstreams);
+        self.select_page(if self.page == page {
+            NavigatorPage::Workstreams
+        } else {
+            page
+        });
+    }
+
     fn open_selected_detail(&mut self) {
         if self.page == NavigatorPage::Workstreams {
             self.detail = self
@@ -1338,29 +1343,6 @@ impl NavigatorView {
                 .then_with(|| left.project_id.cmp(&right.project_id))
         });
         projects
-    }
-
-    fn project_location_source(
-        &self,
-        project_id: ProjectId,
-        location_index: usize,
-    ) -> Option<NavigatorWorkstream> {
-        let location = self
-            .projects()
-            .into_iter()
-            .find(|project| project.project_id == project_id)?
-            .locations
-            .get(location_index)?
-            .clone();
-        self.snapshot
-            .workstreams
-            .iter()
-            .find(|workstream| {
-                workstream.project_id == project_id
-                    && workstream.location_id == location.location_id
-                    && workstream.host.alias() == location.host.alias()
-            })
-            .cloned()
     }
 
     fn select_project_for_workstream(
@@ -1861,13 +1843,6 @@ impl NavigatorView {
         self.modal = Some(NavigatorModal::SelectRegistrationHost { hosts, selected: 0 });
     }
 
-    fn begin_project_location_selection(&mut self, project: NavigatorProjectOverview) {
-        self.modal = Some(NavigatorModal::SelectProjectLocation {
-            locations: project.locations,
-            selected: 0,
-        });
-    }
-
     fn select_registration_host_next(&mut self) {
         let Some(NavigatorModal::SelectRegistrationHost { hosts, selected }) = self.modal.as_mut()
         else {
@@ -1885,32 +1860,6 @@ impl NavigatorView {
         };
         if !hosts.is_empty() {
             *selected = selected.checked_sub(1).unwrap_or(hosts.len() - 1);
-        }
-    }
-
-    fn select_project_location_next(&mut self) {
-        let Some(NavigatorModal::SelectProjectLocation {
-            locations,
-            selected,
-        }) = self.modal.as_mut()
-        else {
-            return;
-        };
-        if !locations.is_empty() {
-            *selected = (*selected + 1) % locations.len();
-        }
-    }
-
-    fn select_project_location_previous(&mut self) {
-        let Some(NavigatorModal::SelectProjectLocation {
-            locations,
-            selected,
-        }) = self.modal.as_mut()
-        else {
-            return;
-        };
-        if !locations.is_empty() {
-            *selected = selected.checked_sub(1).unwrap_or(locations.len() - 1);
         }
     }
 
@@ -2600,7 +2549,7 @@ impl NavigatorView {
         }
         match self.page {
             NavigatorPage::Workstreams => {
-                let mut bindings = vec![("Enter", "open"), ("i", "status")];
+                let mut bindings = vec![("v", "view"), ("Enter", "open"), ("i", "status")];
                 match self.workstream_scope {
                     WorkstreamScope::Active => bindings.extend([
                         (
@@ -2619,21 +2568,23 @@ impl NavigatorView {
                     ]),
                     WorkstreamScope::Archived => bindings.push(("u", "restore")),
                 }
-                bindings.extend([("s", "scope"), ("v", "view"), ("?", "keys")]);
-                bindings.insert(2, ("o", "recovery"));
+                bindings.extend([("s", "scope"), ("?", "keys")]);
+                bindings.insert(3, ("o", "recovery"));
                 bindings
             }
             NavigatorPage::Projects => vec![
-                ("n", "start"),
                 ("a", "add"),
                 ("x", "remove"),
+                (",", "workstreams"),
                 ("Esc", "workstreams"),
                 (".", "hosts"),
                 ("?", "keys"),
             ],
             NavigatorPage::Hosts => vec![
                 ("a", "add"),
+                ("r", "root"),
                 ("x", "remove"),
+                (".", "workstreams"),
                 ("Esc", "workstreams"),
                 (",", "projects"),
                 ("?", "keys"),
@@ -2741,9 +2692,6 @@ fn navigator_modal_area(outer: Rect, modal: &NavigatorModal) -> Rect {
     });
     let desired_height = match modal {
         NavigatorModal::SelectRegistrationHost { hosts, .. } => hosts.len().saturating_add(4),
-        NavigatorModal::SelectProjectLocation { locations, .. } => {
-            locations.len().saturating_add(4)
-        }
         NavigatorModal::ProjectBrowser { directories, .. } => directories
             .entries
             .len()
@@ -2836,10 +2784,6 @@ fn navigator_modal_content(
         NavigatorModal::SelectRegistrationHost { hosts, selected } => {
             registration_host_picker_modal(hosts, selected, key)
         }
-        NavigatorModal::SelectProjectLocation {
-            locations,
-            selected,
-        } => project_location_picker_modal(locations, selected, key),
         NavigatorModal::ProjectBrowser {
             ref host,
             ref directories,
@@ -3072,42 +3016,6 @@ fn registration_host_picker_modal(
     (" Add Project · choose host ".to_owned(), lines)
 }
 
-fn project_location_picker_modal(
-    locations: Vec<NavigatorProjectLocation>,
-    selected: usize,
-    key: Style,
-) -> (String, Vec<Line<'static>>) {
-    let mut lines = vec![Line::raw("Choose where to start the new Workstream:")];
-    lines.extend(locations.into_iter().enumerate().map(|(index, location)| {
-        let marker = if index == selected { "> " } else { "  " };
-        Line::from(vec![
-            Span::styled(
-                marker,
-                if index == selected {
-                    key
-                } else {
-                    Style::default()
-                },
-            ),
-            Span::styled(
-                location.host.alias().to_owned(),
-                Style::default().fg(host_color(location.host.alias())),
-            ),
-            Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-            Span::styled(location.label, Style::default().fg(Color::Gray)),
-        ])
-    }));
-    lines.push(Line::from(vec![
-        Span::styled("↑/↓", key),
-        Span::raw(" choose   "),
-        Span::styled("Enter", key),
-        Span::raw(" start   "),
-        Span::styled("Esc", key),
-        Span::raw(" cancel"),
-    ]));
-    (" Start Workstream ".to_owned(), lines)
-}
-
 fn register_host_modal(value: &str, key: Style) -> (String, Vec<Line<'static>>) {
     (
         " Register remote host ".to_owned(),
@@ -3207,10 +3115,6 @@ fn help_lines(
         if page == NavigatorPage::Projects {
             page_lines.extend([
                 Line::from(vec![
-                    Span::styled("n", key),
-                    Span::raw("          start a new Workstream; choose a host when needed"),
-                ]),
-                Line::from(vec![
                     Span::styled("a", key),
                     Span::raw("          browse and add a Project"),
                 ]),
@@ -3264,6 +3168,10 @@ fn workstream_help_lines(scope: WorkstreamScope, heading: Style, key: Style) -> 
         Line::raw(""),
         Line::from(Span::styled("Workstreams", heading)),
         Line::from(vec![
+            Span::styled("v", key),
+            Span::raw("          cycle recent/project/host"),
+        ]),
+        Line::from(vec![
             Span::styled("Enter", key),
             Span::raw("      open, start, or recover"),
         ]),
@@ -3274,10 +3182,6 @@ fn workstream_help_lines(scope: WorkstreamScope, heading: Style, key: Style) -> 
         Line::from(vec![
             Span::styled("Tab", key),
             Span::raw("        focus native agent"),
-        ]),
-        Line::from(vec![
-            Span::styled("v", key),
-            Span::raw("          cycle recent/project/host"),
         ]),
         Line::from(vec![
             Span::styled("s", key),
@@ -4092,10 +3996,7 @@ fn handle_navigator_key(
     if workstreams && handle_workstream_action_key(key.code, root, presentation, remote, view) {
         return false;
     }
-    if !workstreams
-        && view.detail.is_none()
-        && handle_management_page_key(key.code, root, presentation, remote, view)
-    {
+    if !workstreams && view.detail.is_none() && handle_management_page_key(key.code, view) {
         return false;
     }
     match key.code {
@@ -4115,11 +4016,11 @@ fn handle_navigator_key(
             false
         }
         KeyCode::Char(',') => {
-            view.select_page(NavigatorPage::Projects);
+            view.toggle_management_page(NavigatorPage::Projects);
             false
         }
         KeyCode::Char('.') => {
-            view.select_page(NavigatorPage::Hosts);
+            view.toggle_management_page(NavigatorPage::Hosts);
             false
         }
         KeyCode::Char('v') if workstreams => {
@@ -4160,17 +4061,8 @@ fn handle_navigator_key(
     }
 }
 
-fn handle_management_page_key(
-    key: KeyCode,
-    root: &StateRoot,
-    presentation: &Presentation,
-    remote: &mut RemoteMonitor,
-    view: &mut NavigatorView,
-) -> bool {
+fn handle_management_page_key(key: KeyCode, view: &mut NavigatorView) -> bool {
     match (view.page(), key) {
-        (NavigatorPage::Projects, KeyCode::Char('n')) => {
-            create_workstream_from_selected_project(root, presentation, remote, view);
-        }
         (NavigatorPage::Projects, KeyCode::Char('a')) => view.begin_checkout_registration(),
         (NavigatorPage::Projects, KeyCode::Char('x')) => view.begin_project_forget(),
         (NavigatorPage::Hosts, KeyCode::Char('a')) => view.begin_host_registration(),
@@ -4277,7 +4169,6 @@ fn handle_navigator_modal_key(
             | NavigatorModal::SelectHostRemoval { .. }
             | NavigatorModal::ConfirmForgetProject { .. }
             | NavigatorModal::SelectRegistrationHost { .. }
-            | NavigatorModal::SelectProjectLocation { .. }
             | NavigatorModal::ProjectBrowser { .. },
         )
         | None => {}
@@ -4346,34 +4237,29 @@ fn handle_project_browser_modal_key(
 }
 
 fn handle_modal_picker_key(key: KeyCode, view: &mut NavigatorView) -> bool {
-    let picker = if matches!(
+    let registration_host = matches!(
         view.modal,
         Some(NavigatorModal::SelectRegistrationHost { .. })
-    ) {
-        0
-    } else if matches!(
-        view.modal,
-        Some(NavigatorModal::SelectProjectLocation { .. })
-    ) {
-        1
-    } else if matches!(view.modal, Some(NavigatorModal::SelectHostRemoval { .. })) {
-        2
-    } else {
+    );
+    let host_removal = matches!(view.modal, Some(NavigatorModal::SelectHostRemoval { .. }));
+    if !registration_host && !host_removal {
         return false;
-    };
+    }
     match key {
-        KeyCode::Down | KeyCode::Char('j') => match picker {
-            0 => view.select_registration_host_next(),
-            1 => view.select_project_location_next(),
-            2 => view.toggle_host_removal_mode(),
-            _ => unreachable!("picker discriminator must cover every picker modal"),
-        },
-        KeyCode::Up | KeyCode::Char('k') => match picker {
-            0 => view.select_registration_host_previous(),
-            1 => view.select_project_location_previous(),
-            2 => view.toggle_host_removal_mode(),
-            _ => unreachable!("picker discriminator must cover every picker modal"),
-        },
+        KeyCode::Down | KeyCode::Char('j') => {
+            if registration_host {
+                view.select_registration_host_next();
+            } else {
+                view.toggle_host_removal_mode();
+            }
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if registration_host {
+                view.select_registration_host_previous();
+            } else {
+                view.toggle_host_removal_mode();
+            }
+        }
         KeyCode::Enter => return false,
         _ => {}
     }
@@ -4423,41 +4309,6 @@ fn confirm_navigator_modal(
             } else {
                 view.set_message("no registered host is available for Project registration");
             }
-        }
-        Some(NavigatorModal::SelectProjectLocation {
-            locations,
-            selected,
-        }) => {
-            let Some(location) = locations.get(selected) else {
-                view.set_message("no ProjectLocation is selected");
-                return;
-            };
-            let Some(project_id) = view.selected_project else {
-                view.set_message("the selected Project is unavailable; refresh the navigator");
-                return;
-            };
-            let Some(location_index) = view
-                .projects()
-                .into_iter()
-                .find(|project| project.project_id == project_id)
-                .and_then(|project| {
-                    project.locations.iter().position(|candidate| {
-                        candidate.host.alias() == location.host.alias()
-                            && candidate.location_id == location.location_id
-                    })
-                })
-            else {
-                view.set_message("the selected ProjectLocation is unavailable; refresh this host");
-                return;
-            };
-            create_workstream_from_project_location(
-                root,
-                presentation,
-                remote,
-                view,
-                project_id,
-                location_index,
-            );
         }
         Some(NavigatorModal::ConfigureProjectBrowserRoot { host, value })
             if value.trim().is_empty() =>
@@ -4880,56 +4731,6 @@ fn create_workstream_selected(
         return;
     };
     create_workstream_from_source(root, presentation, remote, view, &source, action);
-}
-
-fn create_workstream_from_selected_project(
-    root: &StateRoot,
-    presentation: &Presentation,
-    remote: &mut RemoteMonitor,
-    view: &mut NavigatorView,
-) {
-    let Some(project) = view.selected_project.and_then(|project_id| {
-        view.projects()
-            .into_iter()
-            .find(|project| project.project_id == project_id)
-    }) else {
-        view.begin_checkout_registration();
-        return;
-    };
-    match project.locations.len() {
-        0 => view.set_message("this Project has no registered location"),
-        1 => create_workstream_from_project_location(
-            root,
-            presentation,
-            remote,
-            view,
-            project.project_id,
-            0,
-        ),
-        _ => view.begin_project_location_selection(project),
-    }
-}
-
-fn create_workstream_from_project_location(
-    root: &StateRoot,
-    presentation: &Presentation,
-    remote: &mut RemoteMonitor,
-    view: &mut NavigatorView,
-    project_id: ProjectId,
-    location_index: usize,
-) {
-    let Some(source) = view.project_location_source(project_id, location_index) else {
-        view.set_message("the selected ProjectLocation is unavailable; refresh this host");
-        return;
-    };
-    create_workstream_from_source(
-        root,
-        presentation,
-        remote,
-        view,
-        &source,
-        CreationAction::Independent,
-    );
 }
 
 fn create_workstream_from_source(
@@ -6872,7 +6673,7 @@ mod tests {
     }
 
     #[test]
-    fn project_tree_exposes_host_owned_locations_and_prompts_for_a_start_target() {
+    fn project_tree_exposes_host_owned_locations_without_start_actions() {
         let project_id = ProjectId::new();
         let local_location = LocationId::new();
         let remote_location = LocationId::new();
@@ -6927,28 +6728,6 @@ mod tests {
         assert_eq!(project.active_workstream_count, 1);
         assert_eq!(project.archived_workstream_count, 2);
         assert_eq!(project.locations.len(), 2);
-        assert_eq!(
-            view.project_location_source(project_id, 0)
-                .map(|source| source.workstream_id),
-            Some(local_active)
-        );
-        assert_eq!(
-            view.project_location_source(project_id, 1)
-                .map(|source| source.workstream_id),
-            Some(remote_archived)
-        );
-        view.begin_project_location_selection(project);
-        assert!(matches!(
-            view.modal,
-            Some(NavigatorModal::SelectProjectLocation { ref locations, selected: 0 })
-                if locations.len() == 2
-        ));
-        view.select_project_location_next();
-        assert!(matches!(
-            view.modal,
-            Some(NavigatorModal::SelectProjectLocation { selected: 1, .. })
-        ));
-        view.dismiss_modal();
 
         let mut terminal = Terminal::new(TestBackend::new(80, 14)).unwrap();
         terminal.draw(|frame| view.render(frame)).unwrap();
@@ -6968,7 +6747,7 @@ mod tests {
         assert!(rendered.contains("snap · remote checkout"));
         assert!(rendered.contains("├─"));
         assert!(rendered.contains("└─"));
-        assert!(rendered.contains("n start"));
+        assert!(!rendered.contains("n start"));
         assert!(!rendered.contains(&local_location.to_string()));
         assert!(!rendered.contains(&remote_location.to_string()));
     }
@@ -7029,6 +6808,7 @@ mod tests {
             .into_iter()
             .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
             .collect::<String>();
+        assert!(compact.contains("v view"));
         assert!(compact.contains("Enter open"));
         assert!(compact.contains("n register"));
         assert!(compact.contains("? keys"));
@@ -7048,11 +6828,19 @@ mod tests {
             .into_iter()
             .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
             .collect::<String>();
-        assert!(project_compact.contains("n start"));
         assert!(project_compact.contains("a add"));
+        assert!(project_compact.contains(", workstreams"));
         assert!(project_compact.contains("Esc workstreams"));
         assert!(project_compact.contains(". hosts"));
+        assert!(!project_compact.contains("n start"));
         assert!(!project_compact.contains("n new"));
+
+        view.toggle_management_page(NavigatorPage::Projects);
+        assert_eq!(view.page(), NavigatorPage::Workstreams);
+        view.toggle_management_page(NavigatorPage::Hosts);
+        assert_eq!(view.page(), NavigatorPage::Hosts);
+        view.toggle_management_page(NavigatorPage::Hosts);
+        assert_eq!(view.page(), NavigatorPage::Workstreams);
 
         view.select_page(NavigatorPage::Hosts);
         let host_compact = view

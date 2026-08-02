@@ -555,6 +555,7 @@ const REMOTE_FOCUSED_POLL_INTERVAL: Duration = Duration::from_millis(750);
 const REMOTE_INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 const REMOTE_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_NAVIGATOR_TEXT_INPUT_BYTES: usize = 4096;
+const PROJECT_BROWSER_VIEWPORT_ROWS: usize = 10;
 
 /// Non-durable client presentation state for bounded asynchronous SSH refresh.
 /// It retains the last accepted snapshot if a host becomes unavailable; an SSH
@@ -998,6 +999,7 @@ enum NavigatorModal {
         host: NavigatorHost,
         directories: ProjectDirectoriesResponse,
         selected: usize,
+        scroll: usize,
         filter: String,
     },
     ConfigureProjectBrowserRoot {
@@ -1916,6 +1918,7 @@ impl NavigatorView {
         let Some(NavigatorModal::ProjectBrowser {
             directories,
             selected,
+            scroll,
             filter,
             ..
         }) = self.modal.as_mut()
@@ -1925,15 +1928,18 @@ impl NavigatorView {
         let visible = project_browser_entry_indexes(directories, filter);
         if visible.is_empty() {
             *selected = 0;
+            *scroll = 0;
         } else if !visible.contains(selected) {
             *selected = visible[0];
         }
+        project_browser_scroll_to_selected(scroll, &visible, *selected);
     }
 
     fn select_project_browser_next(&mut self) {
         let Some(NavigatorModal::ProjectBrowser {
             directories,
             selected,
+            scroll,
             filter,
             ..
         }) = self.modal.as_mut()
@@ -1946,12 +1952,14 @@ impl NavigatorView {
         } else if let Some(first) = visible.first() {
             *selected = *first;
         }
+        project_browser_scroll_to_selected(scroll, &visible, *selected);
     }
 
     fn select_project_browser_previous(&mut self) {
         let Some(NavigatorModal::ProjectBrowser {
             directories,
             selected,
+            scroll,
             filter,
             ..
         }) = self.modal.as_mut()
@@ -1964,6 +1972,7 @@ impl NavigatorView {
         } else if let Some(last) = visible.last() {
             *selected = *last;
         }
+        project_browser_scroll_to_selected(scroll, &visible, *selected);
     }
 
     fn project_browser_selected_entry(
@@ -1974,6 +1983,7 @@ impl NavigatorView {
             directories,
             selected,
             filter,
+            ..
         } = self.modal.as_ref()?
         else {
             return None;
@@ -2687,7 +2697,8 @@ impl NavigatorView {
 
     fn render_modal(frame: &mut Frame<'_>, modal: NavigatorModal) {
         let area = navigator_modal_area(frame.area(), &modal);
-        let (title, lines) = navigator_modal_content(modal);
+        let (title, lines) =
+            navigator_modal_content(modal, usize::from(area.width.saturating_sub(2)));
         frame.render_widget(Clear, area);
         frame.render_widget(
             Paragraph::new(lines).wrap(Wrap { trim: false }).block(
@@ -2708,6 +2719,21 @@ impl NavigatorView {
     }
 }
 
+fn project_browser_scroll_to_selected(scroll: &mut usize, visible: &[usize], selected: usize) {
+    let Some(position) = visible.iter().position(|index| *index == selected) else {
+        *scroll = 0;
+        return;
+    };
+    *scroll = (*scroll).min(visible.len().saturating_sub(1));
+    if position < *scroll {
+        *scroll = position;
+    } else if position >= scroll.saturating_add(PROJECT_BROWSER_VIEWPORT_ROWS) {
+        *scroll = position
+            .saturating_add(1)
+            .saturating_sub(PROJECT_BROWSER_VIEWPORT_ROWS);
+    }
+}
+
 fn navigator_modal_area(outer: Rect, modal: &NavigatorModal) -> Rect {
     let width = outer.width.min(match modal {
         NavigatorModal::ProjectBrowser { .. } => 64,
@@ -2718,9 +2744,11 @@ fn navigator_modal_area(outer: Rect, modal: &NavigatorModal) -> Rect {
         NavigatorModal::SelectProjectLocation { locations, .. } => {
             locations.len().saturating_add(4)
         }
-        NavigatorModal::ProjectBrowser { directories, .. } => {
-            directories.entries.len().min(10).saturating_add(7)
-        }
+        NavigatorModal::ProjectBrowser { directories, .. } => directories
+            .entries
+            .len()
+            .min(PROJECT_BROWSER_VIEWPORT_ROWS)
+            .saturating_add(5),
         NavigatorModal::ConfirmArchive(_)
         | NavigatorModal::SelectHostRemoval { .. }
         | NavigatorModal::ConfirmForgetProject { .. }
@@ -2743,7 +2771,10 @@ fn navigator_modal_area(outer: Rect, modal: &NavigatorModal) -> Rect {
     )
 }
 
-fn navigator_modal_content(modal: NavigatorModal) -> (String, Vec<Line<'static>>) {
+fn navigator_modal_content(
+    modal: NavigatorModal,
+    content_width: usize,
+) -> (String, Vec<Line<'static>>) {
     let key = Style::default().fg(Color::Yellow);
     match modal {
         NavigatorModal::ConfirmArchive(workstream) => (
@@ -2813,36 +2844,57 @@ fn navigator_modal_content(modal: NavigatorModal) -> (String, Vec<Line<'static>>
             ref host,
             ref directories,
             selected,
+            scroll,
             ref filter,
-        } => project_browser_modal(host, directories, selected, filter, key),
-        NavigatorModal::ConfigureProjectBrowserRoot { host, value } => (
-            format!(" Project browser root · {} ", host.alias()),
-            vec![
-                Line::raw("Set the host-local root (for example ~/code):"),
-                Line::from(Span::styled(
-                    truncate_display(&value, 44),
-                    Style::default()
-                        .fg(Color::White)
-                        .add_modifier(Modifier::BOLD),
-                )),
-                Line::raw("Absolute paths remain on the selected host."),
-                Line::from(vec![
-                    Span::styled("Enter", key),
-                    Span::raw(" save   "),
-                    Span::styled("Esc", key),
-                    Span::raw(" cancel"),
-                ]),
-            ],
+        } => project_browser_modal(
+            host,
+            directories,
+            selected,
+            scroll,
+            filter,
+            content_width,
+            key,
         ),
+        NavigatorModal::ConfigureProjectBrowserRoot { host, value } => {
+            project_browser_root_modal(&host, &value, key)
+        }
         NavigatorModal::RegisterHost { value } => register_host_modal(&value, key),
     }
+}
+
+fn project_browser_root_modal(
+    host: &NavigatorHost,
+    value: &str,
+    key: Style,
+) -> (String, Vec<Line<'static>>) {
+    (
+        format!(" Project browser root · {} ", host.alias()),
+        vec![
+            Line::raw("Set the host-local root (for example ~/code):"),
+            Line::from(Span::styled(
+                truncate_display(value, 44),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::raw("Absolute paths remain on the selected host."),
+            Line::from(vec![
+                Span::styled("Enter", key),
+                Span::raw(" save   "),
+                Span::styled("Esc", key),
+                Span::raw(" cancel"),
+            ]),
+        ],
+    )
 }
 
 fn project_browser_modal(
     host: &NavigatorHost,
     directories: &ProjectDirectoriesResponse,
     selected: usize,
+    scroll: usize,
     filter: &str,
+    content_width: usize,
     key: Style,
 ) -> (String, Vec<Line<'static>>) {
     let visible = project_browser_entry_indexes(directories, filter);
@@ -2851,21 +2903,26 @@ fn project_browser_modal(
     } else {
         format!("{}/{}", directories.root_label, directories.relative_path)
     };
+    let entry_width = content_width.saturating_sub(4).max(1);
     let mut lines = vec![
         Line::from(Span::styled(
-            truncate_display(&cursor, 56),
+            truncate_display(&cursor, content_width),
             Style::default().fg(Color::Cyan),
         )),
         Line::raw(if filter.is_empty() {
-            "Enter opens a folder or registers a Git Project · r adds this folder".to_owned()
+            format!("{} folders", visible.len())
         } else {
-            format!("Filter: {filter}")
+            truncate_display(&format!("Filter: {filter}"), content_width)
         }),
     ];
     if visible.is_empty() {
         lines.push(Line::raw("  no matching folders"));
     } else {
-        for index in visible.into_iter().take(10) {
+        for index in visible
+            .into_iter()
+            .skip(scroll)
+            .take(PROJECT_BROWSER_VIEWPORT_ROWS)
+        {
             let entry = &directories.entries[index];
             let marker = if index == selected { "> " } else { "  " };
             let git = if entry.is_git_repository { " ✓" } else { "" };
@@ -2879,7 +2936,7 @@ fn project_browser_modal(
                     },
                 ),
                 Span::styled(
-                    truncate_display(&entry.name, 48),
+                    truncate_display(&entry.name, entry_width),
                     if index == selected {
                         Style::default()
                             .fg(Color::White)
@@ -2892,16 +2949,10 @@ fn project_browser_modal(
             ]));
         }
     }
-    lines.push(Line::from(vec![
-        Span::styled("↑/↓", key),
-        Span::raw(" select  "),
-        Span::styled("h", key),
-        Span::raw(" parent  "),
-        Span::styled("r", key),
-        Span::raw(" add  "),
-        Span::styled("Esc", key),
-        Span::raw(" cancel"),
-    ]));
+    lines.push(Line::from(Span::styled(
+        truncate_display("Enter open/add · r add · h up", content_width),
+        key,
+    )));
     (format!(" Add Project · {} ", host.alias()), lines)
 }
 
@@ -4935,6 +4986,7 @@ fn open_project_browser(
                 host,
                 directories,
                 selected: 0,
+                scroll: 0,
                 filter: String::new(),
             });
             view.normalize_project_browser_selection();
@@ -5644,6 +5696,7 @@ mod tests {
                 }],
             },
             selected: 0,
+            scroll: 0,
             filter: String::new(),
         });
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
@@ -5663,6 +5716,51 @@ mod tests {
         assert!(rendered.contains("switchboard"));
         assert!(!rendered.contains("/private/checkout"));
         assert!(!rendered.contains("provider pane"));
+    }
+
+    #[test]
+    fn project_browser_keeps_the_selected_directory_inside_its_viewport() {
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: Vec::new(),
+            hosts: Vec::new(),
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
+        });
+        view.modal = Some(NavigatorModal::ProjectBrowser {
+            host: NavigatorHost::Local,
+            directories: ProjectDirectoriesResponse {
+                root_label: "~/code".to_owned(),
+                relative_path: String::new(),
+                entries: (0..12)
+                    .map(|index| ProjectDirectoryEntry {
+                        name: format!("project-{index:02}"),
+                        is_git_repository: false,
+                    })
+                    .collect(),
+            },
+            selected: 0,
+            scroll: 0,
+            filter: String::new(),
+        });
+        for _ in 0..10 {
+            view.select_project_browser_next();
+        }
+
+        let Some(NavigatorModal::ProjectBrowser {
+            selected, scroll, ..
+        }) = view.modal.as_ref()
+        else {
+            panic!("project browser should remain open");
+        };
+        assert_eq!((*selected, *scroll), (10, 1));
+        let (_, lines) = navigator_modal_content(view.modal.clone().unwrap(), 30);
+        let rendered = lines
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect::<String>();
+        assert!(rendered.contains("> project-10"));
+        assert!(!rendered.contains("project-00"));
     }
 
     #[test]
@@ -6725,7 +6823,7 @@ mod tests {
             Some(NavigatorModal::SelectHostRemoval { offboard: true, .. })
         ));
 
-        let (_, lines) = navigator_modal_content(view.modal.clone().unwrap());
+        let (_, lines) = navigator_modal_content(view.modal.clone().unwrap(), 30);
         let rendered = lines
             .into_iter()
             .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))

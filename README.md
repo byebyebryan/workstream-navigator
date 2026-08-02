@@ -25,10 +25,12 @@ archive/restore, recovery, Project registration, and guarded SSH host
 onboarding/offboarding are all available without leaving the navigator. The
 current project-root-only correction removes WSNav-owned Git worktree and
 branch lifecycle: independent and forked sessions both start at the registered
-Project root, while Codex or the user manages any task worktree. This clean
-break uses host schema 8; state from the retired worktree-managed design must
-be explicitly reset and Projects re-registered. The Rust implementation does
-not preserve compatibility with the earlier Python prototype.
+Project root, while Codex or the user manages any task worktree. That clean
+break used host schema 8; state from the retired worktree-managed design must
+be explicitly reset and Projects re-registered. The current schema 9 adds only
+the host-private Project-browser root and migrates cleanly from schema 8. The
+Rust implementation does not preserve compatibility with the earlier Python
+prototype.
 
 The frozen prototype remains available as implementation evidence in
 [agent-switchboard-python-reference][].
@@ -115,8 +117,12 @@ Profile updates deliberately refuse to run while a managed Runtime is live.
 The first `wsnav` on a host activates and reviews its observer; it does not
 infer or register the current directory. After native approval, use the
 Projects page (`,`) and `a` to add the Git project you want WSNav to use.
-The navigator asks for the host and project path without sending management
-text to a provider pane:
+Choose the owning host, then choose the directory from that host's
+navigator-only browser. It starts at `~/code` by default; use the Hosts page
+(`.`) and `r` to set a different host-local browser root. The navigator receives
+only a safe root label, relative cursor, and directory names—the selected host
+resolves and registers the actual path without sending management text to a
+provider pane:
 
 ```console
 # approve the exact hook entries in the native right pane, then use Projects → a
@@ -222,7 +228,7 @@ probe leaves cached remote rows visible but disables their actions until the
 operator resolves the installation. The Hosts page distinguishes a matching
 build from a bounded problem such as SSH/`wsnav` unavailable, timeout, malformed
 probe, or explicit ABI/protocol/schema mismatch (for example,
-`protocol 13 ≠ 14`); it does not expose raw SSH output or paths.
+`protocol 14 ≠ 15`); it does not expose raw SSH output or paths.
 
 For a nonstandard SSH destination or executable path, keep the same short
 command and supply only the difference:

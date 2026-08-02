@@ -20,7 +20,8 @@ use crate::build_info::BuildInfo;
 use crate::domain::{RuntimeId, WorkstreamId};
 use crate::protocol::{
     HelloResponse, HostAction, HostRequest, HostResponse, MAX_FRAME_BYTES, MAX_SNAPSHOT_PAGES,
-    ObserverStatus, OperationsResponse, RequestEnvelope, ResponseEnvelope, SnapshotResponse,
+    ObserverStatus, OperationsResponse, ProjectDirectoriesResponse, RequestEnvelope,
+    ResponseEnvelope, SnapshotResponse,
 };
 
 const MAX_STDERR_BYTES: usize = 4096;
@@ -320,6 +321,40 @@ impl<R: CommandRunner> HostClient<R> {
         self.operations(&local_invocation(endpoint, &operations_request()?))
     }
 
+    /// Lists one bounded page of host-private project browser entries through
+    /// SSH. The response contains no absolute checkout paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for transport/protocol failure, host rejection, or an
+    /// unexpected response type.
+    pub fn project_directories_ssh(
+        &self,
+        endpoint: &SshEndpoint,
+        relative_path: &str,
+    ) -> Result<ProjectDirectoriesResponse, TransportError> {
+        self.project_directories(&ssh_invocation(
+            endpoint,
+            &project_directories_request(relative_path)?,
+        ))
+    }
+
+    /// Local-subprocess parity path for bounded project browser listing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error under the same bounds as [`Self::project_directories_ssh`].
+    pub fn project_directories_local(
+        &self,
+        endpoint: &LocalEndpoint,
+        relative_path: &str,
+    ) -> Result<ProjectDirectoriesResponse, TransportError> {
+        self.project_directories(&local_invocation(
+            endpoint,
+            &project_directories_request(relative_path)?,
+        ))
+    }
+
     /// Applies one explicitly revision-guarded action through SSH.
     ///
     /// # Errors
@@ -462,6 +497,17 @@ impl<R: CommandRunner> HostClient<R> {
         }
     }
 
+    fn project_directories(
+        &self,
+        invocation: &CommandInvocation,
+    ) -> Result<ProjectDirectoriesResponse, TransportError> {
+        match self.request(invocation)? {
+            HostResponse::ProjectDirectories(response) => Ok(response),
+            HostResponse::Rejected { diagnostic } => Err(TransportError::Rejected(diagnostic)),
+            _ => Err(TransportError::UnexpectedResponse),
+        }
+    }
+
     fn apply(&self, invocation: &CommandInvocation) -> Result<i64, TransportError> {
         match self.request(invocation)? {
             HostResponse::Applied { revision } => Ok(revision),
@@ -512,6 +558,17 @@ fn operations_request() -> Result<RequestEnvelope, TransportError> {
     let request = RequestEnvelope {
         version: crate::protocol::CURRENT_PROTOCOL_VERSION,
         request: HostRequest::Operations,
+    };
+    request.validate()?;
+    Ok(request)
+}
+
+fn project_directories_request(relative_path: &str) -> Result<RequestEnvelope, TransportError> {
+    let request = RequestEnvelope {
+        version: crate::protocol::CURRENT_PROTOCOL_VERSION,
+        request: HostRequest::ProjectDirectories {
+            relative_path: relative_path.to_owned(),
+        },
     };
     request.validate()?;
     Ok(request)

@@ -1,6 +1,6 @@
 use std::{
-    fs,
-    path::{Path, PathBuf},
+    env, fs,
+    path::{Component, Path, PathBuf},
 };
 
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -13,7 +13,10 @@ use crate::domain::{
     OperationId, OperationKind, OperationPhase, ProjectId, RandomIdGenerator, Revision, RuntimeId,
     RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle, WorkstreamOrigin,
 };
-use crate::protocol::{Capabilities, HelloResponse};
+use crate::protocol::{
+    Capabilities, HelloResponse, MAX_PROJECT_BROWSER_ENTRIES, ProjectDirectoriesResponse,
+    ProjectDirectoryEntry,
+};
 use crate::provider::codex::hooks::{HookObservation, LifecycleEvent};
 use crate::provider::codex::names::NameState;
 #[cfg(test)]
@@ -23,10 +26,13 @@ use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 /// The newest host-registry schema this build can open or create.
 ///
 /// This is safe release-probe metadata; it is not a host-state observation.
-pub const HOST_SCHEMA_VERSION: i64 = 8;
+pub const HOST_SCHEMA_VERSION: i64 = 9;
 const CLIENT_SCHEMA_VERSION: i64 = 4;
 const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
+const DEFAULT_PROJECT_BROWSER_ROOT: &str = "code";
+const MAX_PROJECT_BROWSER_ROOT_BYTES: usize = 4096;
+const MAX_PROJECT_BROWSER_RELATIVE_PATH_BYTES: usize = 1024;
 
 const HOST_SCHEMA_SQL: &str = "
     CREATE TABLE host_identity (
@@ -70,6 +76,11 @@ const HOST_SCHEMA_SQL: &str = "
         source_workstream_id TEXT NOT NULL REFERENCES workstreams(workstream_id),
         source_revision INTEGER NOT NULL CHECK (source_revision > 0),
         workstream_id TEXT NOT NULL UNIQUE REFERENCES workstreams(workstream_id)
+    );
+    CREATE TABLE project_browser_settings (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        root_path TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision > 0)
     );
     CREATE TABLE runtimes (
         runtime_id TEXT PRIMARY KEY,
@@ -543,6 +554,109 @@ impl HostRegistry {
         self.connection
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .map_err(StateError::Sqlite)
+    }
+
+    /// Lists bounded direct child directories beneath this host's configured
+    /// browser root. Paths stay host-private; the protocol receives only a
+    /// safe root label, a relative cursor, and child names.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the configured root is unavailable, the relative
+    /// cursor is unsafe, or a bounded directory read cannot complete.
+    pub fn project_directories(
+        &self,
+        relative_path: &str,
+    ) -> Result<ProjectDirectoriesResponse, StateError> {
+        let root = self.project_browser_root()?;
+        let current = self.project_browser_directory(relative_path)?;
+        let mut entries = fs::read_dir(&current)
+            .map_err(|_| StateError::ProjectBrowserRootUnavailable)?
+            .take(MAX_PROJECT_BROWSER_ENTRIES + 1)
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                if !safe_project_browser_entry_name(&name) {
+                    return None;
+                }
+                let path = fs::canonicalize(entry.path()).ok()?;
+                if !path.starts_with(&root) || !path.is_dir() {
+                    return None;
+                }
+                Some(ProjectDirectoryEntry {
+                    is_git_repository: path.join(".git").exists(),
+                    name,
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        entries.truncate(MAX_PROJECT_BROWSER_ENTRIES);
+        Ok(ProjectDirectoriesResponse {
+            root_label: project_browser_root_label(&root),
+            relative_path: relative_path.to_owned(),
+            entries,
+        })
+    }
+
+    /// Resolves one host-private browser cursor to a directory beneath the
+    /// configured root. This is deliberately not exposed through snapshots or
+    /// the control response: it exists only for local host-side registration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the root or the requested child is unavailable, or
+    /// if the cursor could escape the configured browser root.
+    pub fn project_browser_directory(&self, relative_path: &str) -> Result<PathBuf, StateError> {
+        validate_project_browser_relative_path(relative_path)?;
+        let root = self.project_browser_root()?;
+        project_browser_directory(&root, relative_path)
+    }
+
+    /// Sets this host's private project-browser root. `~/…` resolves only on
+    /// the selected host and no absolute path is returned through the protocol.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the supplied root is unsafe, unavailable, or cannot
+    /// be atomically persisted.
+    pub fn set_project_browser_root(&mut self, root_path: &str) -> Result<(), StateError> {
+        let root = resolve_project_browser_root(root_path)?;
+        let root = fs::canonicalize(root).map_err(|_| StateError::ProjectBrowserRootUnavailable)?;
+        if !root.is_dir() {
+            return Err(StateError::ProjectBrowserRootUnavailable);
+        }
+        let root = root.to_str().ok_or(StateError::InvalidProjectBrowserRoot)?;
+        self.connection
+            .execute(
+                "INSERT INTO project_browser_settings (singleton, root_path, revision)
+                 VALUES (1, ?1, 1)
+                 ON CONFLICT(singleton) DO UPDATE SET
+                   root_path = excluded.root_path,
+                   revision = project_browser_settings.revision + 1",
+                [root],
+            )
+            .map_err(StateError::Sqlite)?;
+        Ok(())
+    }
+
+    fn project_browser_root(&self) -> Result<PathBuf, StateError> {
+        let configured: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT root_path FROM project_browser_settings WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?;
+        let root = match configured {
+            Some(path) => PathBuf::from(path),
+            None => default_project_browser_root()?,
+        };
+        let root = fs::canonicalize(root).map_err(|_| StateError::ProjectBrowserRootUnavailable)?;
+        root.is_dir()
+            .then_some(root)
+            .ok_or(StateError::ProjectBrowserRootUnavailable)
     }
 
     /// Reads the single `wsnav-observer` ownership record, if it exists.
@@ -3440,6 +3554,28 @@ fn migrate_host_schema(connection: &mut Connection, _state_root: &Path) -> Resul
     if current == HOST_SCHEMA_VERSION {
         return Ok(());
     }
+    if current == 8 {
+        let transaction = connection.transaction().map_err(StateError::Sqlite)?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE project_browser_settings (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    root_path TEXT NOT NULL,
+                    revision INTEGER NOT NULL CHECK (revision > 0)
+                );",
+            )
+            .map_err(StateError::Sqlite)?;
+        transaction
+            .execute("PRAGMA user_version = 9", [])
+            .map_err(StateError::Sqlite)?;
+        transaction
+            .execute(
+                "UPDATE host_identity SET schema_version = 9 WHERE singleton = 1",
+                [],
+            )
+            .map_err(StateError::Sqlite)?;
+        return transaction.commit().map_err(StateError::Sqlite);
+    }
     if current != 0 {
         return Err(StateError::HostStateResetRequired(current));
     }
@@ -4392,6 +4528,93 @@ fn validate_client_host_text(name: &'static str, value: &str) -> Result<(), Stat
     Ok(())
 }
 
+fn default_project_browser_root() -> Result<PathBuf, StateError> {
+    let home = env::var_os("HOME").ok_or(StateError::ProjectBrowserRootUnavailable)?;
+    Ok(PathBuf::from(home).join(DEFAULT_PROJECT_BROWSER_ROOT))
+}
+
+fn resolve_project_browser_root(value: &str) -> Result<PathBuf, StateError> {
+    if value.is_empty()
+        || value.len() > MAX_PROJECT_BROWSER_ROOT_BYTES
+        || value.chars().any(char::is_control)
+    {
+        return Err(StateError::InvalidProjectBrowserRoot);
+    }
+    if value == "~" {
+        return env::var_os("HOME")
+            .map(PathBuf::from)
+            .ok_or(StateError::ProjectBrowserRootUnavailable);
+    }
+    if let Some(relative) = value.strip_prefix("~/") {
+        validate_project_browser_relative_path(relative)?;
+        let home = env::var_os("HOME").ok_or(StateError::ProjectBrowserRootUnavailable)?;
+        return Ok(PathBuf::from(home).join(relative));
+    }
+    let path = PathBuf::from(value);
+    path.is_absolute()
+        .then_some(path)
+        .ok_or(StateError::InvalidProjectBrowserRoot)
+}
+
+fn validate_project_browser_relative_path(value: &str) -> Result<(), StateError> {
+    if value.len() > MAX_PROJECT_BROWSER_RELATIVE_PATH_BYTES
+        || value.chars().any(char::is_control)
+        || value.contains('\\')
+        || value.starts_with('/')
+        || value.ends_with('/')
+    {
+        return Err(StateError::InvalidProjectBrowserRelativePath);
+    }
+    if !value.is_empty()
+        && Path::new(value)
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(StateError::InvalidProjectBrowserRelativePath);
+    }
+    Ok(())
+}
+
+fn project_browser_directory(root: &Path, relative_path: &str) -> Result<PathBuf, StateError> {
+    let current = fs::canonicalize(root.join(relative_path))
+        .map_err(|_| StateError::ProjectBrowserRootUnavailable)?;
+    if current.starts_with(root) && current.is_dir() {
+        Ok(current)
+    } else {
+        Err(StateError::InvalidProjectBrowserRelativePath)
+    }
+}
+
+fn safe_project_browser_entry_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 256
+        && !name.chars().any(char::is_control)
+        && !name.contains(['/', '\\'])
+        && !matches!(name, "." | "..")
+}
+
+fn project_browser_root_label(root: &Path) -> String {
+    let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
+        return root
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("project root")
+            .to_owned();
+    };
+    if let Ok(relative) = root.strip_prefix(home) {
+        if relative.as_os_str().is_empty() {
+            "~".to_owned()
+        } else {
+            format!("~/{}", relative.to_string_lossy())
+        }
+    } else {
+        root.file_name().and_then(|name| name.to_str()).map_or_else(
+            || "custom project root".to_owned(),
+            |name| format!("custom root · {name}"),
+        )
+    }
+}
+
 #[cfg(unix)]
 fn set_private_directory_permissions(path: &Path) -> Result<(), StateError> {
     use std::os::unix::fs::PermissionsExt;
@@ -4434,6 +4657,12 @@ pub enum StateError {
     InvalidRegistryField(&'static str),
     #[error("provider metadata is invalid")]
     InvalidProviderMetadata,
+    #[error("project browser root is invalid")]
+    InvalidProjectBrowserRoot,
+    #[error("project browser relative path is invalid")]
+    InvalidProjectBrowserRelativePath,
+    #[error("project browser root is unavailable")]
+    ProjectBrowserRootUnavailable,
     #[error("provider fork plan could not be encoded")]
     ForkPlanEncoding(serde_json::Error),
     #[error("provider fork plan is missing from its operation")]
@@ -4548,6 +4777,46 @@ mod tests {
         let root = StateRoot::create(temporary.path()).unwrap();
         let registry = HostRegistry::open(&root).unwrap();
         (temporary, registry)
+    }
+
+    #[test]
+    fn project_browser_lists_only_safe_directories_without_exposing_root_paths() {
+        let (temporary, mut registry) = registry();
+        let browser_root = temporary.path().join("projects");
+        let git_project = browser_root.join("navigator");
+        let ordinary_directory = browser_root.join("scratch");
+        fs::create_dir_all(git_project.join(".git")).unwrap();
+        fs::create_dir_all(&ordinary_directory).unwrap();
+        fs::write(browser_root.join("not-a-directory"), b"ignored").unwrap();
+        registry
+            .set_project_browser_root(&browser_root.to_string_lossy())
+            .unwrap();
+
+        let directories = registry.project_directories("").unwrap();
+
+        assert_eq!(directories.relative_path, "");
+        assert_eq!(directories.root_label, "custom root · projects");
+        assert!(
+            !directories
+                .root_label
+                .contains(&temporary.path().to_string_lossy().to_string())
+        );
+        assert_eq!(
+            directories
+                .entries
+                .iter()
+                .map(|entry| (entry.name.as_str(), entry.is_git_repository))
+                .collect::<Vec<_>>(),
+            vec![("navigator", true), ("scratch", false)]
+        );
+        assert!(matches!(
+            registry.project_browser_directory("../outside"),
+            Err(StateError::InvalidProjectBrowserRelativePath)
+        ));
+        assert_eq!(
+            registry.project_browser_directory("navigator").unwrap(),
+            fs::canonicalize(git_project).unwrap()
+        );
     }
 
     fn settled_runtime(registry: &mut HostRegistry, workstream_id: WorkstreamId) -> RuntimeRecord {
@@ -5034,6 +5303,34 @@ mod tests {
             HostRegistry::open(&root),
             Err(StateError::HostStateResetRequired(4))
         ));
+    }
+
+    #[test]
+    fn host_schema_eight_migrates_to_the_project_browser_schema() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let registry = HostRegistry::open(&root).unwrap();
+        drop(registry);
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE project_browser_settings;
+                 PRAGMA user_version = 8;
+                 UPDATE host_identity SET schema_version = 8 WHERE singleton = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let mut registry = HostRegistry::open(&root).unwrap();
+
+        assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
+        registry
+            .set_project_browser_root(&temporary.path().to_string_lossy())
+            .unwrap();
+        assert_eq!(
+            registry.project_browser_root().unwrap(),
+            fs::canonicalize(temporary.path()).unwrap()
+        );
     }
 
     #[test]

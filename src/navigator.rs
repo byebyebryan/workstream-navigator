@@ -41,7 +41,7 @@ use crate::{
     },
     presentation::{AttachmentPhase, AttachmentStatus, Presentation, PresentationError},
     process::{BoundedProcessError, output_bounded},
-    protocol::ObserverStatus,
+    protocol::{ObserverStatus, ProjectDirectoriesResponse, ProjectDirectoryEntry},
     provider::codex::names::{NameContext, resolve_name},
     runtime::{
         LinuxProcessProbe, PrivateRuntime, RuntimeError, RuntimePaths, RuntimeProbe, SystemTmux,
@@ -51,8 +51,8 @@ use crate::{
         HostRegistry, IntegrationLifecycle, StateError, StateRoot, WorkstreamOverview,
     },
     transport::{
-        HostClient, RemoteExecutable, SshDestination, SshEndpoint, SystemCommandRunner,
-        TransportError,
+        HostClient, LocalEndpoint, RemoteExecutable, SshDestination, SshEndpoint,
+        SystemCommandRunner, TransportError,
     },
 };
 
@@ -554,7 +554,7 @@ const REMOTE_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const REMOTE_FOCUSED_POLL_INTERVAL: Duration = Duration::from_millis(750);
 const REMOTE_INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 const REMOTE_MAX_BACKOFF: Duration = Duration::from_secs(30);
-const MAX_NAVIGATOR_CHECKOUT_PATH_BYTES: usize = 4096;
+const MAX_NAVIGATOR_TEXT_INPUT_BYTES: usize = 4096;
 
 /// Non-durable client presentation state for bounded asynchronous SSH refresh.
 /// It retains the last accepted snapshot if a host becomes unavailable; an SSH
@@ -994,7 +994,13 @@ enum NavigatorModal {
         locations: Vec<NavigatorProjectLocation>,
         selected: usize,
     },
-    RegisterCheckout {
+    ProjectBrowser {
+        host: NavigatorHost,
+        directories: ProjectDirectoriesResponse,
+        selected: usize,
+        filter: String,
+    },
+    ConfigureProjectBrowserRoot {
         host: NavigatorHost,
         value: String,
     },
@@ -1734,6 +1740,18 @@ impl NavigatorView {
         self.hosts().into_iter().find(|host| host.alias == alias)
     }
 
+    fn selected_host_for_project_browser(&self) -> Option<NavigatorHost> {
+        let host = self.selected_host_summary()?;
+        Some(if host.alias == "local" {
+            NavigatorHost::Local
+        } else {
+            NavigatorHost::Remote {
+                alias: host.alias,
+                reachability: host.reachability,
+            }
+        })
+    }
+
     /// Counts only Runtimes which the host registry still considers live.
     /// `Unknown` and recovery-required rows correspond to durably stopped
     /// Runtime records, so they cannot block exact observer removal.
@@ -1757,6 +1775,17 @@ impl NavigatorView {
     fn begin_host_registration(&mut self) {
         self.modal = Some(NavigatorModal::RegisterHost {
             value: String::new(),
+        });
+    }
+
+    fn begin_project_browser_root_configuration(&mut self) {
+        let Some(host) = self.selected_host_for_project_browser() else {
+            self.set_message("no Host is selected");
+            return;
+        };
+        self.modal = Some(NavigatorModal::ConfigureProjectBrowserRoot {
+            host,
+            value: "~/code".to_owned(),
         });
     }
 
@@ -1881,6 +1910,90 @@ impl NavigatorView {
         if !locations.is_empty() {
             *selected = selected.checked_sub(1).unwrap_or(locations.len() - 1);
         }
+    }
+
+    fn normalize_project_browser_selection(&mut self) {
+        let Some(NavigatorModal::ProjectBrowser {
+            directories,
+            selected,
+            filter,
+            ..
+        }) = self.modal.as_mut()
+        else {
+            return;
+        };
+        let visible = project_browser_entry_indexes(directories, filter);
+        if visible.is_empty() {
+            *selected = 0;
+        } else if !visible.contains(selected) {
+            *selected = visible[0];
+        }
+    }
+
+    fn select_project_browser_next(&mut self) {
+        let Some(NavigatorModal::ProjectBrowser {
+            directories,
+            selected,
+            filter,
+            ..
+        }) = self.modal.as_mut()
+        else {
+            return;
+        };
+        let visible = project_browser_entry_indexes(directories, filter);
+        if let Some(position) = visible.iter().position(|index| index == selected) {
+            *selected = visible[(position + 1) % visible.len()];
+        } else if let Some(first) = visible.first() {
+            *selected = *first;
+        }
+    }
+
+    fn select_project_browser_previous(&mut self) {
+        let Some(NavigatorModal::ProjectBrowser {
+            directories,
+            selected,
+            filter,
+            ..
+        }) = self.modal.as_mut()
+        else {
+            return;
+        };
+        let visible = project_browser_entry_indexes(directories, filter);
+        if let Some(position) = visible.iter().position(|index| index == selected) {
+            *selected = visible[(position + visible.len() - 1) % visible.len()];
+        } else if let Some(last) = visible.last() {
+            *selected = *last;
+        }
+    }
+
+    fn project_browser_selected_entry(
+        &self,
+    ) -> Option<(NavigatorHost, String, ProjectDirectoryEntry)> {
+        let NavigatorModal::ProjectBrowser {
+            host,
+            directories,
+            selected,
+            filter,
+        } = self.modal.as_ref()?
+        else {
+            return None;
+        };
+        project_browser_entry_indexes(directories, filter)
+            .contains(selected)
+            .then(|| {
+                let entry = directories.entries.get(*selected)?.clone();
+                Some((host.clone(), directories.relative_path.clone(), entry))
+            })?
+    }
+
+    fn project_browser_cursor(&self) -> Option<(NavigatorHost, String)> {
+        let NavigatorModal::ProjectBrowser {
+            host, directories, ..
+        } = self.modal.as_ref()?
+        else {
+            return None;
+        };
+        Some((host.clone(), directories.relative_path.clone()))
     }
 
     fn toggle_host_removal_mode(&mut self) {
@@ -2577,7 +2690,7 @@ impl NavigatorView {
         let (title, lines) = navigator_modal_content(modal);
         frame.render_widget(Clear, area);
         frame.render_widget(
-            Paragraph::new(lines).block(
+            Paragraph::new(lines).wrap(Wrap { trim: false }).block(
                 Block::default()
                     .borders(Borders::ALL)
                     .title(title)
@@ -2596,17 +2709,23 @@ impl NavigatorView {
 }
 
 fn navigator_modal_area(outer: Rect, modal: &NavigatorModal) -> Rect {
-    let width = outer.width.min(52);
+    let width = outer.width.min(match modal {
+        NavigatorModal::ProjectBrowser { .. } => 64,
+        _ => 52,
+    });
     let desired_height = match modal {
         NavigatorModal::SelectRegistrationHost { hosts, .. } => hosts.len().saturating_add(4),
         NavigatorModal::SelectProjectLocation { locations, .. } => {
             locations.len().saturating_add(4)
         }
+        NavigatorModal::ProjectBrowser { directories, .. } => {
+            directories.entries.len().min(10).saturating_add(7)
+        }
         NavigatorModal::ConfirmArchive(_)
         | NavigatorModal::SelectHostRemoval { .. }
         | NavigatorModal::ConfirmForgetProject { .. }
         | NavigatorModal::Rename { .. }
-        | NavigatorModal::RegisterCheckout { .. }
+        | NavigatorModal::ConfigureProjectBrowserRoot { .. }
         | NavigatorModal::RegisterHost { .. } => 7,
     };
     let height = outer
@@ -2690,27 +2809,26 @@ fn navigator_modal_content(modal: NavigatorModal) -> (String, Vec<Line<'static>>
             locations,
             selected,
         } => project_location_picker_modal(locations, selected, key),
-        NavigatorModal::RegisterCheckout { host, value } => (
-            if host.is_remote() {
-                " Add remote Project ".to_owned()
-            } else {
-                " Add local Project ".to_owned()
-            },
+        NavigatorModal::ProjectBrowser {
+            ref host,
+            ref directories,
+            selected,
+            ref filter,
+        } => project_browser_modal(host, directories, selected, filter, key),
+        NavigatorModal::ConfigureProjectBrowserRoot { host, value } => (
+            format!(" Project browser root · {} ", host.alias()),
             vec![
-                Line::raw(format!(
-                    "Enter an existing Git project on {}:",
-                    host.alias()
-                )),
+                Line::raw("Set the host-local root (for example ~/code):"),
                 Line::from(Span::styled(
                     truncate_display(&value, 44),
                     Style::default()
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 )),
-                Line::raw("The path is sent only to the selected host."),
+                Line::raw("Absolute paths remain on the selected host."),
                 Line::from(vec![
                     Span::styled("Enter", key),
-                    Span::raw(" register   "),
+                    Span::raw(" save   "),
                     Span::styled("Esc", key),
                     Span::raw(" cancel"),
                 ]),
@@ -2718,6 +2836,86 @@ fn navigator_modal_content(modal: NavigatorModal) -> (String, Vec<Line<'static>>
         ),
         NavigatorModal::RegisterHost { value } => register_host_modal(&value, key),
     }
+}
+
+fn project_browser_modal(
+    host: &NavigatorHost,
+    directories: &ProjectDirectoriesResponse,
+    selected: usize,
+    filter: &str,
+    key: Style,
+) -> (String, Vec<Line<'static>>) {
+    let visible = project_browser_entry_indexes(directories, filter);
+    let cursor = if directories.relative_path.is_empty() {
+        directories.root_label.clone()
+    } else {
+        format!("{}/{}", directories.root_label, directories.relative_path)
+    };
+    let mut lines = vec![
+        Line::from(Span::styled(
+            truncate_display(&cursor, 56),
+            Style::default().fg(Color::Cyan),
+        )),
+        Line::raw(if filter.is_empty() {
+            "Enter opens a folder or registers a Git Project · r adds this folder".to_owned()
+        } else {
+            format!("Filter: {filter}")
+        }),
+    ];
+    if visible.is_empty() {
+        lines.push(Line::raw("  no matching folders"));
+    } else {
+        for index in visible.into_iter().take(10) {
+            let entry = &directories.entries[index];
+            let marker = if index == selected { "> " } else { "  " };
+            let git = if entry.is_git_repository { " ✓" } else { "" };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    marker,
+                    if index == selected {
+                        key
+                    } else {
+                        Style::default()
+                    },
+                ),
+                Span::styled(
+                    truncate_display(&entry.name, 48),
+                    if index == selected {
+                        Style::default()
+                            .fg(Color::White)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                ),
+                Span::styled(git, Style::default().fg(Color::Green)),
+            ]));
+        }
+    }
+    lines.push(Line::from(vec![
+        Span::styled("↑/↓", key),
+        Span::raw(" select  "),
+        Span::styled("h", key),
+        Span::raw(" parent  "),
+        Span::styled("r", key),
+        Span::raw(" add  "),
+        Span::styled("Esc", key),
+        Span::raw(" cancel"),
+    ]));
+    (format!(" Add Project · {} ", host.alias()), lines)
+}
+
+fn project_browser_entry_indexes(
+    directories: &ProjectDirectoriesResponse,
+    filter: &str,
+) -> Vec<usize> {
+    let filter = filter.to_lowercase();
+    directories
+        .entries
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| entry.name.to_lowercase().contains(&filter).then_some(index))
+        .collect()
 }
 
 fn host_removal_modal(
@@ -2963,7 +3161,7 @@ fn help_lines(
                 ]),
                 Line::from(vec![
                     Span::styled("a", key),
-                    Span::raw("          add an existing Project"),
+                    Span::raw("          browse and add a Project"),
                 ]),
                 Line::from(vec![
                     Span::styled("x", key),
@@ -2975,6 +3173,10 @@ fn help_lines(
                 Line::from(vec![
                     Span::styled("a", key),
                     Span::raw("          add, verify, and set up a remote SSH host"),
+                ]),
+                Line::from(vec![
+                    Span::styled("r", key),
+                    Span::raw("          set the selected Host's Project browser root"),
                 ]),
                 Line::from(vec![
                     Span::styled("x", key),
@@ -3709,6 +3911,10 @@ pub enum NavigatorError {
     Runtime(#[from] RuntimeError),
     #[error(transparent)]
     Presentation(#[from] PresentationError),
+    #[error(transparent)]
+    Transport(#[from] TransportError),
+    #[error(transparent)]
+    BuildInfo(#[from] BuildInfoError),
     #[error("could not initialize the local terminal navigator: {0}")]
     Terminal(#[from] io::Error),
     #[error("the local navigator action could not be launched")]
@@ -3917,6 +4123,9 @@ fn handle_management_page_key(
         (NavigatorPage::Projects, KeyCode::Char('a')) => view.begin_checkout_registration(),
         (NavigatorPage::Projects, KeyCode::Char('x')) => view.begin_project_forget(),
         (NavigatorPage::Hosts, KeyCode::Char('a')) => view.begin_host_registration(),
+        (NavigatorPage::Hosts, KeyCode::Char('r')) => {
+            view.begin_project_browser_root_configuration();
+        }
         (NavigatorPage::Hosts, KeyCode::Char('x')) => forget_selected_host(view),
         _ => return false,
     }
@@ -3960,6 +4169,9 @@ fn handle_navigator_modal_key(
     remote: &mut RemoteMonitor,
     view: &mut NavigatorView,
 ) -> bool {
+    if matches!(view.modal, Some(NavigatorModal::ProjectBrowser { .. })) {
+        return handle_project_browser_modal_key(key, root, remote, view);
+    }
     if matches!(key.code, KeyCode::Esc) {
         view.dismiss_modal();
         return false;
@@ -3989,12 +4201,12 @@ fn handle_navigator_modal_key(
             }
             _ => {}
         },
-        Some(NavigatorModal::RegisterCheckout { value, .. }) => match key.code {
+        Some(NavigatorModal::ConfigureProjectBrowserRoot { value, .. }) => match key.code {
             KeyCode::Backspace => {
                 value.pop();
             }
             KeyCode::Char(character)
-                if !character.is_control() && value.len() < MAX_NAVIGATOR_CHECKOUT_PATH_BYTES =>
+                if !character.is_control() && value.len() < MAX_NAVIGATOR_TEXT_INPUT_BYTES =>
             {
                 value.push(character);
             }
@@ -4014,9 +4226,70 @@ fn handle_navigator_modal_key(
             | NavigatorModal::SelectHostRemoval { .. }
             | NavigatorModal::ConfirmForgetProject { .. }
             | NavigatorModal::SelectRegistrationHost { .. }
-            | NavigatorModal::SelectProjectLocation { .. },
+            | NavigatorModal::SelectProjectLocation { .. }
+            | NavigatorModal::ProjectBrowser { .. },
         )
         | None => {}
+    }
+    false
+}
+
+fn handle_project_browser_modal_key(
+    key: crossterm::event::KeyEvent,
+    root: &StateRoot,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+) -> bool {
+    match key.code {
+        KeyCode::Esc => view.dismiss_modal(),
+        KeyCode::Down | KeyCode::Char('j') => view.select_project_browser_next(),
+        KeyCode::Up | KeyCode::Char('k') => view.select_project_browser_previous(),
+        KeyCode::Backspace => {
+            if let Some(NavigatorModal::ProjectBrowser { filter, .. }) = view.modal.as_mut() {
+                filter.pop();
+            }
+            view.normalize_project_browser_selection();
+        }
+        KeyCode::Char('h') => {
+            let Some((host, cursor)) = view.project_browser_cursor() else {
+                return false;
+            };
+            let parent = cursor
+                .rsplit_once('/')
+                .map_or_else(String::new, |(parent, _)| parent.to_owned());
+            open_project_browser(root, view, host, &parent);
+        }
+        KeyCode::Char('r') => {
+            let Some((host, cursor)) = view.project_browser_cursor() else {
+                return false;
+            };
+            register_project_browser_directory(root, remote, view, &host, &cursor);
+        }
+        KeyCode::Enter => {
+            let Some((host, cursor, entry)) = view.project_browser_selected_entry() else {
+                view.set_message("no folder is selected");
+                return false;
+            };
+            let relative_path = if cursor.is_empty() {
+                entry.name
+            } else {
+                format!("{cursor}/{}", entry.name)
+            };
+            if entry.is_git_repository {
+                register_project_browser_directory(root, remote, view, &host, &relative_path);
+            } else {
+                open_project_browser(root, view, host, &relative_path);
+            }
+        }
+        KeyCode::Char(character) if !character.is_control() => {
+            if let Some(NavigatorModal::ProjectBrowser { filter, .. }) = view.modal.as_mut()
+                && filter.chars().count() < 64
+            {
+                filter.push(character);
+            }
+            view.normalize_project_browser_selection();
+        }
+        _ => {}
     }
     false
 }
@@ -4095,10 +4368,7 @@ fn confirm_navigator_modal(
         }
         Some(NavigatorModal::SelectRegistrationHost { hosts, selected }) => {
             if let Some(host) = hosts.get(selected).cloned() {
-                view.modal = Some(NavigatorModal::RegisterCheckout {
-                    host,
-                    value: String::new(),
-                });
+                open_project_browser(root, view, host, "");
             } else {
                 view.set_message("no registered host is available for Project registration");
             }
@@ -4138,13 +4408,16 @@ fn confirm_navigator_modal(
                 location_index,
             );
         }
-        Some(NavigatorModal::RegisterCheckout { host, value }) if value.trim().is_empty() => {
-            view.modal = Some(NavigatorModal::RegisterCheckout { host, value });
-            view.set_message("enter an existing Git project path");
+        Some(NavigatorModal::ConfigureProjectBrowserRoot { host, value })
+            if value.trim().is_empty() =>
+        {
+            view.modal = Some(NavigatorModal::ConfigureProjectBrowserRoot { host, value });
+            view.set_message("enter a host-local project browser root");
         }
-        Some(NavigatorModal::RegisterCheckout { host, value }) => {
-            register_checkout(root, remote, view, &host, &value);
+        Some(NavigatorModal::ConfigureProjectBrowserRoot { host, value }) => {
+            configure_project_browser_root(root, view, &host, &value);
         }
+        Some(NavigatorModal::ProjectBrowser { .. }) | None => {}
         Some(NavigatorModal::RegisterHost { value }) if value.trim().is_empty() => {
             view.modal = Some(NavigatorModal::RegisterHost { value });
             view.set_message("enter an SSH destination to register");
@@ -4152,7 +4425,6 @@ fn confirm_navigator_modal(
         Some(NavigatorModal::RegisterHost { value }) => {
             register_remote_host(root, presentation, remote, view, &value);
         }
-        None => {}
     }
 }
 
@@ -4647,51 +4919,166 @@ fn create_workstream_from_source(
     }
 }
 
-fn register_checkout(
+fn open_project_browser(
+    root: &StateRoot,
+    view: &mut NavigatorView,
+    host: NavigatorHost,
+    relative_path: &str,
+) {
+    if host.is_remote() && !host.is_reachable() {
+        view.set_message("remote host is unavailable; Project browser was not opened");
+        return;
+    }
+    match project_directories(root, &host, relative_path) {
+        Ok(directories) => {
+            view.modal = Some(NavigatorModal::ProjectBrowser {
+                host,
+                directories,
+                selected: 0,
+                filter: String::new(),
+            });
+            view.normalize_project_browser_selection();
+        }
+        Err(error) => {
+            view.set_message(action_message(&error));
+        }
+    }
+}
+
+fn project_directories(
+    root: &StateRoot,
+    host: &NavigatorHost,
+    relative_path: &str,
+) -> Result<ProjectDirectoriesResponse, NavigatorError> {
+    let client = HostClient::new(SystemCommandRunner);
+    if host.is_remote() {
+        let endpoint = checked_navigator_ssh_endpoint(root, host.alias())?;
+        return Ok(client.project_directories_ssh(&endpoint, relative_path)?);
+    }
+    let executable = std::env::current_exe().map_err(NavigatorError::CurrentExecutable)?;
+    let endpoint = LocalEndpoint {
+        executable,
+        state_root: root.base().to_path_buf(),
+    };
+    Ok(client.project_directories_local(&endpoint, relative_path)?)
+}
+
+fn checked_navigator_ssh_endpoint(
+    root: &StateRoot,
+    alias: &str,
+) -> Result<SshEndpoint, NavigatorError> {
+    let catalog = ClientCatalog::open(root)?;
+    let host = catalog.host(alias)?.ok_or(StateError::UnknownClientHost)?;
+    let ClientHostTransport::Ssh { ref destination } = host.transport else {
+        return Err(StateError::ClientHostRegistrationMismatch.into());
+    };
+    let destination = SshDestination::parse(destination)?;
+    let executable = host
+        .executable_path
+        .to_str()
+        .ok_or(StateError::InvalidClientHostField("remote executable"))
+        .and_then(|value| {
+            RemoteExecutable::parse(value)
+                .map_err(|_| StateError::InvalidClientHostField("remote executable"))
+        })?;
+    let endpoint = SshEndpoint::new(destination, executable);
+    let client = HostClient::new(SystemCommandRunner);
+    client
+        .probe_ssh(&endpoint)?
+        .ensure_compatible_with_local()?;
+    let hello = client.hello_ssh(&endpoint, "wsnav")?;
+    host.verify_hello(&hello)?;
+    Ok(endpoint)
+}
+
+fn register_project_browser_directory(
     root: &StateRoot,
     remote: &mut RemoteMonitor,
     view: &mut NavigatorView,
     host: &NavigatorHost,
-    checkout: &str,
+    relative_path: &str,
 ) {
     if host.is_remote() && !host.is_reachable() {
         view.set_message("remote host is unavailable; Project registration was not sent");
         return;
     }
-    let executable = match std::env::current_exe() {
-        Ok(executable) => executable,
-        Err(error) => {
-            view.set_message(action_message(&error));
-            return;
-        }
+    let action = crate::protocol::HostAction::RegisterProjectDirectory {
+        relative_path: relative_path.to_owned(),
     };
-    let mut command = Command::new(executable);
-    command.arg("--state-root").arg(root.base());
-    if host.is_remote() {
-        command
-            .arg("host")
-            .arg("register-checkout")
-            .arg(host.alias())
-            .arg(checkout);
+    let client = HostClient::new(SystemCommandRunner);
+    let result = if host.is_remote() {
+        checked_navigator_ssh_endpoint(root, host.alias())
+            .and_then(|endpoint| client.create_ssh(&endpoint, action).map_err(Into::into))
     } else {
-        command.arg("register").arg(checkout);
-    }
-    match output_bounded(&mut command, 1024, 1024).map_err(NavigatorError::from_action_process) {
-        Ok(output) if output.status.success() => match parse_created_workstream(&output.stdout) {
-            Ok(workstream_id) => {
-                remote.request_soon(host.alias());
-                refresh_view(root, remote, view);
-                if view.select_project_for_workstream(host.alias(), workstream_id) {
-                    view.set_message("Project registered; select it to start Codex");
-                } else if host.is_remote() {
-                    view.set_message("remote Project registered; waiting for its bounded snapshot");
-                } else {
-                    view.set_message("Project registration completed; refresh the Project view");
-                }
+        let executable = match std::env::current_exe() {
+            Ok(executable) => executable,
+            Err(error) => {
+                view.set_message(action_message(&error));
+                return;
             }
-            Err(error) => view.set_message(action_message(&error)),
-        },
-        Ok(_) => view.set_message("Project registration is unavailable"),
+        };
+        let endpoint = LocalEndpoint {
+            executable,
+            state_root: root.base().to_path_buf(),
+        };
+        client.create_local(&endpoint, action).map_err(Into::into)
+    };
+    match result {
+        Ok(workstream_id) => {
+            remote.request_soon(host.alias());
+            refresh_view(root, remote, view);
+            if view.select_project_for_workstream(host.alias(), workstream_id) {
+                view.set_message("Project registered; select it to start Codex");
+            } else if host.is_remote() {
+                view.set_message("remote Project registered; waiting for its bounded snapshot");
+            } else {
+                view.set_message("Project registration completed; refresh the Project view");
+            }
+        }
+        Err(error) => view.set_message(action_message(&error)),
+    }
+}
+
+fn configure_project_browser_root(
+    root: &StateRoot,
+    view: &mut NavigatorView,
+    host: &NavigatorHost,
+    root_path: &str,
+) {
+    if host.is_remote() && !host.is_reachable() {
+        view.set_message("remote host is unavailable; project browser root was not changed");
+        return;
+    }
+    let action = crate::protocol::HostAction::SetProjectBrowserRoot {
+        root_path: root_path.trim().to_owned(),
+    };
+    let client = HostClient::new(SystemCommandRunner);
+    let result = if host.is_remote() {
+        checked_navigator_ssh_endpoint(root, host.alias()).and_then(|endpoint| {
+            client
+                .apply_ssh(&endpoint, action)
+                .map(|_| ())
+                .map_err(Into::into)
+        })
+    } else {
+        let executable = match std::env::current_exe() {
+            Ok(executable) => executable,
+            Err(error) => {
+                view.set_message(action_message(&error));
+                return;
+            }
+        };
+        let endpoint = LocalEndpoint {
+            executable,
+            state_root: root.base().to_path_buf(),
+        };
+        client
+            .apply_local(&endpoint, action)
+            .map(|_| ())
+            .map_err(Into::into)
+    };
+    match result {
+        Ok(()) => view.set_message("project browser root updated; use Projects → a to browse"),
         Err(error) => view.set_message(action_message(&error)),
     }
 }
@@ -5220,7 +5607,7 @@ mod tests {
     }
 
     #[test]
-    fn project_registration_uses_a_navigator_local_host_picker_and_path_entry() {
+    fn project_registration_uses_a_navigator_local_host_picker_then_a_path_free_browser() {
         let mut view = NavigatorView::new(LocalNavigatorSnapshot {
             workstreams: Vec::new(),
             hosts: vec![
@@ -5246,9 +5633,18 @@ mod tests {
             panic!("registration host picker should be active");
         };
         assert_eq!(hosts[selected].alias(), "snap");
-        view.modal = Some(NavigatorModal::RegisterCheckout {
+        view.modal = Some(NavigatorModal::ProjectBrowser {
             host: hosts[selected].clone(),
-            value: "/private/checkout".to_owned(),
+            directories: ProjectDirectoriesResponse {
+                root_label: "~/code".to_owned(),
+                relative_path: String::new(),
+                entries: vec![ProjectDirectoryEntry {
+                    name: "switchboard".to_owned(),
+                    is_git_repository: true,
+                }],
+            },
+            selected: 0,
+            filter: String::new(),
         });
         let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
 
@@ -5261,9 +5657,11 @@ mod tests {
             .iter()
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
-        assert!(rendered.contains("Add remote Project"));
+        assert!(rendered.contains("Add Project"));
         assert!(rendered.contains("snap"));
-        assert!(rendered.contains("/private/checkout"));
+        assert!(rendered.contains("~/code"));
+        assert!(rendered.contains("switchboard"));
+        assert!(!rendered.contains("/private/checkout"));
         assert!(!rendered.contains("provider pane"));
     }
 

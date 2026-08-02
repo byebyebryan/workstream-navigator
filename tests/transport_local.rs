@@ -31,7 +31,7 @@ fn local_subprocess_uses_the_same_bounded_protocol_service_as_ssh() {
     assert!(hello.registry_generation.len() <= 128);
     assert!(snapshot.workstreams.is_empty());
     assert!(operations.operations.is_empty());
-    assert_eq!(CURRENT_PROTOCOL_VERSION, 14);
+    assert_eq!(CURRENT_PROTOCOL_VERSION, 15);
 }
 
 #[test]
@@ -152,6 +152,99 @@ fn local_subprocess_registers_one_existing_checkout_without_returning_its_path()
             .filter(|workstream| workstream.workstream_id == workstream_id)
             .count(),
         1
+    );
+}
+
+#[test]
+fn local_subprocess_browses_and_registers_a_host_private_project_directory() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_root = temporary.path().join("state");
+    let browser_root = temporary.path().join("projects");
+    let checkout = browser_root.join("picker-target");
+    fs::create_dir_all(&checkout).unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&checkout)
+            .args(["init", "--quiet"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&checkout)
+            .args(["config", "user.name", "WSNav Test"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&checkout)
+            .args(["config", "user.email", "wsnav@example.invalid"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    fs::write(checkout.join("README.md"), "picker test\n").unwrap();
+    assert!(
+        Command::new("git")
+            .current_dir(&checkout)
+            .args(["add", "README.md"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    assert!(
+        Command::new("git")
+            .current_dir(&checkout)
+            .args(["commit", "--quiet", "-m", "initial"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    let root = StateRoot::create(&state_root).unwrap();
+    HostRegistry::open(&root)
+        .unwrap()
+        .set_project_browser_root(&browser_root.to_string_lossy())
+        .unwrap();
+    let endpoint = LocalEndpoint {
+        executable: PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
+        state_root,
+    };
+    let client = HostClient::new(SystemCommandRunner);
+
+    let directories = client.project_directories_local(&endpoint, "").unwrap();
+
+    assert_eq!(directories.root_label, "custom root · projects");
+    assert!(
+        !directories
+            .root_label
+            .contains(&*temporary.path().to_string_lossy())
+    );
+    assert_eq!(
+        directories
+            .entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.is_git_repository))
+            .collect::<Vec<_>>(),
+        vec![("picker-target", true)]
+    );
+    let workstream_id = client
+        .create_local(
+            &endpoint,
+            HostAction::RegisterProjectDirectory {
+                relative_path: "picker-target".to_owned(),
+            },
+        )
+        .unwrap();
+    assert!(
+        client
+            .snapshot_local(&endpoint)
+            .unwrap()
+            .workstreams
+            .iter()
+            .any(|workstream| workstream.workstream_id == workstream_id)
     );
 }
 

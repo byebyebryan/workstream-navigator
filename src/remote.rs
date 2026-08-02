@@ -133,6 +133,15 @@ fn dispatch(state_root: Option<std::path::PathBuf>, request: &RequestEnvelope) -
             },
             Err(_) => rejected("host operation list is unavailable"),
         },
+        HostRequest::ProjectDirectories { relative_path } => {
+            match registry.project_directories(relative_path) {
+                Ok(directories) => ResponseEnvelope {
+                    version: CURRENT_PROTOCOL_VERSION,
+                    response: HostResponse::ProjectDirectories(directories),
+                },
+                Err(_) => rejected("project browser is unavailable"),
+            }
+        }
         HostRequest::Attach { runtime_id } => match registry.runtime_by_id(*runtime_id) {
             Ok(Some(_)) => ResponseEnvelope {
                 version: CURRENT_PROTOCOL_VERSION,
@@ -159,7 +168,16 @@ fn apply(root: &StateRoot, registry: &mut HostRegistry, action: HostAction) -> R
             Err(_) => rejected("observer removal is unavailable"),
         },
         HostAction::RegisterCheckout { checkout_path } => {
-            apply_register_checkout(registry, &checkout_path)
+            apply_register_checkout(registry, Path::new(&checkout_path))
+        }
+        HostAction::RegisterProjectDirectory { relative_path } => {
+            apply_register_project_directory(registry, &relative_path)
+        }
+        HostAction::SetProjectBrowserRoot { root_path } => {
+            match registry.set_project_browser_root(&root_path) {
+                Ok(()) => applied(1),
+                Err(_) => rejected("project browser root is unavailable"),
+            }
         }
         HostAction::AcknowledgeAttention {
             workstream_id,
@@ -240,8 +258,8 @@ fn applied(revision: i64) -> ResponseEnvelope {
     }
 }
 
-fn apply_register_checkout(registry: &mut HostRegistry, checkout_path: &str) -> ResponseEnvelope {
-    let Ok(repository) = crate::repository::inspect(Path::new(checkout_path)) else {
+fn apply_register_checkout(registry: &mut HostRegistry, checkout_path: &Path) -> ResponseEnvelope {
+    let Ok(repository) = crate::repository::inspect(checkout_path) else {
         return rejected("project is unavailable");
     };
     match registry.register_external_workstream_with_metadata(
@@ -259,6 +277,16 @@ fn apply_register_checkout(registry: &mut HostRegistry, checkout_path: &str) -> 
         },
         Err(_) => rejected("project registration is unavailable"),
     }
+}
+
+fn apply_register_project_directory(
+    registry: &mut HostRegistry,
+    relative_path: &str,
+) -> ResponseEnvelope {
+    let Ok(directory) = registry.project_browser_directory(relative_path) else {
+        return rejected("project browser selection is unavailable");
+    };
+    apply_register_checkout(registry, directory.as_path())
 }
 
 fn apply_new_workstream(

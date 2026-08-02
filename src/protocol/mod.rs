@@ -13,7 +13,7 @@ use crate::domain::{
     RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 14;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 15;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -27,6 +27,11 @@ const MAX_VERSION_BYTES: usize = 64;
 const MAX_REGISTRY_GENERATION_BYTES: usize = 128;
 const MAX_REQUEST_KEY_BYTES: usize = 128;
 const MAX_CHECKOUT_PATH_BYTES: usize = 4096;
+const MAX_PROJECT_BROWSER_ROOT_BYTES: usize = 4096;
+const MAX_PROJECT_BROWSER_RELATIVE_PATH_BYTES: usize = 1024;
+const MAX_PROJECT_BROWSER_LABEL_BYTES: usize = 512;
+const MAX_PROJECT_BROWSER_ENTRY_NAME_BYTES: usize = 256;
+pub const MAX_PROJECT_BROWSER_ENTRIES: usize = 128;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RequestEnvelope {
@@ -74,11 +79,24 @@ impl RequestEnvelope {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum HostRequest {
-    Hello { client_alias: String },
-    Snapshot { cursor: Option<u32> },
+    Hello {
+        client_alias: String,
+    },
+    Snapshot {
+        cursor: Option<u32>,
+    },
     Operations,
-    Attach { runtime_id: RuntimeId },
-    Apply { action: HostAction },
+    /// Lists bounded child directories below the selected host's private
+    /// project-browser root. The path is relative and cannot escape that root.
+    ProjectDirectories {
+        relative_path: String,
+    },
+    Attach {
+        runtime_id: RuntimeId,
+    },
+    Apply {
+        action: HostAction,
+    },
 }
 
 impl HostRequest {
@@ -88,6 +106,9 @@ impl HostRequest {
                 validate_bounded("client alias", client_alias, MAX_ALIAS_BYTES)
             }
             Self::Snapshot { .. } | Self::Operations | Self::Attach { .. } => Ok(()),
+            Self::ProjectDirectories { relative_path } => {
+                validate_relative_browser_path(relative_path)
+            }
             Self::Apply { action } => action.validate(),
         }
     }
@@ -105,6 +126,13 @@ pub enum HostAction {
     /// Register one existing Git project only on this host. The bounded path is
     /// request-only and is never included in a response or snapshot.
     RegisterCheckout { checkout_path: String },
+    /// Register the currently selected host-private browser directory. Unlike
+    /// `RegisterCheckout`, the client supplies only a validated relative
+    /// cursor; the host resolves and inspects the actual path locally.
+    RegisterProjectDirectory { relative_path: String },
+    /// Changes only the selected host's private directory-browser root. The
+    /// path is request-only and never included in a response or snapshot.
+    SetProjectBrowserRoot { root_path: String },
     AcknowledgeAttention {
         workstream_id: WorkstreamId,
         expected_revision: i64,
@@ -188,6 +216,8 @@ impl HostAction {
             Self::PrepareObserver
             | Self::RemoveObserver
             | Self::RegisterCheckout { .. }
+            | Self::RegisterProjectDirectory { .. }
+            | Self::SetProjectBrowserRoot { .. }
             | Self::RecoverOperation { .. } => None,
         };
         if let Some(expected_revision) = expected_revision {
@@ -196,6 +226,19 @@ impl HostAction {
         match self {
             Self::RegisterCheckout { checkout_path } => {
                 validate_bounded("checkout path", checkout_path, MAX_CHECKOUT_PATH_BYTES)?;
+            }
+            Self::RegisterProjectDirectory { relative_path } => {
+                validate_relative_browser_path(relative_path)?;
+            }
+            Self::SetProjectBrowserRoot { root_path } => {
+                validate_bounded(
+                    "project browser root",
+                    root_path,
+                    MAX_PROJECT_BROWSER_ROOT_BYTES,
+                )?;
+                if root_path.chars().any(char::is_control) {
+                    return Err(ProtocolError::InvalidProjectBrowserPath);
+                }
             }
             Self::NewWorkstream { request_key, .. } | Self::ForkWorkstream { request_key, .. } => {
                 validate_bounded("request key", request_key, MAX_REQUEST_KEY_BYTES)?;
@@ -284,6 +327,7 @@ pub enum HostResponse {
     Hello(HelloResponse),
     Snapshot(SnapshotResponse),
     Operations(OperationsResponse),
+    ProjectDirectories(ProjectDirectoriesResponse),
     Applied {
         revision: i64,
     },
@@ -305,6 +349,7 @@ impl HostResponse {
             Self::Hello(response) => response.validate(),
             Self::Snapshot(response) => response.validate(),
             Self::Operations(response) => response.validate(),
+            Self::ProjectDirectories(response) => response.validate(),
             Self::Applied { revision } => Revision::try_from(*revision)
                 .map(|_| ())
                 .map_err(|_| ProtocolError::InvalidRevision),
@@ -316,6 +361,54 @@ impl HostResponse {
                 validate_bounded("diagnostic", diagnostic, MAX_DIAGNOSTIC_BYTES)
             }
         }
+    }
+}
+
+/// One bounded, host-private directory browser response. The root is rendered
+/// as a safe display label; absolute paths are never returned through the
+/// control protocol.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectDirectoriesResponse {
+    pub root_label: String,
+    pub relative_path: String,
+    pub entries: Vec<ProjectDirectoryEntry>,
+}
+
+impl ProjectDirectoriesResponse {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        validate_project_browser_root_label(&self.root_label)?;
+        validate_relative_browser_path(&self.relative_path)?;
+        if self.entries.len() > MAX_PROJECT_BROWSER_ENTRIES {
+            return Err(ProtocolError::SnapshotTooLarge);
+        }
+        self.entries
+            .iter()
+            .try_for_each(ProjectDirectoryEntry::validate)
+    }
+}
+
+/// One direct child of a project-browser directory. This is display metadata,
+/// never a repository path or durable `ProjectLocation`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectDirectoryEntry {
+    pub name: String,
+    pub is_git_repository: bool,
+}
+
+impl ProjectDirectoryEntry {
+    fn validate(&self) -> Result<(), ProtocolError> {
+        validate_bounded(
+            "project browser entry name",
+            &self.name,
+            MAX_PROJECT_BROWSER_ENTRY_NAME_BYTES,
+        )?;
+        if self.name == "." || self.name == ".." || self.name.contains(['/', '\\']) {
+            return Err(ProtocolError::InvalidProjectBrowserPath);
+        }
+        if self.name.chars().any(char::is_control) {
+            return Err(ProtocolError::InvalidProjectBrowserPath);
+        }
+        Ok(())
     }
 }
 
@@ -524,6 +617,46 @@ fn validate_bounded(name: &'static str, value: &str, maximum: usize) -> Result<(
     Ok(())
 }
 
+fn validate_relative_browser_path(value: &str) -> Result<(), ProtocolError> {
+    if value.len() > MAX_PROJECT_BROWSER_RELATIVE_PATH_BYTES {
+        return Err(ProtocolError::FieldTooLong {
+            name: "project browser relative path",
+            maximum: MAX_PROJECT_BROWSER_RELATIVE_PATH_BYTES,
+        });
+    }
+    if value.chars().any(char::is_control)
+        || value.contains('\\')
+        || value.starts_with('/')
+        || value.ends_with('/')
+        || (!value.is_empty()
+            && value
+                .split('/')
+                .any(|component| component.is_empty() || matches!(component, "." | "..")))
+    {
+        return Err(ProtocolError::InvalidProjectBrowserPath);
+    }
+    Ok(())
+}
+
+fn validate_project_browser_root_label(value: &str) -> Result<(), ProtocolError> {
+    validate_bounded(
+        "project browser root label",
+        value,
+        MAX_PROJECT_BROWSER_LABEL_BYTES,
+    )?;
+    if value == "~" {
+        return Ok(());
+    }
+    if let Some(relative_path) = value.strip_prefix("~/") {
+        return validate_relative_browser_path(relative_path);
+    }
+    if value.starts_with('/') || value.contains(['/', '\\']) || value.chars().any(char::is_control)
+    {
+        return Err(ProtocolError::InvalidProjectBrowserPath);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Error)]
 pub enum ProtocolError {
     #[error("{0} cannot be empty")]
@@ -538,6 +671,8 @@ pub enum ProtocolError {
     InvalidRevision,
     #[error("thread name is invalid")]
     InvalidThreadName,
+    #[error("project browser path is invalid")]
+    InvalidProjectBrowserPath,
     #[error("activity sequence must not be negative")]
     InvalidActivitySequence,
     #[error("activity timestamp must not be negative")]
@@ -638,6 +773,82 @@ mod tests {
         assert!(matches!(
             invalid.validate(),
             Err(ProtocolError::ControlCharacter("checkout path"))
+        ));
+    }
+
+    #[test]
+    fn project_browser_requests_cannot_escape_the_host_root() {
+        let accepted = RequestEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            request: HostRequest::ProjectDirectories {
+                relative_path: "workspace/wsnav".to_owned(),
+            },
+        };
+        assert!(accepted.validate().is_ok());
+
+        for relative_path in [
+            "../outside",
+            "/outside",
+            "workspace//wsnav",
+            "workspace\\wsnav",
+        ] {
+            let rejected = RequestEnvelope {
+                version: CURRENT_PROTOCOL_VERSION,
+                request: HostRequest::Apply {
+                    action: HostAction::RegisterProjectDirectory {
+                        relative_path: relative_path.to_owned(),
+                    },
+                },
+            };
+            assert!(matches!(
+                rejected.validate(),
+                Err(ProtocolError::InvalidProjectBrowserPath)
+            ));
+        }
+    }
+
+    #[test]
+    fn project_browser_responses_contain_only_safe_display_components() {
+        let response = ResponseEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            response: HostResponse::ProjectDirectories(ProjectDirectoriesResponse {
+                root_label: "~/code".to_owned(),
+                relative_path: "workspace".to_owned(),
+                entries: vec![ProjectDirectoryEntry {
+                    name: "wsnav".to_owned(),
+                    is_git_repository: true,
+                }],
+            }),
+        };
+        assert!(response.validate().is_ok());
+
+        let invalid = ResponseEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            response: HostResponse::ProjectDirectories(ProjectDirectoriesResponse {
+                root_label: "~/code".to_owned(),
+                relative_path: String::new(),
+                entries: vec![ProjectDirectoryEntry {
+                    name: "../../private".to_owned(),
+                    is_git_repository: false,
+                }],
+            }),
+        };
+        assert!(matches!(
+            invalid.validate(),
+            Err(ProtocolError::InvalidProjectBrowserPath)
+        ));
+
+        let path_leak = ResponseEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            response: HostResponse::ProjectDirectories(ProjectDirectoriesResponse {
+                root_label: "/private/host/path".to_owned(),
+                relative_path: String::new(),
+                entries: Vec::new(),
+            }),
+        };
+        assert!(matches!(
+            path_leak.validate(),
+            Err(ProtocolError::InvalidProjectBrowserPath)
         ));
     }
 

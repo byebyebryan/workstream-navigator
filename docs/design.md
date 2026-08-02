@@ -62,6 +62,8 @@ its completed visible result.
   interactive native Codex TUI.
 - Explicit host registration and capability checks.
 - Logical projects with one or more explicitly registered host locations.
+- Host-private Project-directory browsing for ordinary registration, rooted at
+  each host's configurable `~/code`-style workspace root.
 - Workstream creation, switching, parking, exact resume, and display through
   the current tip's Codex-owned thread name.
 - Navigator-local Workstreams, Projects, and Hosts pages, with Workstreams as
@@ -255,6 +257,18 @@ Each stateful action introduces its own bounded text entry, confirmation, and
 progress state with the authority that consumes it; the navigator does not keep
 an unconnected generic modal that could imply an action is available before its
 host contract exists.
+
+Project registration is an explicit two-step navigator flow: `Projects → a`
+first selects the owning host, then opens a centered browser inside the
+navigator pane. The browser starts at that host's configured workspace root
+(`~/code` by default), lists only bounded direct-child names plus a Git marker,
+and uses a root label and relative cursor rather than returning absolute paths.
+`Enter` opens a directory or registers a marked Git Project; `r` registers the
+current browser directory. The Hosts page owns the explicit root-setting action
+for the selected host. A local or SSH host resolves the selected relative cursor
+and performs Git inspection itself, so raw paths never enter a snapshot, client
+catalog, protocol response, or provider pane. This is a navigator-only modal,
+not a tmux popup, window, or provider overlay.
 Mouse support in D7 covers selection, primary row activation, forms, and
 confirmation. Full mouse parity for every management action is not an
 acceptance requirement.

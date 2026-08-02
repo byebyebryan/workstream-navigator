@@ -12,9 +12,9 @@ an automatic migration from the retired schema.
 
 Date: 2026-08-01
 
-Status: D0 through D7 complete. D7 combines bounded native local/SSH observer
-review with automated navigator, lifecycle, recovery, and host-control
-acceptance; it does not widen V1 into a task manager or provider replacement.
+Status: D0 through D7.5 are complete. D7.6 is an active source-level
+registration-flow refinement: it adds host-private Project browsing without
+widening V1 into a task manager or provider replacement.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -56,7 +56,8 @@ This document owns sequencing, exit gates, and progress.
 | D6.5 | Project-marker collision correction | Complete |
 | D6.6 | Project-label accent refinement | Complete |
 | D6.9 | Codex observer authority repair | Complete |
-| D7 | Navigator workflow and lifecycle management | In progress |
+| D7 | Navigator workflow and lifecycle management | Complete through D7.5 |
+| D7.6 | Host-private Project directory browser | In progress |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](spikes/0009-codex-hook-environment-boundary.md)
@@ -719,7 +720,7 @@ Exit gate:
 
 ## D7 - Navigator workflow and lifecycle management
 
-Implementation status: complete. D7.0 through D7.5 passed the bounded native
+Implementation status: D7.0 through D7.5 passed the bounded native
 local/SSH observer reviews and the integrated disposable/reversible navigator
 acceptance. See the [D7 navigator workflow acceptance](acceptance-d7-navigator-workflow.md).
 D7.1 supplies the Workstreams, Projects, and Hosts navigation foundation;
@@ -806,6 +807,14 @@ Delivery slices:
    offboarding, and host disconnect/re-register using only the two-pane TUI
    after installation, without provider-pane management traffic or remote
    Runtime interference.
+7. **D7.6 - Host-private Project directory browser.** Replace the ordinary
+   typed checkout-path form with a navigator-only host picker followed by a
+   bounded directory browser. Each host defaults to `~/code` and exposes an
+   explicit Hosts-page root setting. The protocol returns only a safe root
+   label, relative cursor, and direct-child names; host-side registration
+   reconstructs the chosen directory locally. The direct `register` and
+   `host register-checkout` commands remain optional scripting and break-glass
+   paths.
 
 Exit gate:
 
@@ -831,6 +840,10 @@ Exit gate:
   host disconnect/re-register without entering another `wsnav` shell command;
 - the native provider result and input surface remain untouched until the user
   explicitly chooses a Workstream or observer-review action; and
+- D7.6 adds protocol, state, local-subprocess, and terminal tests proving a
+  browser response cannot carry an absolute project path, relative cursors
+  cannot escape the selected root, and a selected Git directory registers only
+  through host-side resolution; and
 - formatting, tests, lint, package checks, and `git diff --check` pass.
 
 ## Deferred beyond V1

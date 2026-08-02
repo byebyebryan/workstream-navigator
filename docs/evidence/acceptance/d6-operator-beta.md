@@ -7,7 +7,7 @@ local-presentation, and SSH-native smoke gates without widening V1.
 
 Historical evidence note: this file records the D6 candidate. Its candidate
 hash, protocol/schema values, and test counts are not the current runtime
-fingerprint; use the [design](design.md), [roadmap](roadmap.md), and
+fingerprint; use the [design](../../design.md), [roadmap](../../roadmap.md), and
 `wsnav host doctor <alias>` for the current contract and installed-build
 compatibility.
 
@@ -53,7 +53,7 @@ compatibility.
   tests, formatting, Clippy, package verification, Cargo Deny, script/fixture
   checks, every disposable D4-D5.1 acceptance harness, and `git diff --check`.
 
-The [sanitized D6 fixture](../spikes/fixtures/d6-operator-beta.json) contains
+The [sanitized D6 fixture](../../../spikes/fixtures/d6-operator-beta.json) contains
 only fixed capability, isolation, cleanup, distribution, and privacy
 assertions. It contains no provider or Workstream identifiers, prompts,
 results, terminal captures, paths, process IDs, credentials, or raw payloads.

@@ -42,4 +42,4 @@ Status: pass — automated control-plane and bounded native-Codex acceptance
 The recorded fixture contains only sanitized relationships, capability checks,
 and cleanup status. It excludes provider identifiers, prompts, responses,
 paths, terminal output, process IDs, credentials, and raw provider payloads:
-[D3 SSH control-plane fixture](../spikes/fixtures/d3-ssh-control-plane.json).
+[D3 SSH control-plane fixture](../../../spikes/fixtures/d3-ssh-control-plane.json).

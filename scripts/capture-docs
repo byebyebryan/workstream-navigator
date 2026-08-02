@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Generate privacy-safe product captures from the deterministic navigator fixture.
+set -euo pipefail
+
+workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$workspace_root"
+
+command -v magick >/dev/null 2>&1 || {
+    printf 'error: ImageMagick (magick) is required to render PNG documentation captures\n' >&2
+    exit 1
+}
+
+cargo run --quiet --example capture_docs
+
+for capture in docs/media/screenshots/*.svg; do
+    magick -background none "$capture" -strip "${capture%.svg}.png"
+done

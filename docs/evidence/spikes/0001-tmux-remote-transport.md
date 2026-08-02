@@ -79,5 +79,5 @@ an authorized, reachable Codex host. The terminal-substrate decision combines
 that result with local Spike 0005 and the historical Python Phase 7F terminal
 trial; no separate manual terminal spike is required.
 
-[fixture]: ../../spikes/fixtures/tmux-remote-transport.json
+[fixture]: ../../../spikes/fixtures/tmux-remote-transport.json
 [spike-0002]: 0002-codex-native-tui.md

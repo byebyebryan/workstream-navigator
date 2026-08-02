@@ -63,9 +63,9 @@ This document owns sequencing, exit gates, and progress.
 | D7.6 | Host-private Project directory browser | Complete |
 
 The completed checkpoints describe the source-installed operator-beta at the
-time of their acceptance. [Spike 0009](spikes/0009-codex-hook-environment-boundary.md)
+time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
 subsequently falsified its launch-environment observer authority. [Spike
-0010](spikes/0010-codex-hook-ancestry-authority.md) validates a strict
+0010](evidence/spikes/0010-codex-hook-ancestry-authority.md) validates a strict
 PID-plus-birth-plus-cwd candidate on Codex 0.146.0, but no production rework is
 included in those completed checkpoints. D6.9 implements that candidate and
 requires a fresh native trust review before it admits any observer-derived
@@ -201,7 +201,7 @@ Exit gate:
 - automated checks plus a sanitized, bounded native reacceptance pass with no
   WSNav-owned runtime/profile/review artifacts left behind.
 
-Recorded evidence: [D1 local native-Codex acceptance](acceptance-d1-local-codex.md)
+Recorded evidence: [D1 local native-Codex acceptance](evidence/acceptance/d1-local-codex.md)
 and its [D1.5 reconciliation fixture](../spikes/fixtures/d1.5-local-codex-reconciliation.json).
 
 ## D2 - Minimal navigator
@@ -211,7 +211,7 @@ Deliver the first normal user-facing terminal workflow.
 Implementation status: complete. The bounded local snapshot, private
 presentation tmux owner, direct attachment helper, Ratatui navigator,
 disposable isolation acceptance, and operator-trusted native Codex terminal
-acceptance passed. See the [D2 local navigator acceptance](acceptance-d2-local-navigator.md).
+acceptance passed. See the [D2 local navigator acceptance](evidence/acceptance/d2-local-navigator.md).
 
 Scope:
 
@@ -242,7 +242,7 @@ subprocess parity tests, revision-guarded remote actions, interactive
 coverage and bounded operator-run native-Codex acceptance. The implementation
 never copies or installs a remote binary; the remote executable remains an
 explicit operator prerequisite. See the [D3 control-plane
-acceptance](acceptance-d3-control-plane.md) and its [sanitized fixture](../spikes/fixtures/d3-ssh-control-plane.json).
+acceptance](evidence/acceptance/d3-control-plane.md) and its [sanitized fixture](../spikes/fixtures/d3-ssh-control-plane.json).
 
 Scope:
 
@@ -311,7 +311,7 @@ Scope:
 
 The disposable native-recovery and fresh-install gates plus the bounded
 combined real-Codex local/remote operator acceptance pass. See the
-[D5 acceptance record](acceptance-d5-v1-closure.md).
+[D5 acceptance record](evidence/acceptance/d5-v1-closure.md).
 
 Exit gate:
 
@@ -329,7 +329,7 @@ Exit gate:
 Implementation status: complete. Durable operation recovery, release probing,
 streaming local child-output bounds, full Runtime identities, explicit
 first-run guidance, and declared/CI-enforced MSRV passed the disposable and
-full local repository gates. See the [D5.1 operational closure acceptance](acceptance-d5.1-operational-closure.md).
+full local repository gates. See the [D5.1 operational closure acceptance](evidence/acceptance/d5.1-operational-closure.md).
 
 Close the release-quality gaps found by the post-D5 broad review without
 expanding the approved V1 product.
@@ -372,7 +372,7 @@ the locked production graph and passes its pinned CI job. Stable project
 labels, fail-closed tmux probes, authority-before-provider launch, observable
 attachment outcomes, process-group deadlines, scrolled mouse targeting, and
 cursor-paged snapshots passed the full local and disposable gates. See the
-[D5.2 correctness closure acceptance](acceptance-d5.2-correctness-closure.md).
+[D5.2 correctness closure acceptance](evidence/acceptance/d5.2-correctness-closure.md).
 
 Reopen V1 closure for the concrete contradictions found by the post-D5.1
 project-wide review. This is hardening of the approved product, not a new
@@ -414,7 +414,7 @@ Exit gate:
 Implementation status: complete. Present-tense documentation, the explicit
 source-installed distribution posture, exact-candidate local/SSH release
 parity, clean navigator shutdown, and bounded native operator smoke passed. See
-the [D6 operator-beta acceptance](acceptance-d6-operator-beta.md).
+the [D6 operator-beta acceptance](evidence/acceptance/d6-operator-beta.md).
 
 Close the implemented V1 as an operator-ready beta without adding another
 workflow or changing the approved ownership boundaries.
@@ -732,7 +732,7 @@ Exit gate:
 
 Implementation status: D7.0 through D7.5 passed the bounded native
 local/SSH observer reviews and the integrated disposable/reversible navigator
-acceptance. See the [D7 navigator workflow acceptance](acceptance-d7-navigator-workflow.md).
+acceptance. See the [D7 navigator workflow acceptance](evidence/acceptance/d7-navigator-workflow.md).
 D7.1 supplies the Workstreams, Projects, and Hosts navigation foundation;
 D7.2 now supplies revision-guarded archive/restore through local and SSH host
 contracts, the Archived navigator view, bounded Workstream status,

@@ -37,6 +37,23 @@ does not create or manage branches, Git worktrees, commits, task records,
 transcript copies, project memory, or autonomous agent teams. Use Codex and
 ordinary Git tooling inside the native session when a task needs them.
 
+## See it
+
+The compact navigator remains a supporting surface; the adjacent native Codex
+pane keeps terminal focus and remains the place work happens.
+
+![Recent Workstreams view](docs/media/screenshots/workstreams.png)
+
+Workstreams are project-first, ordered by activity, and carry only the status
+needed to choose the next session. `n`, `f`, `p`, rename, archive, and the
+other navigator actions stay in the small left pane.
+
+![Conservative recovery and remote state](docs/media/screenshots/remote-recovery.png)
+
+Uncertain or unavailable state is visible rather than guessed: an exact native
+resume is required for recovery, and an unreachable host never becomes a false
+"stopped" session.
+
 ## Quick start
 
 Workstream Navigator is currently a source-installed operator beta. Build and
@@ -98,7 +115,9 @@ compromising the native-workflow model.
 
 - [Product and architecture design](docs/design.md)
 - [Delivery roadmap and acceptance gates](docs/roadmap.md)
-- [Documentation map, historical acceptance evidence, and studies](docs/README.md)
+- [Documentation map](docs/README.md)
+- [Product captures](docs/media/README.md)
+- [Historical acceptance, spike, and study evidence](docs/evidence/README.md)
 
 ## Development
 

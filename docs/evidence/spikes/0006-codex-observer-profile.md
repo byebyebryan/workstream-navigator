@@ -91,4 +91,4 @@ Production uses the user's normal configuration, where all active hook sources
 continue to coexist. Workstream Navigator neither disables nor assumes
 responsibility for those integrations.
 
-[fixture]: ../../spikes/fixtures/codex-observer-profile.json
+[fixture]: ../../../spikes/fixtures/codex-observer-profile.json

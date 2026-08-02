@@ -69,5 +69,5 @@ tmux plus SSH design as Workstream Navigator's V1 persistence and remote
 attachment substrate. They do not authorize a production implementation or a
 remote daemon.
 
-[fixture]: ../../spikes/fixtures/codex-native-tui.json
+[fixture]: ../../../spikes/fixtures/codex-native-tui.json
 [phase-7f]: https://github.com/byebyebryan/agent-switchboard-python-reference/blob/main/docs/phase-7f-acceptance.md

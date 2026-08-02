@@ -65,6 +65,6 @@ resize, focus, reconnect, and result-tip preservation. The earlier
 [native Codex transport spike][spike-0002] independently established that an
 actual Codex TUI survives private-tmux detach and reconnect.
 
-[fixture]: ../../spikes/fixtures/tmux-runtime-isolation.json
+[fixture]: ../../../spikes/fixtures/tmux-runtime-isolation.json
 [spike-0002]: 0002-codex-native-tui.md
 [spike-0005]: 0005-codex-terminal-presentation.md

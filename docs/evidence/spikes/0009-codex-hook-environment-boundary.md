@@ -59,4 +59,4 @@ The stale build-tree hook path discovered during recovery was repaired to the
 stable installed executable and native trust was renewed. That deployment fix
 does not alter this conclusion.
 
-[sanitized fixture]: ../../spikes/fixtures/codex-hook-environment-boundary.json
+[sanitized fixture]: ../../../spikes/fixtures/codex-hook-environment-boundary.json

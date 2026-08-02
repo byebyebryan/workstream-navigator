@@ -75,5 +75,5 @@ constraint for Rust. The eventual Rust navigator still needs normal
 product-level end-to-end testing, but visual terminal review is not a
 pre-implementation or spike gate.
 
-[fixture]: ../../spikes/fixtures/codex-terminal-presentation.json
+[fixture]: ../../../spikes/fixtures/codex-terminal-presentation.json
 [phase-7f]: https://github.com/byebyebryan/agent-switchboard-python-reference/blob/main/docs/phase-7f-acceptance.md

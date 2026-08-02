@@ -123,7 +123,7 @@ The original bounded D1 run passed with Codex CLI `0.145.0` and the
 - The exact dedicated observer profile, managed runtime, review runtime, and
   disposable state/repository were removed. The ordinary tmux fingerprint was
   unchanged before and after the run.
-- The sanitized [fixture](../spikes/fixtures/d1-local-codex-acceptance.json)
+- The sanitized [fixture](../../../spikes/fixtures/d1-local-codex-acceptance.json)
   contains only booleans and a provider contract fingerprint. No identities,
   prompt/result text, paths, PIDs, credentials, raw hook payloads, App Server
   frames, or terminal capture were committed.
@@ -144,7 +144,7 @@ the `codex-d1.5-clear-thread-read-trust-review-v1` fingerprint.
 - Cleanup parked the exact private Runtime, removed the exact observer profile,
   removed the review and disposable test roots, and left the ordinary tmux
   fingerprint unchanged.
-- The separate sanitized [D1.5 fixture](../spikes/fixtures/d1.5-local-codex-reconciliation.json)
+- The separate sanitized [D1.5 fixture](../../../spikes/fixtures/d1.5-local-codex-reconciliation.json)
   contains only assertions and the behavioral fingerprint.
 
 ## 2026-07-29 preliminary live run

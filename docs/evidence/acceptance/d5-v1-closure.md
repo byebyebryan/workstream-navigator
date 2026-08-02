@@ -74,5 +74,5 @@ comparisons, and cleanup status. It excludes provider identifiers, prompts,
 responses, terminal data, paths, process IDs, credentials, and raw provider
 payloads.
 
-See the sanitized [D5 recovery fixture](../spikes/fixtures/d5-local-recovery.json)
-and [combined native-Codex fixture](../spikes/fixtures/d5-combined-native-codex.json).
+See the sanitized [D5 recovery fixture](../../../spikes/fixtures/d5-local-recovery.json)
+and [combined native-Codex fixture](../../../spikes/fixtures/d5-combined-native-codex.json).

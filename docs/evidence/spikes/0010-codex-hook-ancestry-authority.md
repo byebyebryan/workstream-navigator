@@ -71,4 +71,4 @@ the production profile declaration, transactional binding update, App Server
 corroboration, remote transport, or every future Codex release. Those remain
 separate implementation and acceptance gates.
 
-[fixture]: ../../spikes/fixtures/codex-hook-ancestry-authority.json
+[fixture]: ../../../spikes/fixtures/codex-hook-ancestry-authority.json

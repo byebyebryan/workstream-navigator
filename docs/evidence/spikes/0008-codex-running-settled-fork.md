@@ -90,4 +90,4 @@ name, preview, path, PID, credential, environment, raw App Server frame, or
 terminal capture was committed. All live provider state was disposable and
 deleted.
 
-[fixture]: ../../spikes/fixtures/codex-running-settled-fork.json
+[fixture]: ../../../spikes/fixtures/codex-running-settled-fork.json

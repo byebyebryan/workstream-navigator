@@ -77,7 +77,7 @@ response is recorded here. This establishes two design rules:
 > **Superseded display examples.** This study's provenance and App Server
 > findings remain valid, but the current V1 design no longer exposes stable
 > Workstream short IDs in user-facing fallback names. See
-> [`docs/design.md`](../design.md#workstream-display-names) for the accepted
+> [`docs/design.md`](../../design.md#workstream-display-names) for the accepted
 > presentation contract.
 
 1. the current tip's non-empty `thread.name` is the canonical Workstream display

@@ -65,4 +65,4 @@ contract fingerprint. It excludes provider identifiers, prompts, responses,
 terminal capture, paths, process IDs, credentials, and raw hook or App Server
 payloads.
 
-See the [D4 sanitized fixture](../spikes/fixtures/d4-local-codex-workstream-fork.json).
+See the [D4 sanitized fixture](../../../spikes/fixtures/d4-local-codex-workstream-fork.json).

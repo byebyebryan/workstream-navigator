@@ -49,7 +49,7 @@ The final disposable native-Codex run passed with Codex CLI `0.146.0` and the
 
 An initial live interaction exposed an out-of-bounds provider-attachment
 argument in the navigator. It was corrected before the final pass and now has
-a direct regression test. The sanitized [fixture](../spikes/fixtures/d2-local-navigator.json)
+a direct regression test. The sanitized [fixture](../../../spikes/fixtures/d2-local-navigator.json)
 contains only boolean assertions and the behavioral fingerprint; it commits no
 identities, paths, prompts, responses, image data, terminal capture, PIDs,
 credentials, or raw provider payloads.

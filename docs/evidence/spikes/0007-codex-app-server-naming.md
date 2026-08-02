@@ -76,4 +76,4 @@ The Python harness is disposable validation code. The product implementation
 remains Rust and must reproduce the allowlist, filtering, timeout, and cleanup
 properties.
 
-[fixture]: ../../spikes/fixtures/codex-app-server-naming.json
+[fixture]: ../../../spikes/fixtures/codex-app-server-naming.json

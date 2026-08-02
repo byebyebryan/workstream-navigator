@@ -8,8 +8,8 @@ automation.
 
 Historical evidence note: this file records the D7.5 candidate. The current
 contract, including D7.6's host-private Project browser and later navigator
-presentation refinements, is in the [design](design.md),
-[roadmap](roadmap.md), and [operator guide](../README.md).
+presentation refinements, is in the [design](../../design.md),
+[roadmap](../../roadmap.md), and [operator guide](../../../README.md).
 
 ## Native evidence
 
@@ -58,4 +58,4 @@ response, title, Workstream/provider identifier, terminal capture, filesystem
 path, process identifier, credential, or raw lifecycle/App Server payload is
 recorded here or in the fixture.
 
-See the sanitized [D7 fixture](../spikes/fixtures/d7-navigator-workflow.json).
+See the sanitized [D7 fixture](../../../spikes/fixtures/d7-navigator-workflow.json).

@@ -660,9 +660,9 @@ The hook is deliberately passive:
   before an observation is accepted.
 
 The pre-refactor launch-environment authority mechanism is falsified by
-[Spike 0009](spikes/0009-codex-hook-environment-boundary.md): it must remain
+[Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md): it must remain
 fail-closed and cannot supply lifecycle status. [Spike
-0010](spikes/0010-codex-hook-ancestry-authority.md) proves the static-argument
+0010](evidence/spikes/0010-codex-hook-ancestry-authority.md) proves the static-argument
 plus direct-parent candidate. The production observer implements that candidate
 with the normal transactional binding and App Server corroboration gates. No
 shell-wrapper ancestry fallback is allowed; that would admit an agent
@@ -1542,16 +1542,16 @@ result-tip preservation, or the no-transcript boundary.
 
 ## Evidence basis
 
-- [Spike 0001: tmux remote-session transport](spikes/0001-tmux-remote-transport.md)
-- [Spike 0002: native Codex TUI over remote tmux](spikes/0002-codex-native-tui.md)
-- [Spike 0004: per-Workstream tmux runtime isolation](spikes/0004-tmux-runtime-isolation.md)
-- [Spike 0005: native Codex two-pane terminal presentation](spikes/0005-codex-terminal-presentation.md)
-- [Spike 0006: scoped Codex observer profile](spikes/0006-codex-observer-profile.md)
-- [Spike 0007: ephemeral Codex metadata and naming](spikes/0007-codex-app-server-naming.md)
-- [Spike 0008: running-source settled-prefix fork](spikes/0008-codex-running-settled-fork.md)
+- [Spike 0001: tmux remote-session transport](evidence/spikes/0001-tmux-remote-transport.md)
+- [Spike 0002: native Codex TUI over remote tmux](evidence/spikes/0002-codex-native-tui.md)
+- [Spike 0004: per-Workstream tmux runtime isolation](evidence/spikes/0004-tmux-runtime-isolation.md)
+- [Spike 0005: native Codex two-pane terminal presentation](evidence/spikes/0005-codex-terminal-presentation.md)
+- [Spike 0006: scoped Codex observer profile](evidence/spikes/0006-codex-observer-profile.md)
+- [Spike 0007: ephemeral Codex metadata and naming](evidence/spikes/0007-codex-app-server-naming.md)
+- [Spike 0008: running-source settled-prefix fork](evidence/spikes/0008-codex-running-settled-fork.md)
 - [Python Phase 7F terminal evidence](https://github.com/byebyebryan/agent-switchboard-python-reference/blob/main/docs/phase-7f-acceptance.md)
-- [Study 0003: Codex App Server runtime boundary](studies/0003-codex-app-server-runtime-boundary.md)
-- [D6 source-installed operator-beta acceptance](acceptance-d6-operator-beta.md)
+- [Study 0003: Codex App Server runtime boundary](evidence/studies/0003-codex-app-server-runtime-boundary.md)
+- [D6 source-installed operator-beta acceptance](evidence/acceptance/d6-operator-beta.md)
 - [Current Codex CLI commands](https://learn.chatgpt.com/docs/developer-commands?surface=cli)
 - [Current Codex configuration profiles](https://learn.chatgpt.com/docs/config-file/config-advanced#profiles)
 - [Current Codex App Server](https://learn.chatgpt.com/docs/app-server)

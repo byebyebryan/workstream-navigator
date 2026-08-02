@@ -4588,6 +4588,7 @@ fn project_browser_directory(root: &Path, relative_path: &str) -> Result<PathBuf
 fn safe_project_browser_entry_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 256
+        && !name.starts_with('.')
         && !name.chars().any(char::is_control)
         && !name.contains(['/', '\\'])
         && !matches!(name, "." | "..")
@@ -4787,6 +4788,7 @@ mod tests {
         let ordinary_directory = browser_root.join("scratch");
         fs::create_dir_all(git_project.join(".git")).unwrap();
         fs::create_dir_all(&ordinary_directory).unwrap();
+        fs::create_dir_all(browser_root.join(".hidden-project")).unwrap();
         fs::write(browser_root.join("not-a-directory"), b"ignored").unwrap();
         registry
             .set_project_browser_root(&browser_root.to_string_lossy())

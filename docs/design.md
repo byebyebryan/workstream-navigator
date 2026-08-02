@@ -262,7 +262,8 @@ Project registration is an explicit two-step navigator flow: `Projects → a`
 first selects the owning host, then opens a centered browser inside the
 navigator pane. The browser starts at that host's configured workspace root
 (`~/code` by default), lists only bounded direct-child names plus a Git marker,
-and uses a root label and relative cursor rather than returning absolute paths.
+omits dot-prefixed files and folders by default, and uses a root label and
+relative cursor rather than returning absolute paths.
 `Enter` opens a directory or registers a marked Git Project; `r` registers the
 current browser directory. The Hosts page owns the explicit root-setting action
 for the selected host. A local or SSH host resolves the selected relative cursor

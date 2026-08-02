@@ -1080,6 +1080,14 @@ impl NavigatorViewMode {
         }
     }
 
+    const fn previous(self) -> Self {
+        match self {
+            Self::Recent => Self::Host,
+            Self::Project => Self::Recent,
+            Self::Host => Self::Project,
+        }
+    }
+
     const fn label(self) -> &'static str {
         match self {
             Self::Recent => "Recent",
@@ -2054,8 +2062,12 @@ impl NavigatorView {
         self.help_scroll = self.help_scroll.saturating_sub(1);
     }
 
-    fn cycle_view_mode(&mut self) {
+    fn cycle_view_mode_next(&mut self) {
         self.view_mode = self.view_mode.next();
+    }
+
+    fn cycle_view_mode_previous(&mut self) {
+        self.view_mode = self.view_mode.previous();
     }
 
     fn cycle_workstream_scope(&mut self) {
@@ -2601,7 +2613,7 @@ impl NavigatorView {
         }
         match self.page {
             NavigatorPage::Workstreams => {
-                let mut bindings = vec![("v", "view"), ("s", "scope")];
+                let mut bindings = vec![("←/→", "view"), ("s", "scope")];
                 match self.workstream_scope {
                     WorkstreamScope::Active => bindings.extend([
                         (
@@ -3218,7 +3230,7 @@ fn workstream_help_lines(scope: WorkstreamScope, heading: Style, key: Style) -> 
         Line::raw(""),
         Line::from(Span::styled("Workstreams", heading)),
         Line::from(vec![
-            Span::styled("v", key),
+            Span::styled("←/→", key),
             Span::raw("          cycle recent/project/host"),
         ]),
         Line::from(vec![
@@ -4070,8 +4082,12 @@ fn handle_navigator_key(
             view.toggle_management_page(NavigatorPage::Hosts);
             false
         }
-        KeyCode::Char('v') if workstreams => {
-            view.cycle_view_mode();
+        KeyCode::Right if workstreams => {
+            view.cycle_view_mode_next();
+            false
+        }
+        KeyCode::Left if workstreams => {
+            view.cycle_view_mode_previous();
             false
         }
         KeyCode::Char('s') if workstreams => {
@@ -6317,14 +6333,19 @@ mod tests {
         });
 
         assert_eq!(view.view_mode(), NavigatorViewMode::Recent);
-        view.cycle_view_mode();
+        view.cycle_view_mode_next();
         assert_eq!(view.view_mode(), NavigatorViewMode::Project);
         assert_eq!(view.footer_status(), "");
-        view.cycle_view_mode();
+        view.cycle_view_mode_next();
         assert_eq!(view.view_mode(), NavigatorViewMode::Host);
-        view.cycle_view_mode();
+        view.cycle_view_mode_previous();
+        assert_eq!(view.view_mode(), NavigatorViewMode::Project);
+        view.cycle_view_mode_previous();
 
         assert_eq!(view.view_mode(), NavigatorViewMode::Recent);
+        view.cycle_view_mode_previous();
+        assert_eq!(view.view_mode(), NavigatorViewMode::Host);
+        view.cycle_view_mode_next();
         assert_eq!(
             view.selected().map(|row| row.workstream_id),
             Some(workstream_id)
@@ -6366,7 +6387,7 @@ mod tests {
             unresolved_operations: Vec::new(),
         });
 
-        view.cycle_view_mode();
+        view.cycle_view_mode_next();
         assert_eq!(
             view.list_entries(),
             vec![
@@ -6395,7 +6416,7 @@ mod tests {
                 },
             ]
         );
-        view.cycle_view_mode();
+        view.cycle_view_mode_next();
         assert_eq!(
             view.list_entries(),
             vec![
@@ -6529,6 +6550,7 @@ mod tests {
         .into_iter()
         .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
         .collect::<String>();
+        assert!(full_help.contains("←/→"));
         assert!(full_help.contains("cycle recent/project/host"));
         assert!(!full_help.contains("recover an unresolved"));
         assert!(!full_help.contains("Mouse"));
@@ -6970,7 +6992,7 @@ mod tests {
     fn compact_workstream_controls_preserve_terminal_key_memory() {
         let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
         let compact = compact_keys(&view);
-        assert!(compact.contains("v view"));
+        assert!(compact.contains("←/→ view"));
         assert!(compact.contains("s scope"));
         assert!(compact.contains("n register"));
         assert!(compact.contains("? keys"));
@@ -6979,7 +7001,7 @@ mod tests {
         assert_bindings_in_order(
             &compact,
             &[
-                "v view",
+                "←/→ view",
                 "s scope",
                 "n register",
                 "f fork",
@@ -7112,7 +7134,7 @@ mod tests {
         assert!(rendered.contains("Status"));
         assert!(rendered.contains("an intentionally long"));
         assert!(rendered.contains("navigator action result"));
-        assert!(rendered.contains("v view"));
+        assert!(rendered.contains("←/→"));
     }
 
     #[test]

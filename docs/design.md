@@ -286,14 +286,15 @@ acceptance requirement.
 
 The Workstreams page retains its accepted muscle memory: `Enter` performs the
 primary open/start/recover action, `n` starts a sibling, `f` forks, `p` parks,
-`a` acknowledges, `v` changes grouping, and `?` toggles the full reference.
+`a` acknowledges, `←/→` changes grouping, and `?` toggles the full
+reference.
 New D7 actions receive page-local single-key bindings without reinterpreting
 those keys. Projects and Hosts may reuse letters because the active page and
 its visible footer make the scope explicit.
 
-Within the Workstreams page, `v` cycles the local-only `Recent`, `By project`,
-and `By host` views in that order. These remain operational
-Workstream-browsing projections, not substitutes for the Project or Host
+Within the Workstreams page, right cycles the local-only `Recent`, `By project`,
+and `By host` views in that order; left moves in the reverse direction. These
+remain operational Workstream-browsing projections, not substitutes for the Project or Host
 configuration pages. `Recent` is the
 default global activity order. Grouped views retain that order by placing the
 group containing the newest visible activity first and keeping its Workstreams

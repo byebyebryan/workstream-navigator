@@ -32,4 +32,7 @@ falsification studies, not product documentation.
 ## Provider studies
 
 The [studies](studies/) directory records focused provider-contract research
-used to make the design conservative and reproducible.
+used to make the design conservative and reproducible. [Study
+0004](studies/0004-herdr-v0.8-comparison.md) is the competitive-positioning
+exception: it compares the released V1 against Herdr 0.8.0 as documentation
+research and changes no product boundary.

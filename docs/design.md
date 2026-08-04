@@ -33,10 +33,18 @@ The retained two-server presentation can show minor cursor artifacts in Ghostty
 during high-churn native TUI activity such as typing or streaming. After
 removing WSNav's continuous runtime and presentation control probes, that
 residual is accepted as non-blocking V1 visual polish: it does not alter input,
-provider output, result retention, or provider ownership. Its suspected
-nested-tmux rendering cause is not yet a proven contract; the deferred,
-disposable studies and their decision gates are recorded in the
-[roadmap](roadmap.md#2026-08-02-deferred-terminal-fidelity-studies).
+provider output, result retention, or provider ownership. The artifact is
+caused by upstream tmux behavior ([tmux issue
+5419](https://github.com/tmux/tmux/issues/5419)): every full client redraw
+emits `civis`/`cnorm` cursor-visibility toggles, which repeatedly restart the
+cursor blink phase in the nested path. This is version-bound and unfixed in
+every tmux currently available on Arch (`3.7b` is the latest released; the AUR
+`tmux-git` package is stale and upstream master lacks the fix), so WSNav
+configures its private servers with the best available settings and defers a
+fix until the upstream release lands. The A/B instrument, the ruled-out
+workarounds, and the decision gates are recorded in
+[Spike 0014](evidence/spikes/0014-terminal-fidelity-a-b.md) and the
+[roadmap](roadmap.md#2026-08-04-terminal-fidelity-root-cause-is-upstream-tmux).
 
 ## V1 tenets
 

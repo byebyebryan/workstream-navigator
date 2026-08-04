@@ -1,5 +1,36 @@
 # Workstream Navigator V1 Roadmap
 
+## 2026-08-04 terminal-fidelity root cause is upstream tmux
+
+[Spike 0014](evidence/spikes/0014-terminal-fidelity-a-b.md) built the
+deterministic A/B instrument and proved that the nested presentation re-emits
+~2.4-2.6x the cursor-motion sequences of a direct single-tmux baseline for
+identical output. Follow-up probing identified the root cause: **upstream tmux
+behavior, not a WSNav configuration fault**. On every full client redraw,
+tmux emits `civis` (`CSI ?25 l`) before synchronized output and `cnorm`
+(`CSI ?25 h`) after it, even when the pane cursor is visible. On terminals
+where cursor-state updates restart blinking (Ghostty included), repeated
+redraws during streaming visibly disrupt the blink phase. This is documented
+as [tmux issue 5419](https://github.com/tmux/tmux/issues/5419).
+
+The following WSNav-controllable candidates were each ruled out with the
+instrument and left the `civis`/`cnorm` emission unchanged:
+
+- `set -g cursor-style block` (steady, non-blinking) - only selects the cursor
+  shape; the hide/show toggle during redraw is independent;
+- `set -g extended-keys always` / `terminal-features` from commit `c0ce139`;
+- `set -g update-scroll-region on`; and
+- the `sync` (`CSI ?2026`) terminal feature, which is already active for
+  Ghostty clients.
+
+The fix is version-bound: tmux `3.7b` (current Arch `extra`) has the behavior,
+the AUR `tmux-git` package is stale, and upstream master does not yet contain
+the fix. WSNav therefore keeps its best-available private-server configuration
+and defers a fix until an upstream tmux release includes it. Revisit this note
+when tmux ships the `#5419` fix; the instrument's `nested_motion_not_amplified`
+and `nested_bytes_not_amplified` assertions are the objective confirmation
+gate.
+
 ## 2026-08-02 deferred terminal-fidelity studies
 
 The retained presentation topology is Ghostty -> private presentation tmux ->
@@ -8,9 +39,7 @@ private Runtime tmux -> Codex. [Spike
 native input, resize, reconnect, and result-tip behavior, but does not claim
 pixel- or cursor-identical rendering. In current live use, minor cursor
 artifacts remain during typing and agent streaming after removal of continuous
-runtime and presentation-tmux control probes. The leading hypothesis is the
-nested-tmux rendering boundary, not a remaining Navigator refresh loop; that
-has not yet been isolated by a controlled A/B study.
+runtime and presentation-tmux control probes.
 
 This is accepted, non-blocking V1 polish. It does not approve a delivery slice
 or relax private-Runtime, native-UI, input, or result-tip invariants. Revisit
@@ -39,7 +68,17 @@ Before any presentation redesign, run these disposable, privacy-safe studies:
 An eventual candidate passes only when the nested case has no distracting
 cursor artifacts across a bounded typing and streaming run, retains normal
 input/resize/reconnect/result-tip behavior, leaves ordinary tmux unchanged,
-and cleans up all disposable state. No work is scheduled from this note.
+and cleans up all disposable state.
+
+**Resolution:** Study 1 (Topology A/B) was implemented as [Spike
+0014](evidence/spikes/0014-terminal-fidelity-a-b.md), and the resulting
+investigation is recorded in the 2026-08-04 note above: the artifact is
+upstream [tmux issue 5419](https://github.com/tmux/tmux/issues/5419),
+version-bound, and WSNav defers a fix until the upstream release. The
+terminal-contract matrix and control-plane audit were subsumed by that probe
+work (the matrix candidates and control-plane probes were each ruled out with
+the instrument). Topology alternatives are not scheduled unless the upstream
+fix fails to resolve the visible artifact.
 
 ## 2026-08-02 lifecycle evidence — native `/new` remains unsupported
 

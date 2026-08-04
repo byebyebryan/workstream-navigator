@@ -409,9 +409,11 @@ impl Presentation {
         )
     }
 
-    /// Returns the current exact provider attachment attempt. If its helper
-    /// pane died before reporting a terminal phase, the attempt is atomically
-    /// converted to `Failed` for an exact same-row retry.
+    /// Returns the current exact provider attachment attempt. Before its helper
+    /// reports `Running`, a dead pane is atomically converted to `Failed` for
+    /// an exact same-row retry. Once running, the helper itself reports its
+    /// terminal phase, so this method deliberately avoids repeated control
+    /// queries against the presentation tmux server.
     ///
     /// # Errors
     ///
@@ -421,11 +423,7 @@ impl Presentation {
         let Some(mut status) = self.read_attachment_status()? else {
             return Ok(None);
         };
-        if matches!(
-            status.phase,
-            AttachmentPhase::Pending | AttachmentPhase::Running
-        ) && self.provider_pane_is_dead()?
-        {
+        if status.phase == AttachmentPhase::Pending && self.provider_pane_is_dead()? {
             status.phase = AttachmentPhase::Failed;
             self.write_attachment_status(&status)?;
         }
@@ -930,6 +928,29 @@ mod tests {
             presentation.report_attachment_phase(pending.attempt_id, AttachmentPhase::Running),
             Err(PresentationError::StaleAttachmentAttempt)
         ));
+    }
+
+    #[test]
+    fn running_attachment_status_does_not_probe_the_presentation_tmux_server() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        fs::create_dir_all(&paths.directory).unwrap();
+        let presentation = Presentation {
+            paths,
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        let pending = presentation
+            .prepare_attachment("local", WorkstreamId::new())
+            .unwrap();
+        presentation
+            .report_attachment_phase(pending.attempt_id, AttachmentPhase::Running)
+            .unwrap();
+
+        let status = presentation.attachment_status().unwrap().unwrap();
+
+        assert_eq!(status.attempt_id, pending.attempt_id);
+        assert_eq!(status.phase, AttachmentPhase::Running);
     }
 
     #[test]

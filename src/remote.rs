@@ -119,7 +119,7 @@ fn dispatch(state_root: Option<std::path::PathBuf>, request: &RequestEnvelope) -
             },
             Err(_) => rejected("host identity is unavailable"),
         },
-        HostRequest::Snapshot { cursor } => match snapshot(&root, &mut registry, *cursor) {
+        HostRequest::Snapshot { cursor } => match snapshot(&mut registry, *cursor) {
             Ok(snapshot) => ResponseEnvelope {
                 version: CURRENT_PROTOCOL_VERSION,
                 response: HostResponse::Snapshot(snapshot),
@@ -538,22 +538,19 @@ fn workstream_revision(
         .ok_or(StateError::UnknownOpenWorkstream(workstream_id))
 }
 
+/// Projects durable lifecycle state without contacting private provider tmux
+/// servers. Exact liveness checks remain at recovery and stateful action
+/// boundaries, so remote snapshot polling cannot disturb an attached provider.
 fn snapshot(
-    root: &StateRoot,
     registry: &mut HostRegistry,
     cursor: Option<u32>,
 ) -> Result<SnapshotResponse, StateError> {
-    crate::actions::reconcile_lost_runtimes(root, registry)?;
     crate::repository::refresh_pending_metadata(registry)?;
     let page = registry.workstream_overview_page(
         cursor.unwrap_or(0),
         crate::protocol::SNAPSHOT_PAGE_WORKSTREAMS,
     )?;
-    let workstreams = page
-        .workstreams
-        .iter()
-        .map(|overview| snapshot_workstream(root, overview))
-        .collect();
+    let workstreams = page.workstreams.iter().map(snapshot_workstream).collect();
     let unresolved_operation_count = registry
         .unresolved_operation_overviews()?
         .len()
@@ -597,8 +594,8 @@ fn operations(registry: &HostRegistry) -> Result<OperationsResponse, StateError>
     Ok(OperationsResponse { operations })
 }
 
-fn snapshot_workstream(root: &StateRoot, overview: &WorkstreamOverview) -> SnapshotWorkstream {
-    let runtime_status = observed_runtime_status(root, overview);
+fn snapshot_workstream(overview: &WorkstreamOverview) -> SnapshotWorkstream {
+    let runtime_status = observed_runtime_status(overview);
     let attention = overview.attention.as_ref();
     let recovery_required = overview.lifecycle == WorkstreamLifecycle::RecoveryRequired
         || attention
@@ -633,7 +630,7 @@ fn snapshot_workstream(root: &StateRoot, overview: &WorkstreamOverview) -> Snaps
     }
 }
 
-fn observed_runtime_status(root: &StateRoot, overview: &WorkstreamOverview) -> RuntimeStatus {
+fn observed_runtime_status(overview: &WorkstreamOverview) -> RuntimeStatus {
     if overview.lifecycle == WorkstreamLifecycle::Parked {
         return RuntimeStatus::Stopped;
     }
@@ -643,17 +640,7 @@ fn observed_runtime_status(root: &StateRoot, overview: &WorkstreamOverview) -> R
     if record.status == RuntimeStatus::Stopped {
         return RuntimeStatus::Stopped;
     }
-    let tmux = SystemTmux::default();
-    let process_probe = LinuxProcessProbe;
-    let Ok(paths) = RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)
-    else {
-        return RuntimeStatus::Unknown;
-    };
-    let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
-    match runtime.probe() {
-        Ok(RuntimeProbe::Live { .. }) => record.status,
-        Ok(RuntimeProbe::Missing | RuntimeProbe::Unknown { .. }) | Err(_) => RuntimeStatus::Unknown,
-    }
+    record.status
 }
 
 fn display_name(overview: &WorkstreamOverview, runtime_status: RuntimeStatus) -> String {
@@ -982,8 +969,6 @@ mod tests {
 
     #[test]
     fn managed_remote_workstream_keeps_the_project_location_label() {
-        let temporary = tempfile::tempdir().unwrap();
-        let root = StateRoot::create(temporary.path()).unwrap();
         let overview = WorkstreamOverview {
             workstream_id: WorkstreamId::new(),
             location_id: crate::domain::LocationId::new(),
@@ -1001,13 +986,35 @@ mod tests {
             attention: None,
         };
 
-        let snapshot = snapshot_workstream(&root, &overview);
+        let snapshot = snapshot_workstream(&overview);
         assert_eq!(snapshot.project_display_name, "dms-power-status");
         assert_eq!(
             snapshot.remote_identity_display.as_deref(),
             Some("github.com/owner/dms-power-status")
         );
         assert!(snapshot.archived);
+    }
+
+    #[test]
+    fn remote_snapshot_projects_durable_runtime_state_without_a_tmux_probe() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let registered = registry.register_project_root(&project).unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        registry
+            .record_runtime_process_birth(runtime.runtime_id, runtime.revision, "birth-a")
+            .unwrap();
+
+        let snapshot = snapshot(&mut registry, None).unwrap();
+
+        assert_eq!(snapshot.workstreams.len(), 1);
+        assert_eq!(
+            snapshot.workstreams[0].runtime_status,
+            RuntimeStatus::Starting
+        );
     }
 
     #[test]
@@ -1089,7 +1096,7 @@ mod tests {
             response => panic!("unexpected archive response: {response:?}"),
         };
 
-        let snapshot = snapshot(&root, &mut HostRegistry::open(&root).unwrap(), None).unwrap();
+        let snapshot = snapshot(&mut HostRegistry::open(&root).unwrap(), None).unwrap();
         assert_eq!(snapshot.workstreams.len(), 1);
         assert!(snapshot.workstreams[0].archived);
 

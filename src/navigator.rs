@@ -43,9 +43,7 @@ use crate::{
     process::{BoundedProcessError, output_bounded},
     protocol::{HostAction, ObserverStatus, ProjectDirectoriesResponse, ProjectDirectoryEntry},
     provider::codex::names::{NameContext, resolve_name},
-    runtime::{
-        LinuxProcessProbe, PrivateRuntime, RuntimeError, RuntimePaths, RuntimeProbe, SystemTmux,
-    },
+    runtime::RuntimeError,
     state::{
         ClientCatalog, ClientHost, ClientHostTransport, ClientProjectLocation, HostIdentity,
         HostRegistry, IntegrationLifecycle, StateError, StateRoot, WorkstreamOverview,
@@ -257,9 +255,12 @@ pub struct NavigatorHostOverview {
     pub observer_status: ObserverStatus,
 }
 
-/// Reads a fresh local-only navigator projection from the durable host state.
-/// The caller controls polling; this function performs no provider I/O and no
-/// mutation.
+/// Reads a fresh local-only navigator projection from durable host state.
+///
+/// The caller controls polling. This projection does not contact a private
+/// provider tmux server: exact liveness checks are reserved for recovery and
+/// stateful action boundaries so passive rendering cannot disturb the native
+/// provider pane.
 ///
 /// # Errors
 ///
@@ -267,7 +268,6 @@ pub struct NavigatorHostOverview {
 /// invalid persisted state.
 pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, NavigatorError> {
     let mut registry = HostRegistry::open(root)?;
-    crate::actions::reconcile_lost_runtimes(root, &mut registry)?;
     crate::repository::refresh_pending_metadata(&mut registry)?;
     let host = registry.identity()?;
     let observer_status = observer_status(&registry)?;
@@ -276,7 +276,7 @@ pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, Naviga
     let workstreams = registry
         .workstream_overviews()?
         .into_iter()
-        .map(|overview| project_workstream(root, &mut catalog, &host, &executable, &overview))
+        .map(|overview| project_workstream(&mut catalog, &host, &executable, &overview))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
         .flatten()
@@ -322,7 +322,6 @@ fn observer_status(registry: &HostRegistry) -> Result<ObserverStatus, NavigatorE
 }
 
 fn project_workstream(
-    root: &StateRoot,
     catalog: &mut ClientCatalog,
     host: &HostIdentity,
     executable: &Path,
@@ -346,7 +345,7 @@ fn project_workstream(
     let runtime_status = if recovery_required {
         NavigatorRuntimeStatus::RecoveryRequired
     } else {
-        observed_runtime_status(root, overview)?
+        observed_runtime_status(overview)
     };
     let display_name = bounded_display(&display_name(overview, runtime_status));
     let project = match catalog.local_project_location(host.host_id, overview.location_id)? {
@@ -481,30 +480,17 @@ fn project_metadata_matches(
     }
 }
 
-fn observed_runtime_status(
-    root: &StateRoot,
-    overview: &WorkstreamOverview,
-) -> Result<NavigatorRuntimeStatus, NavigatorError> {
+fn observed_runtime_status(overview: &WorkstreamOverview) -> NavigatorRuntimeStatus {
     if overview.lifecycle == WorkstreamLifecycle::Parked {
-        return Ok(NavigatorRuntimeStatus::Parked);
+        return NavigatorRuntimeStatus::Parked;
     }
     let Some(record) = &overview.runtime else {
-        return Ok(NavigatorRuntimeStatus::Parked);
+        return NavigatorRuntimeStatus::Parked;
     };
     if record.status == RuntimeStatus::Stopped {
-        return Ok(NavigatorRuntimeStatus::Unknown);
+        return NavigatorRuntimeStatus::Unknown;
     }
-    let tmux = SystemTmux::default();
-    let process_probe = LinuxProcessProbe;
-    let runtime = PrivateRuntime::new(
-        &tmux,
-        &process_probe,
-        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
-    );
-    match runtime.probe()? {
-        RuntimeProbe::Live { .. } => Ok(navigator_runtime_status(record.status)),
-        RuntimeProbe::Missing | RuntimeProbe::Unknown { .. } => Ok(NavigatorRuntimeStatus::Unknown),
-    }
+    navigator_runtime_status(record.status)
 }
 
 fn display_name(overview: &WorkstreamOverview, runtime_status: NavigatorRuntimeStatus) -> String {
@@ -896,10 +882,11 @@ pub struct NavigatorView {
     rendered_host_rows: Vec<(u16, String)>,
     mouse_click: Option<MouseClickIntent>,
     message: Option<String>,
+    transient_message: Option<(String, Instant)>,
+    spinner_frame: usize,
     help_visible: bool,
     help_scroll: u16,
     modal: Option<NavigatorModal>,
-    spinner_frame: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1142,16 +1129,20 @@ impl NavigatorView {
             rendered_host_rows: Vec::new(),
             mouse_click: None,
             message: None,
+            transient_message: None,
+            spinner_frame: 0,
             help_visible: false,
             help_scroll: 0,
             modal: None,
-            spinner_frame: 0,
         };
         view.normalize_page_selection();
         view
     }
 
-    pub fn replace_snapshot(&mut self, snapshot: LocalNavigatorSnapshot) {
+    pub fn replace_snapshot(&mut self, snapshot: LocalNavigatorSnapshot) -> bool {
+        let snapshot_changed = self.snapshot != snapshot;
+        let previous_selected = self.selected;
+        let previous_attachment = self.attached.clone();
         let selected_id = self
             .selected()
             .map(|row| (row.host.alias().to_owned(), row.workstream_id));
@@ -1169,6 +1160,9 @@ impl NavigatorView {
         self.clear_inactive_attachment();
         self.normalize_page_selection();
         self.normalize_workstream_selection();
+        snapshot_changed
+            || self.selected != previous_selected
+            || self.attached != previous_attachment
     }
 
     #[must_use]
@@ -1665,19 +1659,23 @@ impl NavigatorView {
             })
     }
 
-    fn observe_attachment(&mut self, status: &AttachmentStatus) {
+    fn observe_attachment(&mut self, status: &AttachmentStatus) -> bool {
         let observation = (status.attempt_id, status.phase);
         let changed = self.observed_attachment != Some(observation);
+        let previous_attachment = self.attached.clone();
         self.observed_attachment = Some(observation);
         match status.phase {
             AttachmentPhase::Pending | AttachmentPhase::Running => {
                 self.attached = Some((status.host_alias.clone(), status.workstream_id));
                 if changed {
-                    self.set_message(if status.phase == AttachmentPhase::Pending {
-                        "provider attachment starting"
+                    if status.phase == AttachmentPhase::Pending {
+                        self.set_message("provider attachment starting");
                     } else {
-                        "provider attached; use the native Codex UI directly"
-                    });
+                        self.set_transient_message(
+                            "provider attached; use the native Codex UI directly",
+                            Instant::now(),
+                        );
+                    }
                 }
             }
             AttachmentPhase::Completed => {
@@ -1695,6 +1693,7 @@ impl NavigatorView {
                 }
             }
         }
+        changed || self.attached != previous_attachment
     }
 
     fn clear_attached(&mut self, workstream: &NavigatorWorkstream) {
@@ -1737,11 +1736,32 @@ impl NavigatorView {
     }
 
     pub fn set_message(&mut self, message: impl Into<String>) {
-        self.message = Some(bounded_display(&message.into()));
+        let message = bounded_display(&message.into());
+        self.message = Some(message);
+        self.transient_message = None;
     }
 
     pub fn clear_message(&mut self) {
         self.message = None;
+        self.transient_message = None;
+    }
+
+    fn set_transient_message(&mut self, message: impl Into<String>, now: Instant) {
+        let message = bounded_display(&message.into());
+        self.message = None;
+        self.transient_message = Some((message, now + ATTACHMENT_READY_MESSAGE_DURATION));
+    }
+
+    fn expire_transient_message(&mut self, now: Instant) -> bool {
+        if self
+            .transient_message
+            .as_ref()
+            .is_some_and(|(_, expires_at)| now >= *expires_at)
+        {
+            self.transient_message = None;
+            return true;
+        }
+        false
     }
 
     fn toggle_help(&mut self) {
@@ -2056,8 +2076,24 @@ impl NavigatorView {
         self.view_mode
     }
 
-    fn advance_animation(&mut self) {
-        self.spinner_frame = (self.spinner_frame + 1) % SPINNER_FRAMES.len();
+    /// Advances the active-work indicator only while it is visible in the
+    /// Workstreams list. This is deliberately presentation-only: it must not
+    /// refresh Runtime or presentation-tmux state.
+    fn advance_working_indicator(&mut self) -> bool {
+        let visible = self.page == NavigatorPage::Workstreams
+            && self.detail.is_none()
+            && !self.help_visible
+            && self.modal.is_none()
+            && self.list_entries().into_iter().any(|entry| {
+                entry.workstream_index().is_some_and(|index| {
+                    let row = &self.snapshot.workstreams[index];
+                    row.host.is_reachable() && row.runtime_status == NavigatorRuntimeStatus::Working
+                })
+            });
+        if visible {
+            self.spinner_frame = (self.spinner_frame + 1) % WORKING_SPINNER_FRAMES.len();
+        }
+        visible
     }
 
     pub fn render(&mut self, frame: &mut Frame<'_>) {
@@ -2146,6 +2182,7 @@ impl NavigatorView {
     fn render_workstreams(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let entries = self.list_entries();
         let project_colors = visible_project_colors(&self.snapshot);
+        let spinner_frame = self.spinner_frame;
         let items = entries
             .iter()
             .map(|entry| {
@@ -2153,8 +2190,8 @@ impl NavigatorView {
                     entry,
                     &self.snapshot,
                     &project_colors,
-                    self.spinner_frame,
                     area.width.saturating_sub(2),
+                    spinner_frame,
                 )
             })
             .collect::<Vec<_>>();
@@ -2514,6 +2551,9 @@ impl NavigatorView {
     }
 
     fn footer_status(&self) -> String {
+        if let Some((message, _)) = &self.transient_message {
+            return message.clone();
+        }
         if let Some(message) = &self.message {
             return message.clone();
         }
@@ -2646,6 +2686,7 @@ impl NavigatorView {
         if self.help_visible {
             Style::default().fg(Color::Cyan)
         } else if self.message.is_some()
+            || self.transient_message.is_some()
             || self.snapshot.unresolved_operation_count > 0
             || !self.snapshot.unreachable_hosts.is_empty()
         {
@@ -3265,7 +3306,11 @@ fn workstream_help_lines(
     lines
 }
 
-const SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const ATTACHMENT_READY_MESSAGE_DURATION: Duration = Duration::from_secs(3);
+/// A 10 FPS A/B-test cadence: this is a local navigator redraw, never a tmux
+/// control-plane probe.
+const WORKING_SPINNER_FRAME_INTERVAL: Duration = Duration::from_millis(100);
+const WORKING_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const COMPACT_HINT_LEFT_INSET: usize = 1;
 /// A bordered status frame with at most three wrapped content lines.
 const STATUS_BOX_HEIGHT: u16 = 5;
@@ -3303,8 +3348,8 @@ fn navigator_list_item(
     entry: &NavigatorListEntry,
     snapshot: &LocalNavigatorSnapshot,
     project_colors: &BTreeMap<ProjectId, Color>,
-    spinner_frame: usize,
     available_width: u16,
+    spinner_frame: usize,
 ) -> ListItem<'static> {
     match entry {
         NavigatorListEntry::HostHeader { alias } => host_header_item(alias),
@@ -3320,8 +3365,8 @@ fn navigator_list_item(
             *context,
             *tree_branch,
             project_colors,
-            spinner_frame,
             available_width,
+            spinner_frame,
         ),
     }
 }
@@ -3542,8 +3587,8 @@ fn workstream_item(
     context: WorkstreamRowContext,
     tree_branch: Option<TreeBranch>,
     project_colors: &BTreeMap<ProjectId, Color>,
-    spinner_frame: usize,
     available_width: u16,
+    spinner_frame: usize,
 ) -> ListItem<'static> {
     let (indicator, indicator_style) = status_indicator(row, spinner_frame);
     let thread_style = Style::default().fg(Color::White);
@@ -3882,7 +3927,7 @@ fn status_indicator(row: &NavigatorWorkstream, spinner_frame: usize) -> (&'stati
     match row.runtime_status {
         NavigatorRuntimeStatus::RecoveryRequired => ("!", Style::default().fg(Color::Red)),
         NavigatorRuntimeStatus::Working => (
-            SPINNER_FRAMES[spinner_frame % SPINNER_FRAMES.len()],
+            WORKING_SPINNER_FRAMES[spinner_frame % WORKING_SPINNER_FRAMES.len()],
             Style::default().fg(Color::Yellow),
         ),
         NavigatorRuntimeStatus::Unknown => ("?", Style::default().fg(Color::Red)),
@@ -3961,34 +4006,40 @@ pub fn run_local_navigator(
     let mut observer_needs_review = initialize_observer_activation_message(root, &mut view);
     let mut terminal = TerminalSession::enter()?;
     let mut last_refresh = Instant::now();
-    let mut last_animation = Instant::now();
-    refresh_attachment_status(&presentation, &mut view);
+    let mut last_spinner_frame = Instant::now();
+    let mut needs_redraw = true;
+    needs_redraw |= refresh_attachment_status(&presentation, &mut view);
     let outcome: Result<(), NavigatorError> = loop {
-        terminal.terminal.draw(|frame| view.render(frame))?;
+        if needs_redraw {
+            terminal.terminal.draw(|frame| view.render(frame))?;
+            needs_redraw = false;
+        }
         let timeout = Duration::from_millis(100);
         if event::poll(timeout)? {
-            let exit = match event::read()? {
-                Event::Key(key) => {
-                    handle_navigator_key(key, root, &presentation, &mut remote, &mut view)
-                }
+            let (exit, event_changed) = match event::read()? {
+                Event::Key(key) => (
+                    handle_navigator_key(key, root, &presentation, &mut remote, &mut view),
+                    true,
+                ),
                 Event::Mouse(mouse) if !view.help_visible() => {
                     handle_navigator_mouse(mouse, root, &presentation, &mut remote, &mut view);
-                    false
+                    (false, true)
                 }
                 Event::Resize(_, _) => {
                     if let Err(error) = presentation.set_default_navigator_width() {
                         view.set_message(action_message(&error));
                     }
-                    false
+                    (false, true)
                 }
-                _ => false,
+                _ => (false, false),
             };
             if exit {
                 break Ok(());
             }
+            needs_redraw |= event_changed;
         }
         if last_refresh.elapsed() >= Duration::from_millis(500) {
-            refresh_navigator(
+            needs_redraw |= refresh_navigator(
                 root,
                 &presentation,
                 &mut remote,
@@ -3997,9 +4048,12 @@ pub fn run_local_navigator(
             );
             last_refresh = Instant::now();
         }
-        if last_animation.elapsed() >= Duration::from_millis(100) {
-            view.advance_animation();
-            last_animation = Instant::now();
+        if last_spinner_frame.elapsed() >= WORKING_SPINNER_FRAME_INTERVAL {
+            needs_redraw |= view.advance_working_indicator();
+            last_spinner_frame = Instant::now();
+        }
+        if view.expire_transient_message(Instant::now()) {
+            needs_redraw = true;
         }
     };
     drop(terminal);
@@ -4494,18 +4548,24 @@ fn refresh_navigator(
     remote: &mut RemoteMonitor,
     view: &mut NavigatorView,
     observer_needs_review: &mut bool,
-) {
+) -> bool {
+    let mut changed = false;
     let selected_host = view.selected_host_alias().map(str::to_owned);
     match combined_snapshot(root, remote, selected_host.as_deref()) {
-        Ok(snapshot) => view.replace_snapshot(snapshot),
-        Err(error) => view.set_message(action_message(&error)),
+        Ok(snapshot) => changed |= view.replace_snapshot(snapshot),
+        Err(error) => {
+            view.set_message(action_message(&error));
+            changed = true;
+        }
     }
-    refresh_attachment_status(presentation, view);
+    changed |= refresh_attachment_status(presentation, view);
     let now_pending = observer_review_pending(root);
     if *observer_needs_review && !now_pending {
         view.set_message("observer ready; native Workstreams can now start");
+        changed = true;
     }
     *observer_needs_review = now_pending;
+    changed
 }
 
 fn observer_review_pending(root: &StateRoot) -> bool {
@@ -5211,18 +5271,23 @@ fn forget_project(
     }
 }
 
-fn refresh_attachment_status(presentation: &Presentation, view: &mut NavigatorView) {
+fn refresh_attachment_status(presentation: &Presentation, view: &mut NavigatorView) -> bool {
     match presentation.attachment_status() {
         Ok(Some(status)) => view.observe_attachment(&status),
-        Ok(None) => {}
-        Err(error) => view.set_message(action_message(&error)),
+        Ok(None) => false,
+        Err(error) => {
+            view.set_message(action_message(&error));
+            true
+        }
     }
 }
 
 fn refresh_view(root: &StateRoot, remote: &mut RemoteMonitor, view: &mut NavigatorView) {
     let selected_host = view.selected_host_alias().map(str::to_owned);
     match combined_snapshot(root, remote, selected_host.as_deref()) {
-        Ok(snapshot) => view.replace_snapshot(snapshot),
+        Ok(snapshot) => {
+            view.replace_snapshot(snapshot);
+        }
         Err(error) => view.set_message(action_message(&error)),
     }
 }
@@ -5415,6 +5480,29 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     use super::*;
+
+    #[test]
+    fn local_snapshot_projects_durable_runtime_state_without_a_tmux_probe() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let registered = registry.register_project_root(&project).unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        registry
+            .record_runtime_process_birth(runtime.runtime_id, runtime.revision, "birth-a")
+            .unwrap();
+        drop(registry);
+
+        let snapshot = local_snapshot(&root).unwrap();
+
+        assert_eq!(snapshot.workstreams.len(), 1);
+        assert_eq!(
+            snapshot.workstreams[0].runtime_status,
+            NavigatorRuntimeStatus::Starting
+        );
+    }
 
     #[test]
     fn selection_wraps_without_persisting_focus() {
@@ -5734,6 +5822,51 @@ mod tests {
         });
 
         assert!(!view.is_attached_to(view.selected().unwrap()));
+    }
+
+    #[test]
+    fn unchanged_snapshot_does_not_request_a_navigator_redraw() {
+        let snapshot = LocalNavigatorSnapshot {
+            workstreams: vec![row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)],
+            hosts: Vec::new(),
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
+        };
+        let mut view = NavigatorView::new(snapshot.clone());
+
+        assert!(!view.replace_snapshot(snapshot));
+    }
+
+    #[test]
+    fn attached_confirmation_expires_without_detaching_the_provider() {
+        let workstream_id = WorkstreamId::new();
+        let workstream = row(workstream_id, NavigatorRuntimeStatus::Idle);
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![workstream.clone()],
+            hosts: Vec::new(),
+            unreachable_hosts: Vec::new(),
+            unresolved_operation_count: 0,
+            unresolved_operations: Vec::new(),
+        });
+
+        view.observe_attachment(&AttachmentStatus {
+            attempt_id: uuid::Uuid::new_v4(),
+            host_alias: "local".to_owned(),
+            workstream_id,
+            phase: AttachmentPhase::Running,
+        });
+        assert_eq!(
+            view.footer_status(),
+            "provider attached; use the native Codex UI directly"
+        );
+        assert!(view.is_attached_to(&workstream));
+
+        assert!(view.expire_transient_message(
+            Instant::now() + ATTACHMENT_READY_MESSAGE_DURATION + Duration::from_millis(1)
+        ));
+        assert_eq!(view.footer_status(), "");
+        assert!(view.is_attached_to(&workstream));
     }
 
     #[test]
@@ -7287,7 +7420,7 @@ mod tests {
             ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Working)
         };
 
-        assert_eq!(status_indicator(&row, 0).0, SPINNER_FRAMES[0]);
+        assert_eq!(status_indicator(&row, 0).0, WORKING_SPINNER_FRAMES[0]);
     }
 
     #[test]
@@ -7298,11 +7431,25 @@ mod tests {
     }
 
     #[test]
-    fn working_indicator_advances_between_spinner_frames() {
-        let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
+    fn working_indicator_advances_only_while_visible() {
+        let snapshot = LocalNavigatorSnapshot {
+            workstreams: vec![row(WorkstreamId::new(), NavigatorRuntimeStatus::Working)],
+            ..LocalNavigatorSnapshot::default()
+        };
+        let mut view = NavigatorView::new(snapshot);
 
-        view.advance_animation();
+        assert!(view.advance_working_indicator());
+        assert_eq!(view.spinner_frame, 1);
+        assert_eq!(
+            status_indicator(&view.snapshot.workstreams[0], view.spinner_frame).0,
+            WORKING_SPINNER_FRAMES[1]
+        );
 
+        view.detail = Some(NavigatorDetail::Workstream {
+            host_alias: "local".to_owned(),
+            workstream_id: view.snapshot.workstreams[0].workstream_id,
+        });
+        assert!(!view.advance_working_indicator());
         assert_eq!(view.spinner_frame, 1);
     }
 

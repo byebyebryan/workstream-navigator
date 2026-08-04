@@ -1,0 +1,41 @@
+{
+  "assertions": {
+    "agent_shell_forgery_rejected": true,
+    "cleanup_complete": true,
+    "codex_environment_sanitized": true,
+    "external_shell_forgery_rejected": true,
+    "ordinary_tmux_unchanged": true,
+    "repeated_native_new_thread_inventory_growth": true,
+    "stale_runtime_record_rejected": true,
+    "trusted_hook_source_reused": true,
+    "two_private_runtimes_exactly_matched": true
+  },
+  "elapsed_seconds": 34.8,
+  "privacy_audit": {
+    "credentials_or_raw_payloads_committed": false,
+    "paths_or_process_ids_committed": false,
+    "prompt_or_result_content_committed": false,
+    "provider_or_workstream_identifiers_committed": false,
+    "terminal_data_committed": false
+  },
+  "provider": {
+    "contract_fingerprint": "codex-hook-parent-pid-birth-cwd-v1",
+    "id": "codex",
+    "version": "codex-cli 0.146.0"
+  },
+  "reason": "ancestry-record-authority-proven",
+  "session_start_source_counts": {
+    "clear": 0,
+    "compact": 0,
+    "new": 0,
+    "other": 0,
+    "resume": 0,
+    "startup": 4
+  },
+  "status": "pass",
+  "study": "codex-hook-ancestry-authority",
+  "thread_inventory_growth_count": 2,
+  "transition": "new-inventory",
+  "user_prompt_session_correlation_count": 0,
+  "user_prompt_session_rotation_count": 0
+}

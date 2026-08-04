@@ -88,6 +88,23 @@ design.
 --debug-output writes before/after raw provider captures only at the explicit
 path with mode-0600; normal runs retain no raw terminal content.
 
+### Deferred terminal-fidelity studies
+
+The accepted two-server presentation can still show minor Ghostty cursor
+artifacts during high-churn native Codex rendering. This is non-blocking V1
+polish, not a reason to weaken Runtime isolation or replace the native pane.
+The current observation is recorded as a deferred study in the
+[roadmap](../docs/roadmap.md#2026-08-02-deferred-terminal-fidelity-studies).
+
+Before changing terminal settings or topology, use a disposable extension of
+this presentation harness to compare the retained nested path with a direct
+single-tmux baseline, exercise one fixed harmless typing/streaming sequence,
+and record only aggregate visual, latency, control-plane, and cleanup results.
+Any terminal-setting matrix must be private to the spike servers. Do not alter
+the ordinary tmux server, Ghostty configuration, ordinary Codex home, or user
+provider session. A topology alternative is admissible only if it retains every
+V1 native-UI and private-Runtime invariant.
+
 ## codex-observer-profile.sh
 
 This local study validates the proposed dedicated Codex observer profile and
@@ -154,3 +171,31 @@ The destination runs a divergent harmless turn from the new worktree while the
 source command is still active. Raw identities, turns, prompts, responses,
 paths, PIDs, captures, and generated schemas are private and deleted. The
 Python harness is disposable evidence machinery, not a product dependency.
+
+## codex-hook-ancestry-authority.py
+
+This local study validates the direct-parent authority candidate used for
+passive Codex lifecycle evidence. Its default `--transition clear` run is the
+recorded [Spike 0010](../docs/evidence/spikes/0010-codex-hook-ancestry-authority.md).
+The follow-up variants establish a deliberately narrow native `/new` result:
+
+- `new` is [Spike 0011](../docs/evidence/spikes/0011-codex-native-new-rebinding.md),
+  which falsifies the `SessionStart` changed-binding candidate.
+- `new-prompt` is [Spike 0012](../docs/evidence/spikes/0012-codex-new-prompt-session-rotation.md),
+  which falsifies first-destination-prompt session rotation.
+- `new-inventory` is [Spike 0013](../docs/evidence/spikes/0013-codex-new-thread-inventory.md),
+  which proves native `/new` creates a distinct thread but not its exact live
+  TUI binding.
+
+The last variation runs in a unique disposable workspace:
+
+~~~console
+spikes/codex-hook-ancestry-authority.py --transition new-inventory \
+  --result /tmp/wsnav-codex-new-thread-inventory.json
+~~~
+
+It uses the same temporary Codex home, private tmux servers, forged-hook
+rejections, and cleanup checks as the clear study. Its sanitized result records
+only the selected transition, fixed source categories, and aggregate identity
+rotation assertions; it contains no provider identifiers, prompts, output,
+terminal data, paths, process IDs, or credentials.

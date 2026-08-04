@@ -1,5 +1,63 @@
 # Workstream Navigator V1 Roadmap
 
+## 2026-08-02 deferred terminal-fidelity studies
+
+The retained presentation topology is Ghostty -> private presentation tmux ->
+private Runtime tmux -> Codex. [Spike
+0005](evidence/spikes/0005-codex-terminal-presentation.md) proves the required
+native input, resize, reconnect, and result-tip behavior, but does not claim
+pixel- or cursor-identical rendering. In current live use, minor cursor
+artifacts remain during typing and agent streaming after removal of continuous
+runtime and presentation-tmux control probes. The leading hypothesis is the
+nested-tmux rendering boundary, not a remaining Navigator refresh loop; that
+has not yet been isolated by a controlled A/B study.
+
+This is accepted, non-blocking V1 polish. It does not approve a delivery slice
+or relax private-Runtime, native-UI, input, or result-tip invariants. Revisit
+only if the artifact causes input loss, measurable latency, persistent tearing,
+or otherwise crosses the operator-quality bar.
+
+Before any presentation redesign, run these disposable, privacy-safe studies:
+
+1. **Topology A/B.** Compare a direct single-tmux Codex pane with the retained
+   presentation-plus-Runtime attachment under the same Ghostty dimensions,
+   fixed harmless prompt, typing interval, and bounded streaming turn. Record
+   only aggregate cursor-artifact, input-latency, redraw, and cleanup results.
+2. **Terminal-contract matrix.** Vary only documented private tmux terminal
+   settings (`xterm-ghostty`/`tmux-256color`, RGB, extended keys, mouse, focus,
+   and cursor behavior) in disposable servers. Keep the actual interactive
+   nested path; do not alter ordinary tmux or user terminal configuration.
+3. **Control-plane audit.** Prove that steady-state attachment has no repeated
+   tmux control clients, then separately measure the unavoidable hook/action
+   probes so a visual result is not attributed to hidden management traffic.
+4. **Topology alternatives, only if the first studies fail.** Evaluate whether
+   an alternative can retain one private tmux server per Runtime, direct native
+   interaction, exact recovery, and no provider-pane management traffic. A
+   proposal that drops any of those invariants is a rejected workaround, not a
+   polish fix.
+
+An eventual candidate passes only when the nested case has no distracting
+cursor artifacts across a bounded typing and streaming run, retains normal
+input/resize/reconnect/result-tip behavior, leaves ordinary tmux unchanged,
+and cleans up all disposable state. No work is scheduled from this note.
+
+## 2026-08-02 lifecycle evidence — native `/new` remains unsupported
+
+[Spike 0011](evidence/spikes/0011-codex-native-new-rebinding.md) falsified a
+`SessionStart(source=new)` changed-binding candidate. [Spike
+0012](evidence/spikes/0012-codex-new-prompt-session-rotation.md) likewise
+falsified a changed first-destination-prompt hook identity. [Spike
+0013](evidence/spikes/0013-codex-new-thread-inventory.md) establishes the
+remaining provider fact: native `/new` does create a distinct Codex thread.
+That inventory evidence cannot identify which live TUI owns the thread when
+more than one TUI shares a project root, so it is not authority to rebind a
+Workstream.
+
+Operator instruction: do not use native `/new` in a WSNav-managed Codex pane.
+Use `/clear` for a fresh chat in the same Workstream, or WSNav Start/Fork for a
+separate Workstream. This records a fail-closed product boundary; it neither
+approves a delivery slice nor weakens exact Runtime identity requirements.
+
 ## 2026-08-01 design correction — project-root-only workstreams
 
 The earlier D4/D6.1 worktree-management scope is retired. WSNav now registers a

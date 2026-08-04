@@ -8,6 +8,7 @@ import contextlib
 import hashlib
 import json
 import os
+import selectors
 import shlex
 import shutil
 import subprocess
@@ -21,12 +22,23 @@ from typing import Any
 STUDY = "codex-hook-ancestry-authority"
 CONTRACT = "codex-hook-parent-pid-birth-cwd-v1"
 TIMEOUT_SECONDS = 90.0
+APP_SERVER_TIMEOUT_SECONDS = 5.0
+MAX_APP_SERVER_OUTPUT_BYTES = 256 * 1024
 MARKER_ONE = "WSNAV_ANCESTRY_ONE"
 MARKER_TWO = "WSNAV_ANCESTRY_TWO"
 MARKER_CLEAR_ONE = "WSNAV_ANCESTRY_CLEAR_ONE"
 MARKER_CLEAR_TWO = "WSNAV_ANCESTRY_CLEAR_TWO"
+MARKER_NEW_ONE = "WSNAV_ANCESTRY_NEW_ONE"
+MARKER_NEW_TWO = "WSNAV_ANCESTRY_NEW_TWO"
 STALE_MARKER = "WSNAV_ANCESTRY_STALE"
 FORGED_MARKER = "WSNAV_ANCESTRY_FORGED"
+
+TRANSITION_ASSERTIONS = {
+    "clear": "repeated_native_clear_rebinding",
+    "new": "repeated_native_new_rebinding",
+    "new-prompt": "repeated_native_new_prompt_session_rotation",
+    "new-inventory": "repeated_native_new_thread_inventory_growth",
+}
 
 
 class StudyFailure(RuntimeError):
@@ -220,12 +232,10 @@ def hooks_json(command: str) -> str:
     value = {
         "description": "Managed by the isolated WSNav ancestry-authority spike.",
         "hooks": {
-            "SessionStart": [
-                {
-                    "matcher": "startup|resume|clear|compact",
-                    "hooks": [command_hook],
-                }
-            ],
+            # The `/new` study must observe every source Codex emits, including
+            # one the current production contract does not recognize. The hook
+            # retains only a fixed source category, never raw payload data.
+            "SessionStart": [{"hooks": [command_hook]}],
             "UserPromptSubmit": [{"hooks": [command_hook]}],
             "Stop": [{"hooks": [command_hook]}],
             "SessionEnd": [{"matcher": "other", "hooks": [command_hook]}],
@@ -315,6 +325,47 @@ def events(root: Path) -> list[dict[str, Any]]:
     return values
 
 
+def session_start_source_counts(root: Path | None) -> dict[str, int]:
+    """Return only bounded source categories from accepted SessionStart events."""
+    sources = {
+        source: 0
+        for source in ("startup", "resume", "clear", "compact", "new", "other")
+    }
+    if root is None:
+        return sources
+    for value in events(root):
+        if value.get("event") == "SessionStart" and value.get("accepted") is True:
+            source = value.get("source")
+            if source in sources:
+                sources[source] += 1
+    return sources
+
+
+def user_prompt_session_rotation_count(root: Path | None) -> int:
+    """Count authenticated prompt events that changed the native session."""
+    if root is None:
+        return 0
+    return event_count(
+        root,
+        "UserPromptSubmit",
+        True,
+        session_changed=True,
+    )
+
+
+def user_prompt_session_correlation_count(root: Path | None) -> int:
+    """Count prompt-session rotations corroborated by bounded thread reads."""
+    if root is None:
+        return 0
+    return event_count(
+        root,
+        "UserPromptSubmit",
+        True,
+        session_changed=True,
+        app_server_correlated=True,
+    )
+
+
 def event_count(
     root: Path,
     event: str,
@@ -322,12 +373,17 @@ def event_count(
     *,
     source: str | None = None,
     session_changed: bool | None = None,
+    app_server_correlated: bool | None = None,
 ) -> int:
     return sum(
         value.get("event") == event
         and value.get("accepted") is accepted
         and (source is None or value.get("source") == source)
         and (session_changed is None or value.get("session_changed") is session_changed)
+        and (
+            app_server_correlated is None
+            or value.get("app_server_correlated") is app_server_correlated
+        )
         for value in events(root)
     )
 
@@ -340,6 +396,7 @@ def wait_for_event_count(
     *,
     source: str | None = None,
     session_changed: bool | None = None,
+    app_server_correlated: bool | None = None,
 ) -> None:
     wait_until(
         lambda: (
@@ -349,6 +406,7 @@ def wait_for_event_count(
                 accepted,
                 source=source,
                 session_changed=session_changed,
+                app_server_correlated=app_server_correlated,
             )
             >= expected
         ),
@@ -398,35 +456,36 @@ def agent_forgery_prompt(script: Path, root: Path, workspace: Path) -> str:
     )
 
 
-def clear_and_complete_turn(
+def transition_and_complete_turn(
     root: Path,
     runtime: Runtime,
     marker: str,
-    expected_clear_count: int,
+    expected_transition_count: int,
+    transition: str,
 ) -> None:
-    """Exercise one native clear and the destination thread's first turn."""
-    clear_before = event_count(
+    """Exercise one native thread transition and its destination's first turn."""
+    transition_before = event_count(
         root,
         "SessionStart",
         True,
-        source="clear",
+        source=transition,
         session_changed=True,
     )
     stops_before = event_count(root, "Stop", True)
-    send_prompt(runtime, "/clear")
+    send_prompt(runtime, f"/{transition}")
     # Codex may create the destination immediately or lazily on the next
-    # normal prompt.  In either case WSNav must see exactly one clear binding
-    # before that destination turn settles.
+    # normal prompt. In either case WSNav must see exactly one transition
+    # binding before that destination turn settles.
     wait_briefly(
         lambda: (
             event_count(
                 root,
                 "SessionStart",
                 True,
-                source="clear",
+                source=transition,
                 session_changed=True,
             )
-            >= clear_before + 1
+            >= transition_before + 1
         )
     )
     send_prompt(
@@ -437,11 +496,221 @@ def clear_and_complete_turn(
         root,
         "SessionStart",
         True,
-        expected_clear_count,
-        source="clear",
+        expected_transition_count,
+        source=transition,
         session_changed=True,
     )
     wait_for_event_count(root, "Stop", True, stops_before + 1)
+
+
+def new_prompt_session_rotation_and_complete_turn(
+    root: Path,
+    runtime: Runtime,
+    marker: str,
+    expected_rotation_count: int,
+) -> None:
+    """Prove that `/new` rotates the session on its first destination prompt."""
+    session_starts_before = event_count(root, "SessionStart", True)
+    stops_before = event_count(root, "Stop", True)
+    send_prompt(runtime, "/new")
+    send_prompt(
+        runtime,
+        f"Reply with the exact token {marker} and nothing else. Do not use tools.",
+    )
+    wait_for_event_count(
+        root,
+        "UserPromptSubmit",
+        True,
+        expected_rotation_count,
+        session_changed=True,
+        app_server_correlated=True,
+    )
+    wait_for_event_count(root, "Stop", True, stops_before + 1)
+    if event_count(root, "SessionStart", True) != session_starts_before:
+        raise StudyFailure("native new emitted an unexpected SessionStart")
+
+
+def new_thread_inventory_and_complete_turn(
+    root: Path,
+    runtime: Runtime,
+    marker: str,
+) -> int:
+    """Prove that one native `/new` adds exactly one thread in its unique cwd."""
+    before = app_server_thread_inventory(root, runtime.workspace)
+    if before is None:
+        raise StudyFailure("app-server could not inventory the source workspace")
+    stops_before = event_count(root, "Stop", True)
+    send_prompt(runtime, "/new")
+    send_prompt(
+        runtime,
+        f"Reply with the exact token {marker} and nothing else. Do not use tools.",
+    )
+    wait_for_event_count(root, "Stop", True, stops_before + 1)
+    after = app_server_thread_inventory(root, runtime.workspace)
+    if after is None:
+        raise StudyFailure("app-server could not inventory the destination workspace")
+    if len(after) != len(before) + 1 or len(after - before) != 1:
+        raise StudyFailure(
+            "native new did not add exactly one distinct app-server thread"
+        )
+    return 1
+
+
+def app_server_call(
+    root: Path,
+    method: str,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Perform one bounded App Server request and discard its raw response."""
+    environment = dict(os.environ)
+    environment["CODEX_HOME"] = str(root / "codex-home")
+    stderr = tempfile.TemporaryFile(mode="w+b")  # noqa: SIM115 - closed below
+    process: subprocess.Popen[bytes] | None = None
+    selector: selectors.BaseSelector | None = None
+    result: dict[str, Any] | None = None
+    try:
+        process = subprocess.Popen(
+            ["codex", "app-server", "--listen", "stdio://"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=stderr,
+            env=environment,
+            bufsize=0,
+            start_new_session=True,
+        )
+        if process.stdin is not None and process.stdout is not None:
+            selector = selectors.DefaultSelector()
+            selector.register(process.stdout, selectors.EVENT_READ)
+            buffer = b""
+            received = 0
+
+            def send(message: dict[str, Any]) -> bool:
+                try:
+                    process.stdin.write(
+                        json.dumps(message, separators=(",", ":")).encode() + b"\n"
+                    )
+                    process.stdin.flush()
+                except (BrokenPipeError, OSError):
+                    return False
+                return True
+
+            def receive(response_id: int) -> dict[str, Any] | None:
+                nonlocal buffer, received
+                deadline = time.monotonic() + APP_SERVER_TIMEOUT_SECONDS
+                while True:
+                    if b"\n" in buffer:
+                        line, buffer = buffer.split(b"\n", 1)
+                        if not line.strip():
+                            continue
+                        value = json.loads(line)
+                        if not isinstance(value, dict):
+                            return None
+                        if value.get("id") == response_id:
+                            return value
+                        continue
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0 or selector is None:
+                        return None
+                    if not selector.select(remaining):
+                        return None
+                    chunk = os.read(process.stdout.fileno(), 65536)
+                    if not chunk:
+                        return None
+                    received += len(chunk)
+                    if received > MAX_APP_SERVER_OUTPUT_BYTES:
+                        return None
+                    buffer += chunk
+
+            if send(
+                {
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "clientInfo": {
+                            "name": "workstream-navigator-spike",
+                            "version": "0",
+                        },
+                        "capabilities": {},
+                    },
+                }
+            ):
+                initialized = receive(1)
+                if (
+                    isinstance(initialized, dict)
+                    and isinstance(initialized.get("result"), dict)
+                    and send({"method": "initialized", "params": {}})
+                    and send({"id": 2, "method": method, "params": params})
+                ):
+                    response = receive(2)
+                    candidate = (
+                        response.get("result") if isinstance(response, dict) else None
+                    )
+                    if isinstance(candidate, dict):
+                        result = candidate
+    except (json.JSONDecodeError, OSError, ValueError):
+        result = None
+    finally:
+        if process is not None:
+            if process.stdin is not None and not process.stdin.closed:
+                with contextlib.suppress(BrokenPipeError, OSError):
+                    process.stdin.close()
+            try:
+                process.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                process.terminate()
+                try:
+                    process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=1.0)
+            if process.stdout is not None:
+                process.stdout.close()
+        if selector is not None:
+            selector.close()
+        stderr.close()
+    if process is None or process.returncode != 0:
+        return None
+    return result
+
+
+def app_server_thread_matches(root: Path, session_id: str) -> bool:
+    """Perform one bounded, temporary `thread/read` without retaining its result."""
+    result = app_server_call(
+        root,
+        "thread/read",
+        {"threadId": session_id, "includeTurns": False},
+    )
+    thread = result.get("thread") if isinstance(result, dict) else None
+    return isinstance(thread, dict) and thread.get("id") == session_id
+
+
+def app_server_thread_inventory(root: Path, workspace: Path) -> set[str] | None:
+    """Return one-way thread-ID digests for the unique disposable workspace."""
+    result = app_server_call(
+        root,
+        "thread/list",
+        {
+            "archived": False,
+            "cwd": str(workspace),
+            "limit": 20,
+            "sortDirection": "desc",
+            "sortKey": "recency_at",
+            "sourceKinds": ["cli"],
+            "useStateDbOnly": True,
+        },
+    )
+    data = result.get("data") if isinstance(result, dict) else None
+    if not isinstance(data, list):
+        return None
+    fingerprints = set()
+    for thread in data:
+        if not isinstance(thread, dict):
+            return None
+        thread_id = thread.get("id")
+        if not isinstance(thread_id, str) or not thread_id:
+            return None
+        fingerprints.add(hashlib.sha256(thread_id.encode()).hexdigest())
+    return fingerprints
 
 
 def hook(root: Path) -> int:
@@ -506,13 +775,17 @@ def hook(root: Path) -> int:
     accepted = valid_shape and record_matches == 1 and provider_depth is not None
     reason = "accepted" if accepted else "forged-process"
     source_kind = (
-        source if source in {"startup", "resume", "clear", "compact"} else "other"
+        source
+        if source in {"startup", "resume", "clear", "compact", "new"}
+        else "other"
     )
     session_changed = False
-    if accepted and event == "SessionStart":
+    if accepted and event in {"SessionStart", "UserPromptSubmit"}:
         # The temporary log retains only a one-way digest to express whether
-        # Codex moved this Runtime to a distinct native thread.  It is deleted
-        # with the disposable root and never reaches a fixture.
+        # Codex moved this Runtime to a distinct native thread. It is deleted
+        # with the disposable root and never reaches a fixture. User-prompt
+        # identity rotation is a candidate only for the dedicated `/new` spike;
+        # production continues to accept it only after a separate decision.
         fingerprint = hashlib.sha256(session_id.encode()).hexdigest()
         fingerprints = root / "session-fingerprints"
         previous = ""
@@ -533,6 +806,12 @@ def hook(root: Path) -> int:
             )
         except OSError:
             return 0
+    app_server_correlated = (
+        accepted
+        and event == "UserPromptSubmit"
+        and session_changed
+        and app_server_thread_matches(root, session_id)
+    )
     entry = {
         "event": event if isinstance(event, str) else "unknown",
         "accepted": accepted,
@@ -541,6 +820,7 @@ def hook(root: Path) -> int:
         "provider_depth": provider_depth,
         "source": source_kind,
         "session_changed": session_changed,
+        "app_server_correlated": app_server_correlated,
     }
     event_log = root / "events.jsonl"
     try:
@@ -558,15 +838,37 @@ def write_result(path: Path | None, result: dict[str, Any]) -> None:
     write_private(path, output)
 
 
-def study() -> tuple[str, str, dict[str, bool]]:
+def study_result(
+    status: str,
+    reason: str,
+    assertions: dict[str, bool],
+    root: Path | None,
+    thread_inventory_growth_count: int,
+) -> tuple[str, str, dict[str, bool], dict[str, int], int, int, int]:
+    """Return sanitized aggregate evidence before the disposable root is removed."""
+    return (
+        status,
+        reason,
+        assertions,
+        session_start_source_counts(root),
+        user_prompt_session_rotation_count(root),
+        user_prompt_session_correlation_count(root),
+        thread_inventory_growth_count,
+    )
+
+
+def study(
+    transition: str,
+) -> tuple[str, str, dict[str, bool], dict[str, int], int, int, int]:
     before: str | None = None
     root: Path | None = None
     runtimes: list[Runtime] = []
+    thread_inventory_growth_count = 0
     assertions = {
         "trusted_hook_source_reused": False,
         "codex_environment_sanitized": False,
         "two_private_runtimes_exactly_matched": False,
-        "repeated_native_clear_rebinding": False,
+        TRANSITION_ASSERTIONS[transition]: False,
         "external_shell_forgery_rejected": False,
         "agent_shell_forgery_rejected": False,
         "stale_runtime_record_rejected": False,
@@ -657,12 +959,44 @@ def study() -> tuple[str, str, dict[str, bool]]:
         wait_for_event_count(root, "Stop", True, stop_events_before + 2)
         assertions["two_private_runtimes_exactly_matched"] = True
 
-        clear_and_complete_turn(root, first, MARKER_CLEAR_ONE, 1)
-        clear_and_complete_turn(root, first, MARKER_CLEAR_TWO, 2)
-        _, process_birth_after_clear = process_stat(first.process_id)
-        if process_birth_after_clear != first.process_birth:
-            raise StudyFailure("native clear restarted the managed Codex process")
-        assertions["repeated_native_clear_rebinding"] = True
+        if transition == "new-prompt":
+            new_prompt_session_rotation_and_complete_turn(
+                root,
+                first,
+                MARKER_NEW_ONE,
+                1,
+            )
+            new_prompt_session_rotation_and_complete_turn(
+                root,
+                first,
+                MARKER_NEW_TWO,
+                2,
+            )
+        elif transition == "new-inventory":
+            thread_inventory_growth_count += new_thread_inventory_and_complete_turn(
+                root,
+                first,
+                MARKER_NEW_ONE,
+            )
+            thread_inventory_growth_count += new_thread_inventory_and_complete_turn(
+                root,
+                first,
+                MARKER_NEW_TWO,
+            )
+        else:
+            markers = (
+                (MARKER_CLEAR_ONE, MARKER_CLEAR_TWO)
+                if transition == "clear"
+                else (MARKER_NEW_ONE, MARKER_NEW_TWO)
+            )
+            transition_and_complete_turn(root, first, markers[0], 1, transition)
+            transition_and_complete_turn(root, first, markers[1], 2, transition)
+        _, process_birth_after_transition = process_stat(first.process_id)
+        if process_birth_after_transition != first.process_birth:
+            raise StudyFailure(
+                f"native {transition} restarted the managed Codex process"
+            )
+        assertions[TRANSITION_ASSERTIONS[transition]] = True
 
         rejected_before = event_count(root, "Stop", False)
         invoke_forged_hook(root, script, workspace_one)
@@ -686,17 +1020,45 @@ def study() -> tuple[str, str, dict[str, bool]]:
         wait_for_event_count(root, "Stop", False, rejected_before + 1)
         assertions["agent_shell_forgery_rejected"] = True
 
-        return "pass", "ancestry-record-authority-proven", assertions
+        return study_result(
+            "pass",
+            "ancestry-record-authority-proven",
+            assertions,
+            root,
+            thread_inventory_growth_count,
+        )
     except StudyBlocked as error:
-        return "blocked", str(error), assertions
+        return study_result(
+            "blocked", str(error), assertions, root, thread_inventory_growth_count
+        )
     except StudyFailure as error:
-        return "falsified", str(error), assertions
+        return study_result(
+            "falsified", str(error), assertions, root, thread_inventory_growth_count
+        )
     except subprocess.CalledProcessError:
-        return "blocked", "harness-command-failed", assertions
+        return study_result(
+            "blocked",
+            "harness-command-failed",
+            assertions,
+            root,
+            thread_inventory_growth_count,
+        )
     except subprocess.TimeoutExpired:
-        return "blocked", "harness-timed-out", assertions
+        return study_result(
+            "blocked",
+            "harness-timed-out",
+            assertions,
+            root,
+            thread_inventory_growth_count,
+        )
     except Exception as error:  # noqa: BLE001 - always emit a sanitized fixture.
-        return "blocked", f"harness-error:{type(error).__name__}", assertions
+        return study_result(
+            "blocked",
+            f"harness-error:{type(error).__name__}",
+            assertions,
+            root,
+            thread_inventory_growth_count,
+        )
     finally:
         for runtime in reversed(runtimes):
             with contextlib.suppress(
@@ -716,15 +1078,30 @@ def study() -> tuple[str, str, dict[str, bool]]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--result", type=Path)
+    parser.add_argument(
+        "--transition",
+        choices=("clear", "new", "new-prompt", "new-inventory"),
+        default="clear",
+        help="native same-process transition evidence to exercise (default: clear)",
+    )
     parser.add_argument("--hook-root", type=Path, help=argparse.SUPPRESS)
     arguments = parser.parse_args()
     if arguments.hook_root is not None:
         return hook(arguments.hook_root)
 
     started = time.monotonic()
-    status, reason, assertions = study()
+    (
+        status,
+        reason,
+        assertions,
+        session_start_sources,
+        user_prompt_session_rotations,
+        user_prompt_session_correlations,
+        thread_inventory_growth_count,
+    ) = study(arguments.transition)
     result = {
         "study": STUDY,
+        "transition": arguments.transition,
         "provider": {
             "id": "codex",
             "version": run(["codex", "--version"], check=False).stdout.strip(),
@@ -733,6 +1110,10 @@ def main() -> int:
         "status": status,
         "reason": reason,
         "assertions": assertions,
+        "session_start_source_counts": session_start_sources,
+        "user_prompt_session_rotation_count": user_prompt_session_rotations,
+        "user_prompt_session_correlation_count": user_prompt_session_correlations,
+        "thread_inventory_growth_count": thread_inventory_growth_count,
         "privacy_audit": {
             "provider_or_workstream_identifiers_committed": False,
             "prompt_or_result_content_committed": False,

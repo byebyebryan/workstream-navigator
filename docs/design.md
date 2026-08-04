@@ -29,6 +29,15 @@ viable. A remote Codex process can remain alive behind a dedicated tmux server,
 accept native terminal input, survive local detach and reconnect, and preserve
 its completed visible result.
 
+The retained two-server presentation can show minor cursor artifacts in Ghostty
+during high-churn native TUI activity such as typing or streaming. After
+removing WSNav's continuous runtime and presentation control probes, that
+residual is accepted as non-blocking V1 visual polish: it does not alter input,
+provider output, result retention, or provider ownership. Its suspected
+nested-tmux rendering cause is not yet a proven contract; the deferred,
+disposable studies and their decision gates are recorded in the
+[roadmap](roadmap.md#2026-08-02-deferred-terminal-fidelity-studies).
+
 ## V1 tenets
 
 1. **Preserve the native provider workflow.** Codex owns its composer, models,
@@ -146,11 +155,13 @@ V1 deliberately has no `Task` record. Tasks remain what the user asks Codex to
 do inside a provider session. A workstream may carry many successive tasks and
 many native chats over time without becoming a task manager.
 
-The Workstream ID is stable; its ConversationTip moves. A native `/new`,
-`/clear`, or managed cutover may replace thread A with thread B without
-replacing the Workstream. A Workstream fork creates a new Workstream ID,
-Runtime, and ConversationTip while retaining explicit ancestry at the same
-ProjectLocation root.
+The Workstream ID is stable; its ConversationTip moves. A verified native
+`/clear` or managed cutover may replace thread A with thread B without
+replacing the Workstream. Although Codex native `/new` creates a distinct
+thread, V1 cannot exact-bind that thread to a running Runtime; it is therefore
+unsupported in a managed WSNav provider pane and does not replace the tip. A
+Workstream fork creates a new Workstream ID, Runtime, and ConversationTip while
+retaining explicit ancestry at the same ProjectLocation root.
 
 There is no separate Workstream label in V1. The current tip's native
 `thread.name` is the canonical display name and exact resume still relies on
@@ -684,12 +695,18 @@ known binding. The installed Codex 0.145.0 contract proved exactly one changed
 binding rule: a distinct `SessionStart(source=clear)` in the same live TUI may
 replace an `idle` or `attention` tip. Its predecessor ID/name metadata and
 sticky result attention remain; all other changed, racing, replayed, working,
-or unknown-source claims fail closed. Native `/new`, `/fork`, and `compact`
-remain provider workflow, but their changed-binding visibility is deferred
-until separately validated. If legitimate transitions cannot be distinguished
-from an agent-shell invocation, V1 must require explicit native resume/fork
-selection and observe the resulting launch; it must not weaken the authority
-rule.
+or unknown-source claims fail closed. Follow-up [Spikes
+0011](evidence/spikes/0011-codex-native-new-rebinding.md),
+[0012](evidence/spikes/0012-codex-new-prompt-session-rotation.md), and
+[0013](evidence/spikes/0013-codex-new-thread-inventory.md) on Codex 0.146.0
+show that native `/new` creates a distinct thread but provides neither a
+changed `SessionStart` claim nor a changed first-prompt hook identity. It is
+unsupported in a managed Runtime; `thread/list` ordering must not be used to
+adopt a possible destination. Native `/fork` and `compact` remain provider
+workflow whose changed-binding visibility is deferred until separately
+validated. If legitimate transitions cannot be distinguished from an
+agent-shell invocation, V1 must require explicit native resume/fork selection
+and observe the resulting launch; it must not weaken the authority rule.
 
 #### Ephemeral App Server adapter
 
@@ -942,9 +959,12 @@ environment dump is persisted.
 - `EffectiveNameSource` is derived presentation state and is not persisted as a
   user-authored name.
 - Codex may create native conversations sequentially inside one Workstream as
-  the user uses native `/new`, `/clear`, or `/fork`. D1.5 observes only the
-  separately proven `/clear` binding replacement; the other native actions
-  remain canonical Codex workflow without an inferred WSNav transition.
+  the user uses native `/clear` or `/fork`. D1.5 observes only the separately
+  proven `/clear` binding replacement; other native actions remain canonical
+  Codex workflow without an inferred WSNav transition. Native `/new` is not a
+  supported managed action: Codex creates its destination thread, but WSNav
+  retains the prior binding because no exact transition claim identifies that
+  destination.
 - One sticky AttentionState exists per Workstream; it never changes
   presentation focus.
 - Runtime status and Workstream lifecycle are separate.
@@ -1086,7 +1106,7 @@ Workstream.
 Inside the provider pane, the user continues to use Codex:
 
 - `/rename` for the same canonical thread name shown by the navigator;
-- `/new` or `/clear` for a fresh chat in the same Workstream;
+- `/clear` for a fresh chat in the same Workstream;
 - `/fork` for a native chat fork that remains in the same Workstream unless the
   user explicitly creates a separate Workstream; and
 - native Plan choices, including current-thread implementation or clear-context
@@ -1096,9 +1116,13 @@ Workstream Navigator observes a new session binding when possible. It does not
 infer that a native chat transition created a new task or Workstream. A
 verified D1.5 same-Workstream `/clear` cutover displays the prior effective
 name provisionally when the new thread is unnamed, but does not write that
-fallback into Codex. Other native transitions remain visible in Codex history
-but do not replace the WSNav binding until their event contracts are separately
-validated.
+fallback into Codex. Native `/new` is unsupported inside a managed Runtime:
+although it creates a Codex thread, WSNav has no exact authority to bind it and
+retains the previous tip. The user must use `/clear` for the same Workstream or
+use WSNav Start/Fork for a separate Workstream. WSNav must not infer recovery
+from App Server inventory or `thread/list` ordering. Other native transitions
+remain visible in Codex history but do not replace the WSNav binding until their
+event contracts are separately validated.
 
 ## Navigator experience
 
@@ -1394,8 +1418,10 @@ following behavior without widening the product:
    unrelated state.
 2. **Status transactions and native transitions:** accepted startup/resume
    hooks and the separately proven native `/clear` transition update binding,
-   settled-turn, and sticky attention atomically. Native `/new`, `/fork`, and
-   compact remain Codex-owned workflow; missed events and races fail closed.
+   settled-turn, and sticky attention atomically. Native `/new` is unsupported
+   in a managed Runtime because it lacks an exact changed-binding claim;
+   `/fork` and compact remain Codex-owned workflow. Missed events and races
+   fail closed.
 3. **Cold recovery:** loss of an exact private runtime followed by
    `codex -C <project-root> resume <session-id>` restores the same native history
    and creates one new runtime generation.
@@ -1567,4 +1593,10 @@ The current Codex documentation confirms native `resume`, `/new`, `/clear`,
 and `/rename` flows; App Server `thread/read`, `thread/name/set`, and exact-turn
 `thread/fork`; plus lifecycle hook fields for session, turn, cwd, start source,
 prompt submission, and stop. The design uses those interfaces narrowly and
-treats installed behavioral spikes as the final capability authority.
+treats installed behavioral spikes as the final capability authority. In
+particular, the documentation that `/new` starts a new chat does not establish
+an exact live-Runtime transition; [Spikes
+0011](evidence/spikes/0011-codex-native-new-rebinding.md),
+[0012](evidence/spikes/0012-codex-new-prompt-session-rotation.md), and
+[0013](evidence/spikes/0013-codex-new-thread-inventory.md) retain the
+unsupported boundary until an authoritative binding contract exists.

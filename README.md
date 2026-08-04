@@ -27,10 +27,24 @@ Workstream Navigator owns navigation and runtime reachability; Codex owns the
 conversation.
 
 That means the native provider UI stays visible and interactive, including
-Codex's Plan mode, `/new`, `/clear`, `/fork`, `/rename`, resume flow, history,
+Codex's Plan mode, `/clear`, `/fork`, `/rename`, resume flow, history,
 and permissions. WSNav never sends navigator status, task context, or
 management prompts into the provider pane, and it preserves the completed
 provider result until you act.
+
+### Managed native `/new` boundary
+
+Do not use Codex's native `/new` inside a WSNav-managed provider pane. Codex
+does create a distinct new chat, but its current lifecycle signals cannot prove
+that the new chat belongs to that exact live WSNav Runtime. WSNav therefore
+remains bound to the previous conversation tip: its displayed status, rename,
+park, and resume actions still refer to that prior tip.
+
+Use `/clear` for a fresh chat in the same Workstream. Use WSNav's `n` or `f`
+actions for an independent Workstream. This is an explicit current limitation,
+recorded in [Spikes 0011](docs/evidence/spikes/0011-codex-native-new-rebinding.md),
+[0012](docs/evidence/spikes/0012-codex-new-prompt-session-rotation.md), and
+[0013](docs/evidence/spikes/0013-codex-new-thread-inventory.md).
 
 Each workstream starts from its registered project root. WSNav deliberately
 does not create or manage branches, Git worktrees, commits, task records,

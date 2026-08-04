@@ -1,0 +1,40 @@
+{
+  "assertions": {
+    "agent_shell_forgery_rejected": false,
+    "cleanup_complete": true,
+    "codex_environment_sanitized": true,
+    "external_shell_forgery_rejected": false,
+    "ordinary_tmux_unchanged": true,
+    "repeated_native_new_prompt_session_rotation": false,
+    "stale_runtime_record_rejected": false,
+    "trusted_hook_source_reused": true,
+    "two_private_runtimes_exactly_matched": true
+  },
+  "elapsed_seconds": 106.9,
+  "privacy_audit": {
+    "credentials_or_raw_payloads_committed": false,
+    "paths_or_process_ids_committed": false,
+    "prompt_or_result_content_committed": false,
+    "provider_or_workstream_identifiers_committed": false,
+    "terminal_data_committed": false
+  },
+  "provider": {
+    "contract_fingerprint": "codex-hook-parent-pid-birth-cwd-v1",
+    "id": "codex",
+    "version": "codex-cli 0.146.0"
+  },
+  "reason": "UserPromptSubmit did not reach expected authority result",
+  "session_start_source_counts": {
+    "clear": 0,
+    "compact": 0,
+    "new": 0,
+    "other": 0,
+    "resume": 0,
+    "startup": 3
+  },
+  "status": "falsified",
+  "study": "codex-hook-ancestry-authority",
+  "transition": "new-prompt",
+  "user_prompt_session_correlation_count": 0,
+  "user_prompt_session_rotation_count": 0
+}

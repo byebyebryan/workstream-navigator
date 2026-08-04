@@ -96,14 +96,44 @@ polish, not a reason to weaken Runtime isolation or replace the native pane.
 The current observation is recorded as a deferred study in the
 [roadmap](../docs/roadmap.md#2026-08-02-deferred-terminal-fidelity-studies).
 
-Before changing terminal settings or topology, use a disposable extension of
-this presentation harness to compare the retained nested path with a direct
-single-tmux baseline, exercise one fixed harmless typing/streaming sequence,
-and record only aggregate visual, latency, control-plane, and cleanup results.
-Any terminal-setting matrix must be private to the spike servers. Do not alter
-the ordinary tmux server, Ghostty configuration, ordinary Codex home, or user
-provider session. A topology alternative is admissible only if it retains every
-V1 native-UI and private-Runtime invariant.
+[Spike 0014](../docs/evidence/spikes/0014-terminal-fidelity-a-b.md) and
+`codex-terminal-fidelity.sh` below now provide the deterministic A/B instrument
+that study calls for: the same synthetic streaming/typing workload runs in the
+retained nested topology and in a direct single-tmux baseline, and the recorded
+client byte streams are compared for cursor-motion, erase, and
+cursor-visibility amplification. Any terminal-setting matrix must remain
+private to the spike servers. Do not alter the ordinary tmux server, Ghostty
+configuration, ordinary Codex home, or user provider session. A topology
+alternative is admissible only if it retains every V1 native-UI and
+private-Runtime invariant.
+
+## codex-terminal-fidelity.sh
+
+This local study measures the emitted terminal stream of the retained nested
+presentation against a direct single-tmux baseline. No Codex binary or auth is
+required: a deterministic synthetic alternate-screen workload is the unit under
+test.
+
+~~~console
+spikes/codex-terminal-fidelity.sh \
+  --result /tmp/wsnav-terminal-fidelity.json
+~~~
+
+It creates one private runtime server plus one private presentation server
+(provider pane nested-attached) and one private direct server, all with the
+exact production tmux configuration. A `script`-driven client records the byte
+stream each server would send to a real terminal during the bounded workload.
+The harness reports nested-to-direct cursor-motion, CSI, byte, erase, and
+cursor-visibility ratios, and fails closed when the nested presentation
+amplifies cursor emission beyond the recorded bounds.
+
+The recorded [Spike 0014] fixture currently falsifies: the nested topology
+re-emits ~2.4-2.6x the cursor-motion sequences of the direct baseline for
+identical output. The harness removes every private server and temporary file,
+verifies the ordinary tmux fingerprint is unchanged, and commits only aggregate
+counts and ratios. A candidate presentation change is confirmed when the
+`nested_motion_not_amplified` and `nested_bytes_not_amplified` assertions pass
+without breaking the existing native presentation acceptance.
 
 ## codex-observer-profile.sh
 

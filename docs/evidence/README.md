@@ -27,7 +27,9 @@ product contract:
 
 The [spikes](spikes/) establish the narrow tmux, remote attachment, native
 Codex presentation, observer, naming, and settled-fork boundaries. They are
-falsification studies, not product documentation.
+falsification studies, not product documentation. [Spike
+0014](spikes/0014-terminal-fidelity-a-b.md) adds the deterministic A/B
+instrument for the deferred terminal-fidelity cursor amplification.
 
 ## Provider studies
 

@@ -1,0 +1,32 @@
+{
+  "study": "codex-terminal-fidelity",
+  "contract_fingerprint": "terminal-fidelity-synthetic-churn-v1",
+  "status": "falsified",
+  "reason": "nested-presentation-cursor-emission-amplified",
+  "assertions": {
+    "nested_motion_not_amplified": false,
+    "nested_bytes_not_amplified": false,
+    "ordinary_tmux_unchanged": true
+  },
+  "metrics": {
+    "nested_bytes": 13572,
+    "direct_bytes": 11209,
+    "bytes_ratio": 1.211,
+    "nested_csi": 943,
+    "direct_csi": 656,
+    "csi_ratio": 1.438,
+    "nested_cursor_motion": 158,
+    "direct_cursor_motion": 62,
+    "cursor_motion_ratio": 2.548,
+    "nested_erase": 601,
+    "direct_erase": 524,
+    "erase_ratio": 1.147,
+    "nested_cursor_visibility": 20,
+    "direct_cursor_visibility": 11,
+    "cursor_visibility_ratio": 1.818,
+    "nested_osc": 2,
+    "direct_osc": 2
+  },
+  "cleanup": "complete",
+  "elapsed_seconds": 10
+}

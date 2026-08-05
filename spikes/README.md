@@ -235,7 +235,9 @@ terminal data, paths, process IDs, or credentials.
 [Spike 0015](../docs/evidence/spikes/0015-opencode-provider-feasibility.md)
 records four disposable probes of opencode `1.18.11` as a possible provider;
 [Spike 0016](../docs/evidence/spikes/0016-opencode-runtime-contract.md) adds
-the native TUI Runtime and observer contract:
+the native TUI Runtime and observer contract, and [Spike
+0017](../docs/evidence/spikes/0017-opencode-fresh-session.md) adds blank
+fresh-session binding and observer-sidecar ownership evidence:
 
 - `opencode-running-settled-fork.py` proves a fork of a running source
   preserves the settled prefix and omits the in-flight turn.
@@ -260,8 +262,16 @@ spikes/opencode-shared-db-concurrency.py \
 spikes/opencode-runtime-contract.py \
   --confirm-live-opencode \
   --result spikes/fixtures/opencode-runtime-contract.json
+spikes/opencode-fresh-session.py \
+  --confirm-live-opencode \
+  --result spikes/fixtures/opencode-fresh-session.json
 ~~~
 
 The runtime contract probe is operator-gated because it starts native TUIs and
 sends harmless marker prompts. It uses private tmux sockets and disposable
 OpenCode state, and it fails closed unless every assertion passes.
+
+The fresh-session probe is likewise operator-gated. It additionally starts a
+short-lived blank-session server and one disposable observer child per native
+Runtime, and fails closed unless exact binding, endpoint ownership, sidecar
+replacement, detach/reopen, resume, and cleanup assertions pass.

@@ -34,7 +34,9 @@ instrument for the deferred terminal-fidelity cursor amplification, and
 opencode provider fork-exactness, fork-lineage, and shared-database
 concurrency probes; [Spike
 0016](spikes/0016-opencode-runtime-contract.md) records the native TUI
-Runtime, observer, and exact HTTP Fork boundary.
+Runtime, observer, and exact HTTP Fork boundary; [Spike
+0017](spikes/0017-opencode-fresh-session.md) records blank-session binding,
+endpoint ownership, and per-Runtime observer sidecar evidence.
 
 ## Provider studies
 

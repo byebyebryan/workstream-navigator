@@ -18,6 +18,13 @@ import sys
 import tempfile
 from pathlib import Path
 
+from opencode_support import (
+    environment_for_directory,
+    isolated_environment,
+    remove_root,
+)
+from opencode_support import opencode_db as support_opencode_db
+
 STUDY = "opencode-shared-db-concurrency"
 MODEL = "opencode-go/deepseek-v4-flash"
 RUN_COUNT = 4
@@ -37,14 +44,12 @@ class StudyBlocked(RuntimeError):
     pass
 
 
-def opencode_db() -> str:
-    out = subprocess.run(
-        ["opencode", "db", "path"], capture_output=True, text=True, check=True
-    ).stdout.strip()
-    return out
-
-
-def run_one(prompt: str, cwd: Path, session_id: str | None = None) -> subprocess.Popen[str]:
+def run_one(
+    prompt: str,
+    cwd: Path,
+    env: dict[str, str],
+    session_id: str | None = None,
+) -> subprocess.Popen[str]:
     args = ["opencode", "run", "--model", MODEL, "--format", "json"]
     if session_id is not None:
         args += ["--session", session_id]
@@ -55,6 +60,7 @@ def run_one(prompt: str, cwd: Path, session_id: str | None = None) -> subprocess
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=environment_for_directory(env, cwd),
     )
 
 
@@ -76,13 +82,14 @@ def main() -> int:
     session_ids: list[str] = []
     try:
         root = Path(tempfile.mkdtemp(prefix="wsnav-occonc."))
+        env = isolated_environment(root)
         project = root / "project"
         project.mkdir()
 
-        db_before = opencode_db()
+        db_before = support_opencode_db(env)
 
-        # Launch all runs concurrently against the same global DB.
-        procs = [run_one(prompt, project) for prompt in PROMPTS]
+        # Launch all runs concurrently against the same disposable DB.
+        procs = [run_one(prompt, project, env) for prompt in PROMPTS]
         outs: list[str] = []
         all_ok = True
         for proc in procs:
@@ -107,9 +114,7 @@ def main() -> int:
                     sid = ev["sessionID"]
                     if sid not in session_ids:
                         session_ids.append(sid)
-        assertions["each_run_has_distinct_session"] = (
-            len(set(session_ids)) == RUN_COUNT
-        )
+        assertions["each_run_has_distinct_session"] = len(set(session_ids)) == RUN_COUNT
 
         # Integrity check on the shared DB.
         conn = sqlite3.connect(db_before)
@@ -129,12 +134,12 @@ def main() -> int:
         ).fetchall()
         conn.close()
         visible = {r[0] for r in rows}
-        assertions["all_sessions_visible_in_shared_db"] = (
-            set(session_ids) == visible
-        )
+        assertions["all_sessions_visible_in_shared_db"] = set(session_ids) == visible
 
+        if not all(assertions.values()):
+            raise StudyFailure("shared-db concurrency assertions incomplete")
         status = "pass"
-        reason = "shared-db-concurrency-observations-recorded"
+        reason = "shared-db-concurrency-confirmed"
     except StudyBlocked as error:
         status, reason = "blocked", str(error)
     except StudyFailure as error:
@@ -142,11 +147,7 @@ def main() -> int:
     except (subprocess.TimeoutExpired, OSError, sqlite3.Error) as error:
         status, reason = "blocked", f"harness-error:{type(error).__name__}"
     finally:
-        if root is not None:
-            import shutil
-
-            shutil.rmtree(root, ignore_errors=True)
-            cleanup_complete = not root.exists()
+        cleanup_complete = remove_root(root)
 
     result = {
         "study": STUDY,

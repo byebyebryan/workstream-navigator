@@ -1,7 +1,7 @@
 {
   "study": "opencode-shared-db-concurrency",
   "status": "pass",
-  "reason": "shared-db-concurrency-observations-recorded",
+  "reason": "shared-db-concurrency-confirmed",
   "assertions": {
     "all_concurrent_runs_completed": true,
     "db_integrity_check_passes": true,

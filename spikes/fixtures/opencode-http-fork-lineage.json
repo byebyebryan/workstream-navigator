@@ -1,14 +1,14 @@
 {
   "study": "opencode-http-fork-lineage",
   "status": "pass",
-  "reason": "http-fork-lineage-recorded",
+  "reason": "http-fork-lineage-absence-confirmed",
   "assertions": {
     "http_fork_returns_new_session": true,
     "http_fork_parent_id_structural": false,
     "http_fork_in_children_api": false,
     "http_fork_recoverable_from_source": false
   },
-  "source_session_digest": "83f15751b8f33c6a",
-  "fork_session_digest": "acb83dbd6ad1150e",
+  "source_session_digest": "e5fb20e8c05c8092",
+  "fork_session_digest": "a09ed6556332b680",
   "cleanup": "complete"
 }

@@ -24,6 +24,13 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+from opencode_support import (
+    environment_for_directory,
+    isolated_environment,
+    remove_root,
+)
+from opencode_support import opencode_db as support_opencode_db
+
 STUDY = "opencode-fork-lineage"
 MODEL = "opencode-go/deepseek-v4-flash"
 MARKER = "WSNAV_OC_LINEAGE"
@@ -47,19 +54,14 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def opencode_db() -> str:
-    out = subprocess.run(
-        ["opencode", "db", "path"], capture_output=True, text=True, check=True
-    ).stdout.strip()
-    return out
-
-
 def request(url: str) -> Any:
     with urllib.request.urlopen(url, timeout=10) as resp:
         return json.loads(resp.read().decode())
 
 
-def run_opencode(args: list[str], cwd: Path, timeout: int = 180) -> str:
+def run_opencode(
+    args: list[str], cwd: Path, env: dict[str, str], timeout: int = 180
+) -> str:
     proc = subprocess.run(
         ["opencode", "run", "--model", MODEL, "--format", "json", *args],
         capture_output=True,
@@ -67,6 +69,7 @@ def run_opencode(args: list[str], cwd: Path, timeout: int = 180) -> str:
         timeout=timeout,
         cwd=cwd,
         check=False,
+        env=environment_for_directory(env, cwd),
     )
     if proc.returncode != 0:
         raise StudyBlocked(f"opencode run failed: {proc.stderr[-400:]}")
@@ -109,10 +112,11 @@ def main() -> int:
     port = free_port()
     try:
         root = Path(tempfile.mkdtemp(prefix="wsnav-oclineage."))
+        env = isolated_environment(root)
         project = root / "project"
         project.mkdir()
 
-        source_out = run_opencode([PROMPT], project)
+        source_out = run_opencode([PROMPT], project, env)
         source_id = first_session_id(source_out)
         if source_id is None:
             raise StudyFailure("no source session id observed")
@@ -120,7 +124,7 @@ def main() -> int:
 
         # Fork via CLI (fork-and-continue).
         fork_out = run_opencode(
-            ["--session", source_id, "--fork", PROMPT], project
+            ["--session", source_id, "--fork", PROMPT], project, env
         )
         candidate = first_session_id(fork_out)
         if candidate is None:
@@ -131,7 +135,7 @@ def main() -> int:
         assertions["fork_via_cli_creates_distinct_session"] = True
 
         # Structural parent linkage in the SQLite session table.
-        conn = sqlite3.connect(opencode_db())
+        conn = sqlite3.connect(support_opencode_db(env))
         row = conn.execute(
             "select parent_id from session where id = ?", (fork_id,)
         ).fetchone()
@@ -146,6 +150,7 @@ def main() -> int:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             text=True,
+            env=environment_for_directory(env, project),
         )
         base = f"http://127.0.0.1:{port}"
         deadline = time.time() + 30
@@ -162,15 +167,23 @@ def main() -> int:
         if any(isinstance(c, dict) and c.get("id") == fork_id for c in children):
             assertions["fork_discoverable_via_children_api"] = True
         if children and fork_id is not None:
-            ids = [
-                c.get("id") if isinstance(c, dict) else c
-                for c in children
-            ]
+            ids = [c.get("id") if isinstance(c, dict) else c for c in children]
             if fork_id in ids:
                 assertions["fork_lineage_recoverable_from_source"] = True
 
+        if not assertions["fork_via_cli_creates_distinct_session"]:
+            raise StudyFailure("CLI fork did not create a distinct session")
+        if any(
+            assertions[name]
+            for name in (
+                "fork_discoverable_via_children_api",
+                "fork_parent_id_structural",
+                "fork_lineage_recoverable_from_source",
+            )
+        ):
+            raise StudyFailure("provider fork lineage became structurally recoverable")
         status = "pass"
-        reason = "fork-lineage-recoverability-recorded"
+        reason = "fork-lineage-absence-confirmed"
     except StudyBlocked as error:
         status, reason = "blocked", str(error)
     except StudyFailure as error:
@@ -185,11 +198,7 @@ def main() -> int:
             except subprocess.TimeoutExpired:
                 server.kill()
                 server.wait(timeout=10)
-        if root is not None:
-            import shutil
-
-            shutil.rmtree(root, ignore_errors=True)
-            cleanup_complete = not root.exists()
+        cleanup_complete = remove_root(root)
 
     result = {
         "study": STUDY,

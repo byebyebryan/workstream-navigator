@@ -12,11 +12,13 @@ runtimes sharing one state database.
 
 Each probe is a disposable Python harness (`spikes/opencode-*.py`) that runs
 against opencode CLI `1.18.11` with a free model. Every harness creates its
-own temporary project directory and its own sessions under the shared opencode
-state database. It inspects only the sessions it created, writes no files into
-the user's projects, and never attaches to or terminates another opencode
-process or any tmux server. Temporary directories and any spawned `opencode
-serve` process are removed before the sanitized fixture is written.
+own temporary project directory, isolated XDG roots, and sessions in its own
+temporary OpenCode database. The harness copies the installed auth file into
+that disposable data root with mode `0600`, then removes it with the rest of
+the state. It inspects only the sessions it created, writes no files into the
+user's projects, and never attaches to or terminates another opencode process
+or any tmux server. Temporary directories and any spawned `opencode serve`
+process are removed before the sanitized fixture is written.
 
 Four probes were run:
 
@@ -31,7 +33,7 @@ Four probes were run:
    `POST /session/:id/fork` on a headless `opencode serve` server.
 4. **Shared-database concurrency** (`opencode-shared-db-concurrency.py`):
    launch four independent `opencode run` processes concurrently against the
-   one global SQLite database and check completion, `pragma integrity_check`,
+   one probe-local SQLite database and check completion, `pragma integrity_check`,
    session visibility, and identity distinctness.
 
 ## Observed contract
@@ -61,18 +63,19 @@ structural way to find the destination from the source.
 ## Decision and limits
 
 Fork-exactness and shared-database concurrency are validated; the fork-lineage
-recovery gap is accepted as a known limitation, not a blocker. The accepted
-degradation matches the existing `recovery_required` lifecycle: a lost fork
-response marks the operation as requiring attention with an explicit
-instruction to resolve the destination in opencode's native session list, and
-never re-forks or guesses. Nothing is lost in the provider world because the
-destination session is persisted by opencode; only Workstream Navigator's
-bookkeeping is unresolved.
+recovery gap is accepted as a known limitation, not a blocker. The later
+[Spike 0016](0016-opencode-runtime-contract.md) adds the native Runtime and
+observer evidence and fixes the recovery boundary: a lost Fork response is a
+terminal `Failed` operation with `external_effect_unknown`. The source returns
+to its pre-Fork visible state, WSNav does not create or adopt a destination,
+and the user may inspect or clean up an unmanaged provider session in
+opencode. WSNav never re-forks or guesses from title text; a new explicit Fork
+is the only retry.
 
 The result is opencode-`1.18.11`-specific. It does not authorize a production
-provider adapter, transcript ingestion, a shared-server topology, or weakening
-the existing provider contract. A future opencode release that populates fork
-`parent_id` would remove the limitation without a design change.
+provider adapter, transcript ingestion, a shared cross-Runtime server, or
+weakening the existing provider contract. A future opencode release that
+populates fork `parent_id` would remove the limitation without a design change.
 
 [fixtures]: ../../../spikes/fixtures/
 [fork-exactness]: ../../../spikes/fixtures/opencode-running-settled-fork.json

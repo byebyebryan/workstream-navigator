@@ -1580,8 +1580,9 @@ This section is a forward contract for generalizing the single-Codex V1 into a
 multi-provider, multi-agent navigator. It is **not implemented and not an
 approved delivery slice**; the roadmap owns whether and when it ships. It is
 motivated by the [opencode feasibility spikes](evidence/spikes/0015-opencode-provider-feasibility.md),
-which validated the core runtime, session-resume, and concurrent-runtime
-behavior for opencode while surfacing one fork-recovery limitation.
+which establishes settled-prefix Fork exactness, absent Fork lineage, and
+probe-local database concurrency. The [native runtime contract](evidence/spikes/0016-opencode-runtime-contract.md)
+adds the native TUI Runtime, observer, and per-Runtime server boundary.
 
 ### Framing
 
@@ -1607,6 +1608,11 @@ one-off integration.
     can launch).
 - Hosts expose capability sets. A host may run Codex and opencode work
   concurrently, but each Workstream lane is single-provider.
+- A capability record is provider-specific and status-bearing: `(kind,
+  status, launch, observe, metadata, fork)`, where status is `available`,
+  `unavailable`, or `unknown`. Unknown or incomplete records fail closed;
+  one provider's missing binary or observer cannot hide or downgrade another
+  provider's capability.
 - Provider identity is never inferred from display text. `native_session_id`
   is namespaced by `ProviderKind` (a `(ProviderKind, session_id)` pair), so
   opaque identifiers stay unambiguous across providers.
@@ -1618,16 +1624,24 @@ Codex and opencode each implementing it:
 
 1. **Launch program**: how to start a fresh or resumed native TUI
    (Codex: `codex --profile wsnav-observer -C <root> [resume <id>]`;
-   opencode: `opencode [-s <id>]` in the private tmux pane). The runtime
-   launch barrier and process-birth authority remain generic.
+   opencode: `opencode <root> --pure --hostname 127.0.0.1 --port <free-port>
+   --session <id>` in the private tmux pane). OpenCode's native TUI starts an
+   embedded loopback server; the resulting endpoint is private to that
+   Runtime, short-lived, and never shared. The runtime launch barrier and
+   process-birth authority remain generic.
 2. **Lifecycle observer**: how passive lifecycle evidence is obtained
-   (Codex: stdin JSON hook payload; opencode: read-only SSE event stream plus
-   status polling). Both adapt into the same internal lifecycle events
-   (`start`, `resume`, `working`, `settled`, `stopped`).
+   (Codex: stdin JSON hook payload; opencode: one read-only SSE event stream
+   plus status polling per Runtime). The opencode helper binds events to the
+   observed session ID, keeps only bounded lifecycle metadata, discards event
+   content, and ignores child or unrelated sessions. Both providers adapt into
+   the same internal lifecycle events (`start`, `resume`, `working`, `settled`,
+   `stopped`).
 3. **Metadata operations**: read current tip name, rename, list candidates,
    and fork by exact settled boundary (Codex: ephemeral App Server
    `thread/read|name/set|list|fork`; opencode: HTTP server
-   `GET /session/:id`, `POST /session/:id/fork`, `session list`).
+   `GET /session/:id`, `POST /session/:id/fork`, `session list`). OpenCode Fork
+   uses the exact settled `messageID` boundary and does not provide structural
+   lineage for recovery.
 4. **Fork reconciliation**: resolve a non-idempotent fork after a lost
    response using provider structural lineage when available, else the
    accepted degradation below.
@@ -1649,8 +1663,8 @@ once at the action boundary from the Workstream's `ProviderKind`.
 - **Provider-owned subagents stay provider-owned.** opencode subagents are
   child sessions inside one opencode runtime (`session.parent_id`), not
   WSNav Workstreams, not separate processes. WSNav treats them as provider
-  internal state: it may observe that a tip moved but never creates, names,
-  or manages a subagent as a Workstream.
+  internal state: its observer discards child-session events and never creates,
+  names, rebinds, or manages a subagent as a Workstream.
 
 There is no cross-provider migration: a Codex Workstream never becomes an
 opencode Workstream, and a live conversation is never transferred between
@@ -1659,7 +1673,8 @@ providers.
 ### Fork-recovery known limitation
 
 The [opencode fork-lineage spikes](evidence/spikes/0015-opencode-provider-feasibility.md)
-proved that opencode creates a fork destination with no structural lineage
+and [native runtime contract](evidence/spikes/0016-opencode-runtime-contract.md)
+prove that opencode creates a fork destination with no structural lineage
 (`parent_id` is null, the source children API is empty; the only marker is the
 title suffix `(fork #N)`). Codex exposes structural lineage and keeps the V1
 reconciliation contract. For a provider without structural lineage, the
@@ -1667,11 +1682,14 @@ accepted degradation is:
 
 - the happy path is unchanged (the fork response carries the destination ID
   and WSNav records it immediately);
-- a lost fork response marks the operation `recovery_required` with an explicit
-  instruction to resolve the destination in the provider's native session
-  list; WSNav never re-forks and never guesses from title text;
-- nothing is lost in the provider world (the destination session is persisted
-  by the provider), so the degraded state is bookkeeping-only.
+- a lost fork response is terminal `Failed` with
+  `external_effect_unknown`; the source returns to its pre-Fork visible state,
+  no destination Workstream is created, and the user sees an error explaining
+  that an unmanaged provider session may need inspection or cleanup in the
+  provider's native UI;
+- WSNav never re-forks, guesses from title text, automatically adopts a
+  destination, or shows a recovery picker; the same request key cannot replay
+  the provider Fork, while a new explicit Fork is a new request.
 
 A future provider release that populates fork lineage removes the limitation
 without a design change.
@@ -1692,12 +1710,15 @@ without a design change.
 ### Unchanged invariants
 
 - Each live Runtime remains one provider process in its own private tmux
-  server; never a shared daemon or `--remote`/client-server topology.
+  server; never a shared cross-Runtime daemon or provider `--remote`/
+  client-server topology. OpenCode's per-Runtime embedded loopback backend is
+  allowed only as a private provider implementation detail.
 - WSNav never writes status or management traffic into the provider pane.
 - WSNav never persists prompts, responses, tool output, transcripts, or raw
   provider payloads from any provider. The no-transcript boundary applies to
   opencode's event-sourced SQLite transcript store as much as Codex's history:
-  WSNav scopes provider state per managed host and does not ingest it.
+  the opencode observer discards event content before state adaptation, and
+  WSNav scopes provider state per managed host without ingesting it.
 - The provider owns the conversation, composer, models, naming, resume,
   history, and native workflow for each provider kind.
 - Fail-closed identity, revision-guarded transactions, and exact

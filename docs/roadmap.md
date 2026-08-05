@@ -1,14 +1,16 @@
 # Workstream Navigator V1 Roadmap
 
-## 2026-08-04 proposed multi-provider design — no delivery slice approved
+## 2026-08-04 proposed multi-provider design and evidence correction — no delivery slice approved
 
 The [V1 design](design.md#multi-provider-and-multi-agent-design-proposed-not-a-delivery-slice)
 now records a forward contract for generalizing the single-Codex V1 into a
 multi-provider navigator. It was motivated by [Spike
-0015](evidence/spikes/0015-opencode-provider-feasibility.md), which validated
-opencode's core runtime, exact session resume, running-source settled-prefix
-fork, and concurrent-runtime database behavior, and recorded one fork-lineage
-recovery limitation.
+0015](evidence/spikes/0015-opencode-provider-feasibility.md), which validates
+opencode's settled-prefix Fork boundary, absent Fork lineage, and probe-local
+database concurrency. [Spike
+0016](evidence/spikes/0016-opencode-runtime-contract.md) adds the native TUI
+Runtime, exact session resume, per-Runtime observer, and two-runtime
+noninterference evidence.
 
 The design is **proposed only**; no delivery slice, provider adapter, or
 roadmap checkpoint is approved. It establishes three foundational decisions
@@ -21,10 +23,12 @@ cross-provider migration.
 
 Before any implementation checkpoint is approved, the following open items
 must be resolved in the roadmap: the concrete delivery slices for the
-provider trait and the opencode adapter; the exact observer-authority contract
-for opencode's SSE event stream (it has no hook/profile/trust review to
-reuse); and how the client catalog and host registry represent a host with
-mixed provider capability.
+provider trait and the opencode adapter; how the adapter exposes the
+per-Runtime embedded server while preserving the no-shared-daemon boundary;
+and how the client catalog and host registry represent a host with mixed
+provider capability. Spike 0016 closes the observer evidence gap: the helper
+is session-bound, metadata-only, child-session-filtering, and fail-closed on
+cross-Runtime events. It does not authorize production Rust changes.
 
 ## 2026-08-04 terminal-fidelity root cause is upstream tmux
 

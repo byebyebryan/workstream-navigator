@@ -233,14 +233,16 @@ terminal data, paths, process IDs, or credentials.
 ## opencode provider feasibility probes
 
 [Spike 0015](../docs/evidence/spikes/0015-opencode-provider-feasibility.md)
-records four disposable probes of opencode `1.18.11` as a possible provider:
+records four disposable probes of opencode `1.18.11` as a possible provider;
+[Spike 0016](../docs/evidence/spikes/0016-opencode-runtime-contract.md) adds
+the native TUI Runtime and observer contract:
 
 - `opencode-running-settled-fork.py` proves a fork of a running source
   preserves the settled prefix and omits the in-flight turn.
 - `opencode-fork-lineage.py` and `opencode-http-fork-lineage.py` check whether
   a fork destination is structurally discoverable from its source.
 - `opencode-shared-db-concurrency.py` runs several concurrent `opencode run`
-  processes against the one shared SQLite database.
+  processes against one probe-local SQLite database.
 
 Each probe uses only its own temporary project and sessions, removes any
 spawned server and temporary directory, and writes a sanitized fixture that
@@ -255,4 +257,11 @@ spikes/opencode-http-fork-lineage.py \
   --result spikes/fixtures/opencode-http-fork-lineage.json
 spikes/opencode-shared-db-concurrency.py \
   --result spikes/fixtures/opencode-shared-db-concurrency.json
+spikes/opencode-runtime-contract.py \
+  --confirm-live-opencode \
+  --result spikes/fixtures/opencode-runtime-contract.json
 ~~~
+
+The runtime contract probe is operator-gated because it starts native TUIs and
+sends harmless marker prompts. It uses private tmux sockets and disposable
+OpenCode state, and it fails closed unless every assertion passes.

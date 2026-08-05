@@ -1,0 +1,23 @@
+{
+  "study": "opencode-runtime-contract",
+  "status": "pass",
+  "reason": "native-runtime-observer-and-http-fork-confirmed",
+  "opencode_version": "1.18.11",
+  "assertions": {
+    "operator_confirmed": true,
+    "native_tui_server_ready": true,
+    "provider_pid_correlated": true,
+    "exact_resume_session_visible": true,
+    "lifecycle_events_filtered": true,
+    "child_session_events_ignored": true,
+    "second_runtime_has_distinct_endpoint": true,
+    "runtime_events_do_not_cross": true,
+    "http_fork_returns_distinct_session": true,
+    "http_fork_preserves_settled_prefix": true,
+    "http_fork_omits_in_flight_turn": true,
+    "http_fork_lineage_absent": true,
+    "cleanup_complete": true
+  },
+  "source_session_digest": "e65878bcd729451e",
+  "destination_session_digest": "f547bc9b196ed9c4"
+}

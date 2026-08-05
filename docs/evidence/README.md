@@ -32,7 +32,9 @@ falsification studies, not product documentation. [Spike
 instrument for the deferred terminal-fidelity cursor amplification, and
 [Spike 0015](spikes/0015-opencode-provider-feasibility.md) records the
 opencode provider fork-exactness, fork-lineage, and shared-database
-concurrency probes.
+concurrency probes; [Spike
+0016](spikes/0016-opencode-runtime-contract.md) records the native TUI
+Runtime, observer, and exact HTTP Fork boundary.
 
 ## Provider studies
 

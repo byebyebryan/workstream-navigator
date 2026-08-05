@@ -1,34 +1,40 @@
 # Workstream Navigator V1 Roadmap
 
-## 2026-08-04 proposed multi-provider design and evidence correction — no delivery slice approved
+## 2026-08-05 minimal multi-provider creation contract and D8 approval
 
-The [V1 design](design.md#multi-provider-and-multi-agent-design-proposed-not-a-delivery-slice)
-now records a forward contract for generalizing the single-Codex V1 into a
-multi-provider navigator. It was motivated by [Spike
+The [V1 design](design.md#multi-provider-and-multi-agent-design) now records a
+minimal creation contract for generalizing the single-Codex V1 into a
+multi-provider navigator. It is supported by [Spike
 0015](evidence/spikes/0015-opencode-provider-feasibility.md), which validates
 opencode's settled-prefix Fork boundary, absent Fork lineage, and probe-local
 database concurrency. [Spike
 0016](evidence/spikes/0016-opencode-runtime-contract.md) adds the native TUI
-Runtime, exact session resume, per-Runtime observer, and two-runtime
-noninterference evidence.
+Runtime, exact session resume, probe-local per-Runtime observer wiring, and
+two-runtime noninterference evidence. [Spike
+0017](evidence/spikes/0017-opencode-fresh-session.md) proves blank New binding,
+endpoint ownership, and a persistent host-owned observer sidecar on OpenCode
+`1.18.11`.
 
-The design is **proposed only**; no delivery slice, provider adapter, or
-roadmap checkpoint is approved. It establishes three foundational decisions
-for any future work: `ProviderKind` is a first-class typed, persisted concept
-on Workstream/Runtime/Binding; the provider boundary is a real trait with
-dispatch at the action boundary (no concrete Codex types at call sites); and
-the navigator shows a quiet provider-kind marker with a page-local filter.
-Provider-owned subagents remain provider-internal, and there is no
-cross-provider migration.
+`ProviderKind` is first-class, typed, persisted Workstream identity. Models,
+effort, roles, agents, prompts, and presets remain entirely native-provider
+choices. Ordinary `n` from an existing Workstream retains its exact host and
+ProjectLocation. The host supplies providers eligible for fresh launch, exact
+resume, and observation: one is selected without prompting, while multiple
+providers open a provider-only chooser initially selecting the source
+Workstream's provider when eligible. The empty navigator still performs host
+and ProjectLocation registration first. Cross-provider work is an independent
+New Workstream with an empty conversation, never Fork, migration, or automatic
+context transfer.
 
-Before any implementation checkpoint is approved, the following open items
-must be resolved in the roadmap: the concrete delivery slices for the
-provider trait and the opencode adapter; how the adapter exposes the
-per-Runtime embedded server while preserving the no-shared-daemon boundary;
-and how the client catalog and host registry represent a host with mixed
-provider capability. Spike 0016 closes the observer evidence gap: the helper
-is session-bound, metadata-only, child-session-filtering, and fail-closed on
-cross-Runtime events. It does not authorize production Rust changes.
+D8.0 is now the active implementation checkpoint. It introduces the provider
+identity and dispatch foundation, preserves Codex behavior, and makes provider
+kind visible without adding OpenCode production launch. The D8.1 evidence gate
+now passes for OpenCode `1.18.11`, so D8.1 is ready to activate after D8.0;
+D8.2 remains inactive. There is no generic provider
+onboarding, provider view or filter, model selector, role/preset system, or
+remembered per-Project provider policy in D8. Availability is dynamic
+host-owned snapshot state rather than immutable client-registration identity,
+and every creation action revalidates it on the authoritative host.
 
 ## 2026-08-04 terminal-fidelity root cause is upstream tmux
 
@@ -137,12 +143,11 @@ historical only; it is not a current product commitment. Host schema 8 is a
 clean breaking boundary and requires explicit reset/re-registration instead of
 an automatic migration from the retired schema.
 
-Date: 2026-08-01
+Date: 2026-08-05
 
-Status: D0 through D7.6 are complete. V1 remains a source-installed
-operator beta; no next delivery slice is approved. D7.6 adds host-private
-Project browsing without widening V1 into a task manager or provider
-replacement.
+Status: D0 through D7.6 are complete. V1 remains a source-installed operator
+beta. D8.0 is the active checkpoint; D8.1 is ready after its passing evidence
+gate and D8.2 is inactive.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -188,6 +193,9 @@ This document owns sequencing, exit gates, and progress.
 | D6.9 | Codex observer authority repair | Complete |
 | D7 | Navigator workflow and lifecycle management | Complete through D7.6 |
 | D7.6 | Host-private Project directory browser | Complete |
+| D8.0 | Provider identity foundation and Codex parity | Active |
+| D8.1 | Provider-aware New and OpenCode New/Resume vertical slice | Ready after D8.0 |
+| D8.2 | OpenCode Fork, recovery, and integrated acceptance | Inactive |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -985,11 +993,219 @@ Exit gate:
   through host-side resolution; and
 - formatting, tests, lint, package checks, and `git diff --check` pass.
 
+## D8 - Multi-provider Workstreams
+
+Implementation status: D8.0 is approved and active. D8.1's fresh-session and
+observer evidence passes on OpenCode `1.18.11`, so it is ready to activate
+after D8.0; D8.2 is an inactive follow-up. The [multi-provider design](design.md#multi-provider-and-multi-agent-design)
+is authoritative for the shared provider boundary and privacy invariants.
+
+The product goal is deliberately narrower than provider orchestration. A user
+can start independent Workstreams at the same ProjectLocation, choose among
+providers eligible on the authoritative host, and use each provider's
+native TUI to select models, effort, agents, and workflow. Project files and
+user-authored notes may carry context between Workstreams; WSNav does not copy
+conversation state or invent a cross-provider handoff.
+
+New retains the D7 location behavior:
+
+- `n` on an existing Workstream fixes the target to its host and exact
+  ProjectLocation. It does not ask for a Project or location again.
+- `n` from an empty Workstreams home performs host and ProjectLocation
+  registration before creating the initial Workstream.
+- zero providers eligible for fresh launch plus exact resume and observation
+  rejects creation; one is selected without a prompt; multiple open a
+  provider-only chooser. The source provider is the initial selection when it
+  remains eligible.
+- availability is detected without installation, credential configuration,
+  trust mutation, or generic onboarding. The host revalidates the selected
+  provider at the action boundary and never silently falls back to another;
+- the selected provider is fixed Workstream identity. Resume and same-provider
+  Fork never reopen the chooser; a different-provider conversation is always
+  another independent New Workstream.
+
+Presentation adds only a quiet `Codex` or `OpenCode` context label on each
+Workstream. Provider filters, provider grouping, roles, presets, model and
+effort fields, remembered per-Project provider policy, and generalized
+provider-management UI have no approved checkpoint.
+
+### D8.0 - Provider identity foundation and Codex parity
+
+Scope:
+
+- introduce `ProviderKind` as a validated enum on Workstream, Runtime,
+  ProviderBinding, host snapshots, creation actions, and provider session IDs;
+- migrate host schema 9 to 10 transactionally by assigning `codex` to every
+  existing Workstream and ProviderBinding, validating the existing Runtime
+  provider, and rejecting any unknown or cross-record mismatch; migrate client
+  schema 4 to 5 so the former `codex` executable bit no longer participates in
+  fixed host registration while retaining aliases and Project associations;
+- bump protocol 16 to 17 for the incompatible provider-bearing creation and
+  snapshot wire contract while leaving the independently versioned control ABI
+  unchanged;
+- introduce provider-neutral session identity, lifecycle observation, name
+  state, capability, and error DTOs wherever shared state/wire/navigator code
+  currently imports a concrete Codex type. Keep the existing concrete Codex
+  implementation and add only the typed Codex action-dispatch branch; do not
+  implement or simulate an OpenCode surface in D8.0;
+- carry bounded, sorted, duplicate-free `ProviderCapability` records on every
+  snapshot page and exclude them from the persistent client host identity.
+  New eligibility requires available fresh launch, exact resume, and observe;
+  the authoritative host re-probes before creation. D8.0 reports OpenCode as
+  `unavailable/adapter_unavailable` even if its binary is installed;
+- make New and empty-state registration carry an explicit provider. The UI
+  selects the sole eligible Codex record without a chooser; internal host wire
+  always requires the kind; direct New defaults only to its eligible source
+  provider; and direct registration requires `--provider` only when more than
+  one eligible provider exists;
+- make independent-creation deduplication compare provider kind, reject stale
+  or changed-provider request replay, and retain a fixed-provider visible
+  recovery state if process launch fails only after successful eligibility
+  revalidation and durable creation;
+- render the provider label in Workstream rows and details, and replace action
+  feedback that incorrectly hardcodes Codex where the provider is known. The
+  full provider label remains visible at the supported 32-cell width before
+  variable Project/Host context is truncated; and
+- preserve all current Codex CLI, local, SSH, observer, Runtime, recovery, and
+  native-pane behavior. No OpenCode production process is launched in D8.0.
+
+Exit gate:
+
+- schema and protocol tests cover host 9-to-10 and client 4-to-5 Codex
+  migration without lost associations, fresh-schema explicit provider writes,
+  protocol-16 refusal, unknown provider rejection, namespaced native session
+  identity, and
+  Workstream/Runtime/Binding mismatch;
+- capability tests cover bounds/order/duplicates, page inconsistency,
+  unavailable/unknown reasons, exact New eligibility, provider installation or
+  version drift without host re-registration, and action-boundary revalidation;
+- creation tests cover provider-aware request deduplication, deterministic CLI
+  defaults/errors, zero-provider refusal before creation, and post-creation
+  launch failure without fallback;
+- navigator tests prove `n` retains the selected Workstream's ProjectLocation,
+  the sole Codex provider creates no chooser, and every Workstream visibly
+  identifies its full provider at minimum width without adding a provider view
+  or filter;
+- existing local and SSH Codex tests remain behaviorally unchanged through the
+  provider identity and dispatch seam, and bounded native acceptance confirms
+  launch, observe, resume, Fork, attachment, and cleanup; and
+- formatting, tests, lint, package checks, and `git diff --check` pass through
+  `scripts/check`.
+
+### Required evidence before D8.1 - OpenCode fresh binding and observer ownership
+
+Status: passed on 2026-08-05 for OpenCode `1.18.11`. This remains an
+operator-gated disposable spike, not production Rust; its [sanitized
+fixture](../spikes/fixtures/opencode-fresh-session.json) and
+[evidence record](evidence/spikes/0017-opencode-fresh-session.md) authorize the
+selected D8.1 binding path only for the explicitly allowlisted version.
+
+The probe must:
+
+- use the production OpenCode TUI command shape without `--pure`, `--model`,
+  `--agent`, or `--prompt`, so WSNav does not suppress normal native
+  configuration or plugin semantics;
+- use the selected blank provider-session precreation through a short-lived
+  server, then prove two blank same-project TUIs bind distinct exact root
+  sessions without using transcript content for identity, title/recency
+  inference, or event crossing; disposable postcondition checks are discarded;
+- start the observer before either provider pane accepts native input, record
+  and verify its exact PID/process birth/Runtime generation, exercise bounded
+  reconnect plus helper crash, and prove detach/reopen retains host-side
+  observation;
+- correlate each loopback listening socket to the exact recorded provider pane
+  process or proven descendant, and reject a healthy wrong-process endpoint,
+  stale saved port, port collision, unsupported OpenCode version, child
+  session, and unrelated root session;
+- prove exact resume after park/restart. Native in-TUI session
+  creation/switching remains unsupported because no exact active-TUI
+  changed-binding claim was established, matching Codex native `/new`; and
+- validate only metadata surfaces intended for D8.1. Navigator Rename remains
+  unavailable unless canonical OpenCode rename is separately proven.
+
+The fixture records only bounded assertions and identifier digests. Cleanup
+removed all disposable provider roots, temporary auth copies, sidecars, ports,
+processes, and private tmux servers. A failed identity, native-workflow,
+privacy, persistence, or cleanup assertion in a future rerun keeps the adapter
+inactive and narrows it rather than weakening a core invariant.
+
+### D8.1 - Provider-aware New and OpenCode New/Resume vertical slice
+
+Activation gate: the evidence checkpoint above passes on explicitly allowlisted
+OpenCode `1.18.11`, and the design records blank-session precreation as the
+selected fresh-binding mechanism. D8.1 is ready after D8.0 completes; any
+provider upgrade requires a fresh evidence rerun before eligibility.
+
+Scope:
+
+- add non-mutating, bounded OpenCode executable/version/readiness detection to
+  each host's dynamic provider availability without probing or storing
+  credentials. Only explicitly evidence-backed versions are eligible; all
+  others report the bounded `unsupported_version` reason;
+- add the provider-only chooser for a mixed-provider target, initially select
+  the source Workstream's provider when eligible, and apply the same chooser
+  after empty-state host and ProjectLocation selection but before its initial
+  Workstream is recorded;
+- make startup provider-scoped: an unready Codex observer cannot block an
+  eligible OpenCode adapter, while the Codex-specific Hosts review action
+  remains available and creates no setup Workstream;
+- implement only the evidence-selected OpenCode blank fresh binding, exact
+  resume, session-bound lifecycle observation, and local/SSH attachment. The
+  production command supplies no `--pure`, model, agent, prompt, or WSNav-owned
+  first input; OpenCode navigator Rename remains unavailable unless proven;
+- complete the shared provider boundary so common action/app/state/navigator/
+  remote code consumes provider-neutral types and dispatches once from the
+  fixed Workstream provider;
+- persist the bounded host-private OpenCode Runtime handle and supervise one
+  exact stdio-disconnected `wsnav` observer sidecar per Runtime generation.
+  Corroborate endpoint-to-process ownership before observation or metadata
+  access; fail observation to unknown on helper/endpoint ambiguity; stop the
+  exact helper during park; and replace endpoint plus helper on recovery; and
+- leave OpenCode Fork unavailable until D8.2. A missing capability produces a
+  bounded provider-aware refusal, never Codex fallback or inferred lineage.
+
+Exit gate:
+
+- deterministic state, protocol, navigator, local-subprocess, SSH-command, and
+  private-tmux tests cover zero/one/multiple-provider creation, source-provider
+  initial selection, action-boundary availability/version drift, exact blank
+  binding and resume, provider-scoped Codex readiness, endpoint/process
+  correlation, per-generation sidecar identity, reconnect/crash/unknown
+  transitions, port collision, child/root-session filtering, native session
+  switch refusal when unproven, and cleanup;
+- sanitized operator-gated acceptance proves two same-project Codex/OpenCode
+  Workstreams remain independent, switching preserves both native TUIs, no
+  model, prompt, raw event, or transcript data enters WSNav state, detaching the
+  client does not stop host-side observation, and all disposable endpoints,
+  sidecars, provider processes, tmux servers, and provider roots are removed;
+- `scripts/check` passes.
+
+### D8.2 - OpenCode Fork, recovery, and integrated acceptance
+
+Scope:
+
+- implement same-provider OpenCode Fork at the exact settled `messageID`
+  boundary and the documented terminal `external_effect_unknown` outcome when
+  a response is lost without structural lineage;
+- keep cross-provider Fork unavailable and route different-provider work only
+  through independent New; and
+- complete mixed local/SSH provider acceptance and provider-aware operational
+  diagnostics without onboarding, filters, presets, or context transfer.
+
+Exit gate:
+
+- deterministic tests cover settled-prefix exactness, no cross-provider Fork,
+  lost-response terminal failure without retry/adoption, and provider-specific
+  diagnostics; and
+- sanitized operator-gated local/SSH acceptance plus `scripts/check` pass with
+  complete cleanup and no provider-pane management traffic.
+
 ## Deferred beyond V1
 
 The roadmap does not include arbitrary existing-session adoption, hard
 Workstream/provider-session deletion, worktree or branch removal, checkout
 synchronization, task/context transfer, transcript or memory features,
-automatic plan rollover, profile composition, Claude parity,
-multiple-controller catalog synchronization, a public daemon, or a replacement
-provider UI.
+automatic plan rollover, provider/model/role launch presets, provider filters
+or grouping, generalized provider onboarding, unproven OpenCode navigator
+Rename, profile composition, Claude parity, multiple-controller catalog
+synchronization, a public daemon, or a replacement provider UI.

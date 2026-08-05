@@ -79,15 +79,18 @@ workarounds, and the decision gates are recorded in
 
 ### Included
 
-- Codex-first local and SSH-host operation.
+- Codex-first local and SSH-host operation, plus the bounded D8 provider
+  identity and provider-aware New contract. OpenCode New/Resume enters V1 only
+  after its explicit evidence gate passes.
 - A minimal two-pane terminal experience: navigator beside the directly
-  interactive native Codex TUI.
+  interactive native provider TUI.
 - Explicit host registration and capability checks.
 - Logical projects with one or more explicitly registered host locations.
 - Host-private Project-directory browsing for ordinary registration, rooted at
   each host's configurable `~/code`-style workspace root.
 - Workstream creation, switching, parking, exact resume, and display through
-  the current tip's Codex-owned thread name.
+  the current tip's provider-owned native name when that metadata surface is
+  supported.
 - Navigator-local Workstreams, Projects, and Hosts pages, with Workstreams as
   the default operational home rather than a generic management dashboard.
 - Reversible Workstream archive and restore for removing inactive work from the
@@ -96,10 +99,12 @@ workarounds, and the decision gates are recorded in
 - Conversation-forked workstreams that retain the same registered project root.
 - Read-only Git registration and optional remote fingerprinting for Project
   grouping; no Git lifecycle ownership.
-- Activity and durable result attention for Workstream Navigator-started Codex
-  sessions.
+- Activity and durable result attention for Workstream Navigator-started
+  provider sessions.
 - Navigator-owned observer activation, native trust review, status, and exact
-  removal of one observer-only Codex profile on each managed host.
+  removal of one observer-only Codex profile on each managed host; OpenCode
+  uses the separate read-only per-Runtime sidecar contract in D8.1 and has no
+  generic onboarding flow.
 - Reconnection after local UI or SSH loss.
 - Recovery after the host tmux runtime disappears, using the provider's native
   session identity.
@@ -110,7 +115,7 @@ workarounds, and the decision gates are recorded in
 
 ### Explicitly outside V1
 
-- Importing or controlling arbitrary existing Codex sessions.
+- Importing or controlling arbitrary existing provider sessions.
 - A persisted `Task` entity, assignments, priorities, plans, schedules, queues,
   dependencies, or task-context transfer.
 - Automatic plan detection, plan acceptance inference, prompt interception, or
@@ -127,8 +132,9 @@ workarounds, and the decision gates are recorded in
 - Transcript storage, transcript rendering, history search, or project memory.
 - A custom PTY server, terminal emulator, browser UI, desktop UI, or mobile UI.
 - A public network service or always-running remote daemon.
-- Cloning repositories, managing worktrees, synchronizing repositories, moving a live workstream
-  between hosts, or transferring chats between hosts.
+- Cloning repositories, managing worktrees, synchronizing repositories, moving
+  a live workstream between hosts, or transferring chats between hosts or
+  providers.
 - Automatic Git fetch, pull, commit, merge, rebase, reset, stash, push,
   cherry-pick, or conflict resolution.
 - Copying files, commits, branches, or worktrees between Workstreams.
@@ -136,7 +142,7 @@ workarounds, and the decision gates are recorded in
   files. Archive is visibility and retention, not cleanup authority.
 - Automatic remote installation, upgrade, repository cloning, or host-wide
   teardown from the Hosts page.
-- Claude or broad provider parity.
+- Claude or provider parity beyond the explicitly bounded OpenCode D8 scope.
 - Multiple-controller catalog synchronization. Each navigator client may
   independently reconstruct the same presentation grouping from host-supplied
   repository fingerprints, but clients do not replicate their catalogs.
@@ -149,19 +155,20 @@ It does not mean that one workstream migrates between them.
 
 | Concept | Meaning | Canonical owner |
 | --- | --- | --- |
-| `Host` | A local or SSH-reachable machine with `wsnav`, tmux, Git, and Codex capabilities | Workstream Navigator client catalog plus host handshake |
+| `Host` | A local or SSH-reachable machine with `wsnav`, tmux, Git, and dynamic provider capabilities | Workstream Navigator client catalog plus host handshake/snapshot |
 | `Project` | A logical repository-shaped grouping shown by the navigator | Workstream Navigator |
 | `ProjectLocation` | One registered Git project's canonical root on one host | That host's Workstream Navigator registry |
 | `Workstream` | One runtime lane and current provider-session binding at its ProjectLocation root | That host's Workstream Navigator registry |
 | `Runtime` | One provider process in one private tmux server, session, window, and pane | tmux and live process evidence |
-| `ProviderSession` | A Codex chat/session referenced by its native identifier | Codex |
-| `ConversationTip` | The current native thread plus its latest accepted settled turn | Workstream Navigator binding plus Codex identities |
-| `ThreadName` | The current tip's user-facing name, changed through native `/rename` or App Server `thread/name/set` | Codex |
+| `ProviderSession` | A provider chat/session referenced by its namespaced native identifier | Native provider |
+| `ConversationTip` | The current native session plus its latest accepted settled turn | Workstream Navigator binding plus native provider identities |
+| `ThreadName` | The current tip's provider-owned user-facing name; navigator Rename exists only when the adapter exposes that capability | Native provider |
 | `AttentionState` | One durable, sticky indication per Workstream that a result or recovery state remains unseen | Workstream Navigator |
 
-V1 deliberately has no `Task` record. Tasks remain what the user asks Codex to
-do inside a provider session. A workstream may carry many successive tasks and
-many native chats over time without becoming a task manager.
+V1 deliberately has no `Task` record. Tasks remain what the user asks a
+provider to do inside a provider session. A workstream may carry many
+successive tasks and many native chats over time without becoming a task
+manager.
 
 The Workstream ID is stable; its ConversationTip moves. A verified native
 `/clear` or managed cutover may replace thread A with thread B without
@@ -171,10 +178,11 @@ unsupported in a managed WSNav provider pane and does not replace the tip. A
 Workstream fork creates a new Workstream ID, Runtime, and ConversationTip while
 retaining explicit ancestry at the same ProjectLocation root.
 
-There is no separate Workstream label in V1. The current tip's native
-`thread.name` is the canonical display name and exact resume still relies on
-the native thread ID. The navigator may cache the last observed name for
-availability, but it never creates a second naming authority.
+There is no separate Workstream label in V1. The current tip's provider-owned
+native name is the canonical display name and exact resume still relies on the
+namespaced native session ID. The navigator may cache the last observed name
+for availability, but it never creates a second naming authority or claims
+Rename support when the provider adapter lacks it.
 
 ## Architecture
 
@@ -187,7 +195,7 @@ local terminal
         └── wsnav attach helper
             ├── local host: wsnav host helper -> exact runtime tmux server
             └── SSH host: ssh -tt -> remote wsnav helper -> exact runtime tmux
-                                                       └── native Codex TUI
+                                                       └── native provider TUI
 
 wsnav TUI
 ├── local client catalog
@@ -200,8 +208,10 @@ each managed host
 ├── one private tmux server per live workstream runtime
 │   └── exactly one session, window, and provider pane
 ├── short-lived wsnav action and snapshot commands
-├── per-operation Codex App Server stdio helpers
-└── Codex observer hooks active only in wsnav-started sessions
+├── short-lived per-operation provider metadata helpers
+└── observation scoped to managed Runtimes
+    ├── Codex hooks active only in wsnav-started sessions
+    └── D8.1: one host-owned OpenCode sidecar per Runtime generation
 ```
 
 ### Presentation layer
@@ -257,7 +267,6 @@ Workstreams
 ├── Projects
 │   ├── Project list with inline locations
 │   ├── Register location
-│   ├── Start Workstream
 │   └── Remove archived Project from navigator
 └── Hosts
     ├── Host list with inline health / observer state
@@ -431,7 +440,7 @@ Runtime record created by an older build; any other value is ambiguous and no
 tmux action is attempted.
 
 tmux owns live process persistence. SQLite owns metadata and recoverable
-Start/Fork state. Codex owns session history.
+Start/Fork state. The native provider owns session history.
 
 Each live Runtime is a bounded tmux unit:
 
@@ -462,24 +471,27 @@ The private runtime socket belongs under the host's private state/run root at a
 short, bounded path. The host registry records it; no socket-discovery scan of
 the default tmux directory is permitted.
 
-There is no remote daemon in V1. Control requests launch short-lived
-`wsnav _remote` commands through SSH. The one intentional long-lived path is an
-interactive `ssh -tt` attachment to a provider Runtime; it carries the native
-terminal and no management watch stream. A connected navigator refreshes hosts
-through cursor-paged bounded snapshots: each response contains at most one
-fixed-size page, cursors must advance, replayed Workstream identities are
-rejected, and the client enforces a finite page count. Focused or recently
-active hosts may be polled more frequently, while background and repeatedly
-unreachable hosts back off. Action responses update local state immediately;
-the next complete snapshot reconciles it.
+There is no shared or always-running remote daemon in V1. Control requests
+launch short-lived `wsnav _remote` commands through SSH. An interactive
+`ssh -tt` attachment to a provider Runtime carries the native terminal and no
+management watch stream. D8.1 adds only one host-local observer sidecar scoped
+to each live OpenCode Runtime generation; it is neither a shared service nor a
+network control plane. A connected navigator refreshes hosts through
+cursor-paged bounded snapshots: each response contains at most one fixed-size
+page, cursors must advance, replayed Workstream identities are rejected, and
+the client enforces a finite page count. Focused or recently active hosts may
+be polled more frequently, while background and repeatedly unreachable hosts
+back off. Action responses update local state immediately; the next complete
+snapshot reconciles it.
 
 All mutation commands use host-local SQLite transactions and optimistic
 revisions. Independent Start commits its Workstream and private Runtime
-reservation before launching Codex, so reopening that Workstream automatically
-continues the normal start/resume path after a client loss. Fork additionally
-uses a durable request key and recovery phases because native provider thread
-creation is non-idempotent. Concurrent hooks and clients may race, but only one
-transaction can commit a particular record revision.
+reservation before launching the selected native provider, so reopening that
+Workstream automatically continues the normal start/resume path after a client
+loss. Fork additionally uses a durable request key and recovery phases because
+native provider session creation is non-idempotent. Concurrent observations
+and clients may race, but only one transaction can commit a particular record
+revision.
 
 Focus, attach, snapshot, and refresh are not durable operations. Rename is a
 repeatable provider setting. Park and Resume reconcile through the authoritative
@@ -487,24 +499,27 @@ Runtime record plus live tmux/process probes. Only Fork uses the
 CompoundOperation journal.
 
 Resume transactionally reserves one new Runtime generation before launching
-tmux or Codex. The launcher must match that exact prepared record, and another
-Resume is refused while the generation is `starting` or live. If the response
-is lost, a snapshot reconciles the prepared record with the exact private tmux
-socket and process evidence instead of starting a second Runtime.
+tmux or the selected native provider. The launcher must match that exact
+prepared record, and another Resume is refused while the generation is
+`starting` or live. If the response is lost, a snapshot reconciles the prepared
+record with the exact private tmux socket and process evidence instead of
+starting a second Runtime.
 
 The private pane initially runs a silent one-shot WSNav launch barrier. Its
 process birth is recorded against the prepared Runtime before the owning action
-releases the barrier. The barrier then `exec`s Codex in place, preserving the
-same PID and birth token, so an immediate `SessionStart` cannot race ahead of
-its recorded hook authority.
+releases the barrier. The barrier then `exec`s the selected provider TUI in
+place, preserving the same PID and birth token. For Codex, this prevents an
+immediate `SessionStart` from racing ahead of its recorded hook authority;
+OpenCode additionally must satisfy the D8.1 endpoint and sidecar readiness
+barrier before attachment.
 
 ### Host transport
 
 Local and SSH hosts implement one internal interface:
 
 ```text
-hello() -> protocol, host identity, versions, capabilities
-snapshot() -> locations, workstreams, runtime probes, attention
+hello() -> protocol, host identity, versions, fixed registration capabilities
+snapshot() -> locations, workstreams, dynamic provider capabilities, runtime probes, attention
 apply(action, expected revisions) -> deterministic outcome
 attach(runtime_id) -> native terminal attachment
 ```
@@ -1073,13 +1088,20 @@ host creates a fresh dedicated tmux session at the recorded project root
 ### Start an independent Workstream
 
 ```text
-user selects ProjectLocation and Start Workstream
+user selects an existing Workstream and presses n
+-> navigator retains that Workstream's exact ProjectLocation; no project picker opens
 -> host records a new Workstream at the same ProjectLocation root
 -> host launches a blank native Codex TUI in dedicated tmux
 -> SessionStart confirms the native session
 -> navigator focuses the new Workstream
 -> user enters the first prompt in Codex's native composer
 ```
+
+When the Workstreams home is empty, `n` instead opens ProjectLocation
+registration. That flow selects the host and checkout, registers the location,
+and supplies the initial unstarted Workstream. Project selection and
+registration are therefore bootstrap behavior, not part of ordinary `n` from
+an existing Workstream.
 
 No workstream name, model, branch, session ID, or first prompt is required in a
 manager-owned creation form. Before binding, the row shows
@@ -1157,8 +1179,8 @@ Required interactions:
 - one action to focus or reconnect a Workstream;
 - register the first local ProjectLocation from the empty navigator without a
   shell command or cwd inference;
-- Start Workstream from a selected Workstream or ProjectLocation at its
-  registered root;
+- Start Workstream from a selected Workstream at its registered root, with
+  ProjectLocation registration used only to bootstrap an empty navigator;
 - Fork Workstream from an exact managed source;
 - inspect bounded Workstream status and rename the current tip through Codex's
   canonical thread-name field;
@@ -1205,12 +1227,13 @@ Projects render every host-owned location as a bounded tree under its logical
 Project, with active/archived counts. When available, it renders the compact
 display-only `↗ org/repo` label beneath the Project name, eliding the normalized
 remote host for narrow terminals; the fingerprint remains hidden and
-grouping-only. `n` starts a Workstream from the selected
-Project. When it has more than one host location, a navigator-local picker asks
-where to start; a single-location Project starts directly. `a` adds an existing
-project path through the navigator-local host picker and bounded path entry. On
-an empty Projects list, `n` opens that same add flow. The selected
-host alone receives that path for local Git inspection; no path is written into
+grouping-only. Projects remains management-only: `a` adds an existing project
+path through the navigator-local host picker and bounded directory browser.
+When the Workstreams home is empty, `n` enters that same registration flow and
+supplies the initial Workstream at the chosen location. Once a Workstream
+exists, `n` starts another at that selected Workstream's exact ProjectLocation
+without reopening host, Project, or location selection. The selected host alone
+receives a registration path for local Git inspection; no path is written into
 provider panes, returned by the SSH control response, or shown in Workstream
 snapshots. Matching credential-free repository fingerprints associate locations
 into one logical Project.
@@ -1574,15 +1597,18 @@ provider evidence that contradicts this contract must narrow or reopen the
 affected workflow; it does not authorize silently weakening isolation, trust,
 result-tip preservation, or the no-transcript boundary.
 
-## Multi-provider and multi-agent design (proposed, not a delivery slice)
+## Multi-provider and multi-agent design
 
 This section is a forward contract for generalizing the single-Codex V1 into a
-multi-provider, multi-agent navigator. It is **not implemented and not an
-approved delivery slice**; the roadmap owns whether and when it ships. It is
+multi-provider, multi-agent navigator. It is not implemented as a whole; the
+roadmap authorizes only its explicitly active delivery checkpoint. It is
 motivated by the [opencode feasibility spikes](evidence/spikes/0015-opencode-provider-feasibility.md),
 which establishes settled-prefix Fork exactness, absent Fork lineage, and
 probe-local database concurrency. The [native runtime contract](evidence/spikes/0016-opencode-runtime-contract.md)
-adds the native TUI Runtime, observer, and per-Runtime server boundary.
+adds exact native TUI resume, probe-local observer wiring, and the per-Runtime
+server boundary. [Spike 0017](evidence/spikes/0017-opencode-fresh-session.md)
+now proves the selected blank-session precreation path, exact endpoint
+ownership, and per-Runtime observer sidecar lifecycle on OpenCode `1.18.11`.
 
 ### Framing
 
@@ -1604,44 +1630,178 @@ one-off integration.
     a Workstream never switches provider);
   - its **Runtime** (the live provider process in its private tmux server);
   - each **ProviderBinding** (which provider produced this native session);
-  - and the wire **Capabilities** (a host advertises which provider binaries it
-    can launch).
+  - and every typed provider-session identifier carried through state or wire
+    records.
 - Hosts expose capability sets. A host may run Codex and opencode work
   concurrently, but each Workstream lane is single-provider.
-- A capability record is provider-specific and status-bearing: `(kind,
-  status, launch, observe, metadata, fork)`, where status is `available`,
-  `unavailable`, or `unknown`. Unknown or incomplete records fail closed;
-  one provider's missing binary or observer cannot hide or downgrade another
-  provider's capability.
 - Provider identity is never inferred from display text. `native_session_id`
   is namespaced by `ProviderKind` (a `(ProviderKind, session_id)` pair), so
   opaque identifiers stay unambiguous across providers.
 
-### Provider trait with dispatch at the boundary
+Pre-D8 Rust state migrates transactionally to `codex`: host schema 9 migrates
+to 10 by adding explicit provider kind to Workstream and ProviderBinding,
+validating the existing Runtime `provider` value, and rejecting any non-Codex
+or cross-record mismatch. Fresh-schema writes have no implicit provider
+default. Client schema 4 migrates to 5 by removing the old `codex`
+executable-presence bit from fixed host registration without losing host
+aliases or Project associations. The provider-bearing wire contract bumps
+protocol 16 to 17. No migration fabricates a model, role, agent, or provider
+session ID.
 
-A single `Provider` trait covers the five provider-specific surfaces, with
-Codex and opencode each implementing it:
+### Provider capabilities and availability
+
+Provider availability is dynamic host state, not client-registration identity.
+Each bounded host snapshot carries exactly one sorted, duplicate-free record
+for each known `ProviderKind`:
+
+```text
+ProviderCapability {
+  kind,
+  status: available | unavailable | unknown,
+  reason: none | adapter_unavailable | not_installed | unsupported_version |
+          observer_not_ready | runtime_prerequisite_missing | probe_failed,
+  fresh_launch,
+  exact_resume,
+  observe,
+  metadata_read,
+  rename,
+  fork,
+}
+```
+
+The fixed client host record continues to verify host ID, registry generation,
+release, protocol, and schema compatibility, but does not persist or compare
+`ProviderCapability`. Installing, removing, or upgrading a provider therefore
+does not stale a host registration. The process-local local/remote monitor
+caches provider records only with the snapshot that supplied them; an
+unreachable host remains non-actionable even if its last snapshot said a
+provider was available. Snapshot pagination repeats the same provider set on
+every page and rejects inconsistent pages.
+
+A provider is eligible for New only when `status=available` and
+`fresh_launch`, `exact_resume`, and `observe` are all true. Exact resume is a
+creation prerequisite because every retained Workstream must survive a lost
+Runtime. Metadata read, navigator Rename, and Fork are independent optional
+capabilities and never make an otherwise recoverable provider eligible or
+ineligible for New. Unknown status, a missing record, a duplicate record, or
+an incomplete required surface fails closed.
+
+An available record has `reason=none`; unavailable and unknown records carry
+one bounded reason and expose no true operation flag that the host cannot
+currently honor. Capability records are advisory UI evidence only: every host
+action still validates the Workstream's fixed provider and the exact operation
+surface it needs.
+
+Discovery is read-only, bounded, and credential-free. It may resolve a fixed
+adapter-owned executable name, obtain its bounded version, and verify existing
+observer/runtime prerequisites; it never installs software, reads provider
+credentials, tests account access, or selects a model. OpenCode activation is
+initially constrained to `1.18.11`, the version covered by the passing resume
+and fresh-session evidence. It reports `unavailable/adapter_unavailable`
+throughout D8.0; D8.1 may mark it available only on this explicitly
+allowlisted version and only through the evidence-selected adapter path. Any
+other version reports `unavailable/unsupported_version` until the disposable
+probes are rerun and the allowlist is deliberately updated. A bounded reason
+may be shown in diagnostics, but raw process output and executable paths never
+enter snapshots.
+
+### New Workstream provider choice
+
+`n` creates an independent, empty native conversation; it never transfers a
+conversation between providers.
+
+- From an existing Workstream, its exact host and ProjectLocation are already
+  the target. `n` never reopens Project or location selection.
+- From an empty Workstreams home, the existing host and ProjectLocation
+  registration flow runs first. Provider choice then applies to the initial
+  Workstream at that location.
+- The target host reports which providers are eligible for New by the exact
+  capability predicate above. With no eligible provider, creation stops before
+  a Workstream is recorded. With one, WSNav selects it without another prompt.
+  With more than one, a small navigator-local chooser asks only for provider
+  kind.
+- When the chooser was opened from an existing Workstream and that
+  Workstream's provider remains eligible, it is the initial selection. This is
+  contextual UI state, not a remembered per-Project default. If it is not
+  eligible, the user chooses from the remaining host-authoritative set.
+- The client sends the selected `ProviderKind` in the creation request. The
+  authoritative host repeats discovery immediately before its creation
+  transaction and rejects stale or ineligible selection without recording a
+  Workstream. It never substitutes another provider. If eligibility was
+  revalidated and a later process launch fails, the already-recorded
+  fixed-provider Workstream follows the ordinary visible recovery path; it is
+  never deleted, silently retried, or moved to another provider.
+- Availability detection is read-only and non-mutating. D8 does not install
+  providers, configure credentials, approve trust, or add generic onboarding.
+  Provider authentication and model choice remain native provider behavior.
+- A fresh launch supplies no WSNav-owned model, effort, role, agent, prompt, or
+  preset. The provider TUI and its native configuration choose those values,
+  and WSNav neither persists nor claims their current state.
+
+The provider selection is fixed on the created Workstream. Resume and Fork use
+that recorded provider without prompting. A different-provider Workstream at
+the same ProjectLocation is always another New action, never a Fork, migration,
+or handoff.
+
+Request deduplication includes provider kind. Reusing one request key with a
+different provider is an operation mismatch even when source Workstream and
+revision are unchanged.
+
+Direct CLI creation remains deterministic and the internal host wire always
+carries an explicit provider. `new-workstream` and remote `host new` accept an
+optional `--provider`: omission means the source Workstream's provider when it
+is still eligible, otherwise the command fails and asks for an explicit kind.
+Empty-state/direct Project registration selects the sole eligible provider or
+requires `--provider` when several are eligible. CLI commands never select the
+first provider by catalog order.
+
+### Provider-scoped readiness
+
+Opening the navigator must not mutate or block on an unrelated provider.
+D8.0 retains the existing Codex-only activation behavior while Codex is the
+only production adapter. Before OpenCode can become eligible in D8.1, startup
+becomes provider-scoped:
+
+- if no provider is ready and Codex is detected, the existing exact Codex
+  observer review remains the bootstrap path;
+- if another provider is already eligible, an unready Codex adapter cannot
+  block the navigator or hide that provider;
+- Codex remains `unavailable/observer_not_ready` until the Codex-specific
+  Hosts review action completes; and
+- OpenCode adds no installation, credential, trust, or provider-management
+  flow.
+
+This is a relocation of the existing Codex readiness action, not a generic
+onboarding system. No Workstream is created merely to perform provider setup.
+
+### Provider boundary with dispatch at the action boundary
+
+The production provider boundary covers five provider-specific surfaces, with
+capabilities describing which optional surfaces each adapter implements:
 
 1. **Launch program**: how to start a fresh or resumed native TUI
    (Codex: `codex --profile wsnav-observer -C <root> [resume <id>]`;
-   opencode: `opencode <root> --pure --hostname 127.0.0.1 --port <free-port>
-   --session <id>` in the private tmux pane). OpenCode's native TUI starts an
-   embedded loopback server; the resulting endpoint is private to that
-   Runtime, short-lived, and never shared. The runtime launch barrier and
-   process-birth authority remain generic.
+   OpenCode exact resume: `opencode <root> --hostname 127.0.0.1
+   --port <runtime-port> --session <id>` in the private tmux pane). Production
+   OpenCode never adds `--pure`, `--model`, `--agent`, or `--prompt`; the user
+   retains normal plugins, configuration, model choice, and native first
+   input. OpenCode fresh launch uses the evidence-selected, version-gated
+   precreation path below. The runtime
+   launch barrier and process-birth authority remain generic.
 2. **Lifecycle observer**: how passive lifecycle evidence is obtained
-   (Codex: stdin JSON hook payload; opencode: one read-only SSE event stream
-   plus status polling per Runtime). The opencode helper binds events to the
+   (Codex: stdin JSON hook payload; OpenCode: one read-only SSE event stream
+   plus status polling per Runtime). The OpenCode helper binds events to the
    observed session ID, keeps only bounded lifecycle metadata, discards event
    content, and ignores child or unrelated sessions. Both providers adapt into
    the same internal lifecycle events (`start`, `resume`, `working`, `settled`,
    `stopped`).
-3. **Metadata operations**: read current tip name, rename, list candidates,
-   and fork by exact settled boundary (Codex: ephemeral App Server
-   `thread/read|name/set|list|fork`; opencode: HTTP server
-   `GET /session/:id`, `POST /session/:id/fork`, `session list`). OpenCode Fork
-   uses the exact settled `messageID` boundary and does not provide structural
-   lineage for recovery.
+3. **Metadata operations**: read current tip name, rename when supported, list
+   recovery candidates when supported, and fork by exact settled boundary
+   when supported (Codex: ephemeral App Server
+   `thread/read|name/set|list|fork`; OpenCode evidence currently covers exact
+   session read and `POST /session/:id/fork`, not navigator Rename). OpenCode
+   Fork uses the exact settled `messageID` boundary and does not provide
+   structural lineage for recovery.
 4. **Fork reconciliation**: resolve a non-idempotent fork after a lost
    response using provider structural lineage when available, else the
    accepted degradation below.
@@ -1650,8 +1810,101 @@ Codex and opencode each implementing it:
    `/hooks` trust review; opencode: no profile or trust review is required,
    since observation is read-only SSE).
 
-Call sites depend on the trait, not concrete types; construction is dispatched
-once at the action boundary from the Workstream's `ProviderKind`.
+The provider contract reports prerequisites without requiring a generic
+provider-onboarding surface. Construction is dispatched once at the host
+action boundary from the Workstream's `ProviderKind`; provider kind is never
+accepted from display text or an untrusted hook/event.
+
+D8.0 deliberately establishes only the provider-neutral data kernel and Codex
+parity: typed provider identity, lifecycle/name DTOs used by shared state and
+presentation, dynamic capability records, schema/wire changes, and one Codex
+dispatch branch. It does not invent OpenCode behavior or require a speculative
+five-surface implementation. With the fresh-session and observer evidence
+gate now passing on `1.18.11`, D8.1 may add the second adapter and make shared
+action/app/state/navigator/remote call sites depend on the provider boundary
+rather than concrete Codex adapter types. Provider-specific profile, HTTP,
+SSE, and App Server code remains inside its adapter.
+
+### OpenCode fresh-session evidence gate
+
+Spike 0016 proves exact native resume of sessions that were created by earlier
+prompted `opencode run` commands. [Spike 0017](evidence/spikes/0017-opencode-fresh-session.md)
+proves the New contract through the selected provider-native candidate:
+pre-create a blank session through a short-lived server, stop that server, then
+launch the native TUI with the returned exact session ID. The probe also proves
+two same-root TUIs, production launch without `--pure`, exact endpoint
+ownership, and one replaceable observer sidecar per Runtime generation on
+OpenCode `1.18.11`.
+
+The selected path uses the production command shape without `--pure`,
+`--model`, `--agent`, or `--prompt`, runs two blank native TUIs at the same
+project root, keeps their first native prompts and events non-crossing,
+establishes exact session IDs without using transcript content, title/recency
+inference, or session-list ordering, resumes an exact session after Runtime
+restart, and cleans up all provider/tmux/observer state. The probe's disposable
+postcondition checks are discarded and never enter WSNav state. A candidate
+that relies on title text, database recency, or a WSNav-supplied first prompt
+is rejected.
+
+OpenCode-native creation or switching to another session inside an already
+managed TUI is unsupported unless the same evidence proves an exact active-TUI
+changed-binding claim. Ordinary global `session.created` events are not enough.
+Because Spike 0017 does not prove an exact active-TUI changed-binding claim,
+WSNav retains the prior binding and instructs the user to use `n` for another
+Workstream, matching the fail-closed Codex native `/new` boundary.
+
+### OpenCode Runtime handle and observer sidecar
+
+An OpenCode Runtime keeps bounded host-private provider state scoped to one
+exact Runtime generation:
+
+```text
+OpenCodeRuntimeHandle {
+  loopback_endpoint,
+  supported_provider_version,
+  observer_pid?,
+  observer_process_birth?,
+  observer_status: starting | ready | unknown | stopped,
+}
+```
+
+This handle is stored only in the authoritative host registry. It never enters
+the client catalog or public Workstream snapshots. A new Runtime generation
+gets a new handle; a stopped generation's endpoint or helper can never be
+reused or adopted.
+
+The host starts the native TUI in the Runtime's existing sole tmux
+server/session/window/pane, records the exact pane process birth, and validates
+that the loopback listener belongs to that exact process or a proven descendant
+before using the endpoint. `/global/health`, version, cwd, session identity,
+and process ancestry are corroborating checks; health plus `GET /session/:id`
+alone is insufficient because another OpenCode server may share the same
+provider database. Port selection is bounded, collision failure is explicit,
+and WSNav never searches for or adopts another listening endpoint.
+
+One separate host-owned `wsnav` observer sidecar runs per OpenCode Runtime. It
+is not a provider process, shared daemon, tmux pane/window, or client process.
+It starts with stdin/stdout/stderr disconnected from the provider pane, carries
+the exact Runtime ID/generation/endpoint, records its PID plus process birth,
+and reaches `ready` before the provider pane can be attached for native input.
+On the authoritative host—including an SSH host—it reads the one SSE stream,
+applies the strict session/root metadata allowlist, discards content and raw
+payloads before state adaptation, and writes only provider-neutral lifecycle
+metadata through revision-guarded host transactions.
+
+Spike 0017 validates this ownership model on the allowlisted version: the
+sidecar is independently replaceable, reconnects to the same endpoint and
+generation, survives a detached/reopened tmux attachment, and is removed with
+the disposable Runtime.
+
+The sidecar reconnects only to the same corroborated endpoint with bounded
+backoff. A missing helper, changed process birth, inconsistent endpoint, parse
+failure, or exhausted reconnect budget makes observation `unknown`, blocks
+Fork and other exact-boundary mutations, and never stops or rebinds the native
+TUI. Park validates and stops the exact sidecar before killing the private tmux
+server; recovery replaces both endpoint and helper under a new generation.
+Tests inject helper crash, stale PID, endpoint reuse, port collision, action
+failure between provider and helper start, detach/reopen, and complete cleanup.
 
 ### Multi-agent model
 
@@ -1668,7 +1921,11 @@ once at the action boundary from the Workstream's `ProviderKind`.
 
 There is no cross-provider migration: a Codex Workstream never becomes an
 opencode Workstream, and a live conversation is never transferred between
-providers.
+providers. Parallel Workstreams may share the same ProjectLocation and use
+different providers, but they begin as independent empty conversations. Files
+and user-authored notes in the shared project are the explicit context bridge;
+WSNav does not copy prompts, transcripts, summaries, or provider state between
+them.
 
 ### Fork-recovery known limitation
 
@@ -1698,13 +1955,13 @@ without a design change.
 
 - A quiet provider-kind marker and label on the Workstream row's context line
   (styled like the existing muted project marker accent), never the thread
-  title, lifecycle state, or selection color.
-- A page-local view filter and grouping axis by provider kind, so a
-  multi-provider host can be scanned by agent type. This is client
-  presentation state, not host action authority.
-- Provider-specific management (observer activation, trust, removal) stays on
-  the Hosts page and adapts per provider kind; the observer-status indicator
-  remains host-level.
+  title, lifecycle state, or selection color. The complete `Codex` or
+  `OpenCode` label is reserved before variable Project/Host context is
+  truncated, so provider identity remains visible at the supported 32-cell
+  navigator width and in bounded Workstream detail.
+- The first delivery adds no provider filter, grouping axis, role, preset, or
+  provider-management page. Those remain deferred unless use demonstrates a
+  need. Existing Codex observer management stays unchanged.
 - Hardcoded "Codex"/"native Codex UI" strings become provider-aware labels.
 
 ### Unchanged invariants
@@ -1712,7 +1969,9 @@ without a design change.
 - Each live Runtime remains one provider process in its own private tmux
   server; never a shared cross-Runtime daemon or provider `--remote`/
   client-server topology. OpenCode's per-Runtime embedded loopback backend is
-  allowed only as a private provider implementation detail.
+  allowed only as a private provider implementation detail. Its one exact
+  host-owned observer sidecar is WSNav control-plane observation, not another
+  provider process, and never owns a terminal pane.
 - WSNav never writes status or management traffic into the provider pane.
 - WSNav never persists prompts, responses, tool output, transcripts, or raw
   provider payloads from any provider. The no-transcript boundary applies to
@@ -1733,6 +1992,9 @@ without a design change.
 - [Spike 0006: scoped Codex observer profile](evidence/spikes/0006-codex-observer-profile.md)
 - [Spike 0007: ephemeral Codex metadata and naming](evidence/spikes/0007-codex-app-server-naming.md)
 - [Spike 0008: running-source settled-prefix fork](evidence/spikes/0008-codex-running-settled-fork.md)
+- [Spike 0015: OpenCode provider feasibility](evidence/spikes/0015-opencode-provider-feasibility.md)
+- [Spike 0016: OpenCode native Runtime contract](evidence/spikes/0016-opencode-runtime-contract.md)
+- [Spike 0017: OpenCode blank-session binding](evidence/spikes/0017-opencode-fresh-session.md)
 - [Python Phase 7F terminal evidence](https://github.com/byebyebryan/agent-switchboard-python-reference/blob/main/docs/phase-7f-acceptance.md)
 - [Study 0003: Codex App Server runtime boundary](evidence/studies/0003-codex-app-server-runtime-boundary.md)
 - [Study 0004: Herdr 0.8.0 competitive comparison](evidence/studies/0004-herdr-v0.8-comparison.md)

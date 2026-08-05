@@ -229,3 +229,30 @@ rejections, and cleanup checks as the clear study. Its sanitized result records
 only the selected transition, fixed source categories, and aggregate identity
 rotation assertions; it contains no provider identifiers, prompts, output,
 terminal data, paths, process IDs, or credentials.
+
+## opencode provider feasibility probes
+
+[Spike 0015](../docs/evidence/spikes/0015-opencode-provider-feasibility.md)
+records four disposable probes of opencode `1.18.11` as a possible provider:
+
+- `opencode-running-settled-fork.py` proves a fork of a running source
+  preserves the settled prefix and omits the in-flight turn.
+- `opencode-fork-lineage.py` and `opencode-http-fork-lineage.py` check whether
+  a fork destination is structurally discoverable from its source.
+- `opencode-shared-db-concurrency.py` runs several concurrent `opencode run`
+  processes against the one shared SQLite database.
+
+Each probe uses only its own temporary project and sessions, removes any
+spawned server and temporary directory, and writes a sanitized fixture that
+contains aggregate booleans and one-way session digests only.
+
+~~~console
+spikes/opencode-running-settled-fork.py \
+  --result spikes/fixtures/opencode-running-settled-fork.json
+spikes/opencode-fork-lineage.py \
+  --result spikes/fixtures/opencode-fork-lineage.json
+spikes/opencode-http-fork-lineage.py \
+  --result spikes/fixtures/opencode-http-fork-lineage.json
+spikes/opencode-shared-db-concurrency.py \
+  --result spikes/fixtures/opencode-shared-db-concurrency.json
+~~~

@@ -1,0 +1,14 @@
+{
+  "study": "opencode-running-settled-fork",
+  "status": "pass",
+  "reason": "running-source-settled-prefix-fork-confirmed",
+  "assertions": {
+    "source_settled_baseline_recorded": true,
+    "in_flight_turn_detected": true,
+    "fork_created_distinct_child_session": true,
+    "fork_omits_in_flight_turn": true,
+    "fork_preserves_settled_prefix_exactly": true,
+    "fork_lineage_structural": false
+  },
+  "cleanup": "complete"
+}

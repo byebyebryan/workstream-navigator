@@ -1,0 +1,14 @@
+{
+  "study": "opencode-shared-db-concurrency",
+  "status": "pass",
+  "reason": "shared-db-concurrency-observations-recorded",
+  "assertions": {
+    "all_concurrent_runs_completed": true,
+    "db_integrity_check_passes": true,
+    "all_sessions_visible_in_shared_db": true,
+    "each_run_has_distinct_session": true
+  },
+  "concurrent_runs": 4,
+  "observed_session_count": 4,
+  "cleanup": "complete"
+}

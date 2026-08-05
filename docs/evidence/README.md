@@ -29,7 +29,10 @@ The [spikes](spikes/) establish the narrow tmux, remote attachment, native
 Codex presentation, observer, naming, and settled-fork boundaries. They are
 falsification studies, not product documentation. [Spike
 0014](spikes/0014-terminal-fidelity-a-b.md) adds the deterministic A/B
-instrument for the deferred terminal-fidelity cursor amplification.
+instrument for the deferred terminal-fidelity cursor amplification, and
+[Spike 0015](spikes/0015-opencode-provider-feasibility.md) records the
+opencode provider fork-exactness, fork-lineage, and shared-database
+concurrency probes.
 
 ## Provider studies
 

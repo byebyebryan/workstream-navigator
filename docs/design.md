@@ -1574,6 +1574,135 @@ provider evidence that contradicts this contract must narrow or reopen the
 affected workflow; it does not authorize silently weakening isolation, trust,
 result-tip preservation, or the no-transcript boundary.
 
+## Multi-provider and multi-agent design (proposed, not a delivery slice)
+
+This section is a forward contract for generalizing the single-Codex V1 into a
+multi-provider, multi-agent navigator. It is **not implemented and not an
+approved delivery slice**; the roadmap owns whether and when it ships. It is
+motivated by the [opencode feasibility spikes](evidence/spikes/0015-opencode-provider-feasibility.md),
+which validated the core runtime, session-resume, and concurrent-runtime
+behavior for opencode while surfacing one fork-recovery limitation.
+
+### Framing
+
+The current code has no provider abstraction: `src/provider/` is a namespace,
+and Codex adapter types are imported directly across the state, action, app,
+navigator, and remote layers. Generalizing to a second provider therefore
+requires inventing a real boundary, not extending one. The tmux runtime and
+SSH transport layers are already provider-agnostic and stay that way.
+
+The design treats this as a **provider-kind generalization**, not "add
+opencode". Codex and opencode become two instances of the same provider
+contract. A second agent kind is then a third instance later, not another
+one-off integration.
+
+### Provider is a first-class, typed, persisted concept
+
+- `ProviderKind` is an enum (`codex | opencode`) carried on:
+  - the **Workstream** (created as one kind and fixed for its lifetime;
+    a Workstream never switches provider);
+  - its **Runtime** (the live provider process in its private tmux server);
+  - each **ProviderBinding** (which provider produced this native session);
+  - and the wire **Capabilities** (a host advertises which provider binaries it
+    can launch).
+- Hosts expose capability sets. A host may run Codex and opencode work
+  concurrently, but each Workstream lane is single-provider.
+- Provider identity is never inferred from display text. `native_session_id`
+  is namespaced by `ProviderKind` (a `(ProviderKind, session_id)` pair), so
+  opaque identifiers stay unambiguous across providers.
+
+### Provider trait with dispatch at the boundary
+
+A single `Provider` trait covers the five provider-specific surfaces, with
+Codex and opencode each implementing it:
+
+1. **Launch program**: how to start a fresh or resumed native TUI
+   (Codex: `codex --profile wsnav-observer -C <root> [resume <id>]`;
+   opencode: `opencode [-s <id>]` in the private tmux pane). The runtime
+   launch barrier and process-birth authority remain generic.
+2. **Lifecycle observer**: how passive lifecycle evidence is obtained
+   (Codex: stdin JSON hook payload; opencode: read-only SSE event stream plus
+   status polling). Both adapt into the same internal lifecycle events
+   (`start`, `resume`, `working`, `settled`, `stopped`).
+3. **Metadata operations**: read current tip name, rename, list candidates,
+   and fork by exact settled boundary (Codex: ephemeral App Server
+   `thread/read|name/set|list|fork`; opencode: HTTP server
+   `GET /session/:id`, `POST /session/:id/fork`, `session list`).
+4. **Fork reconciliation**: resolve a non-idempotent fork after a lost
+   response using provider structural lineage when available, else the
+   accepted degradation below.
+5. **Observer/trust setup**: how WSNav installs and verifies passive
+   observation (Codex: exactly owned `wsnav-observer` profile plus native
+   `/hooks` trust review; opencode: no profile or trust review is required,
+   since observation is read-only SSE).
+
+Call sites depend on the trait, not concrete types; construction is dispatched
+once at the action boundary from the Workstream's `ProviderKind`.
+
+### Multi-agent model
+
+"Multi-agent" has two distinct meanings, and only one is WSNav-owned:
+
+- **WSNav lanes are independent single-provider Workstreams.** More agents =
+  more Workstreams, each one provider process in its own private tmux server.
+  This is unchanged from V1 and is validated by the concurrency spike.
+- **Provider-owned subagents stay provider-owned.** opencode subagents are
+  child sessions inside one opencode runtime (`session.parent_id`), not
+  WSNav Workstreams, not separate processes. WSNav treats them as provider
+  internal state: it may observe that a tip moved but never creates, names,
+  or manages a subagent as a Workstream.
+
+There is no cross-provider migration: a Codex Workstream never becomes an
+opencode Workstream, and a live conversation is never transferred between
+providers.
+
+### Fork-recovery known limitation
+
+The [opencode fork-lineage spikes](evidence/spikes/0015-opencode-provider-feasibility.md)
+proved that opencode creates a fork destination with no structural lineage
+(`parent_id` is null, the source children API is empty; the only marker is the
+title suffix `(fork #N)`). Codex exposes structural lineage and keeps the V1
+reconciliation contract. For a provider without structural lineage, the
+accepted degradation is:
+
+- the happy path is unchanged (the fork response carries the destination ID
+  and WSNav records it immediately);
+- a lost fork response marks the operation `recovery_required` with an explicit
+  instruction to resolve the destination in the provider's native session
+  list; WSNav never re-forks and never guesses from title text;
+- nothing is lost in the provider world (the destination session is persisted
+  by the provider), so the degraded state is bookkeeping-only.
+
+A future provider release that populates fork lineage removes the limitation
+without a design change.
+
+### Navigator presentation
+
+- A quiet provider-kind marker and label on the Workstream row's context line
+  (styled like the existing muted project marker accent), never the thread
+  title, lifecycle state, or selection color.
+- A page-local view filter and grouping axis by provider kind, so a
+  multi-provider host can be scanned by agent type. This is client
+  presentation state, not host action authority.
+- Provider-specific management (observer activation, trust, removal) stays on
+  the Hosts page and adapts per provider kind; the observer-status indicator
+  remains host-level.
+- Hardcoded "Codex"/"native Codex UI" strings become provider-aware labels.
+
+### Unchanged invariants
+
+- Each live Runtime remains one provider process in its own private tmux
+  server; never a shared daemon or `--remote`/client-server topology.
+- WSNav never writes status or management traffic into the provider pane.
+- WSNav never persists prompts, responses, tool output, transcripts, or raw
+  provider payloads from any provider. The no-transcript boundary applies to
+  opencode's event-sourced SQLite transcript store as much as Codex's history:
+  WSNav scopes provider state per managed host and does not ingest it.
+- The provider owns the conversation, composer, models, naming, resume,
+  history, and native workflow for each provider kind.
+- Fail-closed identity, revision-guarded transactions, and exact
+  single-candidate recovery remain provider-independent requirements.
+
 ## Evidence basis
 
 - [Spike 0001: tmux remote-session transport](evidence/spikes/0001-tmux-remote-transport.md)

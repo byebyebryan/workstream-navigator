@@ -1,5 +1,31 @@
 # Workstream Navigator V1 Roadmap
 
+## 2026-08-04 proposed multi-provider design — no delivery slice approved
+
+The [V1 design](design.md#multi-provider-and-multi-agent-design-proposed-not-a-delivery-slice)
+now records a forward contract for generalizing the single-Codex V1 into a
+multi-provider navigator. It was motivated by [Spike
+0015](evidence/spikes/0015-opencode-provider-feasibility.md), which validated
+opencode's core runtime, exact session resume, running-source settled-prefix
+fork, and concurrent-runtime database behavior, and recorded one fork-lineage
+recovery limitation.
+
+The design is **proposed only**; no delivery slice, provider adapter, or
+roadmap checkpoint is approved. It establishes three foundational decisions
+for any future work: `ProviderKind` is a first-class typed, persisted concept
+on Workstream/Runtime/Binding; the provider boundary is a real trait with
+dispatch at the action boundary (no concrete Codex types at call sites); and
+the navigator shows a quiet provider-kind marker with a page-local filter.
+Provider-owned subagents remain provider-internal, and there is no
+cross-provider migration.
+
+Before any implementation checkpoint is approved, the following open items
+must be resolved in the roadmap: the concrete delivery slices for the
+provider trait and the opencode adapter; the exact observer-authority contract
+for opencode's SSE event stream (it has no hook/profile/trust review to
+reuse); and how the client catalog and host registry represent a host with
+mixed provider capability.
+
 ## 2026-08-04 terminal-fidelity root cause is upstream tmux
 
 [Spike 0014](evidence/spikes/0014-terminal-fidelity-a-b.md) built the

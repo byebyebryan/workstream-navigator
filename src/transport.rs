@@ -26,6 +26,7 @@ use crate::protocol::{
 
 const MAX_STDERR_BYTES: usize = 4096;
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(8);
+const RUNTIME_MUTATION_TIMEOUT: Duration = Duration::from_secs(45);
 const POLL_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_SSH_TARGET_BYTES: usize = 255;
 const MAX_REMOTE_EXECUTABLE_BYTES: usize = 1024;
@@ -138,6 +139,7 @@ pub struct CommandInvocation {
     pub program: OsString,
     pub arguments: Vec<OsString>,
     pub stdin: Vec<u8>,
+    pub timeout: Duration,
 }
 
 /// Bounded process output. Stderr is intentionally not retained in errors:
@@ -154,7 +156,7 @@ pub struct SystemCommandRunner;
 
 impl CommandRunner for SystemCommandRunner {
     fn run(&self, invocation: CommandInvocation) -> Result<CommandResult, TransportError> {
-        Self::run_with_timeout(&invocation, CONTROL_TIMEOUT)
+        Self::run_with_timeout(&invocation, invocation.timeout)
     }
 }
 
@@ -692,6 +694,7 @@ fn ssh_invocation(endpoint: &SshEndpoint, request: &RequestEnvelope) -> CommandI
         stdin: request
             .encode()
             .expect("validated fixed protocol requests always encode"),
+        timeout: request_timeout(request),
     }
 }
 
@@ -709,6 +712,7 @@ fn ssh_probe_invocation(endpoint: &SshEndpoint) -> CommandInvocation {
             OsString::from("_probe"),
         ],
         stdin: Vec::new(),
+        timeout: CONTROL_TIMEOUT,
     }
 }
 
@@ -723,6 +727,7 @@ fn local_invocation(endpoint: &LocalEndpoint, request: &RequestEnvelope) -> Comm
         stdin: request
             .encode()
             .expect("validated fixed protocol requests always encode"),
+        timeout: request_timeout(request),
     }
 }
 
@@ -731,6 +736,21 @@ fn local_probe_invocation(endpoint: &LocalEndpoint) -> CommandInvocation {
         program: endpoint.executable.clone().into_os_string(),
         arguments: vec![OsString::from("_probe")],
         stdin: Vec::new(),
+        timeout: CONTROL_TIMEOUT,
+    }
+}
+
+const fn request_timeout(request: &RequestEnvelope) -> Duration {
+    match &request.request {
+        HostRequest::Apply {
+            action:
+                HostAction::Start { .. }
+                | HostAction::Recover { .. }
+                | HostAction::NewWorkstream { .. }
+                | HostAction::ForkWorkstream { .. }
+                | HostAction::RecoverOperation { .. },
+        } => RUNTIME_MUTATION_TIMEOUT,
+        _ => CONTROL_TIMEOUT,
     }
 }
 
@@ -963,6 +983,49 @@ mod tests {
             .collect::<Vec<_>>(),
         );
         assert!(invocation.stdin.is_empty());
+        assert_eq!(invocation.timeout, CONTROL_TIMEOUT);
+    }
+
+    #[test]
+    fn runtime_mutations_receive_the_provider_readiness_deadline() {
+        let workstream_id = WorkstreamId::new();
+        for action in [
+            HostAction::Start {
+                workstream_id,
+                expected_revision: 1,
+            },
+            HostAction::Recover {
+                workstream_id,
+                expected_revision: 1,
+            },
+            HostAction::NewWorkstream {
+                source_workstream_id: workstream_id,
+                expected_revision: 1,
+                request_key: "new-request".to_owned(),
+                provider: crate::domain::ProviderKind::OpenCode,
+            },
+            HostAction::ForkWorkstream {
+                source_workstream_id: workstream_id,
+                expected_revision: 1,
+                request_key: "fork-request".to_owned(),
+            },
+            HostAction::RecoverOperation {
+                operation_id: crate::domain::OperationId::new(),
+            },
+        ] {
+            let runtime_request = apply_request(action).unwrap();
+            assert_eq!(request_timeout(&runtime_request), RUNTIME_MUTATION_TIMEOUT);
+        }
+        let park_request = apply_request(HostAction::Park {
+            workstream_id,
+            expected_revision: 1,
+        })
+        .unwrap();
+        assert_eq!(request_timeout(&park_request), CONTROL_TIMEOUT);
+        assert_eq!(
+            request_timeout(&snapshot_request(None).unwrap()),
+            CONTROL_TIMEOUT
+        );
     }
 
     #[test]
@@ -982,6 +1045,7 @@ mod tests {
                 program: "sh".into(),
                 arguments: vec!["-c".into(), "sleep 30 & wait".into()],
                 stdin: Vec::new(),
+                timeout: CONTROL_TIMEOUT,
             },
             Duration::from_millis(100),
         );

@@ -457,6 +457,9 @@ fn apply_created_workstream(
         Err(crate::actions::ActionError::ForkRecoveryRequired) => {
             rejected("workstream outcome needs recovery")
         }
+        Err(crate::actions::ActionError::OpenCodeForkExternalEffectUnknown) => rejected(
+            "OpenCode Fork response was lost; an unmanaged provider session may need native inspection or cleanup; use a new explicit Fork to try again",
+        ),
         Err(crate::actions::ActionError::ForkSourceUnavailable) => {
             rejected("fork source is no longer available")
         }
@@ -1370,7 +1373,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_rename_fork_and_recovery_are_bounded_no_effect_refusals() {
+    fn opencode_rename_and_nonrecovering_actions_are_bounded_no_effect_refusals() {
         let temporary = tempfile::tempdir().unwrap();
         let project = temporary.path().join("project");
         std::fs::create_dir(&project).unwrap();
@@ -1393,19 +1396,6 @@ mod tests {
                 if diagnostic == "opencode provider rename is unavailable"
         ));
 
-        let fork = apply_fork_workstream(
-            &root,
-            &mut registry,
-            source.workstream_id,
-            Revision::INITIAL.value(),
-            "opencode-fork".to_owned(),
-        );
-        assert!(matches!(
-            fork.response,
-            HostResponse::Rejected { ref diagnostic }
-                if diagnostic == "opencode provider action is unavailable"
-        ));
-
         let recovery = apply_recover(
             &root,
             &mut registry,
@@ -1418,6 +1408,23 @@ mod tests {
                 if diagnostic == "opencode provider recovery is unavailable"
         ));
         assert_eq!(registry.workstream_overviews().unwrap(), before);
+    }
+
+    #[test]
+    fn lost_opencode_fork_response_has_an_actionable_bounded_diagnostic() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let registry = HostRegistry::open(&root).unwrap();
+        let response = apply_created_workstream(
+            &Err(crate::actions::ActionError::OpenCodeForkExternalEffectUnknown),
+            &registry,
+        );
+
+        assert!(matches!(
+            response.response,
+            HostResponse::Rejected { ref diagnostic }
+                if diagnostic == "OpenCode Fork response was lost; an unmanaged provider session may need native inspection or cleanup; use a new explicit Fork to try again"
+        ));
     }
 
     #[test]

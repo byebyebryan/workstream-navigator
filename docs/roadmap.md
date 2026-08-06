@@ -28,13 +28,15 @@ context transfer.
 
 D8.0 completed on 2026-08-05. It introduced the provider identity and dispatch
 foundation, preserved Codex behavior, and made provider kind visible without
-adding OpenCode production launch. The D8.1 evidence gate now passes for
-OpenCode `1.18.11`; D8.1 was explicitly activated on 2026-08-05 and is now the
-active checkpoint. D8.2 remains inactive. There is no generic provider
-onboarding, provider view or filter, model selector, role/preset system, or
-remembered per-Project provider policy in D8. Availability is dynamic host-owned
-snapshot state rather than immutable client-registration identity, and every
-creation action revalidates it on the authoritative host.
+adding OpenCode production launch. D8.1 completed on 2026-08-06 with the
+allowlisted OpenCode `1.18.11` New/Resume vertical slice and provider-aware
+creation flow. D8.2 completed on 2026-08-06 with exact-session lost-Runtime
+recovery, same-provider Fork, conservative lost-response handling, and real
+local/SSH acceptance. There is no generic provider onboarding, provider view
+or filter, model selector, role/preset system, or remembered per-Project
+provider policy in D8. Availability is dynamic host-owned snapshot state
+rather than immutable client-registration identity, and every creation action
+revalidates it on the authoritative host.
 
 ## 2026-08-04 terminal-fidelity root cause is upstream tmux
 
@@ -143,11 +145,10 @@ historical only; it is not a current product commitment. Host schema 8 is a
 clean breaking boundary and requires explicit reset/re-registration instead of
 an automatic migration from the retired schema.
 
-Date: 2026-08-05
+Date: 2026-08-06
 
-Status: D0 through D8.0 are complete. V1 remains a source-installed operator
-beta. D8.1 is active after explicit activation on 2026-08-05 and its
-prerequisite evidence gate passed. D8.2 is inactive.
+Status: D0 through D8.2 are complete. V1 remains a source-installed operator
+beta.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -194,8 +195,8 @@ This document owns sequencing, exit gates, and progress.
 | D7 | Navigator workflow and lifecycle management | Complete through D7.6 |
 | D7.6 | Host-private Project directory browser | Complete |
 | D8.0 | Provider identity foundation and Codex parity | Complete (2026-08-05) |
-| D8.1 | Provider-aware New and OpenCode New/Resume vertical slice | Active (2026-08-05; prerequisite evidence passed) |
-| D8.2 | OpenCode Fork, recovery, and integrated acceptance | Inactive |
+| D8.1 | Provider-aware New and OpenCode New/Resume vertical slice | Complete (2026-08-06) |
+| D8.2 | OpenCode Fork, recovery, and integrated acceptance | Complete (2026-08-06) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -995,9 +996,10 @@ Exit gate:
 
 ## D8 - Multi-provider Workstreams
 
-Implementation status: D8.0 is complete (2026-08-05). D8.1's fresh-session and
-observer evidence passes on OpenCode `1.18.11`, and D8.1 is active after
-explicit activation on 2026-08-05. D8.2 is an inactive follow-up. The
+Implementation status: D8.0 completed on 2026-08-05, D8.1 completed on
+2026-08-06 after its fresh-session, observer, mixed-provider, and real-provider
+acceptance passed on OpenCode `1.18.11`, and D8.2 completed on 2026-08-06 with
+exact lost-Runtime recovery, same-provider Fork, and integrated acceptance. The
 [multi-provider design](design.md#multi-provider-and-multi-agent-design) is
 authoritative for the shared provider boundary and privacy invariants.
 
@@ -1155,7 +1157,8 @@ the same probe carried a non-null `parentID` matching its root. The adapter now
 corroborates that exact metadata before interpreting the status map, and treats
 an absent root entry as `Idle` only after that proof. Wrong identity/directory,
 child sessions, missing or malformed metadata, and unknown/malformed statuses
-remain fail-closed. D8.1 stays active; D8.2 remains inactive.
+remain fail-closed. This correction is included in the completed D8.1
+evidence; D8.2 owns the remaining recovery and Fork work.
 
 ### D8.1 - Provider-aware New and OpenCode New/Resume vertical slice
 
@@ -1250,12 +1253,22 @@ no disposable process remained, and the complete provider/state root was
 removed. The final `scripts/check` gate passes 314 library tests plus 5 local
 transport tests, formatting, Clippy, package/license/advisory verification,
 disposable local and mixed-provider acceptances, and diff checks. D8.1 is
-complete; D8.2 remains inactive.
+complete; D8.2 was activated on 2026-08-06.
 
 ### D8.2 - OpenCode Fork, recovery, and integrated acceptance
 
+Status: Complete on 2026-08-06 for allowlisted OpenCode `1.18.11`.
+
 Scope:
 
+- implement explicit lost-Runtime recovery for an OpenCode Workstream only
+  when its exact bound root session is known and the prior private tmux
+  Runtime is conclusively missing. Validate and stop only the recorded
+  sidecar by PID plus process birth, remove only the matching old-generation
+  handle and private Runtime artifacts, reserve a fresh generation with a new
+  endpoint and observer, and resume the same session. An unbound, live, or
+  ambiguous Runtime is refused without provider discovery, a native picker,
+  session adoption, or fallback;
 - implement same-provider OpenCode Fork at the exact settled `messageID`
   boundary and the documented terminal `external_effect_unknown` outcome when
   a response is lost without structural lineage;
@@ -1266,11 +1279,43 @@ Scope:
 
 Exit gate:
 
-- deterministic tests cover settled-prefix exactness, no cross-provider Fork,
-  lost-response terminal failure without retry/adoption, and provider-specific
-  diagnostics; and
+- deterministic tests cover exact bound-session Runtime recovery, ambiguous
+  and unbound recovery refusal, prior-generation sidecar/handle cleanup,
+  settled-prefix Fork exactness, no cross-provider Fork, lost-response terminal
+  failure without retry/adoption, and provider-specific diagnostics; and
 - sanitized operator-gated local/SSH acceptance plus `scripts/check` pass with
   complete cleanup and no provider-pane management traffic.
+
+Completion evidence (2026-08-06): OpenCode Fork now revalidates the exact live
+Runtime, root-session binding, handle, loopback endpoint, provider process,
+observer, and last completed `messageID` before crossing one recorded provider
+effect boundary. A lost response is terminal `external_effect_unknown`; it is
+never retried, reconciled from display text, or adopted. Exact recovery accepts
+only a recovery-required Workstream with a conclusively missing private tmux
+Runtime, matching bound root session, and matching prior-generation handle and
+observer identity, then replaces the generation, endpoint, and sidecar while
+resuming that same session.
+
+Real acceptance first exposed two integration races and retained the strict
+contract: observer `ready` now follows successful SSE stream establishment, a
+trailing provider busy status no longer erases an already completed assistant
+candidate before idle corroboration, and only Runtime-creating/recovery SSH
+mutations receive the longer 45-second bounded process deadline needed to
+contain the adapter's readiness gates. Read-only control remains at eight
+seconds.
+
+The operator-gated production harness passed both local and real loopback-SSH
+Fork and lost-Runtime recovery on OpenCode `1.18.11`. Each Fork produced a
+distinct same-provider bound session; each recovery retained the source
+session while replacing generation, endpoint, and observer. WSNav state
+contained no provider marker or content, every disposable process, port,
+socket, provider root, repository, and SSH artifact was removed, and the
+ordinary tmux inventory was unchanged. The sanitized
+[D8.2 acceptance record](evidence/acceptance/d8.2-opencode-fork-recovery.md)
+contains the bounded results. The final `scripts/check` gate passes 329
+all-target Rust tests plus formatting, Clippy, package/license/advisory,
+shell/Python/fixture, disposable fake-provider, mixed-provider, and diff
+checks.
 
 ## Deferred beyond V1
 

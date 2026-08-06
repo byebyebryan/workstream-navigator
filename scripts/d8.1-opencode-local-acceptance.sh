@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Disposable D8.1 OpenCode/private-tmux acceptance. It never uses ordinary
-# provider state or the user's default tmux server.
+# Disposable D8.1/D8.2 OpenCode/private-tmux acceptance. It never uses
+# ordinary provider state or the user's default tmux server.
 set -euo pipefail
 
 workspace_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -9,10 +9,12 @@ ordinary_tmux_before="$(env -u TMUX tmux list-sessions -F '#{session_name}:#{ses
 wsnav_bin=""
 state_root=""
 workstream_id=""
+fork_workstream_id=""
 attach_socket=""
 
 cleanup() {
     if [[ -n "$wsnav_bin" && -n "$state_root" && -n "$workstream_id" ]]; then
+        [[ -z "$fork_workstream_id" ]] || "$wsnav_bin" --state-root "$state_root" park "$fork_workstream_id" >/dev/null 2>&1 || true
         "$wsnav_bin" --state-root "$state_root" park "$workstream_id" >/dev/null 2>&1 || true
     fi
     if [[ -n "$attach_socket" ]]; then
@@ -52,7 +54,15 @@ DB = Path(os.environ["FAKE_OPENCODE_DB"])
 
 def load_db():
     if not DB.exists():
-        return {"counter": 0, "sessions": [], "event_sent": False, "status": {}}
+        return {
+            "counter": 0,
+            "sessions": [],
+            "event_sent": False,
+            "status": {},
+            "fork_requests": [],
+            "drop_next_fork_response": False,
+            "event_stream_connected": False,
+        }
     return json.loads(DB.read_text(encoding="utf-8"))
 
 
@@ -115,6 +125,10 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         if path == "/global/event":
+            time.sleep(0.25)
+            state = load_db()
+            state["event_stream_connected"] = True
+            save_db(state)
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Transfer-Encoding", "chunked")
@@ -176,7 +190,7 @@ class Handler(BaseHTTPRequestHandler):
                 state = load_db()
                 state.setdefault("status", {})[session] = "idle"
                 save_db(state)
-                for value in (child, busy, candidate, idle_status, idle):
+                for value in (child, busy, candidate, busy, idle_status, idle):
                     chunk(self.wfile, f"data: {json.dumps(value)}\n\n".encode("utf-8"))
             while True:
                 time.sleep(1)
@@ -184,11 +198,41 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(404)
 
     def do_POST(self):  # noqa: N802
-        if urlparse(self.path).path != "/session":
+        path = urlparse(self.path).path
+        length = int(self.headers.get("Content-Length", "0"))
+        raw_body = self.rfile.read(length)
+        if path.startswith("/session/") and path.endswith("/fork"):
+            source = path.removeprefix("/session/").removesuffix("/fork")
+            state = load_db()
+            if source not in state["sessions"]:
+                self.send_error(404)
+                return
+            try:
+                body = json.loads(raw_body)
+            except json.JSONDecodeError:
+                self.send_error(400)
+                return
+            if body != {"messageID": "completed-message"}:
+                self.send_error(400)
+                return
+            state["counter"] += 1
+            destination = f"fake-session-{state['counter']}"
+            state["sessions"].append(destination)
+            state.setdefault("status", {})[destination] = "idle"
+            state.setdefault("fork_requests", []).append(
+                {"source": source, "messageID": body["messageID"]}
+            )
+            drop_response = state.get("drop_next_fork_response", False)
+            state["drop_next_fork_response"] = False
+            save_db(state)
+            if drop_response:
+                self.close_connection = True
+                return
+            self.json_response({"id": destination})
+            return
+        if path != "/session":
             self.send_error(404)
             return
-        length = int(self.headers.get("Content-Length", "0"))
-        self.rfile.read(length)
         state = load_db()
         state["counter"] += 1
         session = f"fake-session-{state['counter']}"
@@ -241,7 +285,8 @@ export FAKE_OPENCODE_SERVER="$fake_server"
 export PATH="$fake_bin:$workspace_root/target/debug:$PATH"
 
 handle_row() {
-    python3 - "$state_root/host.sqlite" "$workstream_id" <<'PY'
+    local target_workstream_id="${1:-$workstream_id}"
+    python3 - "$state_root/host.sqlite" "$target_workstream_id" <<'PY'
 import sqlite3
 import sys
 
@@ -307,6 +352,15 @@ PY
 registration="$($wsnav_bin --state-root "$state_root" register --provider opencode "$repository")"
 workstream_id="${registration##* }"
 "$wsnav_bin" --state-root "$state_root" start "$workstream_id"
+python3 - "$fake_db" <<'PY'
+import json
+import sys
+
+if not json.loads(open(sys.argv[1], encoding="utf-8").read()).get(
+    "event_stream_connected", False
+):
+    raise SystemExit("observer became ready before its SSE stream")
+PY
 sleep 1
 first_status="$($wsnav_bin --state-root "$state_root" status "$workstream_id")"
 grep -F 'lifecycle: Attention' <<<"$first_status" >/dev/null
@@ -378,13 +432,115 @@ IFS='|' read -r second_observer_pid second_observer_birth second_observer_status
 [[ "$second_session" == "$first_session" ]]
 [[ "$second_generation" != "$first_generation" && "$second_port" != "$first_port" ]]
 [[ "$second_observer_pid" != "$first_observer_pid" && "$second_observer_birth" != "$first_observer_birth" ]]
-"$wsnav_bin" --state-root "$state_root" park "$workstream_id"
+
+# Conclusive loss of the exact private Runtime keeps the bound root session,
+# stops/replaces only its old observer and handle, and resumes it under a new
+# generation and endpoint. No provider picker, discovery, or blank session is
+# involved.
+runtime_socket="$(find "$state_root/run" -type s -name tmux.sock -print -quit)"
+env -u TMUX tmux -S "$runtime_socket" kill-server
+sleep 1
+lost_status="$($wsnav_bin --state-root "$state_root" status "$workstream_id")"
+grep -F 'workstream: RecoveryRequired' <<<"$lost_status" >/dev/null
+grep -F 'lifecycle: Unknown' <<<"$lost_status" >/dev/null
+grep -F 'recovery attention: unseen' <<<"$lost_status" >/dev/null
+"$wsnav_bin" --state-root "$state_root" recover "$workstream_id"
+sleep 1
+recovered_status="$($wsnav_bin --state-root "$state_root" status "$workstream_id")"
+grep -F 'workstream: Open' <<<"$recovered_status" >/dev/null
+grep -F 'lifecycle: Idle' <<<"$recovered_status" >/dev/null
+grep -F 'recovery attention: none' <<<"$recovered_status" >/dev/null
+IFS='|' read -r recovered_observer_pid recovered_observer_birth recovered_observer_status recovered_port recovered_generation recovered_session <<<"$(handle_row)"
+[[ "$recovered_observer_status" == "ready" ]]
+[[ -n "$recovered_observer_birth" ]]
+[[ "$recovered_session" == "$second_session" ]]
+[[ "$recovered_generation" != "$second_generation" && "$recovered_port" != "$second_port" ]]
 assert_pid_gone "$second_observer_pid"
 assert_port_closed "$second_port"
+
+# The provider fork is issued through the exact live endpoint at the observer's
+# settled messageID. The destination becomes a distinct same-provider
+# Workstream and starts through the ordinary exact-resume path.
+forked="$($wsnav_bin --state-root "$state_root" fork-workstream "$workstream_id")"
+fork_workstream_id="${forked##* }"
+sleep 1
+IFS='|' read -r fork_observer_pid fork_observer_birth fork_observer_status fork_port fork_generation fork_session <<<"$(handle_row "$fork_workstream_id")"
+[[ "$fork_observer_status" == "ready" ]]
+[[ -n "$fork_observer_birth" && -n "$fork_generation" ]]
+[[ "$fork_session" != "$recovered_session" ]]
+python3 - "$state_root/host.sqlite" "$fake_db" "$workstream_id" "$fork_workstream_id" <<'PY'
+import json
+import sqlite3
+import sys
+
+database, fake_database, source, destination = sys.argv[1:]
+connection = sqlite3.connect(database)
+rows = connection.execute(
+    "SELECT workstream_id, provider FROM workstreams WHERE workstream_id IN (?, ?)",
+    (source, destination),
+).fetchall()
+if sorted(rows) != sorted([(source, "opencode"), (destination, "opencode")]):
+    raise SystemExit("OpenCode Fork did not retain same-provider identity")
+operation = connection.execute(
+    "SELECT phase FROM compound_operations ORDER BY rowid DESC LIMIT 1"
+).fetchone()
+if operation != ("committed",):
+    raise SystemExit("OpenCode Fork did not commit exactly")
+provider = json.loads(open(fake_database, encoding="utf-8").read())
+if provider.get("fork_requests") != [
+    {"source": provider["sessions"][0], "messageID": "completed-message"}
+]:
+    raise SystemExit("OpenCode Fork did not use the exact settled boundary")
+PY
+
+"$wsnav_bin" --state-root "$state_root" park "$fork_workstream_id"
+assert_pid_gone "$fork_observer_pid"
+assert_port_closed "$fork_port"
+fork_workstream_id=""
+
+# A response lost after the provider creates a destination is terminal and
+# never creates or adopts a WSNav Workstream. The unmanaged disposable provider
+# session is removed with the rest of the fake provider root at cleanup.
+python3 - "$fake_db" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+state = json.loads(open(path, encoding="utf-8").read())
+state["drop_next_fork_response"] = True
+open(path, "w", encoding="utf-8").write(json.dumps(state))
+PY
+if "$wsnav_bin" --state-root "$state_root" fork-workstream "$workstream_id" \
+    >"$task_root/lost-fork.out" 2>&1; then
+    echo "OpenCode Fork unexpectedly accepted a lost response" >&2
+    exit 1
+fi
+grep -F 'external effect is unknown' "$task_root/lost-fork.out" >/dev/null
+python3 - "$state_root/host.sqlite" "$fake_db" <<'PY'
+import json
+import sqlite3
+import sys
+
+connection = sqlite3.connect(sys.argv[1])
+phase, outcome = connection.execute(
+    "SELECT phase, outcome_json FROM compound_operations ORDER BY rowid DESC LIMIT 1"
+).fetchone()
+if phase != "failed" or json.loads(outcome) != {"code": "external_effect_unknown"}:
+    raise SystemExit("lost OpenCode Fork response was not terminally bounded")
+if connection.execute("SELECT COUNT(*) FROM workstreams").fetchone()[0] != 2:
+    raise SystemExit("lost OpenCode Fork response created a WSNav destination")
+provider = json.loads(open(sys.argv[2], encoding="utf-8").read())
+if len(provider.get("fork_requests", [])) != 2:
+    raise SystemExit("lost OpenCode Fork was not issued exactly once")
+PY
+
+"$wsnav_bin" --state-root "$state_root" park "$workstream_id"
+assert_pid_gone "$recovered_observer_pid"
+assert_port_closed "$recovered_port"
 assert_final_state
 test -z "$(find "$state_root/run" -type s -name tmux.sock -print -quit 2>/dev/null)"
 workstream_id=""
 
 ordinary_tmux_after="$(env -u TMUX tmux list-sessions -F '#{session_name}:#{session_created}:#{session_windows}' -O name 2>/dev/null || true)"
 [[ "$ordinary_tmux_before" == "$ordinary_tmux_after" ]]
-printf 'D8.1 disposable fake OpenCode/private-tmux acceptance passed\n'
+printf 'D8.1/D8.2 disposable fake OpenCode/private-tmux acceptance passed\n'

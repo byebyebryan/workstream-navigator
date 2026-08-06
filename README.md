@@ -3,17 +3,18 @@
 `wsnav` is a thin terminal layer for organizing persistent coding workstreams
 across machines without replacing the coding agent's native terminal UI.
 
-It is built for the workflow where Codex remains the place you plan, code,
-rename threads, resume history, and use native commands. Workstream Navigator
-makes those sessions easier to find, enter, park, recover, and fork while
+It is built for the workflow where Codex or OpenCode remains the place you
+plan, code, select models and agents, resume history, and use native commands.
+Workstream Navigator makes those sessions easier to find, enter, and park while
 keeping the agent pane directly interactive.
 
 ## What it does
 
-- Keeps a compact Workstreams navigator beside the native Codex TUI.
+- Keeps a compact Workstreams navigator beside the native provider TUI.
 - Organizes independent workstreams under explicitly registered Git projects.
-- Starts fresh workstreams, forks a live Codex conversation at its last
-  completed turn, parks sessions, and recovers a conclusively lost runtime.
+- Starts fresh Codex or OpenCode workstreams, forks a live same-provider
+  conversation at its last completed turn, parks sessions, resumes exact
+  provider sessions, and recovers a conclusively lost runtime.
 - Treats local and SSH hosts as first-class locations, with the same navigator
   workflow on both.
 - Groups matching project locations across hosts without exposing raw remote
@@ -23,25 +24,26 @@ keeping the agent pane directly interactive.
 
 ## Native by design
 
-Workstream Navigator owns navigation and runtime reachability; Codex owns the
-conversation.
+Workstream Navigator owns navigation and runtime reachability; the selected
+provider owns the conversation.
 
-That means the native provider UI stays visible and interactive, including
-Codex's Plan mode, `/clear`, `/fork`, `/rename`, resume flow, history,
-and permissions. WSNav never sends navigator status, task context, or
-management prompts into the provider pane, and it preserves the completed
-provider result until you act.
+That means the native provider UI stays visible and interactive, including its
+model, agent, permission, history, and conversation workflows. WSNav never
+sends navigator status, task context, or management prompts into the provider
+pane, and it preserves the completed provider result until you act.
 
-### Managed native `/new` boundary
+### Managed native new-session boundary
 
-Do not use Codex's native `/new` inside a WSNav-managed provider pane. Codex
+Do not use Codex's native `/new` inside a WSNav-managed Codex pane. Codex
 does create a distinct new chat, but its current lifecycle signals cannot prove
 that the new chat belongs to that exact live WSNav Runtime. WSNav therefore
 remains bound to the previous conversation tip: its displayed status, rename,
 park, and resume actions still refer to that prior tip.
 
-Use `/clear` for a fresh chat in the same Workstream. Use WSNav's `n` or `f`
-actions for an independent Workstream. This is an explicit current limitation,
+Use `/clear` for a fresh chat in the same Workstream. OpenCode-native session
+creation or switching is likewise not used to rebind a managed Workstream.
+Use WSNav's `n` for an independent Workstream, or `f` for a same-provider fork.
+This is an explicit current limitation,
 recorded in [Spikes 0011](docs/evidence/spikes/0011-codex-native-new-rebinding.md),
 [0012](docs/evidence/spikes/0012-codex-new-prompt-session-rotation.md), and
 [0013](docs/evidence/spikes/0013-codex-new-thread-inventory.md).
@@ -53,10 +55,10 @@ ordinary Git tooling inside the native session when a task needs them.
 
 ## See it
 
-The compact navigator remains a supporting surface; the adjacent native Codex
-pane keeps terminal focus and remains the place work happens. The tour uses the
-normal 141×60 presentation split: 32 columns for navigation, one divider, and
-the remaining 108 columns for Codex.
+The compact navigator remains a supporting surface; the adjacent native
+provider pane keeps terminal focus and remains the place work happens. The tour
+uses the normal 141×60 presentation split: 32 columns for navigation, one
+divider, and the remaining 108 columns for the provider.
 
 ![Animated native-workflow tour](docs/media/workstream-tour.gif)
 
@@ -87,18 +89,24 @@ install -m 755 target/release/wsnav ~/.local/bin/wsnav
 wsnav
 ```
 
-On the first launch, WSNav creates its exact passive Codex observer profile and
-opens Codex's native hook review in the right pane. Approve that review, then
-open Projects with `,`, press `a`, and choose the Git project to register. The
-host-private directory browser starts at `~/code` by default; configure another
-browser root from Hosts with `.` then `r`.
+On the first launch, register a Project with `,`, then `a`, and choose its Git
+directory. If Codex is the only eligible path, WSNav first opens its exact
+passive observer profile for native hook review. When OpenCode is already
+eligible, that Codex review is optional and remains available from Hosts;
+approve it before starting a Codex Workstream. The host-private directory
+browser starts at `~/code` by default; configure another browser root from
+Hosts with `.` then `r`.
 
 From the Workstreams home:
 
 - `Enter` opens the selected native session.
-- `n` starts a fresh workstream from the selected project's root.
-- `f` forks the selected live Codex workstream at its last settled turn.
-- `p` parks, `r` renames the native thread, and `x` archives a workstream.
+- `n` starts a fresh workstream from the selected project's root. With multiple
+  eligible providers, it opens a provider-only chooser initially selecting the
+  current Workstream's provider.
+- `f` forks the selected live Codex or OpenCode workstream at its last settled
+  turn.
+- `p` parks, `r` renames a supported native thread, and `x` archives a
+  workstream. OpenCode Rename remains unavailable.
 - `←` / `→` cycle Recent, By project, By host, and Archived views.
 - `?` shows the complete keyboard reference inside the navigator pane.
 
@@ -110,8 +118,10 @@ and enter the existing SSH destination (for example, `snap`). WSNav verifies
 the remote compatibility, prepares its observer, and opens the remote native
 Codex hook review in the right pane.
 
-WSNav never copies, bootstraps, or updates a remote executable. Confirm a
-registered host before stateful work:
+WSNav never copies, bootstraps, or updates a remote executable. A remote Codex
+lane requires the same native hook review; OpenCode readiness is detected from
+the exact allowlisted executable. Confirm a registered host before stateful
+work:
 
 ```console
 wsnav host doctor <alias>
@@ -122,14 +132,15 @@ remain disabled until compatibility and connectivity are restored.
 
 ## Repository status
 
-V1 is implemented through D7.6 as a source-installed `0.1.0` operator beta.
+V1 is implemented through D8.2 as a source-installed `0.1.0` operator beta.
 There is no tagged binary release, automatic updater, remote deployment
 service, crates.io publication, or compatibility commitment to the earlier
 Python prototype.
 
-The implementation is Codex-first, but its host/runtime boundaries are kept
-deliberately narrow so future provider support can be evaluated without
-compromising the native-workflow model.
+The implementation supports Codex and explicitly allowlisted OpenCode
+`1.18.11` New, exact resume, same-provider Fork, and lost-Runtime recovery.
+Provider onboarding, filters, model/role presets, cross-provider Fork, and
+automatic context transfer remain out of scope.
 
 ## Documentation
 

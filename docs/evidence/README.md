@@ -22,6 +22,8 @@ product contract:
 - [D6 source-installed operator beta](acceptance/d6-operator-beta.md)
 - [D6.1 project identity](acceptance/d6.1-project-identity.md)
 - [D7 navigator workflow](acceptance/d7-navigator-workflow.md)
+- [D8.1 real multi-provider acceptance](acceptance/d8.1-multi-provider.md)
+- [D8.2 OpenCode Fork and recovery acceptance](acceptance/d8.2-opencode-fork-recovery.md)
 
 ## Design spikes
 

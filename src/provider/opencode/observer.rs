@@ -20,7 +20,7 @@ use crate::{
 
 use super::{
     LifecycleHint, OpenCodeClient, OpenCodeEndpoint, OpenCodeError, OpenCodeEvent,
-    OpenCodeSessionStatus, endpoint_owned_by_process,
+    OpenCodeEventStream, OpenCodeSessionStatus, endpoint_owned_by_process,
 };
 
 const HEALTH_DEADLINE: Duration = Duration::from_secs(15);
@@ -99,15 +99,22 @@ pub fn run_observer(
             )
             && endpoint_owned_by_process(&context.endpoint, context.pane_pid, pane_birth)
         {
-            let (observer_pid, observer_birth) = prepare(&mut registry, context)?;
-            return supervise(
-                &mut registry,
-                context,
-                &client,
-                pane_birth,
-                observer_pid,
-                &observer_birth,
-            );
+            // `ready` is an action boundary, not merely process liveness. A
+            // caller may submit native input as soon as start returns, so the
+            // exact SSE stream must already be established before the handle
+            // becomes actionable or the first turn can race past observation.
+            if let Ok(stream) = client.event_stream() {
+                let (observer_pid, observer_birth) = prepare(&mut registry, context)?;
+                return supervise(
+                    &mut registry,
+                    context,
+                    &client,
+                    pane_birth,
+                    observer_pid,
+                    &observer_birth,
+                    Some(stream),
+                );
+            }
         }
         if Instant::now() >= deadline {
             mark_unknown(&mut registry, context);
@@ -168,9 +175,9 @@ fn supervise(
     pane_birth: &str,
     observer_pid: u32,
     observer_birth: &str,
+    mut stream: Option<OpenCodeEventStream>,
 ) -> Result<(), OpenCodeObserverError> {
     let mut reconnect_failures = 0_u8;
-    let mut stream = None;
     let mut candidate_message_id = None;
     let mut last_status_poll = Instant::now();
     let mut status_failures = 0_u8;
@@ -284,7 +291,6 @@ fn poll_root_status(
     match status {
         OpenCodeSessionStatus::Busy => {
             *status_failures = 0;
-            *candidate_message_id = None;
             let should_apply = registry
                 .runtime_by_id(evidence.context.runtime_id)?
                 .is_some_and(|runtime| runtime.status != RuntimeStatus::Working);
@@ -322,7 +328,6 @@ fn apply_event(
     record_candidate(candidate_message_id, event);
     match &event.hint {
         Some(LifecycleHint::Working) => {
-            *candidate_message_id = None;
             apply_hint(registry, evidence, LifecycleHint::Working)?;
         }
         Some(LifecycleHint::Settled { .. }) if candidate_message_id.is_some() => {
@@ -341,7 +346,7 @@ fn record_candidate(candidate_message_id: &mut Option<String>, event: &OpenCodeE
     if let Some(candidate) = event.candidate_message_id.clone() {
         *candidate_message_id = Some(candidate);
     }
-    if matches!(&event.hint, Some(LifecycleHint::Working)) {
+    if event.clears_candidate {
         *candidate_message_id = None;
     }
 }
@@ -445,13 +450,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn busy_evidence_clears_a_completed_candidate_before_idle() {
+    fn busy_status_retains_a_completed_candidate_until_idle() {
         let mut candidate = Some("message-1".to_owned());
         record_candidate(
             &mut candidate,
             &OpenCodeEvent {
                 hint: Some(LifecycleHint::Working),
                 candidate_message_id: None,
+                clears_candidate: false,
+            },
+        );
+        assert_eq!(candidate.as_deref(), Some("message-1"));
+    }
+
+    #[test]
+    fn incomplete_message_update_clears_a_completed_candidate() {
+        let mut candidate = Some("message-1".to_owned());
+        record_candidate(
+            &mut candidate,
+            &OpenCodeEvent {
+                hint: Some(LifecycleHint::Working),
+                candidate_message_id: None,
+                clears_candidate: true,
             },
         );
         assert_eq!(candidate, None);
@@ -465,6 +485,7 @@ mod tests {
             &OpenCodeEvent {
                 hint: None,
                 candidate_message_id: Some("message-1".to_owned()),
+                clears_candidate: false,
             },
         );
         assert_eq!(candidate.as_deref(), Some("message-1"));

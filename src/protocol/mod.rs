@@ -168,7 +168,7 @@ pub enum HostAction {
         workstream_id: WorkstreamId,
         expected_revision: i64,
     },
-    /// Reopen a Workstream only through verified native Codex resume evidence.
+    /// Reopen a Workstream only through verified native provider resume evidence.
     Recover {
         workstream_id: WorkstreamId,
         expected_revision: i64,
@@ -182,7 +182,7 @@ pub enum HostAction {
         request_key: String,
         provider: ProviderKind,
     },
-    /// Fork an active source through its last settled native Codex turn.
+    /// Fork an active source through its last settled native provider turn.
     ForkWorkstream {
         source_workstream_id: WorkstreamId,
         expected_revision: i64,

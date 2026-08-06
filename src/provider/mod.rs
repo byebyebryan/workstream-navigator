@@ -59,7 +59,7 @@ pub fn discover_capabilities_with_probe(
             observe: true,
             metadata_read: true,
             rename: false,
-            fork: false,
+            fork: true,
         },
         opencode::VersionProbe::Available => capability(
             ProviderKind::OpenCode,
@@ -355,6 +355,43 @@ pub fn require_new_eligible(
     kind: ProviderKind,
 ) -> Result<(), ProviderReadinessError> {
     require_new_eligible_from_capabilities(registry, kind, discover_capabilities(registry))
+}
+
+/// Requires the selected host/provider pair to expose exact Fork support.
+/// Fork capability is distinct from New eligibility, and the authoritative
+/// host is re-probed immediately before the durable provider boundary.
+///
+/// # Errors
+///
+/// Returns a typed readiness error when discovery is stale, unavailable, or
+/// does not advertise Fork for the exact provider.
+pub fn require_fork_eligible(
+    registry: &HostRegistry,
+    kind: ProviderKind,
+) -> Result<(), ProviderReadinessError> {
+    let capability = discover_capabilities(registry)
+        .ok()
+        .and_then(|capabilities| {
+            capabilities
+                .into_iter()
+                .find(|capability| capability.kind == kind)
+        })
+        .unwrap_or_else(|| {
+            capability(
+                kind,
+                ProviderCapabilityStatus::Unknown,
+                ProviderCapabilityReason::ProbeFailed,
+            )
+        });
+    if matches!(capability.status, ProviderCapabilityStatus::Available) && capability.fork {
+        Ok(())
+    } else {
+        Err(ProviderReadinessError {
+            kind: capability.kind,
+            status: capability.status,
+            reason: capability.reason,
+        })
+    }
 }
 
 fn require_new_eligible_from_capabilities(
@@ -730,7 +767,7 @@ mod tests {
         assert!(capabilities[1].observe);
         assert!(capabilities[1].metadata_read);
         assert!(!capabilities[1].rename);
-        assert!(!capabilities[1].fork);
+        assert!(capabilities[1].fork);
     }
 
     #[test]

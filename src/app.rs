@@ -104,11 +104,11 @@ enum Commands {
         #[arg(long)]
         provider: Option<String>,
     },
-    /// Fork one live Workstream at its last completed native Codex turn.
+    /// Fork one live Workstream at its last completed native provider turn.
     ForkWorkstream { source_workstream_id: String },
     /// Start the Workstream's native provider in its private tmux server.
     Start { workstream_id: String },
-    /// Recover a lost private Runtime through Codex's native resume flow.
+    /// Recover a lost private Runtime through its exact native resume flow.
     Recover { workstream_id: String },
     /// Attach this terminal directly to a live native provider Runtime.
     Attach { workstream_id: String },
@@ -130,7 +130,7 @@ enum Commands {
     Operations,
     /// Reopen one exact unresolved Fork operation.
     RecoverOperation { operation_id: String },
-    /// Rename the current managed Codex thread through its canonical name field.
+    /// Rename the current managed provider thread when canonically supported.
     Rename {
         workstream_id: String,
         revision: i64,
@@ -266,7 +266,7 @@ enum HostCommands {
         workstream_id: String,
         revision: i64,
     },
-    /// Recover one remote Workstream through its native Codex resume flow.
+    /// Recover one remote Workstream through its exact native resume flow.
     Recover {
         alias: String,
         workstream_id: String,
@@ -1656,7 +1656,7 @@ fn recover(
 ) -> Result<(), AppError> {
     match actions::recover(root, registry, workstream_id, None)? {
         actions::StartOutcome::Started => {
-            println!("recovering workstream {workstream_id}; complete native Codex resume");
+            println!("recovering workstream {workstream_id}; completing exact native resume");
         }
         actions::StartOutcome::AlreadyLive => {
             println!("workstream {workstream_id} is already live");
@@ -2231,7 +2231,7 @@ mod tests {
         assert!(help.contains("Start the Workstream's native provider"));
         assert!(help.contains("live native provider Runtime"));
         assert!(!help.contains("Start native Codex"));
-        assert!(help.contains("Recover a lost private Runtime through Codex"));
+        assert!(help.contains("Recover a lost private Runtime through its exact native"));
     }
 
     #[test]

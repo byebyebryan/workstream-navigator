@@ -2,7 +2,7 @@
 
 Date: 2026-08-01
 
-Status: implemented operator-beta contract through D7.6; no compatibility
+Status: implemented operator-beta contract through D8.2; no compatibility
 contract
 
 The design is the current product and architecture contract. Dated acceptance,
@@ -79,9 +79,10 @@ workarounds, and the decision gates are recorded in
 
 ### Included
 
-- Codex-first local and SSH-host operation, plus the bounded D8 provider
-  identity and provider-aware New contract. OpenCode New/Resume enters V1 only
-  after its explicit evidence gate passes.
+- Codex and allowlisted OpenCode `1.18.11` local and SSH-host operation through
+  the bounded D8 provider-aware New, exact resume, same-provider Fork, and
+  lost-Runtime recovery contract. Other OpenCode releases remain ineligible
+  until their explicit evidence gate passes.
 - A minimal two-pane terminal experience: navigator beside the directly
   interactive native provider TUI.
 - Explicit host registration and capability checks.
@@ -529,6 +530,13 @@ The SSH command is fixed and machine-oriented. Request bodies travel as bounded
 JSON on stdin; stdout contains only versioned protocol frames and stderr
 contains bounded diagnostics. Thread names, repository paths, prompts, and shell
 fragments are never interpolated into an SSH command string.
+
+Read-only probes, handshakes, snapshots, and non-Runtime control calls retain
+the short eight-second process deadline. Runtime-creating and recovery mutations
+use a separate bounded 45-second deadline so the outer SSH process contains
+the adapter's bounded endpoint and observer-readiness barriers instead of
+terminating a valid OpenCode start mid-handoff. This does not widen the SSH
+connection deadline or make any control process persistent.
 
 The remote binary validates protocol compatibility before reading or mutating
 state. An incompatible host is visible but unavailable for actions. V1 requires
@@ -1908,11 +1916,18 @@ One separate host-owned `wsnav` observer sidecar runs per OpenCode Runtime. It
 is not a provider process, shared daemon, tmux pane/window, or client process.
 It starts with stdin/stdout/stderr disconnected from the provider pane, carries
 the exact Runtime ID/generation/endpoint, records its PID plus process birth,
-and reaches `ready` before the provider pane can be attached for native input.
+and reaches `ready` only after the exact SSE stream is established, before the
+provider pane can be attached for native input.
 On the authoritative host—including an SSH host—it reads the one SSE stream,
 applies the strict session/root metadata allowlist, discards content and raw
 payloads before state adaptation, and writes only provider-neutral lifecycle
 metadata through revision-guarded host transactions.
+
+A completed assistant `message.updated` is retained as a candidate until exact
+idle corroboration. A trailing busy status does not erase that completed ID;
+only a new incomplete message update can invalidate the transient candidate.
+This preserves the last exact settled boundary without deriving an ID from
+polling or provider content.
 
 Spike 0017 validates this ownership model on the allowlisted version: the
 sidecar is independently replaceable, reconnects to the same endpoint and
@@ -1927,6 +1942,17 @@ TUI. Park validates and stops the exact sidecar before killing the private tmux
 server; recovery replaces both endpoint and helper under a new generation.
 Tests inject helper crash, stale PID, endpoint reuse, port collision, action
 failure between provider and helper start, detach/reopen, and complete cleanup.
+
+OpenCode lost-Runtime recovery is narrower than Codex recovery. It is available
+only when WSNav already holds an exact OpenCode root-session binding and the
+recorded private tmux Runtime is conclusively missing. Recovery validates and
+stops only the recorded observer by PID plus process birth, removes only the
+matching prior-generation handle and private Runtime artifacts, reserves a new
+generation, allocates a new loopback endpoint and observer, and resumes that
+same bound session. A missing binding, live or ambiguous private Runtime,
+uncorroborated observer, or mismatched handle fails closed. WSNav never opens a
+native OpenCode picker, discovers another session, adopts an endpoint, or
+creates a blank replacement conversation during recovery.
 
 ### Multi-agent model
 

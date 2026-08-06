@@ -373,6 +373,7 @@ const fn permits_transition(from: OperationPhase, to: OperationPhase) -> bool {
             OperationPhase::Committed
                 | OperationPhase::AwaitingReconciliation
                 | OperationPhase::RecoveryRequired
+                | OperationPhase::Failed
         ) | (
             OperationPhase::AwaitingReconciliation,
             OperationPhase::Committed | OperationPhase::RecoveryRequired | OperationPhase::Failed
@@ -689,6 +690,32 @@ mod tests {
             .transition(OperationPhase::Committed, None, None)
             .unwrap();
         assert!(ambiguous.phase.is_terminal());
+    }
+
+    #[test]
+    fn external_effect_can_terminally_record_an_unknown_provider_result() {
+        let mut operation = CompoundOperation::new(
+            "fork-unknown".to_owned(),
+            OperationKind::Fork,
+            "{}".to_owned(),
+        )
+        .unwrap();
+        operation
+            .transition(OperationPhase::ExternalEffectStarted, None, None)
+            .unwrap();
+        operation
+            .transition(
+                OperationPhase::Failed,
+                Some("provider-fork-issued".to_owned()),
+                Some("{\"code\":\"external_effect_unknown\"}".to_owned()),
+            )
+            .unwrap();
+        assert!(operation.phase.is_terminal());
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(operation.outcome_json.as_deref().unwrap())
+                .unwrap()["code"],
+            "external_effect_unknown"
+        );
     }
 
     #[test]

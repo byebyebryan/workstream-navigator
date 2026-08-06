@@ -302,7 +302,7 @@ pub struct PendingRepositoryMetadata {
     pub repository_path: PathBuf,
 }
 
-/// The persisted target of one native Codex fork.
+/// The persisted target of one native provider fork.
 ///
 /// The project root is the exact launch directory for the destination. It is
 /// host-private and never returned by snapshots or the SSH protocol.
@@ -323,6 +323,11 @@ pub struct ForkPlan {
     /// `None` proves this process has not crossed that external-effect point.
     pub fork_attempted_at_millis: Option<i64>,
 }
+
+/// Stable bounded outcome code for an `OpenCode` fork whose provider effect may
+/// have happened but whose response cannot be trusted. Such an operation is
+/// terminal and is never retried or reconciled by `WSNav`.
+pub const EXTERNAL_EFFECT_UNKNOWN_CODE: &str = "external_effect_unknown";
 
 /// One committed Workstream record returned after an independent creation or
 /// exact provider fork.
@@ -1469,6 +1474,71 @@ impl HostRegistry {
         if operation.kind != prepared.operation.kind {
             return Err(StateError::ForkPlanMismatch);
         }
+        Ok(())
+    }
+
+    /// Terminally records an unknown `OpenCode` fork effect after the exact
+    /// non-idempotent provider boundary has been crossed. No destination
+    /// Workstream is created and the original source state is untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plan is not an `OpenCode` fork, has no recorded
+    /// provider-attempt marker, is stale, or has already entered another
+    /// terminal state.
+    pub fn mark_fork_external_effect_unknown(
+        &mut self,
+        prepared: &ForkPlan,
+    ) -> Result<(), StateError> {
+        if prepared.provider != ProviderKind::OpenCode
+            || prepared.origin != WorkstreamOrigin::Fork
+            || prepared.fork_attempted_at_millis.is_none()
+        {
+            return Err(StateError::ForkOperationUnavailable);
+        }
+        let current = self.fork_plan(prepared.operation.id)?;
+        let terminal_outcome_is_exact = current.operation.phase == OperationPhase::Failed
+            && current
+                .operation
+                .outcome_json
+                .as_deref()
+                .and_then(|outcome| serde_json::from_str::<serde_json::Value>(outcome).ok())
+                .and_then(|outcome| {
+                    outcome
+                        .get("code")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned)
+                })
+                .as_deref()
+                == Some(EXTERNAL_EFFECT_UNKNOWN_CODE);
+        if terminal_outcome_is_exact && current == *prepared {
+            return Ok(());
+        }
+        if current != *prepared {
+            let mut expected = prepared.clone();
+            expected.operation = current.operation.clone();
+            if terminal_outcome_is_exact && current == expected {
+                return Ok(());
+            }
+            return Err(StateError::ForkOperationUnavailable);
+        }
+        if current.operation.phase == OperationPhase::Failed {
+            return Err(StateError::ForkOperationUnavailable);
+        }
+        if !matches!(
+            current.operation.phase,
+            OperationPhase::ExternalEffectStarted | OperationPhase::AwaitingReconciliation
+        ) {
+            return Err(StateError::ForkOperationUnavailable);
+        }
+        let outcome = serde_json::json!({"code": EXTERNAL_EFFECT_UNKNOWN_CODE}).to_string();
+        self.transition_operation(
+            current.operation.id,
+            current.operation.revision,
+            OperationPhase::Failed,
+            current.operation.effect_watermark.clone(),
+            Some(outcome),
+        )?;
         Ok(())
     }
 
@@ -5077,6 +5147,25 @@ fn apply_opencode_lifecycle_transition(
                 return Err(StateError::HookEvidenceMismatch);
             }
             update_runtime_lifecycle(transaction, runtime_id, runtime_revision, "idle")?;
+            let workstream_lifecycle: String = transaction
+                .query_row(
+                    "SELECT lifecycle FROM workstreams WHERE workstream_id = ?1",
+                    [workstream_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(StateError::Sqlite)?;
+            if workstream_lifecycle == "recovery_required" {
+                let binding = load_binding(transaction, runtime_id)?
+                    .ok_or(StateError::HookEvidenceMismatch)?;
+                if binding.provider != ProviderKind::OpenCode
+                    || binding.native_session_id != observation.session
+                    || binding.start_source != "resume"
+                {
+                    return Err(StateError::HookEvidenceMismatch);
+                }
+                reopen_recovery_workstream(transaction, workstream_id)?;
+                clear_recovery_attention_in_transaction(transaction, workstream_id)?;
+            }
         }
         LifecycleHint::Working => {
             if !matches!(lifecycle, "starting" | "idle" | "working" | "attention") {
@@ -7144,6 +7233,217 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(latest_handle, ready);
+    }
+
+    fn opencode_recovery_lifecycle_fixture() -> (
+        tempfile::TempDir,
+        HostRegistry,
+        RuntimeRecord,
+        ProviderSessionId,
+        Revision,
+    ) {
+        let (temporary, mut registry, runtime, session, _ready) = opencode_lifecycle_fixture();
+        registry
+            .mark_runtime_recovery_required(runtime.runtime_id, runtime.revision)
+            .unwrap();
+        let recovery = registry
+            .reserve_runtime_recovery_with_provider(runtime.workstream_id, ProviderKind::OpenCode)
+            .unwrap();
+        registry
+            .bind_opencode_session(
+                recovery.runtime_id,
+                &recovery.tmux_generation,
+                &session,
+                "resume",
+            )
+            .unwrap();
+        let handle = registry
+            .record_opencode_runtime_handle(
+                recovery.runtime_id,
+                &recovery.tmux_generation,
+                4322,
+                crate::provider::opencode::SUPPORTED_VERSION,
+                &session,
+            )
+            .unwrap();
+        let starting = registry
+            .record_opencode_observer_started(
+                recovery.runtime_id,
+                &recovery.tmux_generation,
+                handle.revision,
+                78,
+                "observer-birth-2",
+            )
+            .unwrap();
+        registry
+            .mark_opencode_observer_ready(
+                recovery.runtime_id,
+                &recovery.tmux_generation,
+                starting.revision,
+                78,
+                "observer-birth-2",
+            )
+            .unwrap();
+        let runtime_revision = registry
+            .runtime_by_id(recovery.runtime_id)
+            .unwrap()
+            .unwrap()
+            .revision;
+        (temporary, registry, recovery, session, runtime_revision)
+    }
+
+    #[test]
+    fn opencode_recovery_started_rejects_wrong_session_and_source() {
+        let (_temporary, mut registry, recovery, session, runtime_revision) =
+            opencode_recovery_lifecycle_fixture();
+        let wrong_session =
+            ProviderSessionId::new(ProviderKind::OpenCode, "other-session").unwrap();
+        assert!(matches!(
+            registry.apply_opencode_lifecycle_observation(
+                recovery.runtime_id,
+                &OpenCodeLifecycleObservation {
+                    generation: recovery.tmux_generation.clone(),
+                    cwd: recovery.cwd.clone(),
+                    runtime_revision,
+                    session: wrong_session,
+                    observer_pid: 78,
+                    observer_birth: "observer-birth-2".to_owned(),
+                    hint: LifecycleHint::Started,
+                },
+            ),
+            Err(StateError::ProviderIdentityMismatch)
+        ));
+        registry
+            .connection
+            .execute(
+                "UPDATE provider_bindings SET start_source = 'new' WHERE runtime_id = ?1",
+                [recovery.runtime_id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            registry.apply_opencode_lifecycle_observation(
+                recovery.runtime_id,
+                &OpenCodeLifecycleObservation {
+                    generation: recovery.tmux_generation.clone(),
+                    cwd: recovery.cwd.clone(),
+                    runtime_revision,
+                    session: session.clone(),
+                    observer_pid: 78,
+                    observer_birth: "observer-birth-2".to_owned(),
+                    hint: LifecycleHint::Started,
+                },
+            ),
+            Err(StateError::HookEvidenceMismatch)
+        ));
+    }
+
+    #[test]
+    fn opencode_recovery_started_reopens_workstream_and_clears_attention() {
+        let (_temporary, mut registry, recovery, session, runtime_revision) =
+            opencode_recovery_lifecycle_fixture();
+        registry
+            .apply_opencode_lifecycle_observation(
+                recovery.runtime_id,
+                &OpenCodeLifecycleObservation {
+                    generation: recovery.tmux_generation,
+                    cwd: recovery.cwd,
+                    runtime_revision,
+                    session,
+                    observer_pid: 78,
+                    observer_birth: "observer-birth-2".to_owned(),
+                    hint: LifecycleHint::Started,
+                },
+            )
+            .unwrap();
+        let overview = registry.workstream_overviews().unwrap().remove(0);
+        assert_eq!(overview.lifecycle, WorkstreamLifecycle::Open);
+        assert_eq!(
+            overview
+                .attention
+                .and_then(|attention| attention.recovery_unseen_since_revision),
+            None
+        );
+    }
+
+    #[test]
+    fn opencode_unknown_fork_effect_is_terminal_and_deduplicated() {
+        let (_temporary, mut registry, runtime, session, _ready) = opencode_lifecycle_fixture();
+        let cwd = PathBuf::from("/disposable/repository");
+        let next = registry
+            .apply_opencode_lifecycle_observation(
+                runtime.runtime_id,
+                &OpenCodeLifecycleObservation {
+                    generation: runtime.tmux_generation.clone(),
+                    cwd: cwd.clone(),
+                    runtime_revision: runtime.revision,
+                    session: session.clone(),
+                    observer_pid: 77,
+                    observer_birth: "observer-birth".to_owned(),
+                    hint: LifecycleHint::Started,
+                },
+            )
+            .unwrap();
+        let _settled_revision = registry
+            .apply_opencode_lifecycle_observation(
+                runtime.runtime_id,
+                &OpenCodeLifecycleObservation {
+                    generation: runtime.tmux_generation,
+                    cwd,
+                    runtime_revision: next,
+                    session,
+                    observer_pid: 77,
+                    observer_birth: "observer-birth".to_owned(),
+                    hint: LifecycleHint::Settled {
+                        message_id: Some("settled-message".to_owned()),
+                    },
+                },
+            )
+            .unwrap();
+        let source_before = registry.workstream_overviews().unwrap().remove(0);
+        let prepared = registry
+            .prepare_fork_with_provider(
+                "opencode-unknown-fork".to_owned(),
+                OperationKind::Fork,
+                source_before.workstream_id,
+                source_before.revision,
+                ProviderKind::OpenCode,
+            )
+            .unwrap();
+        let marked = registry.record_fork_attempt(&prepared.plan).unwrap();
+        registry.mark_fork_external_effect_unknown(&marked).unwrap();
+        let failed = registry.fork_plan(marked.operation.id).unwrap();
+        assert_eq!(failed.operation.phase, OperationPhase::Failed);
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                failed.operation.outcome_json.as_deref().unwrap()
+            )
+            .unwrap()
+            .get("code")
+            .and_then(serde_json::Value::as_str),
+            Some(EXTERNAL_EFFECT_UNKNOWN_CODE)
+        );
+        assert!(
+            registry
+                .unresolved_operation_overviews()
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(registry.workstream_overviews().unwrap().len(), 1);
+        let source_after = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == source_before.workstream_id)
+            .unwrap();
+        assert_eq!(source_after, source_before);
+        registry.mark_fork_external_effect_unknown(&marked).unwrap();
+        registry.mark_fork_external_effect_unknown(&failed).unwrap();
+        let mut mutated = marked.clone();
+        mutated.source_native_name = Some("different-source-name".to_owned());
+        assert!(matches!(
+            registry.mark_fork_external_effect_unknown(&mutated),
+            Err(StateError::ForkOperationUnavailable)
+        ));
     }
 
     fn opencode_lifecycle_fixture() -> (

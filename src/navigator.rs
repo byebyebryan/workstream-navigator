@@ -5189,10 +5189,6 @@ fn create_workstream_selected(
         return;
     };
     if action == CreationAction::Fork {
-        if source.provider == ProviderKind::OpenCode {
-            view.set_message("OpenCode provider Fork is unavailable");
-            return;
-        }
         create_workstream_from_source(
             root,
             presentation,

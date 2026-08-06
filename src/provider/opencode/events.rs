@@ -32,6 +32,7 @@ pub struct OpenCodeEventParseError;
 pub struct OpenCodeEvent {
     pub hint: Option<LifecycleHint>,
     pub candidate_message_id: Option<String>,
+    pub clears_candidate: bool,
 }
 
 #[must_use]
@@ -135,6 +136,7 @@ pub fn parse_event_strict(
     let candidate_message_id = (event_type == "message.updated")
         .then(|| assistant_message_id(info))
         .flatten();
+    let clears_candidate = event_type == "message.updated" && candidate_message_id.is_none();
     let hint = match event_type {
         "session.created" | "session.started" => Some(LifecycleHint::Started),
         "session.deleted" | "session.ended" => Some(LifecycleHint::Ended),
@@ -151,6 +153,7 @@ pub fn parse_event_strict(
     Ok(Some(OpenCodeEvent {
         hint,
         candidate_message_id,
+        clears_candidate,
     }))
 }
 

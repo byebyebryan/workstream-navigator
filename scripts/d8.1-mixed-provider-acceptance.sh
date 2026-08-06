@@ -86,7 +86,7 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers(); self.wfile.write(body)
     def do_GET(self):
         path = urlparse(self.path).path
-        if path == "/global/health": self.send_json({"healthy": True, "version": "1.18.11"})
+        if path == "/global/health": self.send_json({"healthy": True, "version": "future-contract-build"})
         elif path == "/session/status": self.send_json({})
         elif path.startswith("/session/") and path.endswith("/message"): self.send_json([])
         elif path.startswith("/session/"):
@@ -103,7 +103,7 @@ class Handler(BaseHTTPRequestHandler):
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
         state = load(); state["counter"] += 1; session = f"mixed-opencode-session-{state['counter']}"
         state["sessions"].append(session); state["directory"] = os.getcwd(); save(state); self.send_json({"id": session})
-if sys.argv[1:] == ["--version"]: print("opencode 1.18.11"); raise SystemExit(0)
+if sys.argv[1:] == ["--version"]: print("opencode development build"); raise SystemExit(0)
 args = sys.argv[1:]; port = int(args[args.index("--port") + 1])
 session = None if args[0] == "serve" else args[args.index("--session") + 1]
 if session is not None:

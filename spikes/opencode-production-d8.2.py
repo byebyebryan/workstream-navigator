@@ -486,6 +486,7 @@ def main() -> int:
     reason = "operator-confirmation-required"
     root: Path | None = None
     sshd: subprocess.Popen[str] | None = None
+    version: str | None = None
     cleanup_targets: list[tuple[Path, str, dict[str, str]]] = []
     ordinary_before = tmux_snapshot()
     try:
@@ -496,8 +497,12 @@ def main() -> int:
         if not binary.is_file():
             raise AcceptanceBlocked("candidate-binary-missing")
         version = run(["opencode", "--version"]).stdout.strip()
-        if version != "1.18.11":
-            raise AcceptanceBlocked("opencode-version-not-allowlisted")
+        if (
+            not version
+            or len(version.encode("utf-8")) > 256
+            or any(character in version for character in "\x00\r\n")
+        ):
+            raise AcceptanceBlocked("opencode-version-probe-malformed")
         root = Path(tempfile.mkdtemp(prefix="wd82."))
 
         local_root = root / "local"
@@ -713,7 +718,7 @@ def main() -> int:
         "study": "opencode-production-d8.2",
         "status": status,
         "reason": reason,
-        "versions": {"opencode": "1.18.11"},
+        "versions": {"opencode": version},
         "assertions": assertions,
     }
     rendered = json.dumps(result, indent=2) + "\n"

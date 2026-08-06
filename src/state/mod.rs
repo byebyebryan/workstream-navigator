@@ -2464,14 +2464,11 @@ impl HostRegistry {
         version: &str,
         session: &ProviderSessionId,
     ) -> Result<OpenCodeRuntimeHandle, StateError> {
-        if endpoint_port == 0
-            || version != crate::provider::opencode::SUPPORTED_VERSION
-            || session.provider() != ProviderKind::OpenCode
-        {
+        if endpoint_port == 0 || session.provider() != ProviderKind::OpenCode {
             return Err(StateError::ProviderIdentityMismatch);
         }
         validate_registry_text("runtime generation", expected_generation)?;
-        validate_registry_text("OpenCode version", version)?;
+        validate_provider_metadata(version)?;
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -5292,12 +5289,7 @@ fn validate_opencode_handle(
     parts: &PersistedOpenCodeHandle,
 ) -> Result<OpenCodeObserverStatus, StateError> {
     validate_registry_text("runtime generation", &parts.generation)?;
-    validate_registry_text("OpenCode version", &parts.version)?;
-    if parts.version != crate::provider::opencode::SUPPORTED_VERSION {
-        return Err(StateError::InvalidPersistedValue(
-            "OpenCode version".to_owned(),
-        ));
-    }
+    validate_provider_metadata(&parts.version)?;
     let (provider, current_generation): (String, String) = transaction
         .query_row(
             "SELECT provider, tmux_generation FROM runtimes WHERE runtime_id = ?1",
@@ -7062,7 +7054,7 @@ mod tests {
                 runtime.runtime_id,
                 &runtime.tmux_generation,
                 4321,
-                crate::provider::opencode::SUPPORTED_VERSION,
+                "contract-build-a",
                 &session,
             )
             .unwrap();
@@ -7262,7 +7254,7 @@ mod tests {
                 recovery.runtime_id,
                 &recovery.tmux_generation,
                 4322,
-                crate::provider::opencode::SUPPORTED_VERSION,
+                "contract-build-b",
                 &session,
             )
             .unwrap();
@@ -7476,7 +7468,7 @@ mod tests {
                 runtime.runtime_id,
                 &runtime.tmux_generation,
                 4321,
-                crate::provider::opencode::SUPPORTED_VERSION,
+                "contract-build-a",
                 &session,
             )
             .unwrap();

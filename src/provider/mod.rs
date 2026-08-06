@@ -29,13 +29,14 @@ pub mod opencode;
 pub fn discover_capabilities(
     registry: &HostRegistry,
 ) -> Result<Vec<ProviderCapability>, StateError> {
-    discover_capabilities_with_probe(registry, command_available, opencode::probe_version())
+    discover_capabilities_with_probe(registry, command_available, opencode::probe_installation())
 }
 
-/// Capability discovery with an injected `OpenCode` probe outcome.  The
+/// Capability discovery with an injected `OpenCode` installation outcome. The
 /// Codex-only boolean seam remains available for existing deterministic tests,
-/// while production discovery classifies the fixed `opencode --version`
-/// result without consulting provider configuration or credentials.
+/// while production discovery requires a successful bounded `opencode
+/// --version` result without treating its release as compatibility authority
+/// or consulting provider configuration or credentials.
 ///
 /// # Errors
 ///
@@ -45,12 +46,12 @@ pub fn discover_capabilities(
 pub fn discover_capabilities_with_probe(
     registry: &HostRegistry,
     command_available: impl Fn(&str) -> bool,
-    opencode_probe: opencode::VersionProbe,
+    opencode_probe: opencode::InstallationProbe,
 ) -> Result<Vec<ProviderCapability>, StateError> {
     let tmux_available = command_available("tmux");
     let codex = codex_capability(registry, command_available("codex"), tmux_available)?;
     let opencode = match opencode_probe {
-        opencode::VersionProbe::Available if tmux_available => ProviderCapability {
+        opencode::InstallationProbe::Available if tmux_available => ProviderCapability {
             kind: ProviderKind::OpenCode,
             status: ProviderCapabilityStatus::Available,
             reason: ProviderCapabilityReason::None,
@@ -61,22 +62,17 @@ pub fn discover_capabilities_with_probe(
             rename: false,
             fork: true,
         },
-        opencode::VersionProbe::Available => capability(
+        opencode::InstallationProbe::Available => capability(
             ProviderKind::OpenCode,
             ProviderCapabilityStatus::Unavailable,
             ProviderCapabilityReason::RuntimePrerequisiteMissing,
         ),
-        opencode::VersionProbe::NotInstalled => capability(
+        opencode::InstallationProbe::NotInstalled => capability(
             ProviderKind::OpenCode,
             ProviderCapabilityStatus::Unavailable,
             ProviderCapabilityReason::NotInstalled,
         ),
-        opencode::VersionProbe::UnsupportedVersion => capability(
-            ProviderKind::OpenCode,
-            ProviderCapabilityStatus::Unavailable,
-            ProviderCapabilityReason::UnsupportedVersion,
-        ),
-        opencode::VersionProbe::ProbeFailed => capability(
+        opencode::InstallationProbe::ProbeFailed => capability(
             ProviderKind::OpenCode,
             ProviderCapabilityStatus::Unknown,
             ProviderCapabilityReason::ProbeFailed,
@@ -94,7 +90,8 @@ pub fn discover_capabilities_with_probe(
 }
 
 /// Deterministic capability-discovery seam used by tests and host snapshots.
-/// The probe only answers whether one fixed executable can report its version.
+/// The probe only answers whether one fixed executable can produce a bounded
+/// successful version report.
 ///
 /// # Errors
 ///
@@ -754,7 +751,7 @@ mod tests {
         let capabilities = discover_capabilities_with_probe(
             &registry,
             |program| program == "tmux",
-            opencode::VersionProbe::Available,
+            opencode::InstallationProbe::Available,
         )
         .unwrap();
         assert_eq!(
@@ -771,12 +768,12 @@ mod tests {
     }
 
     #[test]
-    fn opencode_version_is_not_ready_without_private_tmux() {
+    fn opencode_installation_is_not_ready_without_private_tmux() {
         let (_temporary, registry) = registry();
         let capabilities = discover_capabilities_with_probe(
             &registry,
             |_| false,
-            opencode::VersionProbe::Available,
+            opencode::InstallationProbe::Available,
         )
         .unwrap();
         assert_eq!(

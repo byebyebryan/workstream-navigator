@@ -92,7 +92,9 @@ pub fn run_observer(
     let client = OpenCodeClient::new(context.endpoint.clone());
     let deadline = Instant::now() + HEALTH_DEADLINE;
     loop {
-        if client.health().is_ok()
+        if client
+            .health()
+            .is_ok_and(|health| health.version == handle.version)
             && matches!(
                 client.session_status_with_root(&context.session, &context.cwd),
                 Ok(OpenCodeSessionStatus::Busy | OpenCodeSessionStatus::Idle)
@@ -105,15 +107,14 @@ pub fn run_observer(
             // becomes actionable or the first turn can race past observation.
             if let Ok(stream) = client.event_stream() {
                 let (observer_pid, observer_birth) = prepare(&mut registry, context)?;
-                return supervise(
-                    &mut registry,
+                let evidence = SupervisionEvidence {
                     context,
-                    &client,
                     pane_birth,
                     observer_pid,
-                    &observer_birth,
-                    Some(stream),
-                );
+                    observer_birth: &observer_birth,
+                    provider_version: &handle.version,
+                };
+                return supervise(&mut registry, &client, &evidence, Some(stream));
             }
         }
         if Instant::now() >= deadline {
@@ -168,15 +169,21 @@ fn prepare(
     Ok((observer_pid, observer_birth))
 }
 
+struct SupervisionEvidence<'a> {
+    context: &'a OpenCodeObserverContext,
+    pane_birth: &'a str,
+    observer_pid: u32,
+    observer_birth: &'a str,
+    provider_version: &'a str,
+}
+
 fn supervise(
     registry: &mut HostRegistry,
-    context: &OpenCodeObserverContext,
     client: &OpenCodeClient,
-    pane_birth: &str,
-    observer_pid: u32,
-    observer_birth: &str,
+    supervision: &SupervisionEvidence<'_>,
     mut stream: Option<OpenCodeEventStream>,
 ) -> Result<(), OpenCodeObserverError> {
+    let context = supervision.context;
     let mut reconnect_failures = 0_u8;
     let mut candidate_message_id = None;
     let mut last_status_poll = Instant::now();
@@ -187,8 +194,14 @@ fn supervise(
         };
         if current.tmux_generation != context.generation
             || current.process_birth.as_deref() != Some(context.provider_birth.as_str())
-            || client.health().is_err()
-            || !endpoint_owned_by_process(client.endpoint(), context.pane_pid, pane_birth)
+            || !client
+                .health()
+                .is_ok_and(|health| health.version == supervision.provider_version)
+            || !endpoint_owned_by_process(
+                client.endpoint(),
+                context.pane_pid,
+                supervision.pane_birth,
+            )
         {
             mark_unknown(registry, context);
             return Ok(());
@@ -200,8 +213,8 @@ fn supervise(
         if last_status_poll.elapsed() >= STATUS_POLL_INTERVAL {
             let evidence = ObserverEvidence {
                 context,
-                observer_pid,
-                observer_birth,
+                observer_pid: supervision.observer_pid,
+                observer_birth: supervision.observer_birth,
             };
             match poll_root_status(
                 registry,
@@ -236,8 +249,8 @@ fn supervise(
                         Ok(Some(event)) => {
                             let evidence = ObserverEvidence {
                                 context,
-                                observer_pid,
-                                observer_birth,
+                                observer_pid: supervision.observer_pid,
+                                observer_birth: supervision.observer_birth,
                             };
                             if let Err(error) = apply_event(
                                 registry,

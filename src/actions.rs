@@ -546,12 +546,18 @@ fn fork_opencode_session(
     if handle.native_session_id != *source
         || handle.runtime_generation.is_empty()
         || handle.endpoint_host != opencode::LOOPBACK_HOST
-        || handle.version != opencode::SUPPORTED_VERSION
     {
         return Err(ActionError::ForkSourceUnavailable);
     }
     let endpoint = OpenCodeEndpoint::loopback(handle.endpoint_port)?;
-    OpenCodeClient::new(endpoint)
+    let client = OpenCodeClient::new(endpoint);
+    if !client
+        .health()
+        .is_ok_and(|health| health.version == handle.version)
+    {
+        return Err(ActionError::ForkSourceUnavailable);
+    }
+    client
         .fork_session(
             source,
             prepared
@@ -776,16 +782,11 @@ fn start_opencode(
         PriorOpenCodeRuntime::AlreadyLive => return Ok(StartOutcome::AlreadyLive),
         PriorOpenCodeRuntime::Ready(binding) => binding,
     };
-    let (record, endpoint, session, handle_revision) =
+    let (record, endpoint, session) =
         prepare_opencode_runtime(registry, workstream_id, overview, prior_binding.as_ref())?;
-    if let Err(error) = launch_reserved_opencode_runtime(
-        root,
-        registry,
-        &record,
-        &endpoint,
-        &session,
-        handle_revision,
-    ) {
+    if let Err(error) =
+        launch_reserved_opencode_runtime(root, registry, &record, &endpoint, &session)
+    {
         cleanup_failed_opencode_runtime(root, registry, &record);
         return Err(error);
     }
@@ -893,7 +894,6 @@ fn validate_opencode_live_runtime(
     });
     let exact = handle.runtime_generation == runtime.tmux_generation
         && handle.endpoint_host == crate::provider::opencode::LOOPBACK_HOST
-        && handle.version == crate::provider::opencode::SUPPORTED_VERSION
         && runtime.status != crate::domain::RuntimeStatus::Stopped
         && handle.observer_status == crate::state::OpenCodeObserverStatus::Ready
         && observer_live
@@ -901,7 +901,9 @@ fn validate_opencode_live_runtime(
         && runtime.process_birth.as_deref() == Some(process_birth)
         && endpoint_owned_by_process(&endpoint, *pane_pid, process_birth)
         && session_exact
-        && OpenCodeClient::new(endpoint.clone()).health().is_ok()
+        && OpenCodeClient::new(endpoint.clone())
+            .health()
+            .is_ok_and(|health| health.version == handle.version)
         && matches!(
             OpenCodeClient::new(endpoint)
                 .session_status_with_root(&handle.native_session_id, &runtime.cwd),
@@ -1004,7 +1006,6 @@ fn prepare_opencode_runtime(
         crate::state::RuntimeRecord,
         OpenCodeEndpoint,
         ProviderSessionId,
-        Revision,
     ),
     ActionError,
 > {
@@ -1048,16 +1049,7 @@ fn prepare_opencode_runtime(
     let endpoint = OpenCodeEndpoint::loopback(port)
         .map_err(ActionError::OpenCode)
         .map_err(|error| fail(registry, error))?;
-    let handle = registry
-        .record_opencode_runtime_handle(
-            record.runtime_id,
-            &record.tmux_generation,
-            endpoint.port,
-            opencode::SUPPORTED_VERSION,
-            &session,
-        )
-        .map_err(|error| fail(registry, error.into()))?;
-    Ok((record, endpoint, session, handle.revision))
+    Ok((record, endpoint, session))
 }
 
 /// Starts a new private tmux generation only after a lost Runtime has been
@@ -1254,27 +1246,9 @@ fn launch_recovered_opencode_runtime(
             return Err(ActionError::OpenCode(error));
         }
     };
-    let handle = match registry.record_opencode_runtime_handle(
-        record.runtime_id,
-        &record.tmux_generation,
-        endpoint.port,
-        opencode::SUPPORTED_VERSION,
-        session,
-    ) {
-        Ok(handle) => handle,
-        Err(error) => {
-            cleanup_failed_opencode_runtime(root, registry, &record);
-            return Err(ActionError::State(error));
-        }
-    };
-    if let Err(error) = launch_reserved_opencode_runtime(
-        root,
-        registry,
-        &record,
-        &endpoint,
-        session,
-        handle.revision,
-    ) {
+    if let Err(error) =
+        launch_reserved_opencode_runtime(root, registry, &record, &endpoint, session)
+    {
         cleanup_failed_opencode_runtime(root, registry, &record);
         return Err(error);
     }
@@ -1291,7 +1265,7 @@ fn opencode_recovery_handle_matches(
         && handle.runtime_generation == runtime.tmux_generation
         && handle.endpoint_host == opencode::LOOPBACK_HOST
         && handle.endpoint_port != 0
-        && handle.version == opencode::SUPPORTED_VERSION
+        && !handle.version.is_empty()
         && binding.runtime_id == runtime.runtime_id
         && binding.provider == ProviderKind::OpenCode
         && binding.native_session_id == handle.native_session_id
@@ -1455,7 +1429,6 @@ fn launch_reserved_opencode_runtime(
     record: &crate::state::RuntimeRecord,
     endpoint: &OpenCodeEndpoint,
     session: &ProviderSessionId,
-    handle_revision: Revision,
 ) -> Result<(), ActionError> {
     opencode::ensure_port_available(endpoint)?;
     let paths = RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?;
@@ -1491,13 +1464,26 @@ fn launch_reserved_opencode_runtime(
     registry.record_runtime_process_birth(record.runtime_id, record.revision, &process_birth)?;
     runtime.release_launch()?;
     let deadline = Instant::now() + Duration::from_secs(10);
-    while !opencode::endpoint_owned_by_process(endpoint, pane_pid, &process_birth) {
+    let client = OpenCodeClient::new(endpoint.clone());
+    let provider_version = loop {
+        if opencode::endpoint_owned_by_process(endpoint, pane_pid, &process_birth)
+            && let Ok(health) = client.health()
+        {
+            break health.version;
+        }
         if Instant::now() >= deadline {
             let _ = runtime.park();
             return Err(ActionError::RuntimeProbeAmbiguous);
         }
         thread::sleep(Duration::from_millis(50));
-    }
+    };
+    let handle = registry.record_opencode_runtime_handle(
+        record.runtime_id,
+        &record.tmux_generation,
+        endpoint.port,
+        &provider_version,
+        session,
+    )?;
     // The app-level observer is intentionally disconnected from the native
     // pane.  It owns only health/SSE corroboration and writes bounded status
     // to the private handle row.
@@ -1510,7 +1496,7 @@ fn launch_reserved_opencode_runtime(
         pane_pid,
         cwd: record.cwd.clone(),
         process_birth,
-        handle_revision,
+        handle_revision: handle.revision,
     };
     spawn_opencode_observer(registry, &observer)?;
     Ok(())
@@ -2617,7 +2603,7 @@ mod tests {
             runtime_generation: "generation".to_owned(),
             endpoint_host: crate::provider::opencode::LOOPBACK_HOST.to_owned(),
             endpoint_port: 4321,
-            version: crate::provider::opencode::SUPPORTED_VERSION.to_owned(),
+            version: "contract-build-a".to_owned(),
             native_session_id: ProviderSessionId::new(ProviderKind::OpenCode, "session").unwrap(),
             observer_pid: Some(77),
             observer_birth: Some("birth-a".to_owned()),
@@ -2676,7 +2662,7 @@ mod tests {
             runtime_generation: "generation-a".to_owned(),
             endpoint_host: crate::provider::opencode::LOOPBACK_HOST.to_owned(),
             endpoint_port: 4321,
-            version: crate::provider::opencode::SUPPORTED_VERSION.to_owned(),
+            version: "contract-build-b".to_owned(),
             native_session_id: session,
             observer_pid: Some(77),
             observer_birth: Some("observer-birth".to_owned()),

@@ -95,7 +95,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         path = urlparse(self.path).path
         if path == "/global/health":
-            self.json_response({"healthy": True, "version": "1.18.11"})
+            self.json_response({"healthy": True, "version": "99.7.3"})
             return
         if path == "/session/status":
             state = load_db()
@@ -245,7 +245,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     if sys.argv[1:] == ["--version"]:
-        print("opencode 1.18.11")
+        print("opencode 99.7.3")
         return 0
     args = sys.argv[1:]
     if not args:

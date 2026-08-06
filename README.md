@@ -120,8 +120,8 @@ Codex hook review in the right pane.
 
 WSNav never copies, bootstraps, or updates a remote executable. A remote Codex
 lane requires the same native hook review; OpenCode readiness is detected from
-the exact allowlisted executable. Confirm a registered host before stateful
-work:
+the bounded installed executable and its Runtime API contract. Confirm a
+registered host before stateful work:
 
 ```console
 wsnav host doctor <alias>
@@ -137,8 +137,10 @@ There is no tagged binary release, automatic updater, remote deployment
 service, crates.io publication, or compatibility commitment to the earlier
 Python prototype.
 
-The implementation supports Codex and explicitly allowlisted OpenCode
-`1.18.11` New, exact resume, same-provider Fork, and lost-Runtime recovery.
+The implementation supports Codex and installed OpenCode releases that satisfy
+the bounded Runtime API/process contract for New, exact resume, same-provider
+Fork, and lost-Runtime recovery. Real acceptance currently covers OpenCode
+`1.18.11`; the release number is diagnostic evidence, not a compatibility pin.
 Provider onboarding, filters, model/role presets, cross-provider Fork, and
 automatic context transfer remain out of scope.
 

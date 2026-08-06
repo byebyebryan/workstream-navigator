@@ -79,10 +79,11 @@ workarounds, and the decision gates are recorded in
 
 ### Included
 
-- Codex and allowlisted OpenCode `1.18.11` local and SSH-host operation through
+- Codex and contract-compatible OpenCode local and SSH-host operation through
   the bounded D8 provider-aware New, exact resume, same-provider Fork, and
-  lost-Runtime recovery contract. Other OpenCode releases remain ineligible
-  until their explicit evidence gate passes.
+  lost-Runtime recovery contract. Real OpenCode acceptance currently covers
+  `1.18.11`; release numbers are diagnostic evidence, not compatibility
+  authority.
 - A minimal two-pane terminal experience: navigator beside the directly
   interactive native provider TUI.
 - Explicit host registration and capability checks.
@@ -1699,6 +1700,9 @@ ProviderCapability {
 }
 ```
 
+`unsupported_version` remains a reserved bounded capability reason; the
+OpenCode adapter does not use it as a release-number gate.
+
 The fixed client host record continues to verify host ID, registry generation,
 release, protocol, and schema compatibility, but does not persist or compare
 `ProviderCapability`. Installing, removing, or upgrading a provider therefore
@@ -1722,18 +1726,25 @@ currently honor. Capability records are advisory UI evidence only: every host
 action still validates the Workstream's fixed provider and the exact operation
 surface it needs.
 
-Discovery is read-only, bounded, and credential-free. It may resolve a fixed
-adapter-owned executable name, obtain its bounded version, and verify existing
-observer/runtime prerequisites; it never installs software, reads provider
-credentials, tests account access, or selects a model. OpenCode activation is
-initially constrained to `1.18.11`, the version covered by the passing resume
-and fresh-session evidence. It reports `unavailable/adapter_unavailable`
-throughout D8.0; D8.1 may mark it available only on this explicitly
-allowlisted version and only through the evidence-selected adapter path. Any
-other version reports `unavailable/unsupported_version` until the disposable
-probes are rerun and the allowlist is deliberately updated. A bounded reason
-may be shown in diagnostics, but raw process output and executable paths never
-enter snapshots.
+Discovery is read-only, bounded, and credential-free. It resolves a fixed
+adapter-owned executable name, requires a successful bounded `--version`
+probe, and verifies existing observer/runtime prerequisites; it never installs
+software, reads provider credentials, tests account access, or selects a model.
+The version output is discarded from public capability state and never gates
+eligibility. OpenCode actions instead validate the exact HTTP/SSE response
+shapes, session/root identity, endpoint/process ownership, and operation
+surface they consume. Malformed or missing contract evidence fails closed
+without fallback or adoption.
+
+The actual version reported by the owned `/global/health` endpoint is retained
+only as bounded host-private Runtime-generation evidence. Every later health
+check for that generation must report the same opaque value; an endpoint or
+version change makes the Runtime ambiguous. A recovery generation may record a
+new value when the upgraded provider still satisfies the adapter contract.
+The passing real acceptance used OpenCode `1.18.11`, but that observation does
+not create a production release allowlist. A bounded reason may be shown in
+diagnostics, while raw process output and executable paths never enter
+snapshots.
 
 ### New Workstream provider choice
 
@@ -1815,7 +1826,7 @@ capabilities describing which optional surfaces each adapter implements:
    --port <runtime-port> --session <id>` in the private tmux pane). Production
    OpenCode never adds `--pure`, `--model`, `--agent`, or `--prompt`; the user
    retains normal plugins, configuration, model choice, and native first
-   input. OpenCode fresh launch uses the evidence-selected, version-gated
+   input. OpenCode fresh launch uses the evidence-selected, contract-validated
    precreation path below. The runtime
    launch barrier and process-birth authority remain generic.
 2. **Lifecycle observer**: how passive lifecycle evidence is obtained
@@ -1849,9 +1860,10 @@ D8.0 deliberately establishes only the provider-neutral data kernel and Codex
 parity: typed provider identity, lifecycle/name DTOs used by shared state and
 presentation, dynamic capability records, schema/wire changes, and one Codex
 dispatch branch. It does not invent OpenCode behavior or require a speculative
-five-surface implementation. With the fresh-session and observer evidence
-gate now passing on `1.18.11`, D8.1 may add the second adapter and make shared
-action/app/state/navigator/remote call sites depend on the provider boundary
+five-surface implementation. With the fresh-session and observer evidence gate
+passing on the contract observed with `1.18.11`, D8.1 may add the second
+adapter and make shared action/app/state/navigator/remote call sites depend on
+the provider boundary
 rather than concrete Codex adapter types. Provider-specific profile, HTTP,
 SSE, and App Server code remains inside its adapter.
 
@@ -1891,7 +1903,7 @@ exact Runtime generation:
 ```text
 OpenCodeRuntimeHandle {
   loopback_endpoint,
-  supported_provider_version,
+  observed_provider_version,
   observer_pid?,
   observer_process_birth?,
   observer_status: starting | ready | unknown | stopped,
@@ -1929,7 +1941,7 @@ only a new incomplete message update can invalidate the transient candidate.
 This preserves the last exact settled boundary without deriving an ID from
 polling or provider content.
 
-Spike 0017 validates this ownership model on the allowlisted version: the
+Spike 0017 validates this ownership model on the acceptance-tested release: the
 sidecar is independently replaceable, reconnects to the same endpoint and
 generation, survives a detached/reopened tmux attachment, and is removed with
 the disposable Runtime.

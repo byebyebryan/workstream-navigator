@@ -29,10 +29,11 @@ context transfer.
 D8.0 completed on 2026-08-05. It introduced the provider identity and dispatch
 foundation, preserved Codex behavior, and made provider kind visible without
 adding OpenCode production launch. D8.1 completed on 2026-08-06 with the
-allowlisted OpenCode `1.18.11` New/Resume vertical slice and provider-aware
-creation flow. D8.2 completed on 2026-08-06 with exact-session lost-Runtime
-recovery, same-provider Fork, conservative lost-response handling, and real
-local/SSH acceptance. There is no generic provider onboarding, provider view
+contract-validated OpenCode New/Resume vertical slice, acceptance-tested on
+`1.18.11`, and provider-aware creation flow. D8.2 completed on 2026-08-06 with
+exact-session lost-Runtime recovery, same-provider Fork, conservative
+lost-response handling, and real local/SSH acceptance. There is no generic
+provider onboarding, provider view
 or filter, model selector, role/preset system, or remembered per-Project
 provider policy in D8. Availability is dynamic host-owned snapshot state
 rather than immutable client-registration identity, and every creation action
@@ -1113,11 +1114,12 @@ launch is claimed.
 
 ### Required evidence before D8.1 - OpenCode fresh binding and observer ownership
 
-Status: passed on 2026-08-05 for OpenCode `1.18.11`. This remains an
+Status: passed on 2026-08-05 using OpenCode `1.18.11`. This remains an
 operator-gated disposable spike, not production Rust; its [sanitized
 fixture](../spikes/fixtures/opencode-fresh-session.json) and
 [evidence record](evidence/spikes/0017-opencode-fresh-session.md) authorize the
-selected D8.1 binding path only for the explicitly allowlisted version.
+selected D8.1 binding and observation contract. The observed release records
+what was tested; it is not production compatibility authority.
 
 The probe must:
 
@@ -1134,8 +1136,8 @@ The probe must:
   observation;
 - correlate each loopback listening socket to the exact recorded provider pane
   process or proven descendant, and reject a healthy wrong-process endpoint,
-  stale saved port, port collision, unsupported OpenCode version, child
-  session, and unrelated root session;
+  stale saved port, port collision, changed or malformed health metadata,
+  child session, and unrelated root session;
 - prove exact resume after park/restart. Native in-TUI session
   creation/switching remains unsupported because no exact active-TUI
   changed-binding claim was established, matching Codex native `/new`; and
@@ -1162,17 +1164,19 @@ evidence; D8.2 owns the remaining recovery and Fork work.
 
 ### D8.1 - Provider-aware New and OpenCode New/Resume vertical slice
 
-Status: Complete on 2026-08-06. The prerequisite evidence checkpoint passes on
-explicitly allowlisted OpenCode `1.18.11`, and the design records blank-session
-precreation as the selected fresh-binding mechanism. Any provider upgrade
-requires a fresh evidence rerun before eligibility.
+Status: Complete on 2026-08-06. The prerequisite evidence checkpoint passed
+using OpenCode `1.18.11`, and the design records blank-session precreation as
+the selected fresh-binding mechanism. Production eligibility assumes that
+contract across releases and validates every consumed surface at its action or
+Runtime boundary.
 
 Scope:
 
-- add non-mutating, bounded OpenCode executable/version/readiness detection to
-  each host's dynamic provider availability without probing or storing
-  credentials. Only explicitly evidence-backed versions are eligible; all
-  others report the bounded `unsupported_version` reason;
+- add non-mutating, bounded OpenCode executable/readiness detection to each
+  host's dynamic provider availability without probing or storing credentials.
+  A successful bounded version command proves installation but never selects
+  compatible releases; the launched Runtime must satisfy the exact HTTP/SSE,
+  identity, and process contract;
 - add the provider-only chooser for a mixed-provider target, initially select
   the source Workstream's provider when eligible, and apply the same chooser
   after empty-state host and ProjectLocation selection but before its initial
@@ -1257,7 +1261,8 @@ complete; D8.2 was activated on 2026-08-06.
 
 ### D8.2 - OpenCode Fork, recovery, and integrated acceptance
 
-Status: Complete on 2026-08-06 for allowlisted OpenCode `1.18.11`.
+Status: Complete on 2026-08-06; real acceptance used OpenCode `1.18.11` while
+production compatibility is contract-based.
 
 Scope:
 
@@ -1305,17 +1310,31 @@ contain the adapter's readiness gates. Read-only control remains at eight
 seconds.
 
 The operator-gated production harness passed both local and real loopback-SSH
-Fork and lost-Runtime recovery on OpenCode `1.18.11`. Each Fork produced a
-distinct same-provider bound session; each recovery retained the source
+Fork and lost-Runtime recovery on the installed OpenCode release (`1.18.11` in
+the recorded run). Each Fork produced a distinct same-provider bound session;
+each recovery retained the source
 session while replacing generation, endpoint, and observer. WSNav state
 contained no provider marker or content, every disposable process, port,
 socket, provider root, repository, and SSH artifact was removed, and the
 ordinary tmux inventory was unchanged. The sanitized
 [D8.2 acceptance record](evidence/acceptance/d8.2-opencode-fork-recovery.md)
-contains the bounded results. The final `scripts/check` gate passes 329
+contains the bounded results. The final `scripts/check` gate passes 330
 all-target Rust tests plus formatting, Clippy, package/license/advisory,
 shell/Python/fixture, disposable fake-provider, mixed-provider, and diff
 checks.
+
+Post-completion contract correction (2026-08-06): the initial adapter promoted
+the spike's observed `1.18.11` release into an exact production allowlist. That
+confused acceptance evidence with compatibility and would disable OpenCode on
+every routine upgrade. Discovery now accepts any installed executable with a
+successful bounded version command, while actual compatibility is enforced by
+the exact endpoint health, root-session, SSE, settled-boundary, Fork,
+process-ownership, and cleanup contracts. The owned endpoint's version is
+stored only as an opaque Runtime-generation fingerprint; it must remain exact
+within that generation, while a recovered generation may record a newer value.
+Disposable acceptance advertises deliberately non-accepted future/development
+version strings and still passes the unchanged API contract. Malformed health
+metadata and mid-generation mismatches remain fail-closed.
 
 ## Deferred beyond V1
 

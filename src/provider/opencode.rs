@@ -29,8 +29,6 @@ pub use events::{
     parse_event_hint_for_project, parse_event_strict,
 };
 
-/// The only `OpenCode` release supported by this adapter.
-pub const SUPPORTED_VERSION: &str = "1.18.11";
 pub const LOOPBACK_HOST: &str = "127.0.0.1";
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
@@ -45,25 +43,25 @@ const MAX_EVENT_BYTES: usize = 64 * 1024;
 
 /// Read-only result of the fixed executable probe.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub enum VersionProbe {
+pub enum InstallationProbe {
     NotInstalled,
-    UnsupportedVersion,
     Available,
     ProbeFailed,
 }
 
-impl VersionProbe {
+impl InstallationProbe {
     #[must_use]
     pub const fn is_available(&self) -> bool {
         matches!(self, Self::Available)
     }
 }
 
-/// Runs `opencode --version` with bounded output and timeout, and accepts only
-/// the exact allowlisted release.  Missing executables are distinct from a
-/// malformed or timed-out probe so callers can expose a useful typed reason.
+/// Runs `opencode --version` with bounded output and timeout. The reported
+/// release is diagnostic evidence only: compatibility is governed by the
+/// bounded HTTP/SSE contract exercised by each Runtime. Missing executables
+/// remain distinct from malformed or timed-out probes.
 #[must_use]
-pub fn probe_version() -> VersionProbe {
+pub fn probe_installation() -> InstallationProbe {
     let mut command = Command::new("opencode");
     command.arg("--version");
     let output =
@@ -71,24 +69,24 @@ pub fn probe_version() -> VersionProbe {
             Ok(output) if output.status.success() => output,
             Ok(output) => {
                 let combined = [output.stdout, output.stderr].concat();
-                return classify_version_output(&combined, false);
+                return classify_installation_output(&combined, false);
             }
             Err(crate::process::BoundedProcessError::Launch(error))
                 if error.kind() == std::io::ErrorKind::NotFound =>
             {
-                return VersionProbe::NotInstalled;
+                return InstallationProbe::NotInstalled;
             }
-            Err(_) => return VersionProbe::ProbeFailed,
+            Err(_) => return InstallationProbe::ProbeFailed,
         };
-    classify_version_output(&output.stdout, true)
+    classify_installation_output(&[output.stdout, output.stderr].concat(), true)
 }
 
 /// Deterministic seam for capability tests.  The supplied runner receives the
 /// fixed executable and argument vector and returns bounded stdout/stderr and
 /// an exit-success bit; no shell is involved.
-pub fn probe_version_with<F>(runner: F) -> VersionProbe
+pub fn probe_installation_with<F>(runner: F) -> InstallationProbe
 where
-    F: FnOnce(&OsStr, &[OsString]) -> Result<(bool, Vec<u8>, Vec<u8>), VersionProbe>,
+    F: FnOnce(&OsStr, &[OsString]) -> Result<(bool, Vec<u8>, Vec<u8>), InstallationProbe>,
 {
     let executable = OsStr::new("opencode");
     let args = [OsString::from("--version")];
@@ -97,34 +95,20 @@ where
         Err(outcome) => return outcome,
     };
     if stdout.len() > MAX_VERSION_BYTES || stderr.len() > MAX_VERSION_BYTES {
-        return VersionProbe::ProbeFailed;
+        return InstallationProbe::ProbeFailed;
     }
-    classify_version_output(&[stdout, stderr].concat(), success)
+    classify_installation_output(&[stdout, stderr].concat(), success)
 }
 
-fn classify_version_output(output: &[u8], success: bool) -> VersionProbe {
+fn classify_installation_output(output: &[u8], success: bool) -> InstallationProbe {
     let Ok(text) = std::str::from_utf8(output) else {
-        return VersionProbe::ProbeFailed;
+        return InstallationProbe::ProbeFailed;
     };
     let text = text.trim();
-    if text.is_empty() || text.chars().any(char::is_control) {
-        return VersionProbe::ProbeFailed;
+    if !success || text.is_empty() || text.chars().any(char::is_control) {
+        return InstallationProbe::ProbeFailed;
     }
-    // OpenCode has emitted both `1.18.11` and `opencode 1.18.11` forms.  A
-    // parseable semantic version is unsupported unless it is the exact fixed
-    // release; arbitrary text remains an ambiguous probe failure.
-    let version = text.split_whitespace().find(|token| {
-        let token = token.trim_matches(|c: char| !c.is_ascii_digit() && c != '.');
-        let mut parts = token.split('.');
-        parts.clone().count() == 3
-            && parts.all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
-    });
-    match (success, version) {
-        (true, Some(version)) if version == SUPPORTED_VERSION => VersionProbe::Available,
-        (false, Some(version)) if version == SUPPORTED_VERSION => VersionProbe::ProbeFailed,
-        (_, Some(_)) => VersionProbe::UnsupportedVersion,
-        _ => VersionProbe::ProbeFailed,
-    }
+    InstallationProbe::Available
 }
 
 /// A fixed loopback endpoint for one native `OpenCode` generation.
@@ -166,6 +150,13 @@ pub struct OpenCodeClient {
     endpoint: OpenCodeEndpoint,
 }
 
+/// Bounded health metadata from one exact owned endpoint. The release string
+/// is an opaque Runtime-generation fingerprint, not compatibility authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenCodeHealth {
+    pub version: String,
+}
+
 /// Exact status returned by the bounded `/session/status` map.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpenCodeSessionStatus {
@@ -185,13 +176,14 @@ impl OpenCodeClient {
         &self.endpoint
     }
 
-    /// Corroborates the server's health and exact allowlisted version.
+    /// Corroborates the server's bounded health contract and returns its
+    /// opaque release fingerprint.
     ///
     /// # Errors
     ///
-    /// Returns an error when the endpoint, response, health, or version is
-    /// not exact and bounded.
-    pub fn health(&self) -> Result<(), OpenCodeError> {
+    /// Returns an error when the endpoint, response, or health metadata is not
+    /// exact and bounded.
+    pub fn health(&self) -> Result<OpenCodeHealth, OpenCodeError> {
         let body = self.json_request("GET", "/global/health", None)?;
         let value: Value =
             serde_json::from_slice(&body).map_err(|_| OpenCodeError::MalformedResponse)?;
@@ -200,10 +192,11 @@ impl OpenCodeClient {
             .and_then(Value::as_str)
             .ok_or(OpenCodeError::MalformedResponse)?;
         let healthy = value.get("healthy").and_then(Value::as_bool);
-        if healthy != Some(true) || version != SUPPORTED_VERSION {
-            return Err(OpenCodeError::UnsupportedVersion);
+        if healthy != Some(true) {
+            return Err(OpenCodeError::HealthContractMismatch);
         }
-        Ok(())
+        let version = bounded_health_version(version)?;
+        Ok(OpenCodeHealth { version })
     }
 
     /// Creates one blank session and returns only its bounded opaque ID.
@@ -376,8 +369,8 @@ impl OpenCodeClient {
             .and_then(Value::as_str)
             .ok_or(OpenCodeError::MalformedResponse)?;
         Ok(match status {
-            // `retry` is an active provider state in the pinned 1.18.11
-            // schema.  Its action/reason fields are intentionally discarded;
+            // `retry` was observed as an active provider state in the accepted
+            // contract. Its action/reason fields are intentionally discarded;
             // WSNav needs only the bounded fact that the exact session is not
             // idle yet.
             "busy" | "retry" => OpenCodeSessionStatus::Busy,
@@ -945,6 +938,13 @@ fn bounded_metadata(value: &str) -> Result<String, OpenCodeError> {
     Ok(value.to_owned())
 }
 
+fn bounded_health_version(value: &str) -> Result<String, OpenCodeError> {
+    if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+        return Err(OpenCodeError::MalformedResponse);
+    }
+    Ok(value.to_owned())
+}
+
 struct HttpResponse {
     body: Vec<u8>,
     content_type: Option<String>,
@@ -1165,8 +1165,8 @@ pub enum OpenCodeError {
     ContentTypeMismatch,
     #[error("OpenCode event stream idle read timed out")]
     IdleTimeout,
-    #[error("OpenCode health/version is unsupported")]
-    UnsupportedVersion,
+    #[error("OpenCode health response did not satisfy the adapter contract")]
+    HealthContractMismatch,
     #[error("OpenCode session was not blank")]
     SessionNotBlank,
     #[error("OpenCode session identity did not match the expected root")]
@@ -1188,14 +1188,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn version_probe_is_strict_and_bounded() {
+    fn installation_probe_is_version_independent_strict_and_bounded() {
         let run = |output: &str, success: bool| {
-            probe_version_with(|_, _| Ok((success, output.as_bytes().to_vec(), Vec::new())))
+            probe_installation_with(|_, _| Ok((success, output.as_bytes().to_vec(), Vec::new())))
         };
-        assert_eq!(run("opencode 1.18.11\n", true), VersionProbe::Available);
-        assert_eq!(run("1.19.0\n", true), VersionProbe::UnsupportedVersion);
-        assert_eq!(run("unknown\n", true), VersionProbe::ProbeFailed);
-        assert_eq!(run("1.18.11\n", false), VersionProbe::ProbeFailed);
+        assert_eq!(
+            run("opencode 1.18.11\n", true),
+            InstallationProbe::Available
+        );
+        assert_eq!(run("1.19.0\n", true), InstallationProbe::Available);
+        assert_eq!(
+            run("development build\n", true),
+            InstallationProbe::Available
+        );
+        assert_eq!(run("\n", true), InstallationProbe::ProbeFailed);
+        assert_eq!(run("1.18.11\n", false), InstallationProbe::ProbeFailed);
     }
 
     #[test]
@@ -1267,7 +1274,7 @@ mod tests {
                 }
                 let request = String::from_utf8_lossy(&request);
                 let body = if request.starts_with("GET /global/health") {
-                    br#"{"healthy":true,"version":"1.18.11"}"#.to_vec()
+                    br#"{"healthy":true,"version":"99.7.3"}"#.to_vec()
                 } else if request.starts_with("POST /session") {
                     br#"{"id":"root-session"}"#.to_vec()
                 } else {
@@ -1282,10 +1289,37 @@ mod tests {
             }
         });
         let client = OpenCodeClient::new(OpenCodeEndpoint::loopback(port).unwrap());
-        client.health().unwrap();
+        assert_eq!(client.health().unwrap().version, "99.7.3");
         let session = client.create_session().unwrap();
         client.verify_blank_session(&session).unwrap();
         worker.join().unwrap();
+    }
+
+    #[test]
+    fn health_contract_rejects_unhealthy_or_missing_version_metadata() {
+        for body in [
+            br#"{"healthy":false,"version":"99.7.3"}"#.as_slice(),
+            br#"{"healthy":true,"version":""}"#.as_slice(),
+            br#"{"healthy":true}"#.as_slice(),
+        ] {
+            let listener = TcpListener::bind((LOOPBACK_HOST, 0)).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let body = body.to_vec();
+            let worker = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 1024];
+                let _ = stream.read(&mut request).unwrap();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.write_all(&body).unwrap();
+            });
+            let client = OpenCodeClient::new(OpenCodeEndpoint::loopback(port).unwrap());
+            assert!(client.health().is_err());
+            worker.join().unwrap();
+        }
     }
 
     #[test]
@@ -1687,7 +1721,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0_u8; 1024];
             let _ = stream.read(&mut request).unwrap();
-            let body = br#"{"healthy":true,"version":"1.18.11"}"#;
+            let body = br#"{"healthy":true,"version":"contract-build"}"#;
             let header = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n{:X}\r\n",
                 body.len()
@@ -1697,7 +1731,7 @@ mod tests {
             stream.write_all(b"\r\n0\r\n\r\n").unwrap();
         });
         let client = OpenCodeClient::new(OpenCodeEndpoint::loopback(port).unwrap());
-        client.health().unwrap();
+        assert_eq!(client.health().unwrap().version, "contract-build");
         worker.join().unwrap();
     }
 }

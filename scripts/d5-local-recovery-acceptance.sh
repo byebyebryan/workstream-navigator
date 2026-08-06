@@ -76,7 +76,7 @@ for hook in session_start user_prompt_submit stop session_end; do
         "$profile_path" "$hook" >>"$profile_path"
 done
 "$wsnav_bin" --state-root "$state_root" trust-observer
-registration="$("$wsnav_bin" --state-root "$state_root" register "$repository")"
+registration="$("$wsnav_bin" --state-root "$state_root" register --provider codex "$repository")"
 workstream_id="${registration##* }"
 "$wsnav_bin" --state-root "$state_root" start "$workstream_id"
 sleep 1

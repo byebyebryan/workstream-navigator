@@ -21,8 +21,8 @@ use crate::{
     provider::codex::profile::{OBSERVER_PROFILE_SCHEMA_VERSION, ObserverProfile},
     provider::lifecycle::LifecycleEvent,
     runtime::{
-        LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
-        await_launch_release, is_direct_provider_hook,
+        LinuxProcessProbe, NativeLaunch, PrivateRuntime, ProcessProbe, RuntimePaths, RuntimeProbe,
+        SystemTmux, await_launch_release, is_direct_provider_hook,
     },
     state::{
         ClientCatalog, ClientHostTransport, HostIdentity, HostRegistry, IntegrationLifecycle,
@@ -224,6 +224,18 @@ enum Commands {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         program: Vec<std::ffi::OsString>,
     },
+    /// Internal disconnected `OpenCode` lifecycle observer.  It never writes to
+    /// the provider pane and persists only bounded handle status.
+    #[command(name = "_opencode_observer", hide = true)]
+    OpenCodeObserver {
+        runtime_id: String,
+        generation: String,
+        port: u16,
+        session_id: String,
+        pane_pid: u32,
+        cwd: PathBuf,
+        provider_birth: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -328,6 +340,7 @@ const fn is_provider_surface_command(command: Option<&Commands>) -> bool {
                 | Commands::RemoteObserverReview
                 | Commands::RemoteAttach { .. }
                 | Commands::RuntimeLaunch { .. }
+                | Commands::OpenCodeObserver { .. }
         )
     )
 }
@@ -355,24 +368,32 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             .map_err(AppError::BuildInfo);
     }
     let root = StateRoot::create(state_root.unwrap_or_else(default_state_root))?;
-    let command = match command {
-        Commands::Navigator => return navigator(&root),
+    execute_root_command(&root, command)
+}
+
+fn execute_root_command(root: &StateRoot, command: Commands) -> Result<(), AppError> {
+    match command {
+        Commands::Navigator => navigator(root),
         Commands::NavigatorPane {
             presentation_socket,
             presentation_session,
-        } => {
-            return run_local_navigator(&root, presentation_socket, presentation_session)
-                .map_err(AppError::Navigator);
-        }
-        Commands::ProviderWait => return provider_wait(),
-        Commands::ObserverReview => return observer_review(&root),
+        } => run_local_navigator(root, presentation_socket, presentation_session)
+            .map_err(AppError::Navigator),
+        Commands::ProviderWait => provider_wait(),
+        Commands::ObserverReview => observer_review(root),
         Commands::RemoteObserverReview => {
-            observer_review_once(&root);
-            return Ok(());
+            observer_review_once(root);
+            Ok(())
         }
         Commands::ProviderRemoteObserverReview { host_alias } => {
-            return provider_remote_observer_review(&root, &host_alias);
+            provider_remote_observer_review(root, &host_alias)
         }
+        command => execute_root_surface(root, command),
+    }
+}
+
+fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppError> {
+    let state_command = match command {
         Commands::ProviderAttach {
             workstream_id,
             presentation_socket,
@@ -380,7 +401,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             attempt_id,
         } => {
             return provider_attach(
-                &root,
+                root,
                 &workstream_id,
                 presentation_socket,
                 presentation_session,
@@ -395,7 +416,7 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             attempt_id,
         } => {
             return provider_remote_attach(
-                &root,
+                root,
                 &host_alias,
                 &workstream_id,
                 presentation_socket,
@@ -410,22 +431,44 @@ fn execute(cli: Cli) -> Result<(), AppError> {
             // This command runs directly in the provider terminal over SSH.
             // It must never print management diagnostics into that surface;
             // the local navigator observes the resulting runtime state.
-            let _ = crate::remote::attach(&root, runtime_id);
+            let _ = crate::remote::attach(root, runtime_id);
             return Ok(());
         }
         Commands::RuntimeLaunch {
             runtime_id,
             program,
-        } => return runtime_launch(&root, &runtime_id, program),
+        } => return runtime_launch(root, &runtime_id, program),
+        Commands::OpenCodeObserver {
+            runtime_id,
+            generation,
+            port,
+            session_id,
+            pane_pid,
+            cwd,
+            provider_birth,
+        } => {
+            return opencode_observer(
+                root,
+                OpenCodeObserverArguments {
+                    runtime_id,
+                    generation,
+                    port,
+                    session_id,
+                    pane_pid,
+                    cwd,
+                    provider_birth,
+                },
+            );
+        }
         Commands::RegisterRemote {
             host,
             destination,
             executable,
-        } => return register_remote(&root, &host, destination.as_deref(), executable.as_deref()),
-        Commands::Host { command } => return host_command(&root, command),
-        command => command,
+        } => return register_remote(root, &host, destination.as_deref(), executable.as_deref()),
+        Commands::Host { command } => return host_command(root, command),
+        other => other,
     };
-    execute_state_command(&root, command)
+    execute_state_command(root, state_command)
 }
 
 fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppError> {
@@ -464,7 +507,7 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
             recover(root, &mut registry, parse_workstream(&workstream_id)?)
         }
         Commands::Attach { workstream_id } => {
-            attach(root, &registry, parse_workstream(&workstream_id)?)
+            attach(root, &mut registry, parse_workstream(&workstream_id)?)
         }
         Commands::Park { workstream_id } => {
             park(root, &mut registry, parse_workstream(&workstream_id)?)
@@ -511,23 +554,7 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
             parse_workstream(&workstream_id)?,
             attention_revision,
         ),
-        Commands::Navigator
-        | Commands::NavigatorPane { .. }
-        | Commands::ProviderWait
-        | Commands::ObserverReview
-        | Commands::RemoteObserverReview
-        | Commands::ProviderRemoteObserverReview { .. }
-        | Commands::ProviderAttach { .. }
-        | Commands::ProviderRemoteAttach { .. }
-        | Commands::Hook
-        | Commands::Remote
-        | Commands::Probe
-        | Commands::RemoteAttach { .. }
-        | Commands::RuntimeLaunch { .. }
-        | Commands::RegisterRemote { .. }
-        | Commands::Host { .. } => {
-            unreachable!("special command dispatch returns before state setup")
-        }
+        _ => unreachable!("special command dispatch returns before state setup"),
     }
 }
 
@@ -556,6 +583,46 @@ fn runtime_launch(
             Err(AppError::RuntimeExited)
         }
     }
+}
+
+struct OpenCodeObserverArguments {
+    runtime_id: String,
+    generation: String,
+    port: u16,
+    session_id: String,
+    pane_pid: u32,
+    cwd: PathBuf,
+    provider_birth: String,
+}
+
+fn opencode_observer(
+    root: &StateRoot,
+    arguments: OpenCodeObserverArguments,
+) -> Result<(), AppError> {
+    let context = crate::provider::opencode::OpenCodeObserverContext {
+        runtime_id: RuntimeId::from_str(&arguments.runtime_id)
+            .map_err(AppError::InvalidRuntimeId)?,
+        generation: arguments.generation,
+        endpoint: crate::provider::opencode::OpenCodeEndpoint::loopback(arguments.port)
+            .map_err(AppError::OpenCode)?,
+        session: ProviderSessionId::new(
+            crate::domain::ProviderKind::OpenCode,
+            &arguments.session_id,
+        )
+        .map_err(AppError::Domain)?,
+        pane_pid: arguments.pane_pid,
+        cwd: arguments.cwd,
+        provider_birth: arguments.provider_birth,
+    };
+    crate::provider::opencode::run_observer(root, &context).map_err(AppError::OpenCodeObserver)
+}
+
+fn mark_opencode_observer_unknown_handle(
+    registry: &mut HostRegistry,
+    handle: &crate::state::OpenCodeRuntimeHandle,
+    generation: &str,
+) {
+    crate::provider::opencode::mark_unknown_handle(registry, handle, generation);
 }
 
 fn navigator(root: &StateRoot) -> Result<(), AppError> {
@@ -1057,8 +1124,8 @@ fn provider_attach(
     presentation.report_attachment_phase(attempt_id, AttachmentPhase::Running)?;
     let outcome = (|| -> Result<(), AppError> {
         let workstream_id = parse_workstream(workstream_id)?;
-        let registry = HostRegistry::open(root)?;
-        attach(root, &registry, workstream_id)
+        let mut registry = HostRegistry::open(root)?;
+        attach(root, &mut registry, workstream_id)
     })();
     let phase = if outcome.is_ok() {
         AttachmentPhase::Completed
@@ -1678,7 +1745,7 @@ fn rename(
 
 fn attach(
     root: &StateRoot,
-    registry: &HostRegistry,
+    registry: &mut HostRegistry,
     workstream_id: WorkstreamId,
 ) -> Result<(), AppError> {
     let record = registry
@@ -1691,6 +1758,45 @@ fn attach(
         &process_probe,
         RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
     );
+    match record.provider {
+        crate::domain::ProviderKind::Codex => {}
+        crate::domain::ProviderKind::OpenCode => {
+            let Some(handle) = registry.opencode_runtime_handle(record.runtime_id)? else {
+                return Err(AppError::RuntimeProbeAmbiguous);
+            };
+            let RuntimeProbe::Live {
+                pane_pid,
+                cwd,
+                process_birth: Some(process_birth),
+                ..
+            } = runtime.probe()?
+            else {
+                mark_opencode_observer_unknown_handle(registry, &handle, &record.tmux_generation);
+                return Err(AppError::RuntimeProbeAmbiguous);
+            };
+            let observer_live = handle
+                .observer_pid
+                .zip(handle.observer_birth.as_deref())
+                .is_some_and(|(pid, birth)| {
+                    LinuxProcessProbe.process_birth(pid).as_deref() == Some(birth)
+                });
+            if handle.runtime_generation != record.tmux_generation
+                || handle.observer_status != crate::state::OpenCodeObserverStatus::Ready
+                || cwd != record.cwd
+                || record.process_birth.as_deref() != Some(process_birth.as_str())
+                || !observer_live
+                || !crate::provider::opencode::endpoint_owned_by_process(
+                    &crate::provider::opencode::OpenCodeEndpoint::loopback(handle.endpoint_port)
+                        .map_err(AppError::OpenCode)?,
+                    pane_pid,
+                    &process_birth,
+                )
+            {
+                mark_opencode_observer_unknown_handle(registry, &handle, &record.tmux_generation);
+                return Err(AppError::RuntimeProbeAmbiguous);
+            }
+        }
+    }
     let mut command = runtime.attach_command();
     command.stderr(Stdio::null());
     let status = command.status().map_err(AppError::Io)?;
@@ -1878,6 +1984,8 @@ fn default_state_root() -> PathBuf {
 pub(crate) enum AppError {
     #[error("native tmux attach failed")]
     AttachFailed,
+    #[error("private runtime probe is ambiguous")]
+    RuntimeProbeAmbiguous,
     #[error("attention revision is invalid")]
     InvalidAttentionRevision,
     #[error("invalid workstream ID")]
@@ -1931,6 +2039,12 @@ pub(crate) enum AppError {
     Provider(#[from] crate::provider::ProviderReadinessError),
     #[error(transparent)]
     ProviderSelection(#[from] crate::provider::ProviderSelectionError),
+    #[error(transparent)]
+    Domain(#[from] crate::domain::DomainError),
+    #[error(transparent)]
+    OpenCode(#[from] crate::provider::opencode::OpenCodeError),
+    #[error(transparent)]
+    OpenCodeObserver(#[from] crate::provider::opencode::OpenCodeObserverError),
     #[error(transparent)]
     AppServer(#[from] crate::provider::codex::app_server::AppServerError),
     #[error(transparent)]
@@ -2027,6 +2141,27 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn opencode_observer_entrypoint_is_hidden_and_typed() {
+        let parsed = Cli::try_parse_from([
+            "wsnav",
+            "_opencode_observer",
+            "00000000-0000-0000-0000-000000000001",
+            "generation",
+            "4321",
+            "root-session",
+            "4242",
+            "/project",
+            "birth",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command,
+            Some(Commands::OpenCodeObserver { port: 4321, .. })
+        ));
+        assert!(Cli::try_parse_from(["wsnav", "opencode-observer"]).is_err());
     }
 
     #[test]

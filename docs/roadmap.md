@@ -29,8 +29,8 @@ context transfer.
 D8.0 completed on 2026-08-05. It introduced the provider identity and dispatch
 foundation, preserved Codex behavior, and made provider kind visible without
 adding OpenCode production launch. The D8.1 evidence gate now passes for
-OpenCode `1.18.11`; D8.1 is the next checkpoint but remains inactive pending
-explicit activation. D8.2 remains inactive. There is no generic provider
+OpenCode `1.18.11`; D8.1 was explicitly activated on 2026-08-05 and is now the
+active checkpoint. D8.2 remains inactive. There is no generic provider
 onboarding, provider view or filter, model selector, role/preset system, or
 remembered per-Project provider policy in D8. Availability is dynamic host-owned
 snapshot state rather than immutable client-registration identity, and every
@@ -146,8 +146,8 @@ an automatic migration from the retired schema.
 Date: 2026-08-05
 
 Status: D0 through D8.0 are complete. V1 remains a source-installed operator
-beta. D8.1 is the next checkpoint but remains inactive pending explicit
-activation; its prerequisite evidence gate passed. D8.2 is inactive.
+beta. D8.1 is active after explicit activation on 2026-08-05 and its
+prerequisite evidence gate passed. D8.2 is inactive.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -194,7 +194,7 @@ This document owns sequencing, exit gates, and progress.
 | D7 | Navigator workflow and lifecycle management | Complete through D7.6 |
 | D7.6 | Host-private Project directory browser | Complete |
 | D8.0 | Provider identity foundation and Codex parity | Complete (2026-08-05) |
-| D8.1 | Provider-aware New and OpenCode New/Resume vertical slice | Next; inactive pending explicit activation (prerequisite evidence passed) |
+| D8.1 | Provider-aware New and OpenCode New/Resume vertical slice | Active (2026-08-05; prerequisite evidence passed) |
 | D8.2 | OpenCode Fork, recovery, and integrated acceptance | Inactive |
 
 The completed checkpoints describe the source-installed operator-beta at the
@@ -996,8 +996,8 @@ Exit gate:
 ## D8 - Multi-provider Workstreams
 
 Implementation status: D8.0 is complete (2026-08-05). D8.1's fresh-session and
-observer evidence passes on OpenCode `1.18.11`; it is the next checkpoint but
-remains inactive pending explicit activation. D8.2 is an inactive follow-up. The
+observer evidence passes on OpenCode `1.18.11`, and D8.1 is active after
+explicit activation on 2026-08-05. D8.2 is an inactive follow-up. The
 [multi-provider design](design.md#multi-provider-and-multi-agent-design) is
 authoritative for the shared provider boundary and privacy invariants.
 
@@ -1148,11 +1148,11 @@ inactive and narrows it rather than weakening a core invariant.
 
 ### D8.1 - Provider-aware New and OpenCode New/Resume vertical slice
 
-Status: Next checkpoint, inactive pending explicit activation. The prerequisite
+Status: Active after explicit activation on 2026-08-05. The prerequisite
 evidence checkpoint above passes on explicitly allowlisted OpenCode `1.18.11`,
 and the design records blank-session precreation as the selected fresh-binding
-mechanism. D8.1 requires explicit activation before implementation; any provider
-upgrade requires a fresh evidence rerun before eligibility.
+mechanism. Any provider upgrade requires a fresh evidence rerun before
+eligibility.
 
 Scope:
 

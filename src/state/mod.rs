@@ -21,13 +21,13 @@ use crate::protocol::{
 #[cfg(test)]
 use crate::provider::codex::profile::OBSERVER_PROFILE_SCHEMA_VERSION;
 use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
-use crate::provider::lifecycle::{LifecycleEvent, LifecycleObservation};
+use crate::provider::lifecycle::{LifecycleEvent, LifecycleHint, LifecycleObservation};
 use crate::provider::names::NameState;
 
 /// The newest host-registry schema this build can open or create.
 ///
 /// This is safe release-probe metadata; it is not a host-state observation.
-pub const HOST_SCHEMA_VERSION: i64 = 10;
+pub const HOST_SCHEMA_VERSION: i64 = 11;
 const CLIENT_SCHEMA_VERSION: i64 = 5;
 const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
@@ -94,6 +94,19 @@ const HOST_SCHEMA_SQL: &str = "
         process_birth TEXT,
         lifecycle TEXT NOT NULL,
         revision INTEGER NOT NULL CHECK (revision > 0)
+    );
+    CREATE TABLE opencode_runtime_handles (
+        runtime_id TEXT PRIMARY KEY REFERENCES runtimes(runtime_id),
+        runtime_generation TEXT NOT NULL,
+        endpoint_host TEXT NOT NULL CHECK (endpoint_host = '127.0.0.1'),
+        endpoint_port INTEGER NOT NULL CHECK (endpoint_port BETWEEN 1 AND 65535),
+        version TEXT NOT NULL,
+        native_session_id TEXT NOT NULL,
+        observer_pid INTEGER,
+        observer_birth TEXT,
+        observer_status TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        UNIQUE(runtime_id, runtime_generation)
     );
     CREATE TABLE provider_bindings (
         binding_id TEXT PRIMARY KEY,
@@ -494,6 +507,59 @@ pub struct ProviderBinding {
     pub predecessor_native_session_id: Option<ProviderSessionId>,
     pub predecessor_effective_name: Option<String>,
     pub revision: Revision,
+}
+
+/// Lifecycle of the hidden `OpenCode` SSE observer for one exact Runtime
+/// generation.  This is host-private evidence and is never projected into a
+/// public snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OpenCodeObserverStatus {
+    Starting,
+    Ready,
+    Unknown,
+    Stopped,
+}
+
+impl OpenCodeObserverStatus {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Starting => "starting",
+            Self::Ready => "ready",
+            Self::Unknown => "unknown",
+            Self::Stopped => "stopped",
+        }
+    }
+}
+
+/// Host-private `OpenCode` endpoint and observer identity for one exact Runtime
+/// generation.  Provider payloads, event content, and terminal captures are
+/// intentionally absent.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenCodeRuntimeHandle {
+    pub runtime_id: RuntimeId,
+    pub runtime_generation: String,
+    pub endpoint_host: String,
+    pub endpoint_port: u16,
+    pub version: String,
+    pub native_session_id: ProviderSessionId,
+    pub observer_pid: Option<u32>,
+    pub observer_birth: Option<String>,
+    pub observer_status: OpenCodeObserverStatus,
+    pub revision: Revision,
+}
+
+/// Exact evidence supplied by a private `OpenCode` observer for one Runtime
+/// revision.  The state layer consumes this bounded, provider-neutral hint;
+/// it never stores the originating SSE record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenCodeLifecycleObservation {
+    pub generation: String,
+    pub cwd: PathBuf,
+    pub runtime_revision: Revision,
+    pub session: ProviderSessionId,
+    pub observer_pid: u32,
+    pub observer_birth: String,
+    pub hint: LifecycleHint,
 }
 
 /// One bounded host-local record needed to render and act on a Workstream.
@@ -2221,6 +2287,376 @@ impl HostRegistry {
         Ok(binding)
     }
 
+    /// Loads the host-private `OpenCode` endpoint and observer identity for one
+    /// exact Runtime.  It refuses to return a handle whose provider or
+    /// generation no longer matches the current Runtime and binding.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn opencode_runtime_handle(
+        &self,
+        runtime_id: RuntimeId,
+    ) -> Result<Option<OpenCodeRuntimeHandle>, StateError> {
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(StateError::Sqlite)?;
+        let handle = load_opencode_handle(&transaction, runtime_id)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(handle)
+    }
+
+    /// Binds an exact `OpenCode` session before native launch.  A pre-existing
+    /// binding may only be reused for the same provider/session; a stale
+    /// generation is updated transactionally and never adopted.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn bind_opencode_session(
+        &mut self,
+        runtime_id: RuntimeId,
+        expected_generation: &str,
+        session: &ProviderSessionId,
+        start_source: &str,
+    ) -> Result<ProviderBinding, StateError> {
+        if session.provider() != ProviderKind::OpenCode || !matches!(start_source, "new" | "resume")
+        {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+        validate_registry_text("runtime generation", expected_generation)?;
+        validate_registry_text("start source", start_source)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let (provider, generation, lifecycle): (String, String, String) = transaction
+            .query_row(
+                "SELECT provider, tmux_generation, lifecycle FROM runtimes WHERE runtime_id = ?1",
+                [runtime_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::UnknownRuntime(runtime_id))?;
+        if provider_kind_from_text(&provider)? != ProviderKind::OpenCode
+            || generation != expected_generation
+            || lifecycle != "starting"
+        {
+            return Err(StateError::HookEvidenceMismatch);
+        }
+        let existing = load_binding(&transaction, runtime_id)?;
+        let binding = if let Some(existing) = existing {
+            if existing.provider != ProviderKind::OpenCode || existing.native_session_id != *session
+            {
+                return Err(StateError::ProviderIdentityMismatch);
+            }
+            let changed = transaction
+                .execute(
+                    "UPDATE provider_bindings SET runtime_generation = ?1,
+                        start_source = ?2, revision = revision + 1
+                     WHERE runtime_id = ?3 AND runtime_generation != ?1",
+                    params![expected_generation, start_source, runtime_id.to_string()],
+                )
+                .map_err(StateError::Sqlite)?;
+            if changed == 0 {
+                existing
+            } else {
+                load_binding(&transaction, runtime_id)?.ok_or(StateError::ConcurrentWrite)?
+            }
+        } else {
+            transaction
+                .execute(
+                    "INSERT INTO provider_bindings (
+                        binding_id, runtime_id, provider, native_session_id, start_source,
+                        last_settled_turn_id, observed_thread_name, name_state,
+                        name_observed_at, predecessor_native_session_id,
+                        predecessor_effective_name, runtime_generation, revision
+                     ) VALUES (?1, ?2, 'opencode', ?3, ?4, NULL, NULL,
+                        'unavailable', NULL, NULL, NULL, ?5, 1)",
+                    params![
+                        Uuid::new_v4().to_string(),
+                        runtime_id.to_string(),
+                        session.native_id(),
+                        start_source,
+                        expected_generation,
+                    ],
+                )
+                .map_err(StateError::Sqlite)?;
+            load_binding(&transaction, runtime_id)?.ok_or(StateError::ConcurrentWrite)?
+        };
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(binding)
+    }
+
+    /// Records the exact loopback handle for a prepared `OpenCode` generation.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn record_opencode_runtime_handle(
+        &mut self,
+        runtime_id: RuntimeId,
+        expected_generation: &str,
+        endpoint_port: u16,
+        version: &str,
+        session: &ProviderSessionId,
+    ) -> Result<OpenCodeRuntimeHandle, StateError> {
+        if endpoint_port == 0
+            || version != crate::provider::opencode::SUPPORTED_VERSION
+            || session.provider() != ProviderKind::OpenCode
+        {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+        validate_registry_text("runtime generation", expected_generation)?;
+        validate_registry_text("OpenCode version", version)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let (provider, generation, lifecycle): (String, String, String) = transaction
+            .query_row(
+                "SELECT provider, tmux_generation, lifecycle FROM runtimes WHERE runtime_id = ?1",
+                [runtime_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::UnknownRuntime(runtime_id))?;
+        if provider_kind_from_text(&provider)? != ProviderKind::OpenCode
+            || generation != expected_generation
+            || lifecycle != "starting"
+        {
+            return Err(StateError::HookEvidenceMismatch);
+        }
+        let binding =
+            load_binding(&transaction, runtime_id)?.ok_or(StateError::HookEvidenceMismatch)?;
+        if binding.provider != ProviderKind::OpenCode || binding.native_session_id != *session {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+        transaction
+            .execute(
+                "INSERT INTO opencode_runtime_handles (
+                    runtime_id, runtime_generation, endpoint_host, endpoint_port,
+                    version, native_session_id, observer_pid, observer_birth,
+                    observer_status, revision
+                 ) VALUES (?1, ?2, '127.0.0.1', ?3, ?4, ?5, NULL, NULL, 'starting', 1)
+                 ON CONFLICT(runtime_id) DO UPDATE SET
+                    runtime_generation = excluded.runtime_generation,
+                    endpoint_host = excluded.endpoint_host,
+                    endpoint_port = excluded.endpoint_port,
+                    version = excluded.version,
+                    native_session_id = excluded.native_session_id,
+                    observer_pid = NULL,
+                    observer_birth = NULL,
+                    observer_status = 'starting',
+                    revision = opencode_runtime_handles.revision + 1",
+                params![
+                    runtime_id.to_string(),
+                    expected_generation,
+                    i64::from(endpoint_port),
+                    version,
+                    session.native_id(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        let handle =
+            load_opencode_handle(&transaction, runtime_id)?.ok_or(StateError::ConcurrentWrite)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(handle)
+    }
+
+    /// Records the exact spawned observer process while its handle remains in
+    /// `Starting`.  The handle revision prevents an old helper from claiming
+    /// a newly reserved generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the handle identity or revision is stale, or the
+    /// observer process identity is invalid.
+    pub fn record_opencode_observer_started(
+        &mut self,
+        runtime_id: RuntimeId,
+        expected_generation: &str,
+        expected_handle_revision: Revision,
+        observer_pid: u32,
+        observer_birth: &str,
+    ) -> Result<OpenCodeRuntimeHandle, StateError> {
+        if observer_pid == 0 {
+            return Err(StateError::InvalidRegistryField("observer PID"));
+        }
+        validate_registry_text("observer birth", observer_birth)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let changed = transaction
+            .execute(
+                "UPDATE opencode_runtime_handles SET observer_pid = ?1,
+                    observer_birth = ?2, observer_status = 'starting', revision = revision + 1
+                 WHERE runtime_id = ?3 AND runtime_generation = ?4
+                   AND observer_status = 'starting' AND revision = ?5",
+                params![
+                    i64::from(observer_pid),
+                    observer_birth,
+                    runtime_id.to_string(),
+                    expected_generation,
+                    expected_handle_revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if changed != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        let handle =
+            load_opencode_handle(&transaction, runtime_id)?.ok_or(StateError::ConcurrentWrite)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(handle)
+    }
+
+    /// Moves one exact spawned helper from `Starting` to `Ready` after the
+    /// child corroborates the native endpoint and verifies its own PID/birth.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the handle identity or revision is stale, or the
+    /// observer process identity is invalid.
+    pub fn mark_opencode_observer_ready(
+        &mut self,
+        runtime_id: RuntimeId,
+        expected_generation: &str,
+        expected_handle_revision: Revision,
+        observer_pid: u32,
+        observer_birth: &str,
+    ) -> Result<OpenCodeRuntimeHandle, StateError> {
+        if observer_pid == 0 {
+            return Err(StateError::InvalidRegistryField("observer PID"));
+        }
+        validate_registry_text("observer birth", observer_birth)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let changed = transaction
+            .execute(
+                "UPDATE opencode_runtime_handles SET observer_status = 'ready',
+                    revision = revision + 1
+                 WHERE runtime_id = ?1 AND runtime_generation = ?2
+                   AND observer_status = 'starting' AND observer_pid = ?3
+                   AND observer_birth = ?4 AND revision = ?5",
+                params![
+                    runtime_id.to_string(),
+                    expected_generation,
+                    i64::from(observer_pid),
+                    observer_birth,
+                    expected_handle_revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if changed != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        let handle =
+            load_opencode_handle(&transaction, runtime_id)?.ok_or(StateError::ConcurrentWrite)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(handle)
+    }
+
+    /// Marks one helper unknown only when its persisted PID/birth and handle
+    /// revision still identify the caller's exact generation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the handle identity or revision is stale, or the
+    /// observer process identity is invalid.
+    pub fn mark_opencode_observer_unknown_exact(
+        &mut self,
+        runtime_id: RuntimeId,
+        expected_generation: &str,
+        expected_handle_revision: Revision,
+        observer_pid: u32,
+        observer_birth: &str,
+    ) -> Result<(), StateError> {
+        if observer_pid == 0 {
+            return Err(StateError::InvalidRegistryField("observer PID"));
+        }
+        validate_registry_text("observer birth", observer_birth)?;
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE opencode_runtime_handles SET observer_status = 'unknown',
+                    revision = revision + 1
+                 WHERE runtime_id = ?1 AND runtime_generation = ?2
+                   AND observer_pid = ?3 AND observer_birth = ?4 AND revision = ?5",
+                params![
+                    runtime_id.to_string(),
+                    expected_generation,
+                    i64::from(observer_pid),
+                    observer_birth,
+                    expected_handle_revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(StateError::HookEvidenceMismatch)
+        }
+    }
+
+    /// Applies one exact `OpenCode` observer hint to the already-bound Runtime.
+    /// The observer supplies evidence only: provider, generation, cwd,
+    /// session, observer PID/birth, and the current Runtime revision must all
+    /// match before a neutral lifecycle transition is committed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any identity/revision evidence is stale or a
+    /// settled message has no bounded exact ID.
+    pub fn apply_opencode_lifecycle_observation(
+        &mut self,
+        runtime_id: RuntimeId,
+        observation: &OpenCodeLifecycleObservation,
+    ) -> Result<Revision, StateError> {
+        if observation.session.provider() != ProviderKind::OpenCode || observation.observer_pid == 0
+        {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+        validate_registry_text("observer birth", &observation.observer_birth)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let (lifecycle, workstream_id) =
+            validate_opencode_observation(&transaction, runtime_id, observation)?;
+        apply_opencode_lifecycle_transition(
+            &transaction,
+            runtime_id,
+            observation.runtime_revision,
+            &lifecycle,
+            workstream_id,
+            observation,
+        )?;
+        touch_workstream(&transaction, &workstream_id.to_string(), None)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(observation.runtime_revision.next())
+    }
+
+    /// Removes only the exact private `OpenCode` handle after its observer has
+    /// been validated/stopped and its Runtime is being deliberately parked.
+    #[allow(clippy::missing_errors_doc)]
+    pub fn delete_opencode_runtime_handle(
+        &mut self,
+        runtime_id: RuntimeId,
+        expected_generation: &str,
+    ) -> Result<(), StateError> {
+        let changed = self
+            .connection
+            .execute(
+                "DELETE FROM opencode_runtime_handles
+                 WHERE runtime_id = ?1 AND runtime_generation = ?2",
+                params![runtime_id.to_string(), expected_generation],
+            )
+            .map_err(StateError::Sqlite)?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(StateError::HookEvidenceMismatch)
+        }
+    }
+
     /// Persists the exact private-pane process birth only while the Runtime is
     /// prepared for its initial native lifecycle binding.
     ///
@@ -3889,10 +4325,15 @@ fn migrate_host_schema(connection: &mut Connection, _state_root: &Path) -> Resul
             .map_err(StateError::Sqlite)?;
         transaction.commit().map_err(StateError::Sqlite)?;
         migrate_host_schema_9_to_10(connection)?;
+        migrate_host_schema_10_to_11(connection)?;
         return Ok(());
     }
     if current == 9 {
-        return migrate_host_schema_9_to_10(connection);
+        migrate_host_schema_9_to_10(connection)?;
+        return migrate_host_schema_10_to_11(connection);
+    }
+    if current == 10 {
+        return migrate_host_schema_10_to_11(connection);
     }
     if current != 0 {
         return Err(StateError::HostStateResetRequired(current));
@@ -4014,6 +4455,53 @@ fn migrate_host_schema_9_to_10(connection: &mut Connection) -> Result<(), StateE
     transaction
         .execute(
             "UPDATE host_identity SET schema_version = 10 WHERE singleton = 1",
+            [],
+        )
+        .map_err(StateError::Sqlite)?;
+    transaction.commit().map_err(StateError::Sqlite)
+}
+
+fn migrate_host_schema_10_to_11(connection: &mut Connection) -> Result<(), StateError> {
+    let transaction = connection.transaction().map_err(StateError::Sqlite)?;
+    let existing: Option<String> = transaction
+        .query_row(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'opencode_runtime_handles'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?;
+    if existing.is_some() {
+        // Schema 10 predates this table.  Any pre-existing table is therefore
+        // ambiguous (including one that happens to have the same columns) and
+        // must abort the transaction without advancing user_version.
+        return Err(StateError::InvalidPersistedValue(
+            "preexisting OpenCode handle table".to_owned(),
+        ));
+    }
+    transaction
+        .execute_batch(
+            "CREATE TABLE opencode_runtime_handles (
+                runtime_id TEXT PRIMARY KEY REFERENCES runtimes(runtime_id),
+                runtime_generation TEXT NOT NULL,
+                endpoint_host TEXT NOT NULL CHECK (endpoint_host = '127.0.0.1'),
+                endpoint_port INTEGER NOT NULL CHECK (endpoint_port BETWEEN 1 AND 65535),
+                version TEXT NOT NULL,
+                native_session_id TEXT NOT NULL,
+                observer_pid INTEGER,
+                observer_birth TEXT,
+                observer_status TEXT NOT NULL,
+                revision INTEGER NOT NULL CHECK (revision > 0),
+                UNIQUE(runtime_id, runtime_generation)
+            );",
+        )
+        .map_err(StateError::Sqlite)?;
+    transaction
+        .execute("PRAGMA user_version = 11", [])
+        .map_err(StateError::Sqlite)?;
+    transaction
+        .execute(
+            "UPDATE host_identity SET schema_version = 11 WHERE singleton = 1",
             [],
         )
         .map_err(StateError::Sqlite)?;
@@ -4507,6 +4995,268 @@ fn load_binding(
         }
     }
     Ok(binding)
+}
+
+fn validate_opencode_observation(
+    transaction: &rusqlite::Transaction<'_>,
+    runtime_id: RuntimeId,
+    observation: &OpenCodeLifecycleObservation,
+) -> Result<(String, WorkstreamId), StateError> {
+    let runtime = transaction
+        .query_row(
+            "SELECT provider, tmux_generation, cwd, lifecycle, revision, workstream_id
+             FROM runtimes WHERE runtime_id = ?1",
+            [runtime_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?
+        .ok_or(StateError::UnknownRuntime(runtime_id))?;
+    if provider_kind_from_text(&runtime.0)? != ProviderKind::OpenCode
+        || runtime.1 != observation.generation
+        || runtime.2 != observation.cwd.to_string_lossy()
+        || Revision::try_from(runtime.4)? != observation.runtime_revision
+    {
+        return Err(StateError::HookEvidenceMismatch);
+    }
+    let handle = transaction
+        .query_row(
+            "SELECT observer_pid, observer_birth, observer_status
+             FROM opencode_runtime_handles
+             WHERE runtime_id = ?1 AND runtime_generation = ?2",
+            params![runtime_id.to_string(), observation.generation],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?
+        .ok_or(StateError::HookEvidenceMismatch)?;
+    if handle.0 != Some(i64::from(observation.observer_pid))
+        || handle.1.as_deref() != Some(&observation.observer_birth)
+        || handle.2 != OpenCodeObserverStatus::Ready.as_str()
+    {
+        return Err(StateError::HookEvidenceMismatch);
+    }
+    let binding = load_binding(transaction, runtime_id)?.ok_or(StateError::HookEvidenceMismatch)?;
+    if binding.provider != ProviderKind::OpenCode
+        || binding.native_session_id != observation.session
+    {
+        return Err(StateError::ProviderIdentityMismatch);
+    }
+    let workstream_id = Uuid::parse_str(&runtime.5)
+        .map(WorkstreamId::from)
+        .map_err(StateError::InvalidPersistedUuid)?;
+    Ok((runtime.3, workstream_id))
+}
+
+fn apply_opencode_lifecycle_transition(
+    transaction: &rusqlite::Transaction<'_>,
+    runtime_id: RuntimeId,
+    runtime_revision: Revision,
+    lifecycle: &str,
+    workstream_id: WorkstreamId,
+    observation: &OpenCodeLifecycleObservation,
+) -> Result<(), StateError> {
+    match &observation.hint {
+        LifecycleHint::Started => {
+            if lifecycle != "starting" {
+                return Err(StateError::HookEvidenceMismatch);
+            }
+            update_runtime_lifecycle(transaction, runtime_id, runtime_revision, "idle")?;
+        }
+        LifecycleHint::Working => {
+            if !matches!(lifecycle, "starting" | "idle" | "working" | "attention") {
+                return Err(StateError::HookEvidenceMismatch);
+            }
+            update_runtime_lifecycle(transaction, runtime_id, runtime_revision, "working")?;
+        }
+        LifecycleHint::Settled { message_id } => {
+            if !matches!(lifecycle, "starting" | "idle" | "working" | "attention") {
+                return Err(StateError::HookEvidenceMismatch);
+            }
+            let message_id = message_id
+                .as_deref()
+                .ok_or(StateError::HookEvidenceMismatch)?;
+            validate_provider_metadata(message_id)?;
+            let changed = transaction
+                .execute(
+                    "UPDATE provider_bindings SET last_settled_turn_id = ?1,
+                        revision = revision + 1
+                     WHERE runtime_id = ?2 AND provider = 'opencode'
+                       AND native_session_id = ?3",
+                    params![
+                        message_id,
+                        runtime_id.to_string(),
+                        observation.session.native_id()
+                    ],
+                )
+                .map_err(StateError::Sqlite)?;
+            if changed != 1 {
+                return Err(StateError::ConcurrentWrite);
+            }
+            update_runtime_lifecycle(transaction, runtime_id, runtime_revision, "attention")?;
+            mark_result_attention_in_transaction(
+                transaction,
+                workstream_id,
+                observation.session.clone(),
+                message_id.to_owned(),
+            )?;
+        }
+        LifecycleHint::Ended => {
+            if !matches!(lifecycle, "starting" | "idle" | "working" | "attention") {
+                return Err(StateError::HookEvidenceMismatch);
+            }
+            update_runtime_lifecycle(transaction, runtime_id, runtime_revision, "stopped")?;
+        }
+    }
+    Ok(())
+}
+
+struct PersistedOpenCodeHandle {
+    generation: String,
+    host: String,
+    port: i64,
+    version: String,
+    session: String,
+    observer_pid: Option<i64>,
+    observer_birth: Option<String>,
+    status: String,
+    revision: i64,
+}
+
+fn load_opencode_handle(
+    transaction: &rusqlite::Transaction<'_>,
+    runtime_id: RuntimeId,
+) -> Result<Option<OpenCodeRuntimeHandle>, StateError> {
+    let Some(parts) = read_opencode_handle(transaction, runtime_id)? else {
+        return Ok(None);
+    };
+    let observer_status = validate_opencode_handle(transaction, runtime_id, &parts)?;
+    let native_session_id = ProviderSessionId::new(ProviderKind::OpenCode, &parts.session)?;
+    Ok(Some(OpenCodeRuntimeHandle {
+        runtime_id,
+        runtime_generation: parts.generation,
+        endpoint_host: parts.host,
+        endpoint_port: u16::try_from(parts.port)
+            .map_err(|_| StateError::InvalidPersistedValue("OpenCode endpoint port".to_owned()))?,
+        version: parts.version,
+        native_session_id,
+        observer_pid: parts
+            .observer_pid
+            .map(|pid| {
+                u32::try_from(pid)
+                    .map_err(|_| StateError::InvalidPersistedValue("observer PID".to_owned()))
+            })
+            .transpose()?,
+        observer_birth: parts.observer_birth,
+        observer_status,
+        revision: Revision::try_from(parts.revision)?,
+    }))
+}
+
+fn read_opencode_handle(
+    transaction: &rusqlite::Transaction<'_>,
+    runtime_id: RuntimeId,
+) -> Result<Option<PersistedOpenCodeHandle>, StateError> {
+    transaction
+        .query_row(
+            "SELECT runtime_generation, endpoint_host, endpoint_port, version,
+                    native_session_id, observer_pid, observer_birth,
+                    observer_status, revision
+             FROM opencode_runtime_handles WHERE runtime_id = ?1",
+            [runtime_id.to_string()],
+            |row| {
+                Ok(PersistedOpenCodeHandle {
+                    generation: row.get(0)?,
+                    host: row.get(1)?,
+                    port: row.get(2)?,
+                    version: row.get(3)?,
+                    session: row.get(4)?,
+                    observer_pid: row.get(5)?,
+                    observer_birth: row.get(6)?,
+                    status: row.get(7)?,
+                    revision: row.get(8)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(StateError::Sqlite)
+}
+
+fn validate_opencode_handle(
+    transaction: &rusqlite::Transaction<'_>,
+    runtime_id: RuntimeId,
+    parts: &PersistedOpenCodeHandle,
+) -> Result<OpenCodeObserverStatus, StateError> {
+    validate_registry_text("runtime generation", &parts.generation)?;
+    validate_registry_text("OpenCode version", &parts.version)?;
+    if parts.version != crate::provider::opencode::SUPPORTED_VERSION {
+        return Err(StateError::InvalidPersistedValue(
+            "OpenCode version".to_owned(),
+        ));
+    }
+    let (provider, current_generation): (String, String) = transaction
+        .query_row(
+            "SELECT provider, tmux_generation FROM runtimes WHERE runtime_id = ?1",
+            [runtime_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(StateError::Sqlite)?;
+    if provider_kind_from_text(&provider)? != ProviderKind::OpenCode
+        || current_generation != parts.generation
+        || parts.host != crate::provider::opencode::LOOPBACK_HOST
+        || !(1..=65_535).contains(&parts.port)
+    {
+        return Err(StateError::ProviderIdentityMismatch);
+    }
+    let native_session_id = ProviderSessionId::new(ProviderKind::OpenCode, &parts.session)?;
+    let binding =
+        load_binding(transaction, runtime_id)?.ok_or(StateError::ProviderIdentityMismatch)?;
+    if binding.provider != ProviderKind::OpenCode || binding.native_session_id != native_session_id
+    {
+        return Err(StateError::ProviderIdentityMismatch);
+    }
+    let binding_generation: String = transaction
+        .query_row(
+            "SELECT runtime_generation FROM provider_bindings WHERE runtime_id = ?1",
+            [runtime_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)?;
+    if binding_generation != parts.generation {
+        return Err(StateError::ProviderIdentityMismatch);
+    }
+    let observer_status = match parts.status.as_str() {
+        "starting" => OpenCodeObserverStatus::Starting,
+        "ready" => OpenCodeObserverStatus::Ready,
+        "unknown" => OpenCodeObserverStatus::Unknown,
+        "stopped" => OpenCodeObserverStatus::Stopped,
+        _ => return Err(StateError::InvalidPersistedValue(parts.status.clone())),
+    };
+    if parts.observer_pid.is_some() != parts.observer_birth.is_some()
+        || parts.observer_pid.is_some_and(|pid| pid <= 0)
+        || observer_status == OpenCodeObserverStatus::Ready
+            && (parts.observer_pid.is_none() || parts.observer_birth.is_none())
+    {
+        return Err(StateError::InvalidPersistedValue(
+            "OpenCode observer identity".to_owned(),
+        ));
+    }
+    Ok(observer_status)
 }
 
 struct SessionStartContext<'a> {
@@ -5930,6 +6680,7 @@ mod tests {
         connection
             .execute_batch(
                 "DROP TABLE project_browser_settings;
+                 DROP TABLE opencode_runtime_handles;
                  PRAGMA user_version = 8;
                  UPDATE host_identity SET schema_version = 8 WHERE singleton = 1;",
             )
@@ -5949,7 +6700,18 @@ mod tests {
     }
 
     fn legacy_host_schema_sql() -> String {
-        HOST_SCHEMA_SQL
+        let table_start = HOST_SCHEMA_SQL
+            .find("    CREATE TABLE opencode_runtime_handles (")
+            .unwrap();
+        let table_end = HOST_SCHEMA_SQL[table_start..]
+            .find("    CREATE TABLE provider_bindings (")
+            .map(|offset| table_start + offset)
+            .unwrap();
+        format!(
+            "{}{}",
+            &HOST_SCHEMA_SQL[..table_start],
+            &HOST_SCHEMA_SQL[table_end..]
+        )
             .replace(
                 "        location_id TEXT NOT NULL REFERENCES project_locations(location_id),\n        provider TEXT NOT NULL,\n        origin",
                 "        location_id TEXT NOT NULL REFERENCES project_locations(location_id),\n        origin",
@@ -6019,6 +6781,72 @@ mod tests {
         assert_eq!(
             overview.binding.unwrap().native_session_id,
             ProviderSessionId::codex("session-id").unwrap()
+        );
+    }
+
+    #[test]
+    fn host_schema_ten_rejects_conflicting_opencode_handle_table() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let registry = HostRegistry::open(&root).unwrap();
+        drop(registry);
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE opencode_runtime_handles;
+                 CREATE TABLE opencode_runtime_handles (runtime_id TEXT PRIMARY KEY);
+                 PRAGMA user_version = 10;
+                 UPDATE host_identity SET schema_version = 10 WHERE singleton = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            HostRegistry::open(&root),
+            Err(StateError::InvalidPersistedValue(_))
+        ));
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 10);
+    }
+
+    #[test]
+    fn host_schema_ten_rejects_even_a_matching_preexisting_opencode_table() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let registry = HostRegistry::open(&root).unwrap();
+        drop(registry);
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA user_version = 10;
+                 UPDATE host_identity SET schema_version = 10 WHERE singleton = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            HostRegistry::open(&root),
+            Err(StateError::InvalidPersistedValue(_))
+        ));
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        assert_eq!(
+            connection
+                .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            10
+        );
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT schema_version FROM host_identity WHERE singleton = 1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            10
         );
     }
 
@@ -6118,6 +6946,259 @@ mod tests {
             .reserve_runtime_with_provider(registered.workstream_id, ProviderKind::OpenCode)
             .unwrap();
         assert_eq!(runtime.provider, ProviderKind::OpenCode);
+    }
+
+    #[test]
+    fn opencode_handle_is_private_and_generation_bound() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let registered = registry
+            .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
+            .unwrap();
+        let runtime = registry
+            .reserve_runtime_with_provider(registered.workstream_id, ProviderKind::OpenCode)
+            .unwrap();
+        let session = ProviderSessionId::new(ProviderKind::OpenCode, "root-session").unwrap();
+        registry
+            .bind_opencode_session(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                &session,
+                "new",
+            )
+            .unwrap();
+        let handle = registry
+            .record_opencode_runtime_handle(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                4321,
+                crate::provider::opencode::SUPPORTED_VERSION,
+                &session,
+            )
+            .unwrap();
+        assert_eq!(handle.endpoint_host, "127.0.0.1");
+        assert_eq!(
+            registry
+                .opencode_runtime_handle(runtime.runtime_id)
+                .unwrap(),
+            Some(handle.clone())
+        );
+        let overview = registry.workstream_overviews().unwrap().remove(0);
+        assert_eq!(overview.provider, ProviderKind::OpenCode);
+        // The loopback endpoint/observer row is separate from the bounded
+        // Workstream overview projection; it is available only through the
+        // host-private handle accessor above.
+        assert!(matches!(
+            registry.record_opencode_observer_started(
+                runtime.runtime_id,
+                "wrong-generation",
+                handle.revision,
+                77,
+                "birth",
+            ),
+            Err(StateError::ConcurrentWrite)
+        ));
+        let starting = registry
+            .record_opencode_observer_started(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                handle.revision,
+                77,
+                "birth",
+            )
+            .unwrap();
+        registry
+            .mark_opencode_observer_ready(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                starting.revision,
+                77,
+                "birth",
+            )
+            .unwrap();
+        assert_eq!(
+            registry
+                .opencode_runtime_handle(runtime.runtime_id)
+                .unwrap()
+                .unwrap()
+                .observer_status,
+            OpenCodeObserverStatus::Ready
+        );
+        let ready = registry
+            .opencode_runtime_handle(runtime.runtime_id)
+            .unwrap()
+            .unwrap();
+        registry
+            .mark_opencode_observer_unknown_exact(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                ready.revision,
+                ready.observer_pid.unwrap(),
+                ready.observer_birth.as_deref().unwrap(),
+            )
+            .unwrap();
+        assert_eq!(
+            registry
+                .opencode_runtime_handle(runtime.runtime_id)
+                .unwrap()
+                .unwrap()
+                .observer_status,
+            OpenCodeObserverStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn opencode_observer_lifecycle_is_revision_guarded_and_bounded() {
+        let (_temporary, mut registry, runtime, session, ready) = opencode_lifecycle_fixture();
+        let cwd = PathBuf::from("/disposable/repository");
+        let started = OpenCodeLifecycleObservation {
+            generation: runtime.tmux_generation.clone(),
+            cwd: cwd.clone(),
+            runtime_revision: runtime.revision,
+            session: session.clone(),
+            observer_pid: 77,
+            observer_birth: "observer-birth".to_owned(),
+            hint: LifecycleHint::Started,
+        };
+        let next = registry
+            .apply_opencode_lifecycle_observation(runtime.runtime_id, &started)
+            .unwrap();
+        assert_eq!(
+            registry
+                .runtime_by_id(runtime.runtime_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            RuntimeStatus::Idle
+        );
+        assert!(matches!(
+            registry.apply_opencode_lifecycle_observation(runtime.runtime_id, &started),
+            Err(StateError::HookEvidenceMismatch)
+        ));
+        let working = OpenCodeLifecycleObservation {
+            runtime_revision: next,
+            hint: LifecycleHint::Working,
+            ..started.clone()
+        };
+        let next = registry
+            .apply_opencode_lifecycle_observation(runtime.runtime_id, &working)
+            .unwrap();
+        let uncorroborated = OpenCodeLifecycleObservation {
+            runtime_revision: next,
+            hint: LifecycleHint::Settled { message_id: None },
+            ..working.clone()
+        };
+        assert!(matches!(
+            registry.apply_opencode_lifecycle_observation(runtime.runtime_id, &uncorroborated),
+            Err(StateError::HookEvidenceMismatch)
+        ));
+        assert_eq!(
+            registry
+                .runtime_by_id(runtime.runtime_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            RuntimeStatus::Working
+        );
+        let settled = OpenCodeLifecycleObservation {
+            runtime_revision: next,
+            hint: LifecycleHint::Settled {
+                message_id: Some("completed-message".to_owned()),
+            },
+            ..working.clone()
+        };
+        let next = registry
+            .apply_opencode_lifecycle_observation(runtime.runtime_id, &settled)
+            .unwrap();
+        let overview = registry.workstream_overviews().unwrap().remove(0);
+        assert_eq!(
+            overview.binding.unwrap().last_settled_turn_id.as_deref(),
+            Some("completed-message")
+        );
+        assert!(
+            overview
+                .attention
+                .unwrap()
+                .result_unseen_since_revision
+                .is_some()
+        );
+        let ended = OpenCodeLifecycleObservation {
+            runtime_revision: next,
+            hint: LifecycleHint::Ended,
+            ..settled
+        };
+        registry
+            .apply_opencode_lifecycle_observation(runtime.runtime_id, &ended)
+            .unwrap();
+        assert_eq!(
+            registry
+                .runtime_by_id(runtime.runtime_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            RuntimeStatus::Stopped
+        );
+        let latest_handle = registry
+            .opencode_runtime_handle(runtime.runtime_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest_handle, ready);
+    }
+
+    fn opencode_lifecycle_fixture() -> (
+        tempfile::TempDir,
+        HostRegistry,
+        RuntimeRecord,
+        ProviderSessionId,
+        OpenCodeRuntimeHandle,
+    ) {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let registered = registry
+            .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
+            .unwrap();
+        let runtime = registry
+            .reserve_runtime_with_provider(registered.workstream_id, ProviderKind::OpenCode)
+            .unwrap();
+        let session = ProviderSessionId::new(ProviderKind::OpenCode, "root-session").unwrap();
+        registry
+            .bind_opencode_session(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                &session,
+                "new",
+            )
+            .unwrap();
+        let handle = registry
+            .record_opencode_runtime_handle(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                4321,
+                crate::provider::opencode::SUPPORTED_VERSION,
+                &session,
+            )
+            .unwrap();
+        let starting = registry
+            .record_opencode_observer_started(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                handle.revision,
+                77,
+                "observer-birth",
+            )
+            .unwrap();
+        let ready = registry
+            .mark_opencode_observer_ready(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                starting.revision,
+                77,
+                "observer-birth",
+            )
+            .unwrap();
+        (temporary, registry, runtime, session, ready)
     }
 
     #[test]

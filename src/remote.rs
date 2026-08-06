@@ -269,6 +269,11 @@ fn apply_register_checkout(
     let Ok(repository) = crate::repository::inspect(checkout_path) else {
         return rejected("project is unavailable");
     };
+    // Keep OpenCode remote registration unavailable until the remote transport
+    // owns its endpoint and observer lifecycle contract.
+    if provider == crate::domain::ProviderKind::OpenCode {
+        return rejected("provider is unavailable");
+    }
     if crate::provider::require_new_eligible(registry, provider).is_err() {
         return rejected("provider is unavailable");
     }
@@ -310,6 +315,9 @@ fn apply_new_workstream(
     request_key: &str,
     provider: crate::domain::ProviderKind,
 ) -> ResponseEnvelope {
+    if provider == crate::domain::ProviderKind::OpenCode {
+        return rejected("workstream creation is unavailable");
+    }
     apply_created_workstream(
         &crate::actions::start_independent_workstream(
             root,

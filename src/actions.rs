@@ -22,8 +22,12 @@ use crate::{
     },
     provider::codex::app_server::{AppServerError, EphemeralAppServer, ForkReconciliation},
     provider::codex::profile::{ObserverProfile, ProfileError},
+    provider::opencode::{
+        self, OpenCodeClient, OpenCodeEndpoint, OpenCodeError, endpoint_owned_by_process,
+    },
     runtime::{
-        LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
+        LinuxProcessProbe, NativeLaunch, PrivateRuntime, ProcessProbe, RuntimePaths, RuntimeProbe,
+        SystemTmux,
     },
     state::{HostRegistry, IntegrationLifecycle, ProviderBinding, StateError},
 };
@@ -33,6 +37,25 @@ use crate::provider::names::NameState;
 
 const PARK_CONFIRM_TIMEOUT: Duration = Duration::from_millis(500);
 const PARK_CONFIRM_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+fn observer_identity_matches<P: ProcessProbe + ?Sized>(
+    probe: &P,
+    pid: u32,
+    expected_birth: &str,
+) -> bool {
+    !expected_birth.is_empty() && probe.process_birth(pid).as_deref() == Some(expected_birth)
+}
+
+fn spawned_observer_identity_matches<P: ProcessProbe + ?Sized>(
+    handle: &crate::state::OpenCodeRuntimeHandle,
+    pid: u32,
+    birth: &str,
+    probe: &P,
+) -> bool {
+    handle.observer_pid == Some(pid)
+        && handle.observer_birth.as_deref() == Some(birth)
+        && observer_identity_matches(probe, pid, birth)
+}
 
 /// The durable outcome of a start-or-resume request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -428,6 +451,23 @@ pub fn start(
     expected_revision: Option<Revision>,
 ) -> Result<StartOutcome, ActionError> {
     let overview = active_workstream_overview(registry, workstream_id)?;
+    match overview.provider {
+        ProviderKind::Codex => {
+            start_codex(root, registry, workstream_id, expected_revision, &overview)
+        }
+        ProviderKind::OpenCode => {
+            start_opencode(root, registry, workstream_id, expected_revision, &overview)
+        }
+    }
+}
+
+fn start_codex(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: Option<Revision>,
+    overview: &crate::state::WorkstreamOverview,
+) -> Result<StartOutcome, ActionError> {
     require_codex_provider(overview.provider)?;
     if expected_revision.is_some_and(|expected| expected != overview.revision) {
         return Err(ActionError::WorkstreamRevisionConflict);
@@ -501,6 +541,234 @@ pub fn start(
     Ok(StartOutcome::Started)
 }
 
+fn start_opencode(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: Option<Revision>,
+    overview: &crate::state::WorkstreamOverview,
+) -> Result<StartOutcome, ActionError> {
+    if expected_revision.is_some_and(|expected| expected != overview.revision) {
+        return Err(ActionError::WorkstreamRevisionConflict);
+    }
+    if overview.lifecycle == WorkstreamLifecycle::RecoveryRequired {
+        return Err(ActionError::ProviderRecoveryUnavailable(
+            ProviderKind::OpenCode,
+        ));
+    }
+    crate::provider::require_new_eligible(registry, ProviderKind::OpenCode)
+        .map_err(ActionError::ProviderReadiness)?;
+    let prior_binding = match inspect_opencode_prior_runtime(root, registry, workstream_id)? {
+        PriorOpenCodeRuntime::AlreadyLive => return Ok(StartOutcome::AlreadyLive),
+        PriorOpenCodeRuntime::Ready(binding) => binding,
+    };
+    let (record, endpoint, session, handle_revision) =
+        prepare_opencode_runtime(registry, workstream_id, overview, prior_binding.as_ref())?;
+    if let Err(error) = launch_reserved_opencode_runtime(
+        root,
+        registry,
+        &record,
+        &endpoint,
+        &session,
+        handle_revision,
+    ) {
+        if let Ok(Some(current)) = registry.runtime_for_workstream(workstream_id)
+            && current.runtime_id == record.runtime_id
+        {
+            let _ = registry.mark_runtime_recovery_required(current.runtime_id, current.revision);
+            let _ = park(root, registry, workstream_id, None);
+        }
+        return Err(error);
+    }
+    Ok(StartOutcome::Started)
+}
+
+enum PriorOpenCodeRuntime {
+    AlreadyLive,
+    Ready(Option<crate::state::ProviderBinding>),
+}
+
+fn inspect_opencode_prior_runtime(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+) -> Result<PriorOpenCodeRuntime, ActionError> {
+    let Some(prior_runtime) = registry.runtime_for_workstream(workstream_id)? else {
+        return Ok(PriorOpenCodeRuntime::Ready(None));
+    };
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let prior = PrivateRuntime::new(
+        &tmux,
+        &process_probe,
+        RuntimePaths::for_record(
+            root.base(),
+            prior_runtime.runtime_id,
+            &prior_runtime.tmux_session,
+        )?,
+    );
+    let prior_probe = prior.probe()?;
+    if matches_recorded_runtime(&prior_runtime, &prior_probe, false) {
+        return validate_opencode_live_runtime(registry, &prior_runtime, &prior_probe);
+    }
+    if prior_runtime.provider == ProviderKind::OpenCode
+        && matches!(
+            prior_probe,
+            RuntimeProbe::Live { .. } | RuntimeProbe::Unknown { .. }
+        )
+        && let Some(handle) = registry.opencode_runtime_handle(prior_runtime.runtime_id)?
+    {
+        crate::provider::opencode::mark_unknown_handle(
+            registry,
+            &handle,
+            &prior_runtime.tmux_generation,
+        );
+    }
+    match prior_probe {
+        RuntimeProbe::Missing => {
+            if prior_runtime.process_birth.is_some()
+                && !matches!(prior_runtime.status, crate::domain::RuntimeStatus::Stopped)
+            {
+                registry.mark_runtime_recovery_required(
+                    prior_runtime.runtime_id,
+                    prior_runtime.revision,
+                )?;
+                return Err(ActionError::ProviderRecoveryUnavailable(
+                    ProviderKind::OpenCode,
+                ));
+            }
+            if !matches!(prior_runtime.status, crate::domain::RuntimeStatus::Stopped) {
+                registry.mark_runtime_stopped(prior_runtime.runtime_id, prior_runtime.revision)?;
+            }
+        }
+        RuntimeProbe::Live { .. } | RuntimeProbe::Unknown { .. } => {
+            return Err(ActionError::RuntimeProbeAmbiguous);
+        }
+    }
+    registry
+        .binding_for_runtime(prior_runtime.runtime_id)
+        .map(PriorOpenCodeRuntime::Ready)
+        .map_err(ActionError::State)
+}
+
+/// An `OpenCode` Runtime may be reported `AlreadyLive` only after every
+/// persisted ownership token is corroborated again.  A tmux pane alone is
+/// not enough: the exact handle generation/session, observer PID birth,
+/// endpoint listener, health, and root-session status must all agree.
+fn validate_opencode_live_runtime(
+    registry: &mut HostRegistry,
+    runtime: &crate::state::RuntimeRecord,
+    probe: &RuntimeProbe,
+) -> Result<PriorOpenCodeRuntime, ActionError> {
+    let RuntimeProbe::Live {
+        pane_pid,
+        cwd,
+        process_birth: Some(process_birth),
+        ..
+    } = probe
+    else {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    };
+    let Some(handle) = registry.opencode_runtime_handle(runtime.runtime_id)? else {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    };
+    let binding = registry.binding_for_runtime(runtime.runtime_id)?;
+    let endpoint = OpenCodeEndpoint::loopback(handle.endpoint_port)?;
+    let observer_live = handle
+        .observer_pid
+        .zip(handle.observer_birth.as_deref())
+        .is_some_and(|(pid, birth)| LinuxProcessProbe.process_birth(pid).as_deref() == Some(birth));
+    let session_exact = binding.as_ref().is_some_and(|binding| {
+        binding.provider == ProviderKind::OpenCode
+            && binding.native_session_id == handle.native_session_id
+    });
+    let exact = handle.runtime_generation == runtime.tmux_generation
+        && handle.endpoint_host == crate::provider::opencode::LOOPBACK_HOST
+        && handle.version == crate::provider::opencode::SUPPORTED_VERSION
+        && runtime.status != crate::domain::RuntimeStatus::Stopped
+        && handle.observer_status == crate::state::OpenCodeObserverStatus::Ready
+        && observer_live
+        && cwd == &runtime.cwd
+        && endpoint_owned_by_process(&endpoint, *pane_pid, process_birth)
+        && session_exact
+        && OpenCodeClient::new(endpoint.clone()).health().is_ok()
+        && !matches!(
+            OpenCodeClient::new(endpoint).session_status(&handle.native_session_id),
+            Ok(crate::provider::opencode::OpenCodeSessionStatus::Unknown) | Err(_)
+        );
+    if !exact {
+        crate::provider::opencode::mark_unknown_handle(registry, &handle, &runtime.tmux_generation);
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    Ok(PriorOpenCodeRuntime::AlreadyLive)
+}
+
+fn prepare_opencode_runtime(
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    overview: &crate::state::WorkstreamOverview,
+    prior_binding: Option<&crate::state::ProviderBinding>,
+) -> Result<
+    (
+        crate::state::RuntimeRecord,
+        OpenCodeEndpoint,
+        ProviderSessionId,
+        Revision,
+    ),
+    ActionError,
+> {
+    let record = registry.reserve_runtime_with_provider(workstream_id, ProviderKind::OpenCode)?;
+    let fail = |registry: &mut HostRegistry, error: ActionError| {
+        let _ = registry.mark_runtime_recovery_required(record.runtime_id, record.revision);
+        error
+    };
+    let (session, start_source) = if let Some(binding) = prior_binding {
+        if binding.provider != ProviderKind::OpenCode {
+            return Err(fail(
+                registry,
+                ActionError::UnsupportedProvider(ProviderKind::OpenCode),
+            ));
+        }
+        (binding.native_session_id.clone(), "resume")
+    } else {
+        let port = opencode::reserve_loopback_port()
+            .map_err(ActionError::OpenCode)
+            .map_err(|error| fail(registry, error))?;
+        let endpoint = OpenCodeEndpoint::loopback(port)
+            .map_err(ActionError::OpenCode)
+            .map_err(|error| fail(registry, error))?;
+        let session =
+            opencode::create_blank_session("opencode", &overview.project_repository_path, endpoint)
+                .map_err(ActionError::OpenCode)
+                .map_err(|error| fail(registry, error))?;
+        (session, "new")
+    };
+    registry
+        .bind_opencode_session(
+            record.runtime_id,
+            &record.tmux_generation,
+            &session,
+            start_source,
+        )
+        .map_err(|error| fail(registry, error.into()))?;
+    let port = opencode::reserve_loopback_port()
+        .map_err(ActionError::OpenCode)
+        .map_err(|error| fail(registry, error))?;
+    let endpoint = OpenCodeEndpoint::loopback(port)
+        .map_err(ActionError::OpenCode)
+        .map_err(|error| fail(registry, error))?;
+    let handle = registry
+        .record_opencode_runtime_handle(
+            record.runtime_id,
+            &record.tmux_generation,
+            endpoint.port,
+            opencode::SUPPORTED_VERSION,
+            &session,
+        )
+        .map_err(|error| fail(registry, error.into()))?;
+    Ok((record, endpoint, session, handle.revision))
+}
+
 /// Starts a new private tmux generation only after a lost Runtime has been
 /// made visible as recovery-required. A known native session resumes exactly;
 /// an unbound Runtime opens Codex's native resume picker rather than creating
@@ -521,6 +789,23 @@ pub fn recover(
     expected_revision: Option<Revision>,
 ) -> Result<StartOutcome, ActionError> {
     let overview = active_workstream_overview(registry, workstream_id)?;
+    match overview.provider {
+        ProviderKind::Codex => {
+            recover_codex(root, registry, workstream_id, expected_revision, &overview)
+        }
+        ProviderKind::OpenCode => Err(ActionError::ProviderRecoveryUnavailable(
+            ProviderKind::OpenCode,
+        )),
+    }
+}
+
+fn recover_codex(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: Option<Revision>,
+    overview: &crate::state::WorkstreamOverview,
+) -> Result<StartOutcome, ActionError> {
     require_codex_provider(overview.provider)?;
     if expected_revision.is_some_and(|expected| expected != overview.revision) {
         return Err(ActionError::WorkstreamRevisionConflict);
@@ -709,6 +994,261 @@ fn launch_reserved_runtime(
     Ok(())
 }
 
+fn launch_reserved_opencode_runtime(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    record: &crate::state::RuntimeRecord,
+    endpoint: &OpenCodeEndpoint,
+    session: &ProviderSessionId,
+    handle_revision: Revision,
+) -> Result<(), ActionError> {
+    opencode::ensure_port_available(endpoint)?;
+    let paths = RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?;
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+    let program = runtime_launch_program(
+        root.base(),
+        record.runtime_id,
+        opencode::native_command("opencode", &record.cwd, endpoint, session),
+    )?;
+    let launch = NativeLaunch {
+        cwd: record.cwd.clone(),
+        program,
+        environment: managed_codex_environment(),
+    };
+    if let Err(error) = runtime.start(&launch) {
+        let _ = runtime.park();
+        return Err(ActionError::Runtime(error));
+    }
+    let (pane_pid, process_birth) = match runtime.probe()? {
+        RuntimeProbe::Live {
+            pane_pid,
+            cwd,
+            process_birth: Some(process_birth),
+            ..
+        } if cwd == record.cwd => (pane_pid, process_birth),
+        RuntimeProbe::Live { .. } | RuntimeProbe::Missing | RuntimeProbe::Unknown { .. } => {
+            let _ = runtime.park();
+            return Err(ActionError::RuntimeProbeAmbiguous);
+        }
+    };
+    registry.record_runtime_process_birth(record.runtime_id, record.revision, &process_birth)?;
+    runtime.release_launch()?;
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !opencode::endpoint_owned_by_process(endpoint, pane_pid, &process_birth) {
+        if Instant::now() >= deadline {
+            let _ = runtime.park();
+            return Err(ActionError::RuntimeProbeAmbiguous);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+    // The app-level observer is intentionally disconnected from the native
+    // pane.  It owns only health/SSE corroboration and writes bounded status
+    // to the private handle row.
+    let observer = OpenCodeObserverLaunch {
+        root: root.base().to_owned(),
+        runtime_id: record.runtime_id,
+        generation: record.tmux_generation.clone(),
+        endpoint: endpoint.clone(),
+        session: session.clone(),
+        pane_pid,
+        cwd: record.cwd.clone(),
+        process_birth,
+        handle_revision,
+    };
+    spawn_opencode_observer(registry, &observer)?;
+    Ok(())
+}
+
+struct OpenCodeObserverLaunch {
+    root: PathBuf,
+    runtime_id: RuntimeId,
+    generation: String,
+    endpoint: OpenCodeEndpoint,
+    session: ProviderSessionId,
+    pane_pid: u32,
+    cwd: PathBuf,
+    process_birth: String,
+    handle_revision: Revision,
+}
+
+fn spawn_opencode_observer(
+    registry: &mut HostRegistry,
+    observer: &OpenCodeObserverLaunch,
+) -> Result<(), ActionError> {
+    let executable = env::current_exe().map_err(ActionError::Io)?;
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg("--state-root")
+        .arg(&observer.root)
+        .arg("_opencode_observer")
+        .arg(observer.runtime_id.to_string())
+        .arg(&observer.generation)
+        .arg(observer.endpoint.port.to_string())
+        .arg(observer.session.native_id())
+        .arg(observer.pane_pid.to_string())
+        .arg(observer.cwd.as_os_str())
+        .arg(&observer.process_birth)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = command.spawn().map_err(ActionError::Io)?;
+    let observer_pid = child.id();
+    let Some(observer_birth) = LinuxProcessProbe.process_birth(observer_pid) else {
+        terminate_spawned_observer(&mut child);
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    };
+    let starting = match registry.record_opencode_observer_started(
+        observer.runtime_id,
+        &observer.generation,
+        observer.handle_revision,
+        observer_pid,
+        &observer_birth,
+    ) {
+        Ok(starting) => starting,
+        Err(error) => {
+            terminate_spawned_observer(&mut child);
+            return Err(ActionError::State(error));
+        }
+    };
+    wait_for_spawned_observer_ready(
+        registry,
+        observer,
+        &mut child,
+        observer_pid,
+        &observer_birth,
+        &starting,
+    )
+}
+
+fn wait_for_spawned_observer_ready(
+    registry: &mut HostRegistry,
+    observer: &OpenCodeObserverLaunch,
+    child: &mut std::process::Child,
+    observer_pid: u32,
+    observer_birth: &str,
+    starting: &crate::state::OpenCodeRuntimeHandle,
+) -> Result<(), ActionError> {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let child_status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                terminate_spawned_observer(child);
+                return Err(ActionError::Io(error));
+            }
+        };
+        if let Some(_status) = child_status {
+            mark_spawned_observer_unknown(
+                registry,
+                observer,
+                observer_pid,
+                observer_birth,
+                starting.revision,
+            );
+            terminate_spawned_observer(child);
+            return Err(ActionError::RuntimeProbeAmbiguous);
+        }
+        let current = match registry.opencode_runtime_handle(observer.runtime_id) {
+            Ok(Some(current)) => current,
+            Ok(None) => {
+                terminate_spawned_observer(child);
+                return Err(ActionError::RuntimeProbeAmbiguous);
+            }
+            Err(error) => {
+                terminate_spawned_observer(child);
+                return Err(ActionError::State(error));
+            }
+        };
+        let exact_child = spawned_observer_identity_matches(
+            &current,
+            observer_pid,
+            observer_birth,
+            &LinuxProcessProbe,
+        );
+        if current.runtime_generation != observer.generation
+            || current.revision < starting.revision
+            || !exact_child
+        {
+            let _ = registry.mark_opencode_observer_unknown_exact(
+                observer.runtime_id,
+                &observer.generation,
+                current.revision,
+                observer_pid,
+                observer_birth,
+            );
+            terminate_spawned_observer(child);
+            return Err(ActionError::RuntimeProbeAmbiguous);
+        }
+        if current.observer_status == crate::state::OpenCodeObserverStatus::Ready {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let _ = registry.mark_opencode_observer_unknown_exact(
+                observer.runtime_id,
+                &observer.generation,
+                current.revision,
+                observer_pid,
+                observer_birth,
+            );
+            terminate_spawned_observer(child);
+            return Err(ActionError::RuntimeProbeAmbiguous);
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn mark_spawned_observer_unknown(
+    registry: &mut HostRegistry,
+    observer: &OpenCodeObserverLaunch,
+    observer_pid: u32,
+    observer_birth: &str,
+    fallback_revision: Revision,
+) {
+    let revision = registry
+        .opencode_runtime_handle(observer.runtime_id)
+        .ok()
+        .flatten()
+        .filter(|handle| {
+            handle.runtime_generation == observer.generation
+                && handle.observer_pid == Some(observer_pid)
+                && handle.observer_birth.as_deref() == Some(observer_birth)
+        })
+        .map_or(fallback_revision, |handle| handle.revision);
+    let _ = registry.mark_opencode_observer_unknown_exact(
+        observer.runtime_id,
+        &observer.generation,
+        revision,
+        observer_pid,
+        observer_birth,
+    );
+}
+
+fn terminate_spawned_observer(child: &mut std::process::Child) {
+    let deadline = Instant::now() + PARK_CONFIRM_TIMEOUT;
+    let still_live = !matches!(child.try_wait(), Ok(Some(_)));
+    if still_live {
+        #[cfg(unix)]
+        {
+            use nix::{sys::signal, unistd::Pid};
+            if let Ok(pid) = i32::try_from(child.id()) {
+                let _ = signal::kill(Pid::from_raw(pid), signal::Signal::SIGTERM);
+            }
+        }
+        while Instant::now() < deadline {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                break;
+            }
+            thread::sleep(PARK_CONFIRM_POLL_INTERVAL);
+        }
+        if !matches!(child.try_wait(), Ok(Some(_))) {
+            let _ = child.kill();
+        }
+    }
+    let _ = child.wait();
+}
+
 fn runtime_launch_program(
     state_root: &Path,
     runtime_id: RuntimeId,
@@ -746,6 +1286,13 @@ pub fn park(
     let record = registry
         .runtime_for_workstream(workstream_id)?
         .ok_or(ActionError::NoRuntime(workstream_id))?;
+    let opencode_handle = match record.provider {
+        ProviderKind::Codex => None,
+        ProviderKind::OpenCode => registry.opencode_runtime_handle(record.runtime_id)?,
+    };
+    if let Some(handle) = opencode_handle.as_ref() {
+        stop_opencode_observer(handle)?;
+    }
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
     let runtime = PrivateRuntime::new(
@@ -754,8 +1301,52 @@ pub fn park(
         RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
     );
     runtime.park()?;
+    if opencode_handle.is_some() {
+        registry.delete_opencode_runtime_handle(record.runtime_id, &record.tmux_generation)?;
+    }
     registry.park_runtime(record.runtime_id, record.revision)?;
     workstream_revision(registry, workstream_id)
+}
+
+fn stop_opencode_observer(handle: &crate::state::OpenCodeRuntimeHandle) -> Result<(), ActionError> {
+    let Some(pid) = handle.observer_pid else {
+        return Ok(());
+    };
+    let probe = LinuxProcessProbe;
+    let Some(expected_birth) = handle.observer_birth.as_deref() else {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    };
+    if expected_birth.is_empty() {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    // A missing or changed birth token proves that the persisted helper is
+    // already gone or that the PID was reused.  It is safe to continue
+    // parking, but never safe to signal that PID.
+    if !observer_identity_matches(&probe, pid, expected_birth) {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use nix::{errno::Errno, sys::signal, unistd::Pid};
+        let result = signal::kill(
+            Pid::from_raw(i32::try_from(pid).map_err(|_| ActionError::RuntimeProbeAmbiguous)?),
+            signal::Signal::SIGTERM,
+        );
+        if let Err(error) = result {
+            if error == Errno::ESRCH {
+                return Ok(());
+            }
+            return Err(ActionError::RuntimeProbeAmbiguous);
+        }
+        let deadline = Instant::now() + PARK_CONFIRM_TIMEOUT;
+        while observer_identity_matches(&probe, pid, expected_birth) {
+            if Instant::now() >= deadline {
+                return Err(ActionError::RuntimeProbeAmbiguous);
+            }
+            thread::sleep(PARK_CONFIRM_POLL_INTERVAL);
+        }
+    }
+    Ok(())
 }
 
 /// Archives a Workstream as a reversible navigator-visibility change. A live
@@ -1046,6 +1637,8 @@ pub enum ActionError {
     ProviderReadiness(crate::provider::ProviderReadinessError),
     #[error("provider {0} is not active in the Codex production adapter")]
     UnsupportedProvider(ProviderKind),
+    #[error("provider {0} does not expose the bounded native recovery flow")]
+    ProviderRecoveryUnavailable(ProviderKind),
     #[error("CODEX_HOME cannot be determined")]
     CodexHomeUnavailable,
     #[error("I/O: {0}")]
@@ -1082,6 +1675,8 @@ pub enum ActionError {
     Profile(#[from] ProfileError),
     #[error(transparent)]
     AppServer(#[from] AppServerError),
+    #[error(transparent)]
+    OpenCode(#[from] OpenCodeError),
     #[error(transparent)]
     Runtime(#[from] crate::runtime::RuntimeError),
     #[error(transparent)]
@@ -1495,5 +2090,67 @@ mod tests {
             .expect("failed launch retains its Runtime record");
         assert_eq!(runtime.provider, selected_provider);
         assert_eq!(runtime.status, crate::domain::RuntimeStatus::Unknown);
+    }
+
+    struct FixedBirth(Option<String>);
+
+    impl ProcessProbe for FixedBirth {
+        fn process_birth(&self, _pid: u32) -> Option<String> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn observer_cleanup_refuses_missing_or_reused_birth_without_signalling() {
+        assert!(!observer_identity_matches(&FixedBirth(None), 77, "birth-a"));
+        assert!(!observer_identity_matches(
+            &FixedBirth(Some("birth-b".to_owned())),
+            77,
+            "birth-a"
+        ));
+        assert!(!observer_identity_matches(
+            &FixedBirth(Some("birth-a".to_owned())),
+            77,
+            ""
+        ));
+        assert!(observer_identity_matches(
+            &FixedBirth(Some("birth-a".to_owned())),
+            77,
+            "birth-a"
+        ));
+    }
+
+    #[test]
+    fn spawned_observer_ready_requires_the_exact_live_pid_and_birth() {
+        let handle = crate::state::OpenCodeRuntimeHandle {
+            runtime_id: RuntimeId::new(),
+            runtime_generation: "generation".to_owned(),
+            endpoint_host: crate::provider::opencode::LOOPBACK_HOST.to_owned(),
+            endpoint_port: 4321,
+            version: crate::provider::opencode::SUPPORTED_VERSION.to_owned(),
+            native_session_id: ProviderSessionId::new(ProviderKind::OpenCode, "session").unwrap(),
+            observer_pid: Some(77),
+            observer_birth: Some("birth-a".to_owned()),
+            observer_status: crate::state::OpenCodeObserverStatus::Ready,
+            revision: Revision::INITIAL,
+        };
+        assert!(spawned_observer_identity_matches(
+            &handle,
+            77,
+            "birth-a",
+            &FixedBirth(Some("birth-a".to_owned())),
+        ));
+        assert!(!spawned_observer_identity_matches(
+            &handle,
+            77,
+            "birth-a",
+            &FixedBirth(None),
+        ));
+        assert!(!spawned_observer_identity_matches(
+            &handle,
+            78,
+            "birth-a",
+            &FixedBirth(Some("birth-a".to_owned())),
+        ));
     }
 }

@@ -20,3 +20,13 @@ pub struct LifecycleObservation {
     pub turn_id: Option<String>,
     pub source: Option<String>,
 }
+
+/// Provider-neutral bounded lifecycle hint emitted by a passive observer.
+/// Provider adapters discard their raw event payload before constructing one.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LifecycleHint {
+    Started,
+    Working,
+    Settled { message_id: Option<String> },
+    Ended,
+}

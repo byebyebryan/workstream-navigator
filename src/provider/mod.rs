@@ -1,4 +1,4 @@
-//! Provider adapters. V1 contains one concrete Codex implementation.
+//! Provider adapters. Each provider has a concrete, bounded capability probe.
 
 use std::process::Command;
 
@@ -17,6 +17,7 @@ use crate::{
 pub mod codex;
 pub mod lifecycle;
 pub mod names;
+pub mod opencode;
 
 /// Dynamically observed provider readiness evidence. This is intentionally
 /// read-only and bounded; it never carries process output, paths, prompts, or
@@ -28,7 +29,68 @@ pub mod names;
 pub fn discover_capabilities(
     registry: &HostRegistry,
 ) -> Result<Vec<ProviderCapability>, StateError> {
-    discover_capabilities_with(registry, command_available)
+    discover_capabilities_with_probe(registry, command_available, opencode::probe_version())
+}
+
+/// Capability discovery with an injected `OpenCode` probe outcome.  The
+/// Codex-only boolean seam remains available for existing deterministic tests,
+/// while production discovery classifies the fixed `opencode --version`
+/// result without consulting provider configuration or credentials.
+///
+/// # Errors
+///
+/// Returns an error when the host registry cannot read Codex observer state.
+#[allow(clippy::needless_pass_by_value)]
+#[allow(clippy::missing_errors_doc)]
+pub fn discover_capabilities_with_probe(
+    registry: &HostRegistry,
+    command_available: impl Fn(&str) -> bool,
+    opencode_probe: opencode::VersionProbe,
+) -> Result<Vec<ProviderCapability>, StateError> {
+    let tmux_available = command_available("tmux");
+    let codex = codex_capability(registry, command_available("codex"), tmux_available)?;
+    let opencode = match opencode_probe {
+        opencode::VersionProbe::Available if tmux_available => ProviderCapability {
+            kind: ProviderKind::OpenCode,
+            status: ProviderCapabilityStatus::Available,
+            reason: ProviderCapabilityReason::None,
+            fresh_launch: true,
+            exact_resume: true,
+            observe: true,
+            metadata_read: true,
+            rename: false,
+            fork: false,
+        },
+        opencode::VersionProbe::Available => capability(
+            ProviderKind::OpenCode,
+            ProviderCapabilityStatus::Unavailable,
+            ProviderCapabilityReason::RuntimePrerequisiteMissing,
+        ),
+        opencode::VersionProbe::NotInstalled => capability(
+            ProviderKind::OpenCode,
+            ProviderCapabilityStatus::Unavailable,
+            ProviderCapabilityReason::NotInstalled,
+        ),
+        opencode::VersionProbe::UnsupportedVersion => capability(
+            ProviderKind::OpenCode,
+            ProviderCapabilityStatus::Unavailable,
+            ProviderCapabilityReason::UnsupportedVersion,
+        ),
+        opencode::VersionProbe::ProbeFailed => capability(
+            ProviderKind::OpenCode,
+            ProviderCapabilityStatus::Unknown,
+            ProviderCapabilityReason::ProbeFailed,
+        ),
+    };
+    let capabilities = vec![codex, opencode];
+    debug_assert_eq!(
+        capabilities
+            .iter()
+            .map(|capability| capability.kind)
+            .collect::<Vec<_>>(),
+        KNOWN_PROVIDER_KINDS,
+    );
+    Ok(capabilities)
 }
 
 /// Deterministic capability-discovery seam used by tests and host snapshots.
@@ -41,15 +103,41 @@ pub fn discover_capabilities_with(
     registry: &HostRegistry,
     command_available: impl Fn(&str) -> bool,
 ) -> Result<Vec<ProviderCapability>, StateError> {
-    let codex_installed = command_available("codex");
-    let runtime_ready = command_available("tmux");
+    let codex = codex_capability(
+        registry,
+        command_available("codex"),
+        command_available("tmux"),
+    )?;
+    let capabilities = vec![
+        codex,
+        capability(
+            ProviderKind::OpenCode,
+            ProviderCapabilityStatus::Unavailable,
+            ProviderCapabilityReason::AdapterUnavailable,
+        ),
+    ];
+    debug_assert_eq!(
+        capabilities
+            .iter()
+            .map(|capability| capability.kind)
+            .collect::<Vec<_>>(),
+        KNOWN_PROVIDER_KINDS,
+    );
+    Ok(capabilities)
+}
+
+fn codex_capability(
+    registry: &HostRegistry,
+    codex_installed: bool,
+    runtime_ready: bool,
+) -> Result<ProviderCapability, StateError> {
     let observer_ready = matches!(
         registry
             .codex_integration()?
             .map(|integration| integration.lifecycle),
         Some(IntegrationLifecycle::Ready)
     );
-    let codex = if !codex_installed {
+    Ok(if !codex_installed {
         capability(
             ProviderKind::Codex,
             ProviderCapabilityStatus::Unavailable,
@@ -79,21 +167,7 @@ pub fn discover_capabilities_with(
             rename: true,
             fork: true,
         }
-    };
-    let opencode = capability(
-        ProviderKind::OpenCode,
-        ProviderCapabilityStatus::Unavailable,
-        ProviderCapabilityReason::AdapterUnavailable,
-    );
-    let capabilities = vec![codex, opencode];
-    debug_assert_eq!(
-        capabilities
-            .iter()
-            .map(|capability| capability.kind)
-            .collect::<Vec<_>>(),
-        KNOWN_PROVIDER_KINDS,
-    );
-    Ok(capabilities)
+    })
 }
 
 fn capability(
@@ -280,9 +354,40 @@ pub fn require_new_eligible(
     registry: &HostRegistry,
     kind: ProviderKind,
 ) -> Result<(), ProviderReadinessError> {
-    require_new_eligible_with(registry, kind, command_available)
+    require_new_eligible_from_capabilities(registry, kind, discover_capabilities(registry))
 }
 
+fn require_new_eligible_from_capabilities(
+    _registry: &HostRegistry,
+    kind: ProviderKind,
+    capabilities: Result<Vec<ProviderCapability>, StateError>,
+) -> Result<(), ProviderReadinessError> {
+    let capability = capabilities
+        .ok()
+        .and_then(|capabilities| {
+            capabilities
+                .into_iter()
+                .find(|capability| capability.kind == kind)
+        })
+        .unwrap_or_else(|| {
+            capability(
+                kind,
+                ProviderCapabilityStatus::Unknown,
+                ProviderCapabilityReason::ProbeFailed,
+            )
+        });
+    if capability.is_new_eligible() {
+        Ok(())
+    } else {
+        Err(ProviderReadinessError {
+            kind: capability.kind,
+            status: capability.status,
+            reason: capability.reason,
+        })
+    }
+}
+
+#[cfg(test)]
 fn require_new_eligible_with(
     registry: &HostRegistry,
     kind: ProviderKind,
@@ -604,5 +709,47 @@ mod tests {
                 reason: ProviderCapabilityReason::AdapterUnavailable,
             })
         );
+    }
+
+    #[test]
+    fn injected_opencode_probe_is_independent_of_codex_observer_state() {
+        let (_temporary, registry) = registry();
+        let capabilities = discover_capabilities_with_probe(
+            &registry,
+            |program| program == "tmux",
+            opencode::VersionProbe::Available,
+        )
+        .unwrap();
+        assert_eq!(
+            capabilities[0].reason,
+            ProviderCapabilityReason::NotInstalled
+        );
+        assert_eq!(capabilities[1].status, ProviderCapabilityStatus::Available);
+        assert!(capabilities[1].fresh_launch);
+        assert!(capabilities[1].exact_resume);
+        assert!(capabilities[1].observe);
+        assert!(capabilities[1].metadata_read);
+        assert!(!capabilities[1].rename);
+        assert!(!capabilities[1].fork);
+    }
+
+    #[test]
+    fn opencode_version_is_not_ready_without_private_tmux() {
+        let (_temporary, registry) = registry();
+        let capabilities = discover_capabilities_with_probe(
+            &registry,
+            |_| false,
+            opencode::VersionProbe::Available,
+        )
+        .unwrap();
+        assert_eq!(
+            capabilities[1].reason,
+            ProviderCapabilityReason::RuntimePrerequisiteMissing
+        );
+        assert_eq!(
+            capabilities[1].status,
+            ProviderCapabilityStatus::Unavailable
+        );
+        assert!(!capabilities[1].fresh_launch);
     }
 }

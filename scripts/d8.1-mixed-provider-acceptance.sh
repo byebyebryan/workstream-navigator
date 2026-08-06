@@ -87,8 +87,12 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = urlparse(self.path).path
         if path == "/global/health": self.send_json({"healthy": True, "version": "1.18.11"})
-        elif path == "/session/status": self.send_json({s: {"type": "idle"} for s in load()["sessions"]})
+        elif path == "/session/status": self.send_json({})
         elif path.startswith("/session/") and path.endswith("/message"): self.send_json([])
+        elif path.startswith("/session/"):
+            state = load(); session = path.rsplit("/", 1)[-1]
+            if session not in state["sessions"]: self.send_error(404); return
+            self.send_json({"id": session, "directory": state.get("directory", os.getcwd())})
         elif path == "/global/event":
             self.send_response(200); self.send_header("Content-Type", "text/event-stream")
             self.send_header("Transfer-Encoding", "chunked"); self.send_header("Connection", "keep-alive"); self.end_headers()
@@ -98,7 +102,7 @@ class Handler(BaseHTTPRequestHandler):
         if urlparse(self.path).path != "/session": self.send_error(404); return
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
         state = load(); state["counter"] += 1; session = f"mixed-opencode-session-{state['counter']}"
-        state["sessions"].append(session); save(state); self.send_json({"id": session})
+        state["sessions"].append(session); state["directory"] = os.getcwd(); save(state); self.send_json({"id": session})
 if sys.argv[1:] == ["--version"]: print("opencode 1.18.11"); raise SystemExit(0)
 args = sys.argv[1:]; port = int(args[args.index("--port") + 1])
 session = None if args[0] == "serve" else args[args.index("--session") + 1]

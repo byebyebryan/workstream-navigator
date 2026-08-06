@@ -766,9 +766,11 @@ fn validate_opencode_live_runtime(
         && endpoint_owned_by_process(&endpoint, *pane_pid, process_birth)
         && session_exact
         && OpenCodeClient::new(endpoint.clone()).health().is_ok()
-        && !matches!(
-            OpenCodeClient::new(endpoint).session_status(&handle.native_session_id),
-            Ok(crate::provider::opencode::OpenCodeSessionStatus::Unknown) | Err(_)
+        && matches!(
+            OpenCodeClient::new(endpoint)
+                .session_status_with_root(&handle.native_session_id, &runtime.cwd),
+            Ok(crate::provider::opencode::OpenCodeSessionStatus::Busy
+                | crate::provider::opencode::OpenCodeSessionStatus::Idle)
         );
     if !exact {
         crate::provider::opencode::mark_unknown_handle(registry, &handle, &runtime.tmux_generation);

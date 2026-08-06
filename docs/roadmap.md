@@ -1146,6 +1146,17 @@ processes, and private tmux servers. A failed identity, native-workflow,
 privacy, persistence, or cleanup assertion in a future rerun keeps the adapter
 inactive and narrows it rather than weakening a core invariant.
 
+Production-status correction (2026-08-05): a disposable fresh OpenCode
+`1.18.11` start falsified the earlier assumption that a known idle root always
+appears in `/session/status`; the real endpoint returned an empty status map
+while `GET /session/:id` returned exact root metadata (`id`, `directory`, and
+no `parentID`; an explicit JSON `null` is also accepted). A child response in
+the same probe carried a non-null `parentID` matching its root. The adapter now
+corroborates that exact metadata before interpreting the status map, and treats
+an absent root entry as `Idle` only after that proof. Wrong identity/directory,
+child sessions, missing or malformed metadata, and unknown/malformed statuses
+remain fail-closed. D8.1 stays active; D8.2 remains inactive.
+
 ### D8.1 - Provider-aware New and OpenCode New/Resume vertical slice
 
 Status: Active after explicit activation on 2026-08-05. The prerequisite
@@ -1210,14 +1221,23 @@ independent local and RemoteAttach native attachment/detachment, exact pane
 and observer process/port/socket cleanup, bounded launch-flag/privacy checks,
 unsupported OpenCode no-effect actions, and ordinary-tmux non-interference.
 
-The remaining gate is operator-gated real-provider/real-SSH acceptance on an
-explicitly disposable host: rerun allowlisted OpenCode `1.18.11` Register/New,
-exact resume, helper crash/Unknown, attach/detach, park, and cleanup checks
-locally and over SSH with sanitized evidence; exercise one mixed-provider
-project without ordinary Codex/tmux state; and independently verify the fixed
-SSH TTY command and host identity. A provider upgrade or any failed identity,
-native-workflow, privacy, persistence, or cleanup assertion keeps D8.1 active
-and requires a fresh evidence rerun. D8.2 remains inactive.
+Real-provider acceptance (2026-08-06) passed the local and real-loopback-SSH
+OpenCode Register/New, exact resume, helper crash/Unknown, attach/detach, park,
+identity, fixed SSH TTY command, and complete process/socket/provider-root
+cleanup checks. A real same-project Codex/OpenCode pair also retained distinct
+bindings and native TUIs across Codex to OpenCode to Codex switching, with no
+model, prompt, or raw provider marker in WSNav state. The sanitized
+[D8.1 acceptance record](evidence/acceptance/d8.1-multi-provider.md) contains
+the bounded results.
+
+That mixed run also falsified the native-workflow assumption behind the exact
+profile lifecycle: native Codex `/model` selection wrote `model` and
+`model_reasoning_effort` before the managed `wsnav-observer` declaration.
+Exact profile removal correctly refused the modified file, and the complete
+disposable Codex home was removed only after all Runtimes stopped. D8.1
+remains active pending an explicit design decision; do not widen the accepted
+profile grammar, erase native model settings, or declare the checkpoint
+complete as a workaround. D8.2 remains inactive.
 
 ### D8.2 - OpenCode Fork, recovery, and integrated acceptance
 

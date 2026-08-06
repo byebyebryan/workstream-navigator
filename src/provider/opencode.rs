@@ -243,23 +243,96 @@ impl OpenCodeClient {
         }
     }
 
-    /// Reads the bounded status map and returns only the exact root session's
-    /// status. Child and unrelated sessions are ignored.
+    /// Reads the bounded status map and returns only the exact entry for the
+    /// supplied session.  This parser does not prove that the session is the
+    /// expected project root, so callers that make lifecycle decisions must
+    /// use [`Self::session_status_with_root`].
     ///
     /// # Errors
     ///
     /// Returns an error when the endpoint response is malformed or violates
     /// the bounded JSON contract.
-    pub fn session_status(
+    #[cfg(test)]
+    fn session_status(
         &self,
         session: &ProviderSessionId,
+    ) -> Result<OpenCodeSessionStatus, OpenCodeError> {
+        self.session_status_map(session, OpenCodeSessionStatus::Unknown)
+    }
+
+    /// Corroborates the exact root-session metadata before interpreting the
+    /// `/session/status` map.  `OpenCode` 1.18.11 omits an idle root from that
+    /// map, so an absent entry is treated as idle only after the metadata
+    /// proves the exact session ID, directory, and root (no parent).
+    ///
+    /// The metadata response is consumed locally and no provider payload is
+    /// returned or persisted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact root metadata or bounded status map is
+    /// missing, malformed, or identifies another session/project.
+    pub fn session_status_with_root(
+        &self,
+        session: &ProviderSessionId,
+        expected_directory: &Path,
+    ) -> Result<OpenCodeSessionStatus, OpenCodeError> {
+        self.verify_root_session(session, expected_directory)?;
+        self.session_status_map(session, OpenCodeSessionStatus::Idle)
+    }
+
+    fn verify_root_session(
+        &self,
+        session: &ProviderSessionId,
+        expected_directory: &Path,
+    ) -> Result<(), OpenCodeError> {
+        let path = format!("/session/{}", url_segment(session.native_id())?);
+        let body = self.json_request("GET", &path, None)?;
+        let value: Value =
+            serde_json::from_slice(&body).map_err(|_| OpenCodeError::MalformedResponse)?;
+        let id = value
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or(OpenCodeError::MalformedResponse)?;
+        if id != session.native_id() {
+            return Err(OpenCodeError::SessionIdentityMismatch);
+        }
+        let expected_directory = expected_directory
+            .to_str()
+            .ok_or(OpenCodeError::MalformedResponse)?;
+        let directory = value
+            .get("directory")
+            .and_then(Value::as_str)
+            .ok_or(OpenCodeError::MalformedResponse)?;
+        if directory != expected_directory {
+            return Err(OpenCodeError::SessionIdentityMismatch);
+        }
+        if value
+            .get("parentID")
+            .is_some_and(|parent_id| !parent_id.is_null())
+        {
+            return Err(OpenCodeError::SessionIdentityMismatch);
+        }
+        Ok(())
+    }
+
+    fn session_status_map(
+        &self,
+        session: &ProviderSessionId,
+        absent_status: OpenCodeSessionStatus,
     ) -> Result<OpenCodeSessionStatus, OpenCodeError> {
         let body = self.json_request("GET", "/session/status", None)?;
         let value: Value =
             serde_json::from_slice(&body).map_err(|_| OpenCodeError::MalformedResponse)?;
+        if !value.is_object() {
+            return Err(OpenCodeError::MalformedResponse);
+        }
         let Some(entry) = value.get(session.native_id()) else {
-            return Ok(OpenCodeSessionStatus::Unknown);
+            return Ok(absent_status);
         };
+        if !entry.is_object() {
+            return Err(OpenCodeError::MalformedResponse);
+        }
         let status = entry
             .get("type")
             .and_then(Value::as_str)
@@ -1044,6 +1117,8 @@ pub enum OpenCodeError {
     UnsupportedVersion,
     #[error("OpenCode session was not blank")]
     SessionNotBlank,
+    #[error("OpenCode session identity did not match the expected root")]
+    SessionIdentityMismatch,
     #[error("OpenCode loopback port is already occupied")]
     PortCollision,
     #[error("OpenCode serve exited before becoming ready ({0:?})")]
@@ -1207,6 +1282,116 @@ mod tests {
             OpenCodeSessionStatus::Busy
         );
         worker.join().unwrap();
+    }
+
+    fn root_status_case(
+        session_id: &str,
+        metadata_status: u16,
+        metadata_body: &str,
+        status_body: &str,
+        expected_directory: &Path,
+    ) -> Result<OpenCodeSessionStatus, OpenCodeError> {
+        let listener = TcpListener::bind((LOOPBACK_HOST, 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let metadata_body = metadata_body.as_bytes().to_vec();
+        let status_body = status_body.as_bytes().to_vec();
+        let expected_id = session_id.to_owned();
+        let expected_directory_text = expected_directory
+            .to_str()
+            .expect("test directory is UTF-8")
+            .to_owned();
+        let expect_status = metadata_status == 200
+            && serde_json::from_slice::<Value>(&metadata_body)
+                .ok()
+                .is_some_and(|value| {
+                    value.get("id").and_then(Value::as_str) == Some(expected_id.as_str())
+                        && value.get("directory").and_then(Value::as_str)
+                            == Some(expected_directory_text.as_str())
+                        && value.get("parentID").is_none_or(Value::is_null)
+                });
+        let worker = std::thread::spawn(move || {
+            for _ in 0..=usize::from(expect_status) {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = Vec::new();
+                let mut chunk = [0_u8; 1024];
+                while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                    let count = stream.read(&mut chunk).unwrap();
+                    request.extend_from_slice(&chunk[..count]);
+                }
+                let request = String::from_utf8_lossy(&request);
+                let (status, body) = if request.starts_with("GET /session/status") {
+                    (200, status_body.as_slice())
+                } else {
+                    (metadata_status, metadata_body.as_slice())
+                };
+                let reason = if status == 200 { "OK" } else { "Not Found" };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.write_all(body).unwrap();
+            }
+        });
+        let client = OpenCodeClient::new(OpenCodeEndpoint::loopback(port).unwrap());
+        let session =
+            ProviderSessionId::new(crate::domain::ProviderKind::OpenCode, session_id).unwrap();
+        let result = client.session_status_with_root(&session, expected_directory);
+        worker.join().unwrap();
+        result
+    }
+
+    #[test]
+    fn root_session_status_requires_exact_metadata_and_fails_closed() {
+        let directory = Path::new("/project");
+        let metadata = r#"{"id":"root","directory":"/project"}"#;
+        for (status_body, expected) in [
+            (r#"{"child":{"type":"busy"}}"#, OpenCodeSessionStatus::Idle),
+            (r#"{"root":{"type":"idle"}}"#, OpenCodeSessionStatus::Idle),
+            (r#"{"root":{"type":"busy"}}"#, OpenCodeSessionStatus::Busy),
+            (r#"{"root":{"type":"retry"}}"#, OpenCodeSessionStatus::Busy),
+            (
+                r#"{"root":{"type":"future-status"}}"#,
+                OpenCodeSessionStatus::Unknown,
+            ),
+        ] {
+            assert_eq!(
+                root_status_case("root", 200, metadata, status_body, directory).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            root_status_case(
+                "root",
+                200,
+                r#"{"id":"root","directory":"/project","parentID":null}"#,
+                "{}",
+                directory,
+            )
+            .unwrap(),
+            OpenCodeSessionStatus::Idle
+        );
+        for (metadata_status, metadata_body) in [
+            (200, r#"{"id":"other","directory":"/project"}"#),
+            (200, r#"{"id":"root","directory":"/other"}"#),
+            (
+                200,
+                r#"{"id":"root","directory":"/project","parentID":"parent"}"#,
+            ),
+            (
+                200,
+                r#"{"id":"root","directory":"/project","parentID":123}"#,
+            ),
+            (404, "{}"),
+            (200, "not-json"),
+        ] {
+            assert!(
+                root_status_case("root", metadata_status, metadata_body, "{}", directory).is_err()
+            );
+        }
+        for status_body in [r#"{"root":{}}"#, "[]"] {
+            assert!(root_status_case("root", 200, metadata, status_body, directory).is_err());
+        }
     }
 
     #[test]

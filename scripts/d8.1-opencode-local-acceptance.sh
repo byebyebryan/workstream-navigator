@@ -87,18 +87,32 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/global/health":
             self.json_response({"healthy": True, "version": "1.18.11"})
             return
-        if path.endswith("/message") and path.startswith("/session/"):
-            self.json_response([])
-            return
         if path == "/session/status":
             state = load_db()
             statuses = {
                 session: {"type": state.get("status", {}).get(session, "idle")}
                 for session in state["sessions"]
+                if state.get("status", {}).get(session, "idle") != "idle"
             }
             statuses["child-session"] = {"type": "busy"}
             statuses["unrelated-session"] = {"type": "busy"}
             self.json_response(statuses)
+            return
+        if path.endswith("/message") and path.startswith("/session/"):
+            self.json_response([])
+            return
+        if path.startswith("/session/"):
+            state = load_db()
+            session = path.rsplit("/", 1)[-1]
+            if session not in state["sessions"]:
+                self.send_error(404)
+                return
+            self.json_response(
+                {
+                    "id": session,
+                    "directory": state.get("directory", str(Path.cwd())),
+                }
+            )
             return
         if path == "/global/event":
             self.send_response(200)
@@ -179,6 +193,7 @@ class Handler(BaseHTTPRequestHandler):
         state["counter"] += 1
         session = f"fake-session-{state['counter']}"
         state["sessions"].append(session)
+        state["directory"] = str(Path.cwd())
         state.setdefault("status", {})[session] = "idle"
         save_db(state)
         self.json_response({"id": session})

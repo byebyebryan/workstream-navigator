@@ -94,7 +94,7 @@ pub fn run_observer(
     loop {
         if client.health().is_ok()
             && matches!(
-                client.session_status(&context.session),
+                client.session_status_with_root(&context.session, &context.cwd),
                 Ok(OpenCodeSessionStatus::Busy | OpenCodeSessionStatus::Idle)
             )
             && endpoint_owned_by_process(&context.endpoint, context.pane_pid, pane_birth)
@@ -275,7 +275,9 @@ fn poll_root_status(
     client: &OpenCodeClient,
     status_failures: &mut u8,
 ) -> Result<bool, OpenCodeObserverError> {
-    let Ok(status) = client.session_status(&evidence.context.session) else {
+    let Ok(status) =
+        client.session_status_with_root(&evidence.context.session, &evidence.context.cwd)
+    else {
         *status_failures = status_failures.saturating_add(1);
         return Ok(*status_failures < STATUS_FAILURE_LIMIT);
     };
@@ -350,7 +352,8 @@ fn settle_if_idle(
     candidate_message_id: &mut Option<String>,
     client: &OpenCodeClient,
 ) -> Result<(), OpenCodeError> {
-    let status = client.session_status(&evidence.context.session)?;
+    let status =
+        client.session_status_with_root(&evidence.context.session, &evidence.context.cwd)?;
     match status {
         OpenCodeSessionStatus::Idle => {
             let Some(message_id) = candidate_message_id.take() else {

@@ -10,8 +10,9 @@ use uuid::Uuid;
 
 use crate::domain::{
     AttentionState, Clock, CompoundOperation, DomainError, HostId, IdGenerator, LocationId,
-    OperationId, OperationKind, OperationPhase, ProjectId, RandomIdGenerator, Revision, RuntimeId,
-    RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle, WorkstreamOrigin,
+    OperationId, OperationKind, OperationPhase, ProjectId, ProviderKind, ProviderSessionId,
+    RandomIdGenerator, Revision, RuntimeId, RuntimeStatus, SystemClock, WorkstreamId,
+    WorkstreamLifecycle, WorkstreamOrigin,
 };
 use crate::protocol::{
     Capabilities, HelloResponse, MAX_PROJECT_BROWSER_ENTRIES, ProjectDirectoriesResponse,
@@ -26,7 +27,7 @@ use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 /// The newest host-registry schema this build can open or create.
 ///
 /// This is safe release-probe metadata; it is not a host-state observation.
-pub const HOST_SCHEMA_VERSION: i64 = 9;
+pub const HOST_SCHEMA_VERSION: i64 = 10;
 const CLIENT_SCHEMA_VERSION: i64 = 4;
 const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
@@ -63,6 +64,7 @@ const HOST_SCHEMA_SQL: &str = "
     CREATE TABLE workstreams (
         workstream_id TEXT PRIMARY KEY,
         location_id TEXT NOT NULL REFERENCES project_locations(location_id),
+        provider TEXT NOT NULL,
         origin TEXT NOT NULL,
         source_workstream_id TEXT REFERENCES workstreams(workstream_id),
         lifecycle TEXT NOT NULL,
@@ -96,6 +98,7 @@ const HOST_SCHEMA_SQL: &str = "
     CREATE TABLE provider_bindings (
         binding_id TEXT PRIMARY KEY,
         runtime_id TEXT NOT NULL UNIQUE REFERENCES runtimes(runtime_id),
+        provider TEXT NOT NULL,
         native_session_id TEXT NOT NULL,
         start_source TEXT NOT NULL,
         last_settled_turn_id TEXT,
@@ -112,6 +115,7 @@ const HOST_SCHEMA_SQL: &str = "
         result_unseen_since_revision INTEGER,
         recovery_unseen_since_revision INTEGER,
         latest_native_session_id TEXT,
+        latest_native_session_provider TEXT,
         latest_turn_id TEXT,
         revision INTEGER NOT NULL CHECK (revision > 0)
     );
@@ -292,13 +296,14 @@ pub struct PendingRepositoryMetadata {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForkPlan {
     pub operation: CompoundOperation,
+    pub provider: ProviderKind,
     pub workstream_id: WorkstreamId,
     pub location_id: LocationId,
     pub origin: WorkstreamOrigin,
     pub source_workstream_id: WorkstreamId,
     pub project_root: PathBuf,
     pub source_runtime_id: Option<RuntimeId>,
-    pub source_native_session_id: Option<String>,
+    pub source_native_session_id: Option<ProviderSessionId>,
     pub last_settled_turn_id: Option<String>,
     pub source_native_name: Option<String>,
     /// Recorded immediately before the one non-idempotent provider fork.
@@ -312,6 +317,7 @@ pub struct ForkPlan {
 pub struct CreatedWorkstream {
     pub workstream_id: WorkstreamId,
     pub location_id: LocationId,
+    pub provider: ProviderKind,
     pub origin: WorkstreamOrigin,
     pub source_workstream_id: WorkstreamId,
     pub revision: Revision,
@@ -341,21 +347,85 @@ pub struct OperationOverview {
     pub revision: Revision,
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 struct PersistedForkPlan {
     schema_version: u8,
+    #[serde(default = "default_provider_kind")]
+    provider: ProviderKind,
     workstream_id: WorkstreamId,
     location_id: LocationId,
     origin: WorkstreamOrigin,
     source_workstream_id: WorkstreamId,
     project_root: PathBuf,
     source_runtime_id: Option<RuntimeId>,
-    source_native_session_id: Option<String>,
+    source_native_session_id: Option<ProviderSessionId>,
     last_settled_turn_id: Option<String>,
     #[serde(default)]
     source_native_name: Option<String>,
     #[serde(default)]
     fork_attempted_at_millis: Option<i64>,
+}
+
+impl<'de> Deserialize<'de> for PersistedForkPlan {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            schema_version: u8,
+            #[serde(default = "default_provider_kind")]
+            provider: ProviderKind,
+            workstream_id: WorkstreamId,
+            location_id: LocationId,
+            origin: WorkstreamOrigin,
+            source_workstream_id: WorkstreamId,
+            project_root: PathBuf,
+            source_runtime_id: Option<RuntimeId>,
+            #[serde(default)]
+            source_native_session_id: Option<serde_json::Value>,
+            last_settled_turn_id: Option<String>,
+            #[serde(default)]
+            source_native_name: Option<String>,
+            #[serde(default)]
+            fork_attempted_at_millis: Option<i64>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        let source_native_session_id = wire
+            .source_native_session_id
+            .map(|value| match value {
+                serde_json::Value::String(value) => {
+                    ProviderSessionId::new(ProviderKind::Codex, value)
+                }
+                value => {
+                    serde_json::from_value(value).map_err(DomainError::InvalidOperationOutcome)
+                }
+            })
+            .transpose()
+            .map_err(serde::de::Error::custom)?;
+        if source_native_session_id
+            .as_ref()
+            .is_some_and(|session| session.provider() != wire.provider)
+        {
+            return Err(serde::de::Error::custom(
+                StateError::ProviderIdentityMismatch,
+            ));
+        }
+        Ok(Self {
+            schema_version: wire.schema_version,
+            provider: wire.provider,
+            workstream_id: wire.workstream_id,
+            location_id: wire.location_id,
+            origin: wire.origin,
+            source_workstream_id: wire.source_workstream_id,
+            project_root: wire.project_root,
+            source_runtime_id: wire.source_runtime_id,
+            source_native_session_id,
+            last_settled_turn_id: wire.last_settled_turn_id,
+            source_native_name: wire.source_native_name,
+            fork_attempted_at_millis: wire.fork_attempted_at_millis,
+        })
+    }
 }
 
 impl PersistedForkPlan {
@@ -382,6 +452,7 @@ impl PersistedForkPlan {
     fn public_plan(&self, operation: CompoundOperation) -> ForkPlan {
         ForkPlan {
             operation,
+            provider: self.provider,
             workstream_id: self.workstream_id,
             location_id: self.location_id,
             origin: self.origin,
@@ -401,6 +472,7 @@ impl PersistedForkPlan {
 pub struct RuntimeRecord {
     pub runtime_id: RuntimeId,
     pub workstream_id: WorkstreamId,
+    pub provider: ProviderKind,
     pub tmux_generation: String,
     pub tmux_session: String,
     pub cwd: PathBuf,
@@ -413,12 +485,13 @@ pub struct RuntimeRecord {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProviderBinding {
     pub runtime_id: RuntimeId,
-    pub native_session_id: String,
+    pub provider: ProviderKind,
+    pub native_session_id: ProviderSessionId,
     pub start_source: String,
     pub last_settled_turn_id: Option<String>,
     pub observed_thread_name: Option<String>,
     pub name_state: NameState,
-    pub predecessor_native_session_id: Option<String>,
+    pub predecessor_native_session_id: Option<ProviderSessionId>,
     pub predecessor_effective_name: Option<String>,
     pub revision: Revision,
 }
@@ -430,6 +503,7 @@ pub struct ProviderBinding {
 pub struct WorkstreamOverview {
     pub workstream_id: WorkstreamId,
     pub location_id: LocationId,
+    pub provider: ProviderKind,
     pub project_repository_path: PathBuf,
     pub project_display_name: String,
     pub remote_identity_fingerprint: Option<String>,
@@ -451,6 +525,7 @@ pub struct WorkstreamOverview {
 struct PersistedWorkstreamOverview {
     workstream_id: String,
     location_id: String,
+    provider: String,
     project_repository_path: String,
     project_display_name: String,
     remote_identity_fingerprint: Option<String>,
@@ -833,6 +908,7 @@ impl HostRegistry {
     pub fn register_project_root(
         &mut self,
         project_root: &Path,
+        provider: ProviderKind,
     ) -> Result<ExternalWorkstream, StateError> {
         let display_name = project_root
             .file_name()
@@ -840,7 +916,13 @@ impl HostRegistry {
             .filter(|name| !name.trim().is_empty())
             .unwrap_or("local project")
             .to_owned();
-        self.register_external_workstream_with_metadata(project_root, &display_name, None, None)
+        self.register_external_workstream_with_metadata(
+            project_root,
+            &display_name,
+            None,
+            None,
+            provider,
+        )
     }
 
     #[cfg(test)]
@@ -851,7 +933,7 @@ impl HostRegistry {
         _legacy_repository_identity: String,
         _legacy_base_ref: String,
     ) -> Result<ExternalWorkstream, StateError> {
-        self.register_project_root(&project_root)
+        self.register_project_root(&project_root, ProviderKind::Codex)
     }
 
     /// Registers a project root with separately discovered project-level
@@ -868,6 +950,7 @@ impl HostRegistry {
         repository_display_name: &str,
         remote_identity_fingerprint: Option<&str>,
         remote_identity_display: Option<&str>,
+        provider: ProviderKind,
     ) -> Result<ExternalWorkstream, StateError> {
         validate_project_display_name(repository_display_name)?;
         validate_repository_fingerprint(remote_identity_fingerprint)?;
@@ -901,13 +984,14 @@ impl HostRegistry {
         transaction
             .execute(
                 "INSERT INTO workstreams (
-                    workstream_id, location_id, origin, source_workstream_id,
+                    workstream_id, location_id, provider, origin, source_workstream_id,
                     lifecycle, last_activity_sequence,
                     last_activity_at_millis, revision
-                 ) VALUES (?1, ?2, 'external', NULL, 'open', ?3, ?4, 1)",
+                 ) VALUES (?1, ?2, ?3, 'external', NULL, 'open', ?4, ?5, 1)",
                 params![
                     registration.workstream_id.to_string(),
                     registration.location_id.to_string(),
+                    provider.as_str(),
                     activity_sequence,
                     0_i64,
                 ],
@@ -999,6 +1083,8 @@ impl HostRegistry {
     }
 
     /// Creates a fresh Workstream at the source Project's registered root.
+    /// The destination provider is explicit and may differ from the source;
+    /// replaying a request with a different provider is rejected.
     /// The request key deduplicates an interrupted remote request without
     /// creating a branch, worktree, or repository side effect.
     ///
@@ -1014,6 +1100,7 @@ impl HostRegistry {
         request_key: &str,
         source_workstream_id: WorkstreamId,
         expected_source_revision: Revision,
+        provider: ProviderKind,
     ) -> Result<CreatedWorkstream, StateError> {
         let transaction = self
             .connection
@@ -1049,6 +1136,9 @@ impl HostRegistry {
                     .map(WorkstreamId::from)
                     .map_err(StateError::InvalidPersistedUuid)?,
             )?;
+            if created.provider != provider {
+                return Err(StateError::OperationRequestMismatch);
+            }
             transaction.commit().map_err(StateError::Sqlite)?;
             return Ok(created);
         }
@@ -1065,12 +1155,13 @@ impl HostRegistry {
         transaction
             .execute(
                 "INSERT INTO workstreams (
-                    workstream_id, location_id, origin, source_workstream_id,
+                    workstream_id, location_id, provider, origin, source_workstream_id,
                     lifecycle, last_activity_sequence, last_activity_at_millis, revision
-                 ) VALUES (?1, ?2, 'independent', ?3, 'open', ?4, 0, 1)",
+                 ) VALUES (?1, ?2, ?3, 'independent', ?4, 'open', ?5, 0, 1)",
                 params![
                     workstream_id.to_string(),
                     source.location_id.to_string(),
+                    provider.as_str(),
                     source_workstream_id.to_string(),
                     activity_sequence,
                 ],
@@ -1092,6 +1183,7 @@ impl HostRegistry {
         let created = CreatedWorkstream {
             workstream_id,
             location_id: source.location_id,
+            provider,
             origin: WorkstreamOrigin::Independent,
             source_workstream_id,
             revision: Revision::INITIAL,
@@ -1108,12 +1200,13 @@ impl HostRegistry {
     ///
     /// Returns an error for a stale/unknown source, unavailable settled fork
     /// boundary, request mismatch, or state failure.
-    pub fn prepare_fork(
+    pub fn prepare_fork_with_provider(
         &mut self,
         request_key: String,
         kind: OperationKind,
         source_workstream_id: WorkstreamId,
         expected_source_revision: Revision,
+        provider: ProviderKind,
     ) -> Result<ForkPreparation, StateError> {
         if kind != OperationKind::Fork {
             return Err(StateError::InvalidForkPlanShape);
@@ -1135,6 +1228,9 @@ impl HostRegistry {
                 return Err(StateError::OperationRequestMismatch);
             }
             let plan = PersistedForkPlan::decode(operation.effect_watermark.as_deref())?;
+            if plan.provider != provider {
+                return Err(StateError::OperationRequestMismatch);
+            }
             transaction.commit().map_err(StateError::Sqlite)?;
             return Ok(ForkPreparation {
                 plan: plan.public_plan(operation),
@@ -1144,6 +1240,9 @@ impl HostRegistry {
 
         let plan =
             fork_plan_for_source(&transaction, source_workstream_id, expected_source_revision)?;
+        if plan.provider != provider {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
         let mut operation = CompoundOperation::new(request_key, kind, expected_revisions_json)?;
         operation.transition(
             OperationPhase::ExternalEffectStarted,
@@ -1174,6 +1273,25 @@ impl HostRegistry {
         })
     }
 
+    #[cfg(test)]
+    #[allow(clippy::missing_errors_doc)]
+    pub fn prepare_fork(
+        &mut self,
+        request_key: String,
+        kind: OperationKind,
+        source_workstream_id: WorkstreamId,
+        expected_source_revision: Revision,
+    ) -> Result<ForkPreparation, StateError> {
+        let provider = self.workstream_provider(source_workstream_id)?;
+        self.prepare_fork_with_provider(
+            request_key,
+            kind,
+            source_workstream_id,
+            expected_source_revision,
+            provider,
+        )
+    }
+
     /// Commits a confirmed provider fork together with its destination
     /// Workstream and an exact stopped Runtime binding. The ordinary start
     /// path then launches `codex resume` from that durable binding.
@@ -1190,8 +1308,8 @@ impl HostRegistry {
         if prepared.origin != WorkstreamOrigin::Fork {
             return Err(StateError::ForkPlanMismatch);
         }
-        validate_provider_metadata(destination_native_session_id)?;
-        self.commit_fork_with_destination(prepared, Some(destination_native_session_id), false)
+        let destination = ProviderSessionId::new(prepared.provider, destination_native_session_id)?;
+        self.commit_fork_with_destination(prepared, Some(&destination), false)
     }
 
     /// Commits a Fork plan only after explicit recovery has found exactly one
@@ -1209,14 +1327,14 @@ impl HostRegistry {
         if prepared.origin != WorkstreamOrigin::Fork {
             return Err(StateError::ForkPlanMismatch);
         }
-        validate_provider_metadata(destination_native_session_id)?;
-        self.commit_fork_with_destination(prepared, Some(destination_native_session_id), true)
+        let destination = ProviderSessionId::new(prepared.provider, destination_native_session_id)?;
+        self.commit_fork_with_destination(prepared, Some(&destination), true)
     }
 
     fn commit_fork_with_destination(
         &mut self,
         prepared: &ForkPlan,
-        destination_native_session_id: Option<&str>,
+        destination_native_session_id: Option<&ProviderSessionId>,
         allow_recovery_required: bool,
     ) -> Result<CreatedWorkstream, StateError> {
         let transaction = self
@@ -1247,7 +1365,10 @@ impl HostRegistry {
         {
             return Err(StateError::ForkOperationUnavailable);
         }
-        if persisted.origin != WorkstreamOrigin::Fork || destination_native_session_id.is_none() {
+        if persisted.origin != WorkstreamOrigin::Fork
+            || destination_native_session_id.is_none()
+            || destination_native_session_id.is_some_and(|id| id.provider() != persisted.provider)
+        {
             return Err(StateError::ForkPlanMismatch);
         }
         insert_fork_records(&transaction, &persisted, destination_native_session_id)?;
@@ -1346,9 +1467,11 @@ impl HostRegistry {
     ///
     /// Returns an error when the workstream is unknown, not open, already live,
     /// or durable state cannot be changed.
-    pub fn reserve_runtime(
+    #[allow(clippy::too_many_lines)]
+    pub fn reserve_runtime_with_provider(
         &mut self,
         workstream_id: WorkstreamId,
+        provider: ProviderKind,
     ) -> Result<RuntimeRecord, StateError> {
         let transaction = self
             .connection
@@ -1356,12 +1479,23 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?;
         let (project_root, workstream_lifecycle, archived_at_millis) =
             open_workstream_project_root(&transaction, workstream_id)?;
+        let workstream_provider: String = transaction
+            .query_row(
+                "SELECT provider FROM workstreams WHERE workstream_id = ?1",
+                [workstream_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StateError::Sqlite)?;
+        let workstream_provider = provider_kind_from_text(&workstream_provider)?;
+        if workstream_provider != provider {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
         if archived_at_millis.is_some() {
             return Err(StateError::WorkstreamArchived(workstream_id));
         }
         let current: Option<RuntimeRecord> = transaction
             .query_row(
-                "SELECT runtime_id, tmux_generation, tmux_session, cwd, process_birth, lifecycle, revision
+                "SELECT runtime_id, provider, tmux_generation, tmux_session, cwd, process_birth, lifecycle, revision
                  FROM runtimes WHERE workstream_id = ?1",
                 [workstream_id.to_string()],
                 |row| row_to_runtime(row, workstream_id),
@@ -1370,6 +1504,9 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?;
         let generation = Uuid::new_v4().to_string();
         let record = if let Some(current) = current {
+            if current.provider != workstream_provider {
+                return Err(StateError::ProviderIdentityMismatch);
+            }
             if !matches!(
                 current.status,
                 RuntimeStatus::Stopped | RuntimeStatus::Unknown
@@ -1406,6 +1543,7 @@ impl HostRegistry {
             let record = RuntimeRecord {
                 runtime_id,
                 workstream_id,
+                provider: workstream_provider,
                 tmux_generation: generation,
                 tmux_session: format!("wsnav-{runtime_id}"),
                 cwd: PathBuf::from(project_root),
@@ -1418,10 +1556,11 @@ impl HostRegistry {
                     "INSERT INTO runtimes (
                     runtime_id, workstream_id, provider, tmux_generation, tmux_session,
                     cwd, process_birth, lifecycle, revision
-                 ) VALUES (?1, ?2, 'codex', ?3, ?4, ?5, NULL, 'starting', 1)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 'starting', 1)",
                     params![
                         record.runtime_id.to_string(),
                         workstream_id.to_string(),
+                        record.provider.as_str(),
                         record.tmux_generation,
                         record.tmux_session,
                         record.cwd.to_string_lossy()
@@ -1439,6 +1578,16 @@ impl HostRegistry {
         Ok(record)
     }
 
+    #[cfg(test)]
+    #[allow(clippy::missing_errors_doc)]
+    pub fn reserve_runtime(
+        &mut self,
+        workstream_id: WorkstreamId,
+    ) -> Result<RuntimeRecord, StateError> {
+        let provider = self.workstream_provider(workstream_id)?;
+        self.reserve_runtime_with_provider(workstream_id, provider)
+    }
+
     /// Reserves a new private tmux generation for an explicitly recovering
     /// Workstream. The Workstream remains `recovery_required` until a verified
     /// native `SessionStart(source=resume)` binds the launched Codex process.
@@ -1447,34 +1596,41 @@ impl HostRegistry {
     ///
     /// Returns an error unless this Workstream has one runtime in the exact
     /// `unknown` state established by [`Self::mark_runtime_recovery_required`].
-    pub fn reserve_runtime_recovery(
+    pub fn reserve_runtime_recovery_with_provider(
         &mut self,
         workstream_id: WorkstreamId,
+        provider: ProviderKind,
     ) -> Result<RuntimeRecord, StateError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
-        let (project_root, archived_at_millis): (String, Option<i64>) = transaction
-            .query_row(
-                "SELECT project_locations.repository_path, workstreams.archived_at_millis
+        let (project_root, archived_at_millis, workstream_provider): (String, Option<i64>, String) =
+            transaction
+                .query_row(
+                    "SELECT project_locations.repository_path, workstreams.archived_at_millis,
+                        workstreams.provider
                  FROM workstreams
                  JOIN project_locations
                    ON project_locations.location_id = workstreams.location_id
                  WHERE workstreams.workstream_id = ?1
                    AND workstreams.lifecycle = 'recovery_required'",
-                [workstream_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .optional()
-            .map_err(StateError::Sqlite)?
-            .ok_or(StateError::RecoveryUnavailable(workstream_id))?;
+                    [workstream_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+                .map_err(StateError::Sqlite)?
+                .ok_or(StateError::RecoveryUnavailable(workstream_id))?;
         if archived_at_millis.is_some() {
             return Err(StateError::WorkstreamArchived(workstream_id));
         }
+        let workstream_provider = provider_kind_from_text(&workstream_provider)?;
+        if workstream_provider != provider {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
         let current: RuntimeRecord = transaction
             .query_row(
-                "SELECT runtime_id, tmux_generation, tmux_session, cwd, process_birth, lifecycle, revision
+                "SELECT runtime_id, provider, tmux_generation, tmux_session, cwd, process_birth, lifecycle, revision
                  FROM runtimes WHERE workstream_id = ?1 AND lifecycle = 'unknown'",
                 [workstream_id.to_string()],
                 |row| row_to_runtime(row, workstream_id),
@@ -1482,6 +1638,9 @@ impl HostRegistry {
             .optional()
             .map_err(StateError::Sqlite)?
             .ok_or(StateError::RecoveryUnavailable(workstream_id))?;
+        if current.provider != workstream_provider {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
         let next = RuntimeRecord {
             tmux_generation: Uuid::new_v4().to_string(),
             tmux_session: format!("wsnav-{}", current.runtime_id),
@@ -1514,6 +1673,16 @@ impl HostRegistry {
         Ok(next)
     }
 
+    #[cfg(test)]
+    #[allow(clippy::missing_errors_doc)]
+    pub fn reserve_runtime_recovery(
+        &mut self,
+        workstream_id: WorkstreamId,
+    ) -> Result<RuntimeRecord, StateError> {
+        let provider = self.workstream_provider(workstream_id)?;
+        self.reserve_runtime_recovery_with_provider(workstream_id, provider)
+    }
+
     /// Reads the single persisted runtime record for a workstream.
     ///
     /// # Errors
@@ -1524,15 +1693,35 @@ impl HostRegistry {
         &self,
         workstream_id: WorkstreamId,
     ) -> Result<Option<RuntimeRecord>, StateError> {
-        self.connection
+        let runtime = self
+            .connection
             .query_row(
-            "SELECT runtime_id, tmux_generation, tmux_session, cwd, process_birth, lifecycle, revision
+            "SELECT runtime_id, provider, tmux_generation, tmux_session, cwd, process_birth, lifecycle, revision
                  FROM runtimes WHERE workstream_id = ?1",
                 [workstream_id.to_string()],
                 |row| row_to_runtime(row, workstream_id),
             )
             .optional()
-            .map_err(StateError::Sqlite)
+            .map_err(StateError::Sqlite)?;
+        if let Some(runtime) = &runtime {
+            let provider = self.workstream_provider(workstream_id)?;
+            if provider != runtime.provider {
+                return Err(StateError::ProviderIdentityMismatch);
+            }
+        }
+        Ok(runtime)
+    }
+
+    fn workstream_provider(&self, workstream_id: WorkstreamId) -> Result<ProviderKind, StateError> {
+        let value: String = self
+            .connection
+            .query_row(
+                "SELECT provider FROM workstreams WHERE workstream_id = ?1",
+                [workstream_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StateError::Sqlite)?;
+        provider_kind_from_text(&value)
     }
 
     /// Reads one exact persisted Runtime by its opaque identity.
@@ -1548,10 +1737,11 @@ impl HostRegistry {
         &self,
         runtime_id: RuntimeId,
     ) -> Result<Option<RuntimeRecord>, StateError> {
-        self.connection
+        let runtime = self
+            .connection
             .query_row(
-                "SELECT workstream_id, tmux_generation, tmux_session, cwd, process_birth,
-                        lifecycle, revision
+                "SELECT workstream_id, provider, tmux_generation, tmux_session, cwd,
+                        process_birth, lifecycle, revision
                  FROM runtimes WHERE runtime_id = ?1",
                 [runtime_id.to_string()],
                 |row| {
@@ -1563,7 +1753,14 @@ impl HostRegistry {
                 },
             )
             .optional()
-            .map_err(StateError::Sqlite)
+            .map_err(StateError::Sqlite)?;
+        if let Some(runtime) = &runtime {
+            let provider = self.workstream_provider(runtime.workstream_id)?;
+            if provider != runtime.provider {
+                return Err(StateError::ProviderIdentityMismatch);
+            }
+        }
+        Ok(runtime)
     }
 
     /// Returns only current, process-fingerprinted private Runtimes that may
@@ -1579,7 +1776,7 @@ impl HostRegistry {
             .connection
             .prepare(
                 "SELECT runtime_id, workstream_id, tmux_generation, tmux_session,
-                        cwd, process_birth, lifecycle, revision
+                        provider, cwd, process_birth, lifecycle, revision
                  FROM runtimes
                  WHERE lifecycle IN ('starting', 'idle', 'working', 'attention')
                    AND process_birth IS NOT NULL",
@@ -1591,15 +1788,17 @@ impl HostRegistry {
                 let workstream_id: String = row.get(1)?;
                 let tmux_generation: String = row.get(2)?;
                 let tmux_session: String = row.get(3)?;
-                let cwd: String = row.get(4)?;
-                let process_birth: Option<String> = row.get(5)?;
-                let lifecycle: String = row.get(6)?;
-                let revision: i64 = row.get(7)?;
+                let provider: String = row.get(4)?;
+                let cwd: String = row.get(5)?;
+                let process_birth: Option<String> = row.get(6)?;
+                let lifecycle: String = row.get(7)?;
+                let revision: i64 = row.get(8)?;
                 Ok((
                     runtime_id,
                     workstream_id,
                     tmux_generation,
                     tmux_session,
+                    provider,
                     cwd,
                     process_birth,
                     lifecycle,
@@ -1613,6 +1812,7 @@ impl HostRegistry {
                     workstream_id,
                     tmux_generation,
                     tmux_session,
+                    provider,
                     cwd,
                     process_birth,
                     lifecycle,
@@ -1625,6 +1825,7 @@ impl HostRegistry {
                     workstream_id: Uuid::parse_str(&workstream_id)
                         .map(WorkstreamId::from)
                         .map_err(StateError::InvalidPersistedUuid)?,
+                    provider: provider_kind_from_text(&provider)?,
                     tmux_generation,
                     tmux_session,
                     cwd: PathBuf::from(cwd),
@@ -1807,6 +2008,7 @@ impl HostRegistry {
             .connection
             .prepare(
                 "SELECT workstreams.workstream_id, workstreams.location_id,
+                        workstreams.provider,
                         project_locations.repository_path,
                         project_locations.repository_display_name,
                         project_locations.remote_identity_fingerprint,
@@ -1828,15 +2030,16 @@ impl HostRegistry {
                 Ok(PersistedWorkstreamOverview {
                     workstream_id: row.get(0)?,
                     location_id: row.get(1)?,
-                    project_repository_path: row.get(2)?,
-                    project_display_name: row.get(3)?,
-                    remote_identity_fingerprint: row.get(4)?,
-                    remote_identity_display: row.get(5)?,
-                    lifecycle: row.get(6)?,
-                    archived_at_millis: row.get(7)?,
-                    activity_sequence: row.get(8)?,
-                    activity_at_millis: row.get(9)?,
-                    revision: row.get(10)?,
+                    provider: row.get(2)?,
+                    project_repository_path: row.get(3)?,
+                    project_display_name: row.get(4)?,
+                    remote_identity_fingerprint: row.get(5)?,
+                    remote_identity_display: row.get(6)?,
+                    lifecycle: row.get(7)?,
+                    archived_at_millis: row.get(8)?,
+                    activity_sequence: row.get(9)?,
+                    activity_at_millis: row.get(10)?,
+                    revision: row.get(11)?,
                 })
             })
             .map_err(StateError::Sqlite)?
@@ -1874,6 +2077,7 @@ impl HostRegistry {
             .map(LocationId::from)
             .map_err(StateError::InvalidPersistedUuid)?;
         let lifecycle = workstream_lifecycle_from_text(&base.lifecycle)?;
+        let provider = provider_kind_from_text(&base.provider)?;
         let revision = Revision::try_from(base.revision)?;
         let runtime = self.runtime_for_workstream(workstream_id)?;
         let binding = runtime
@@ -1882,9 +2086,17 @@ impl HostRegistry {
             .transpose()?
             .flatten();
         let attention = self.attention(workstream_id)?;
+        if attention
+            .as_ref()
+            .and_then(|state| state.latest_native_session_id.as_ref())
+            .is_some_and(|session| session.provider() != provider)
+        {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
         Ok(WorkstreamOverview {
             workstream_id,
             location_id,
+            provider,
             project_repository_path: PathBuf::from(base.project_repository_path),
             project_display_name: base.project_display_name,
             remote_identity_fingerprint: base
@@ -2078,7 +2290,7 @@ impl HostRegistry {
     pub fn record_thread_name(
         &mut self,
         runtime_id: RuntimeId,
-        native_session_id: &str,
+        native_session_id: &ProviderSessionId,
         name: &str,
     ) -> Result<(), StateError> {
         self.record_thread_metadata(runtime_id, native_session_id, Some(name))
@@ -2095,7 +2307,7 @@ impl HostRegistry {
     pub fn record_thread_metadata(
         &mut self,
         runtime_id: RuntimeId,
-        native_session_id: &str,
+        native_session_id: &ProviderSessionId,
         name: Option<&str>,
     ) -> Result<(), StateError> {
         let (name, name_state) = match name.filter(|value| !value.trim().is_empty()) {
@@ -2109,8 +2321,15 @@ impl HostRegistry {
             .connection
             .execute(
                 "UPDATE provider_bindings SET observed_thread_name = ?1, name_state = ?2,
-             revision = revision + 1 WHERE runtime_id = ?3 AND native_session_id = ?4",
-                params![name, name_state, runtime_id.to_string(), native_session_id],
+             revision = revision + 1 WHERE runtime_id = ?3 AND provider = ?4
+             AND native_session_id = ?5",
+                params![
+                    name,
+                    name_state,
+                    runtime_id.to_string(),
+                    native_session_id.provider().as_str(),
+                    native_session_id.native_id(),
+                ],
             )
             .map_err(StateError::Sqlite)?;
         if changed == 1 {
@@ -2292,8 +2511,9 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?;
         let runtime = transaction
             .query_row(
-                "SELECT runtimes.workstream_id, runtimes.tmux_generation, runtimes.cwd,
-                        runtimes.lifecycle, runtimes.revision, workstreams.lifecycle
+                "SELECT runtimes.workstream_id, runtimes.provider, runtimes.tmux_generation,
+                        runtimes.cwd, runtimes.lifecycle, runtimes.revision,
+                        workstreams.provider, workstreams.lifecycle
                  FROM runtimes JOIN workstreams ON workstreams.workstream_id = runtimes.workstream_id
                  WHERE runtimes.runtime_id = ?1",
                 [runtime_id.to_string()],
@@ -2303,8 +2523,10 @@ impl HostRegistry {
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
                         row.get::<_, String>(3)?,
-                        row.get::<_, i64>(4)?,
-                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
                     ))
                 },
             )
@@ -2314,24 +2536,35 @@ impl HostRegistry {
         let workstream_id = Uuid::parse_str(&runtime.0)
             .map(WorkstreamId::from)
             .map_err(StateError::InvalidPersistedUuid)?;
-        let revision = Revision::try_from(runtime.4)?;
-        if runtime.1 != generation || runtime.2 != observation.cwd {
+        let provider = provider_kind_from_text(&runtime.1)?;
+        let workstream_provider = provider_kind_from_text(&runtime.6)?;
+        if provider != workstream_provider {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+        let revision = Revision::try_from(runtime.5)?;
+        if runtime.2 != generation || runtime.3 != observation.cwd {
             return Err(StateError::HookEvidenceMismatch);
         }
         let existing = load_binding(&transaction, runtime_id)?;
+        if provider != ProviderKind::Codex {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+        let observed_session =
+            ProviderSessionId::new(provider, observation.native_session_id.clone())?;
         match observation.event {
             LifecycleEvent::SessionStart => apply_session_start(
                 &transaction,
                 &SessionStartContext {
                     runtime_id,
-                    runtime_status: &runtime.3,
+                    provider,
+                    runtime_status: &runtime.4,
                     runtime_revision: revision,
                     generation,
                     workstream_id,
-                    workstream_lifecycle: workstream_lifecycle_from_text(&runtime.5)?,
+                    workstream_lifecycle: workstream_lifecycle_from_text(&runtime.7)?,
                 },
                 existing,
-                &observation.native_session_id,
+                observed_session.native_id(),
                 observation.source.as_deref(),
             )?,
             LifecycleEvent::UserPromptSubmit => {
@@ -2354,7 +2587,7 @@ impl HostRegistry {
                 mark_result_attention_in_transaction(
                     &transaction,
                     workstream_id,
-                    observation.native_session_id,
+                    observed_session,
                     turn_id,
                 )?;
             }
@@ -2496,17 +2729,19 @@ impl HostRegistry {
     ///
     /// # Errors
     ///
-    /// Returns an error for an invalid provider identifier or failed state
-    /// transaction.
+    /// Returns an error when the Workstream is unknown, its persisted provider
+    /// differs from the session provider, or the state transaction fails.
     pub fn mark_result_attention(
         &mut self,
         workstream_id: WorkstreamId,
-        session_id: String,
+        session_id: ProviderSessionId,
         turn_id: String,
     ) -> Result<AttentionState, StateError> {
-        self.update_attention(workstream_id, |attention| {
-            attention.mark_result(session_id, turn_id)
-        })
+        self.update_attention_with_provider(
+            workstream_id,
+            Some(session_id.provider()),
+            |attention| attention.mark_result(session_id, turn_id),
+        )
     }
 
     /// Records a recovery-required attention condition.
@@ -2558,10 +2793,34 @@ impl HostRegistry {
         workstream_id: WorkstreamId,
         update: impl FnOnce(&mut AttentionState) -> Result<(), DomainError>,
     ) -> Result<AttentionState, StateError> {
+        self.update_attention_with_provider(workstream_id, None, update)
+    }
+
+    fn update_attention_with_provider(
+        &mut self,
+        workstream_id: WorkstreamId,
+        expected_provider: Option<ProviderKind>,
+        update: impl FnOnce(&mut AttentionState) -> Result<(), DomainError>,
+    ) -> Result<AttentionState, StateError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
+        if let Some(expected_provider) = expected_provider {
+            let stored_provider = transaction
+                .query_row(
+                    "SELECT provider FROM workstreams WHERE workstream_id = ?1",
+                    [workstream_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(StateError::Sqlite)?
+                .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
+            let stored_provider = provider_kind_from_text(&stored_provider)?;
+            if stored_provider != expected_provider {
+                return Err(StateError::ProviderIdentityMismatch);
+            }
+        }
         let mut attention = load_attention_from_transaction(&transaction, workstream_id)?
             .unwrap_or_else(|| AttentionState::new(workstream_id));
         let prior_revision = attention.revision;
@@ -2571,22 +2830,31 @@ impl HostRegistry {
                 "INSERT INTO attention_states (
                     workstream_id, result_unseen_since_revision,
                     recovery_unseen_since_revision, latest_native_session_id,
+                    latest_native_session_provider,
                     latest_turn_id, revision
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                  ON CONFLICT(workstream_id) DO UPDATE SET
                     result_unseen_since_revision = excluded.result_unseen_since_revision,
                     recovery_unseen_since_revision = excluded.recovery_unseen_since_revision,
                     latest_native_session_id = excluded.latest_native_session_id,
+                    latest_native_session_provider = excluded.latest_native_session_provider,
                     latest_turn_id = excluded.latest_turn_id,
                     revision = excluded.revision
-                 WHERE attention_states.revision = ?7",
+                 WHERE attention_states.revision = ?8",
                 params![
                     attention.workstream_id.to_string(),
                     attention.result_unseen_since_revision.map(Revision::value),
                     attention
                         .recovery_unseen_since_revision
                         .map(Revision::value),
-                    attention.latest_native_session_id,
+                    attention
+                        .latest_native_session_id
+                        .as_ref()
+                        .map(ProviderSessionId::native_id),
+                    attention
+                        .latest_native_session_id
+                        .as_ref()
+                        .map(|session| session.provider().as_str()),
                     attention.latest_turn_id,
                     attention.revision.value(),
                     prior_revision.value(),
@@ -2624,6 +2892,7 @@ fn open_workstream_project_root(
 
 struct ForkSource {
     location_id: LocationId,
+    provider: ProviderKind,
     revision: Revision,
     project_root: PathBuf,
     runtime_id: Option<RuntimeId>,
@@ -2652,6 +2921,7 @@ fn fork_plan_for_source(
     let workstream_id = WorkstreamId::new();
     Ok(PersistedForkPlan {
         schema_version: 1,
+        provider: source.provider,
         workstream_id,
         location_id: source.location_id,
         origin: WorkstreamOrigin::Fork,
@@ -2671,15 +2941,16 @@ fn created_workstream_from_record(
 ) -> Result<CreatedWorkstream, StateError> {
     let record = transaction
         .query_row(
-            "SELECT location_id, origin, source_workstream_id, revision
+            "SELECT location_id, provider, origin, source_workstream_id, revision
              FROM workstreams WHERE workstream_id = ?1",
             [workstream_id.to_string()],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, i64>(3)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, i64>(4)?,
                 ))
             },
         )
@@ -2689,8 +2960,9 @@ fn created_workstream_from_record(
     let location_id = Uuid::parse_str(&record.0)
         .map(LocationId::from)
         .map_err(StateError::InvalidPersistedUuid)?;
+    let provider = provider_kind_from_text(&record.1)?;
     let source_workstream_id = record
-        .2
+        .3
         .as_deref()
         .ok_or(StateError::ForkPlanMismatch)
         .and_then(|value| {
@@ -2698,7 +2970,7 @@ fn created_workstream_from_record(
                 .map(WorkstreamId::from)
                 .map_err(StateError::InvalidPersistedUuid)
         })?;
-    let origin = match record.1.as_str() {
+    let origin = match record.2.as_str() {
         "independent" => WorkstreamOrigin::Independent,
         "fork" => WorkstreamOrigin::Fork,
         _ => return Err(StateError::ForkPlanMismatch),
@@ -2706,9 +2978,10 @@ fn created_workstream_from_record(
     Ok(CreatedWorkstream {
         workstream_id,
         location_id,
+        provider,
         origin,
         source_workstream_id,
-        revision: Revision::try_from(record.3)?,
+        revision: Revision::try_from(record.4)?,
     })
 }
 
@@ -2719,11 +2992,11 @@ fn load_fork_source(
 ) -> Result<ForkSource, StateError> {
     let source = transaction
         .query_row(
-            "SELECT workstreams.location_id, workstreams.revision,
+            "SELECT workstreams.location_id, workstreams.provider, workstreams.revision,
                     project_locations.repository_path,
                     workstreams.archived_at_millis,
-                    runtimes.runtime_id, runtimes.lifecycle,
-                    provider_bindings.native_session_id,
+                    runtimes.runtime_id, runtimes.provider, runtimes.lifecycle,
+                    provider_bindings.provider, provider_bindings.native_session_id,
                     provider_bindings.last_settled_turn_id,
                     provider_bindings.observed_thread_name
              FROM workstreams
@@ -2735,44 +3008,66 @@ fn load_fork_source(
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<String>>(6)?,
                     row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<String>>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
                 ))
             },
         )
         .optional()
         .map_err(StateError::Sqlite)?
         .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
-    if source.3.is_some() && !include_archived {
+    if source.4.is_some() && !include_archived {
         return Err(StateError::WorkstreamArchived(workstream_id));
+    }
+    let provider = provider_kind_from_text(&source.1)?;
+    let runtime_provider = source
+        .6
+        .as_deref()
+        .map(provider_kind_from_text)
+        .transpose()?;
+    let binding_provider = source
+        .8
+        .as_deref()
+        .map(provider_kind_from_text)
+        .transpose()?;
+    if runtime_provider.is_some_and(|value| value != provider)
+        || binding_provider.is_some_and(|value| value != provider)
+    {
+        return Err(StateError::ProviderIdentityMismatch);
     }
     Ok(ForkSource {
         location_id: Uuid::parse_str(&source.0)
             .map(LocationId::from)
             .map_err(StateError::InvalidPersistedUuid)?,
-        revision: Revision::try_from(source.1)?,
-        project_root: PathBuf::from(source.2),
+        provider,
+        revision: Revision::try_from(source.2)?,
+        project_root: PathBuf::from(source.3),
         runtime_id: source
-            .4
+            .5
             .as_deref()
             .map(Uuid::parse_str)
             .transpose()
             .map_err(StateError::InvalidPersistedUuid)?
             .map(RuntimeId::from),
-        runtime_lifecycle: source.5,
-        native_session_id: source.6,
-        last_settled_turn_id: source.7,
-        native_name: source.8,
+        runtime_lifecycle: source.7,
+        native_session_id: source.9,
+        last_settled_turn_id: source.10,
+        native_name: source.11,
     })
 }
 
-fn fork_boundary(source: &ForkSource) -> Result<(Option<String>, Option<String>), StateError> {
+fn fork_boundary(
+    source: &ForkSource,
+) -> Result<(Option<ProviderSessionId>, Option<String>), StateError> {
     let runtime_is_live = matches!(
         source.runtime_lifecycle.as_deref(),
         Some("idle" | "working" | "attention")
@@ -2788,7 +3083,7 @@ fn fork_boundary(source: &ForkSource) -> Result<(Option<String>, Option<String>)
     if !runtime_is_live || source.runtime_id.is_none() {
         return Err(StateError::ForkBoundaryUnavailable);
     }
-    validate_provider_metadata(&session_id)?;
+    let session_id = ProviderSessionId::new(source.provider, session_id)?;
     validate_provider_metadata(&settled_turn_id)?;
     Ok((Some(session_id), Some(settled_turn_id)))
 }
@@ -2796,19 +3091,20 @@ fn fork_boundary(source: &ForkSource) -> Result<(Option<String>, Option<String>)
 fn insert_fork_records(
     transaction: &rusqlite::Transaction<'_>,
     plan: &PersistedForkPlan,
-    destination_native_session_id: Option<&str>,
+    destination_native_session_id: Option<&ProviderSessionId>,
 ) -> Result<(), StateError> {
     let activity_sequence = next_activity_sequence(transaction)?;
     transaction
         .execute(
             "INSERT INTO workstreams (
-                workstream_id, location_id, origin, source_workstream_id,
+                workstream_id, location_id, provider, origin, source_workstream_id,
                 lifecycle, last_activity_sequence,
                 last_activity_at_millis, revision
-             ) VALUES (?1, ?2, ?3, ?4, 'open', ?5, 0, 1)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, 0, 1)",
             params![
                 plan.workstream_id.to_string(),
                 plan.location_id.to_string(),
+                plan.provider.as_str(),
                 workstream_origin_text(plan.origin),
                 plan.source_workstream_id.to_string(),
                 activity_sequence,
@@ -2824,7 +3120,7 @@ fn insert_fork_records(
 fn insert_pending_fork_runtime(
     transaction: &rusqlite::Transaction<'_>,
     plan: &PersistedForkPlan,
-    destination_native_session_id: &str,
+    destination_native_session_id: &ProviderSessionId,
 ) -> Result<(), StateError> {
     let runtime_id = RuntimeId::new();
     let runtime_generation = format!("pending-fork-{}", Uuid::new_v4());
@@ -2834,10 +3130,11 @@ fn insert_pending_fork_runtime(
             "INSERT INTO runtimes (
                 runtime_id, workstream_id, provider, tmux_generation, tmux_session,
                 cwd, process_birth, lifecycle, revision
-             ) VALUES (?1, ?2, 'codex', ?3, ?4, ?5, NULL, 'stopped', 1)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 'stopped', 1)",
             params![
                 runtime_id.to_string(),
                 plan.workstream_id.to_string(),
+                plan.provider.as_str(),
                 runtime_generation,
                 tmux_session,
                 plan.project_root.to_string_lossy(),
@@ -2847,16 +3144,17 @@ fn insert_pending_fork_runtime(
     transaction
         .execute(
             "INSERT INTO provider_bindings (
-                binding_id, runtime_id, native_session_id, start_source,
+                binding_id, runtime_id, provider, native_session_id, start_source,
                 last_settled_turn_id, observed_thread_name, name_state,
                 name_observed_at, predecessor_native_session_id,
                 predecessor_effective_name, runtime_generation, revision
-             ) VALUES (?1, ?2, ?3, 'resume', NULL, NULL, 'unavailable', NULL,
-                NULL, NULL, ?4, 1)",
+             ) VALUES (?1, ?2, ?3, ?4, 'resume', NULL, NULL, 'unavailable', NULL,
+                NULL, NULL, ?5, 1)",
             params![
                 Uuid::new_v4().to_string(),
                 runtime_id.to_string(),
-                destination_native_session_id,
+                plan.provider.as_str(),
+                destination_native_session_id.native_id(),
                 runtime_generation,
             ],
         )
@@ -2868,7 +3166,7 @@ fn commit_managed_operation(
     transaction: &rusqlite::Transaction<'_>,
     operation: &mut CompoundOperation,
     plan: &PersistedForkPlan,
-    destination_native_session_id: Option<&str>,
+    destination_native_session_id: Option<&ProviderSessionId>,
 ) -> Result<(), StateError> {
     let outcome = serde_json::json!({
         "workstream_id": plan.workstream_id,
@@ -2906,6 +3204,7 @@ fn created_workstream_from_fork_plan(plan: &PersistedForkPlan) -> CreatedWorkstr
     CreatedWorkstream {
         workstream_id: plan.workstream_id,
         location_id: plan.location_id,
+        provider: plan.provider,
         origin: plan.origin,
         source_workstream_id: plan.source_workstream_id,
         revision: Revision::INITIAL,
@@ -3588,7 +3887,12 @@ fn migrate_host_schema(connection: &mut Connection, _state_root: &Path) -> Resul
                 [],
             )
             .map_err(StateError::Sqlite)?;
-        return transaction.commit().map_err(StateError::Sqlite);
+        transaction.commit().map_err(StateError::Sqlite)?;
+        migrate_host_schema_9_to_10(connection)?;
+        return Ok(());
+    }
+    if current == 9 {
+        return migrate_host_schema_9_to_10(connection);
     }
     if current != 0 {
         return Err(StateError::HostStateResetRequired(current));
@@ -3607,6 +3911,129 @@ fn migrate_host_schema(connection: &mut Connection, _state_root: &Path) -> Resul
         )
         .map_err(StateError::Sqlite)?;
     transaction.commit().map_err(StateError::Sqlite)
+}
+
+/// Adds the first-class provider identity to the schema-9 host registry.
+///
+/// The migration deliberately adds nullable columns without a SQL default,
+/// validates every existing Runtime provider before writing any assignment,
+/// then fills all legacy Workstreams and `ProviderBindings` with Codex in one
+/// transaction. Any unknown Runtime provider or cross-record mismatch aborts
+/// the transaction, leaving the schema and all rows at version 9.
+fn migrate_host_schema_9_to_10(connection: &mut Connection) -> Result<(), StateError> {
+    let transaction = connection.transaction().map_err(StateError::Sqlite)?;
+    if !table_has_column(&transaction, "workstreams", "provider")? {
+        transaction
+            .execute("ALTER TABLE workstreams ADD COLUMN provider TEXT", [])
+            .map_err(StateError::Sqlite)?;
+    }
+    if !table_has_column(&transaction, "provider_bindings", "provider")? {
+        transaction
+            .execute("ALTER TABLE provider_bindings ADD COLUMN provider TEXT", [])
+            .map_err(StateError::Sqlite)?;
+    }
+    if !table_has_column(
+        &transaction,
+        "attention_states",
+        "latest_native_session_provider",
+    )? {
+        transaction
+            .execute(
+                "ALTER TABLE attention_states ADD COLUMN latest_native_session_provider TEXT",
+                [],
+            )
+            .map_err(StateError::Sqlite)?;
+    }
+
+    let mut runtime_providers = transaction
+        .prepare("SELECT provider FROM runtimes")
+        .map_err(StateError::Sqlite)?;
+    let providers = runtime_providers
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(StateError::Sqlite)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StateError::Sqlite)?;
+    for provider in providers {
+        let parsed = provider_kind_from_text(&provider)?;
+        if parsed != ProviderKind::Codex {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+    }
+    drop(runtime_providers);
+
+    transaction
+        .execute(
+            "UPDATE workstreams SET provider = ?1 WHERE provider IS NULL",
+            [ProviderKind::Codex.as_str()],
+        )
+        .map_err(StateError::Sqlite)?;
+    transaction
+        .execute(
+            "UPDATE provider_bindings SET provider = ?1 WHERE provider IS NULL",
+            [ProviderKind::Codex.as_str()],
+        )
+        .map_err(StateError::Sqlite)?;
+    transaction
+        .execute(
+            "UPDATE attention_states SET latest_native_session_provider = ?1
+             WHERE latest_native_session_id IS NOT NULL
+               AND latest_native_session_provider IS NULL",
+            [ProviderKind::Codex.as_str()],
+        )
+        .map_err(StateError::Sqlite)?;
+
+    let mismatch: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM runtimes
+             JOIN workstreams ON workstreams.workstream_id = runtimes.workstream_id
+             WHERE runtimes.provider != workstreams.provider
+                OR runtimes.provider != 'codex'",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)?;
+    if mismatch != 0 {
+        return Err(StateError::ProviderIdentityMismatch);
+    }
+    let binding_mismatch: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM provider_bindings
+             JOIN runtimes ON runtimes.runtime_id = provider_bindings.runtime_id
+             WHERE provider_bindings.provider != runtimes.provider",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)?;
+    if binding_mismatch != 0 {
+        return Err(StateError::ProviderIdentityMismatch);
+    }
+
+    transaction
+        .execute("PRAGMA user_version = 10", [])
+        .map_err(StateError::Sqlite)?;
+    transaction
+        .execute(
+            "UPDATE host_identity SET schema_version = 10 WHERE singleton = 1",
+            [],
+        )
+        .map_err(StateError::Sqlite)?;
+    transaction.commit().map_err(StateError::Sqlite)
+}
+
+fn table_has_column(
+    transaction: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+) -> Result<bool, StateError> {
+    let mut statement = transaction
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(StateError::Sqlite)?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(StateError::Sqlite)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StateError::Sqlite)?;
+    Ok(columns.iter().any(|value| value == column))
 }
 
 fn migrate_client_schema(connection: &mut Connection) -> Result<(), StateError> {
@@ -3858,14 +4285,14 @@ fn load_operation_by_id(
 #[derive(Deserialize)]
 struct ForkOutcome {
     workstream_id: WorkstreamId,
-    destination_native_session_id: Option<String>,
+    destination_native_session_id: Option<ProviderSessionId>,
 }
 
 fn created_workstream_from_fork_outcome(
     transaction: &rusqlite::Transaction<'_>,
     operation: &CompoundOperation,
     plan: &PersistedForkPlan,
-    expected_destination_native_session_id: Option<&str>,
+    expected_destination_native_session_id: Option<&ProviderSessionId>,
 ) -> Result<CreatedWorkstream, StateError> {
     let outcome = operation
         .outcome_json
@@ -3874,13 +4301,13 @@ fn created_workstream_from_fork_outcome(
     let outcome: ForkOutcome =
         serde_json::from_str(outcome).map_err(StateError::InvalidForkOutcome)?;
     if outcome.workstream_id != plan.workstream_id
-        || outcome.destination_native_session_id.as_deref()
-            != expected_destination_native_session_id
+        || outcome.destination_native_session_id.as_ref() != expected_destination_native_session_id
     {
         return Err(StateError::ForkPlanMismatch);
     }
     let created = created_workstream_from_record(transaction, plan.workstream_id)?;
     if created.location_id != plan.location_id
+        || created.provider != plan.provider
         || created.source_workstream_id != plan.source_workstream_id
         || created.origin != plan.origin
     {
@@ -3913,17 +4340,19 @@ fn row_to_runtime(
     workstream_id: WorkstreamId,
 ) -> rusqlite::Result<RuntimeRecord> {
     let runtime_id: String = row.get(0)?;
-    let generation: String = row.get(1)?;
-    let session: String = row.get(2)?;
-    let cwd: String = row.get(3)?;
-    let process_birth: Option<String> = row.get(4)?;
-    let lifecycle: String = row.get(5)?;
-    let revision: i64 = row.get(6)?;
+    let provider: String = row.get(1)?;
+    let generation: String = row.get(2)?;
+    let session: String = row.get(3)?;
+    let cwd: String = row.get(4)?;
+    let process_birth: Option<String> = row.get(5)?;
+    let lifecycle: String = row.get(6)?;
+    let revision: i64 = row.get(7)?;
     Ok(RuntimeRecord {
         runtime_id: Uuid::parse_str(&runtime_id)
             .map(RuntimeId::from)
             .map_err(to_from_sql_error)?,
         workstream_id,
+        provider: provider_kind_from_text(&provider).map_err(to_from_sql_error)?,
         tmux_generation: generation,
         tmux_session: session,
         cwd: PathBuf::from(cwd),
@@ -3938,15 +4367,17 @@ fn row_to_runtime_with_id(
     runtime_id: RuntimeId,
     workstream_id: WorkstreamId,
 ) -> rusqlite::Result<RuntimeRecord> {
-    let generation: String = row.get(1)?;
-    let session: String = row.get(2)?;
-    let cwd: String = row.get(3)?;
-    let process_birth: Option<String> = row.get(4)?;
-    let lifecycle: String = row.get(5)?;
-    let revision: i64 = row.get(6)?;
+    let provider: String = row.get(1)?;
+    let generation: String = row.get(2)?;
+    let session: String = row.get(3)?;
+    let cwd: String = row.get(4)?;
+    let process_birth: Option<String> = row.get(5)?;
+    let lifecycle: String = row.get(6)?;
+    let revision: i64 = row.get(7)?;
     Ok(RuntimeRecord {
         runtime_id,
         workstream_id,
+        provider: provider_kind_from_text(&provider).map_err(to_from_sql_error)?,
         tmux_generation: generation,
         tmux_session: session,
         cwd: PathBuf::from(cwd),
@@ -3977,35 +4408,65 @@ fn load_binding(
     transaction: &rusqlite::Transaction<'_>,
     runtime_id: RuntimeId,
 ) -> Result<Option<ProviderBinding>, StateError> {
-    transaction
+    let binding = transaction
         .query_row(
-            "SELECT native_session_id, start_source, last_settled_turn_id,
+            "SELECT provider, native_session_id, start_source, last_settled_turn_id,
                     observed_thread_name, name_state, predecessor_native_session_id,
                     predecessor_effective_name, revision
              FROM provider_bindings WHERE runtime_id = ?1",
             [runtime_id.to_string()],
             |row| {
+                let provider = provider_kind_from_text(&row.get::<_, String>(0)?)
+                    .map_err(to_from_sql_error)?;
+                let native_session_id = ProviderSessionId::new(provider, row.get::<_, String>(1)?)
+                    .map_err(to_from_sql_error)?;
+                let predecessor_native_session_id = row
+                    .get::<_, Option<String>>(6)?
+                    .map(|value| ProviderSessionId::new(provider, value))
+                    .transpose()
+                    .map_err(to_from_sql_error)?;
                 Ok(ProviderBinding {
                     runtime_id,
-                    native_session_id: row.get(0)?,
-                    start_source: row.get(1)?,
-                    last_settled_turn_id: row.get(2)?,
-                    observed_thread_name: row.get(3)?,
-                    name_state: name_state_from_text(&row.get::<_, String>(4)?)
+                    provider,
+                    native_session_id,
+                    start_source: row.get(2)?,
+                    last_settled_turn_id: row.get(3)?,
+                    observed_thread_name: row.get(4)?,
+                    name_state: name_state_from_text(&row.get::<_, String>(5)?)
                         .map_err(to_from_sql_error)?,
-                    predecessor_native_session_id: row.get(5)?,
-                    predecessor_effective_name: row.get(6)?,
-                    revision: Revision::try_from(row.get::<_, i64>(7)?)
+                    predecessor_native_session_id,
+                    predecessor_effective_name: row.get(7)?,
+                    revision: Revision::try_from(row.get::<_, i64>(8)?)
                         .map_err(to_from_sql_error)?,
                 })
             },
         )
         .optional()
-        .map_err(StateError::Sqlite)
+        .map_err(StateError::Sqlite)?;
+    if let Some(binding) = &binding {
+        let runtime_provider: String = transaction
+            .query_row(
+                "SELECT provider FROM runtimes WHERE runtime_id = ?1",
+                [runtime_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StateError::Sqlite)?;
+        if provider_kind_from_text(&runtime_provider)? != binding.provider
+            || binding.native_session_id.provider() != binding.provider
+            || binding
+                .predecessor_native_session_id
+                .as_ref()
+                .is_some_and(|id| id.provider() != binding.provider)
+        {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+    }
+    Ok(binding)
 }
 
 struct SessionStartContext<'a> {
     runtime_id: RuntimeId,
+    provider: ProviderKind,
     runtime_status: &'a str,
     runtime_revision: Revision,
     generation: &'a str,
@@ -4020,10 +4481,14 @@ fn apply_session_start(
     session_id: &str,
     source: Option<&str>,
 ) -> Result<(), StateError> {
+    let session_id = ProviderSessionId::new(context.provider, session_id)?;
     let Some(binding) = existing else {
-        return insert_initial_binding(transaction, context, session_id, source);
+        return insert_initial_binding(transaction, context, session_id.native_id(), source);
     };
-    if binding.native_session_id == session_id {
+    if binding.provider != context.provider || binding.native_session_id == session_id {
+        if binding.provider != context.provider {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
         // A persisted binding appears at `starting` only when an exact parked
         // session is resumed in a fresh private tmux generation. Repeated live
         // SessionStart evidence must not mark a working turn idle.
@@ -4054,8 +4519,8 @@ fn apply_session_start(
                 revision = revision + 1
              WHERE runtime_id = ?4 AND native_session_id = ?2 AND revision = ?5",
             params![
-                session_id,
-                binding.native_session_id,
+                session_id.native_id(),
+                binding.native_session_id.native_id(),
                 binding.observed_thread_name,
                 context.runtime_id.to_string(),
                 binding.revision.value(),
@@ -4087,19 +4552,21 @@ fn insert_initial_binding(
     {
         return Err(StateError::HookEvidenceMismatch);
     }
+    let session_id = ProviderSessionId::new(context.provider, session_id)?;
     transaction
         .execute(
             "INSERT INTO provider_bindings (
-                binding_id, runtime_id, native_session_id, start_source,
+                binding_id, runtime_id, provider, native_session_id, start_source,
                 last_settled_turn_id, observed_thread_name, name_state,
                 name_observed_at, predecessor_native_session_id,
                 predecessor_effective_name, runtime_generation, revision
-             ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, 'unavailable', NULL,
-                NULL, NULL, ?5, 1)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, NULL, NULL, 'unavailable', NULL,
+                NULL, NULL, ?6, 1)",
             params![
                 Uuid::new_v4().to_string(),
                 context.runtime_id.to_string(),
-                session_id,
+                context.provider.as_str(),
+                session_id.native_id(),
                 source.unwrap_or("startup"),
                 context.generation,
             ],
@@ -4129,7 +4596,10 @@ fn require_matching_binding(
     binding: Option<&ProviderBinding>,
     session_id: &str,
 ) -> Result<(), StateError> {
-    if binding.is_some_and(|binding| binding.native_session_id == session_id) {
+    let session_id = ProviderSessionId::codex(session_id)?;
+    if binding.is_some_and(|binding| {
+        binding.provider == ProviderKind::Codex && binding.native_session_id == session_id
+    }) {
         Ok(())
     } else {
         Err(StateError::HookEvidenceMismatch)
@@ -4271,22 +4741,30 @@ fn save_attention_in_transaction(
             "INSERT INTO attention_states (
             workstream_id, result_unseen_since_revision,
             recovery_unseen_since_revision, latest_native_session_id,
-            latest_turn_id, revision
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            latest_native_session_provider, latest_turn_id, revision
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(workstream_id) DO UPDATE SET
             result_unseen_since_revision = excluded.result_unseen_since_revision,
             recovery_unseen_since_revision = excluded.recovery_unseen_since_revision,
             latest_native_session_id = excluded.latest_native_session_id,
+            latest_native_session_provider = excluded.latest_native_session_provider,
             latest_turn_id = excluded.latest_turn_id,
             revision = excluded.revision
-         WHERE attention_states.revision = ?7",
+         WHERE attention_states.revision = ?8",
             params![
                 attention.workstream_id.to_string(),
                 attention.result_unseen_since_revision.map(Revision::value),
                 attention
                     .recovery_unseen_since_revision
                     .map(Revision::value),
-                attention.latest_native_session_id,
+                attention
+                    .latest_native_session_id
+                    .as_ref()
+                    .map(ProviderSessionId::native_id),
+                attention
+                    .latest_native_session_id
+                    .as_ref()
+                    .map(|session| session.provider().as_str()),
                 attention.latest_turn_id,
                 attention.revision.value(),
                 prior_revision.value(),
@@ -4303,7 +4781,7 @@ fn save_attention_in_transaction(
 fn mark_result_attention_in_transaction(
     transaction: &rusqlite::Transaction<'_>,
     workstream_id: WorkstreamId,
-    session_id: String,
+    session_id: ProviderSessionId,
     turn_id: String,
 ) -> Result<(), StateError> {
     let current = load_attention_from_transaction(transaction, workstream_id)?;
@@ -4320,7 +4798,8 @@ fn load_attention_from_connection(
     let attention = connection
         .query_row(
             "SELECT result_unseen_since_revision, recovery_unseen_since_revision,
-                    latest_native_session_id, latest_turn_id, revision
+                    latest_native_session_id, latest_native_session_provider,
+                    latest_turn_id, revision
              FROM attention_states WHERE workstream_id = ?1",
             [workstream_id.to_string()],
             |row| row_to_attention(row, workstream_id),
@@ -4337,7 +4816,8 @@ fn load_attention_from_transaction(
     let attention = transaction
         .query_row(
             "SELECT result_unseen_since_revision, recovery_unseen_since_revision,
-                    latest_native_session_id, latest_turn_id, revision
+                    latest_native_session_id, latest_native_session_provider,
+                    latest_turn_id, revision
              FROM attention_states WHERE workstream_id = ?1",
             [workstream_id.to_string()],
             |row| row_to_attention(row, workstream_id),
@@ -4353,7 +4833,18 @@ fn row_to_attention(
 ) -> rusqlite::Result<AttentionState> {
     let result: Option<i64> = row.get(0)?;
     let recovery: Option<i64> = row.get(1)?;
-    let revision: i64 = row.get(4)?;
+    let native_session_id: Option<String> = row.get(2)?;
+    let provider: Option<String> = row.get(3)?;
+    let latest_native_session_id = match (native_session_id, provider) {
+        (None, None) => None,
+        (Some(native_session_id), Some(provider)) => {
+            let provider = provider_kind_from_text(&provider).map_err(to_from_sql_error)?;
+            Some(ProviderSessionId::new(provider, native_session_id).map_err(to_from_sql_error)?)
+        }
+        _ => {
+            return Err(to_from_sql_error(StateError::ProviderIdentityMismatch));
+        }
+    };
     Ok(AttentionState {
         workstream_id,
         result_unseen_since_revision: result
@@ -4364,9 +4855,9 @@ fn row_to_attention(
             .map(Revision::try_from)
             .transpose()
             .map_err(to_from_sql_error)?,
-        latest_native_session_id: row.get(2)?,
-        latest_turn_id: row.get(3)?,
-        revision: Revision::try_from(revision).map_err(to_from_sql_error)?,
+        latest_native_session_id,
+        latest_turn_id: row.get(4)?,
+        revision: Revision::try_from(row.get::<_, i64>(5)?).map_err(to_from_sql_error)?,
     })
 }
 
@@ -4431,6 +4922,16 @@ fn runtime_status_from_text(value: &str) -> Result<RuntimeStatus, StateError> {
         "unreachable" => Ok(RuntimeStatus::Unreachable),
         _ => Err(StateError::InvalidPersistedValue(value.to_owned())),
     }
+}
+
+fn provider_kind_from_text(value: &str) -> Result<ProviderKind, StateError> {
+    value
+        .parse::<ProviderKind>()
+        .map_err(|_| StateError::InvalidPersistedValue(format!("provider kind {value}")))
+}
+
+const fn default_provider_kind() -> ProviderKind {
+    ProviderKind::Codex
 }
 
 fn workstream_lifecycle_from_text(value: &str) -> Result<WorkstreamLifecycle, StateError> {
@@ -4672,6 +5173,8 @@ pub enum StateError {
     InvalidRegistryField(&'static str),
     #[error("provider metadata is invalid")]
     InvalidProviderMetadata,
+    #[error("provider identity does not match its Workstream, Runtime, or binding")]
+    ProviderIdentityMismatch,
     #[error("project browser root is invalid")]
     InvalidProjectBrowserRoot,
     #[error("project browser relative path is invalid")]
@@ -4775,6 +5278,8 @@ pub enum StateError {
 mod tests {
     use std::fs;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::domain::BindingId;
 
     use super::*;
 
@@ -4988,12 +5493,23 @@ mod tests {
     #[test]
     fn result_attention_stays_unseen_until_the_current_revision_acknowledges_it() {
         let (_temporary, mut registry) = registry();
-        let workstream_id = WorkstreamId::new();
+        let registered = registry
+            .register_project_root(Path::new("/disposable/repository"), ProviderKind::Codex)
+            .unwrap();
+        let workstream_id = registered.workstream_id;
         let first = registry
-            .mark_result_attention(workstream_id, "session-a".to_owned(), "turn-a".to_owned())
+            .mark_result_attention(
+                workstream_id,
+                ProviderSessionId::codex("session-a").unwrap(),
+                "turn-a".to_owned(),
+            )
             .unwrap();
         let second = registry
-            .mark_result_attention(workstream_id, "session-a".to_owned(), "turn-b".to_owned())
+            .mark_result_attention(
+                workstream_id,
+                ProviderSessionId::codex("session-a").unwrap(),
+                "turn-b".to_owned(),
+            )
             .unwrap();
 
         assert_eq!(
@@ -5011,6 +5527,43 @@ mod tests {
     }
 
     #[test]
+    fn independent_workstream_can_select_a_different_provider_and_replay_rejects_it() {
+        let (_temporary, mut registry) = registry();
+        let source = registry
+            .register_project_root(Path::new("/disposable/repository"), ProviderKind::Codex)
+            .unwrap();
+        let created = registry
+            .create_independent_workstream(
+                "independent-opencode",
+                source.workstream_id,
+                Revision::INITIAL,
+                ProviderKind::OpenCode,
+            )
+            .unwrap();
+
+        assert_eq!(created.provider, ProviderKind::OpenCode);
+        assert_eq!(
+            registry
+                .workstream_overviews()
+                .unwrap()
+                .into_iter()
+                .find(|overview| overview.workstream_id == created.workstream_id)
+                .unwrap()
+                .provider,
+            ProviderKind::OpenCode
+        );
+        assert!(matches!(
+            registry.create_independent_workstream(
+                "independent-opencode",
+                source.workstream_id,
+                Revision::INITIAL,
+                ProviderKind::Codex,
+            ),
+            Err(StateError::OperationRequestMismatch)
+        ));
+    }
+
+    #[test]
     fn archive_and_restore_change_only_visibility_with_revision_guards() {
         let temporary = tempfile::tempdir().unwrap();
         let root = StateRoot::create(temporary.path()).unwrap();
@@ -5025,7 +5578,7 @@ mod tests {
         let attention = registry
             .mark_result_attention(
                 registered.workstream_id,
-                "native-session".to_owned(),
+                ProviderSessionId::codex("native-session").unwrap(),
                 "settled-turn".to_owned(),
             )
             .unwrap();
@@ -5062,6 +5615,7 @@ mod tests {
                 "archived-location-start",
                 registered.workstream_id,
                 archived_revision,
+                ProviderKind::Codex,
             )
             .unwrap();
         assert_eq!(independent.source_workstream_id, registered.workstream_id);
@@ -5347,6 +5901,297 @@ mod tests {
             registry.project_browser_root().unwrap(),
             fs::canonicalize(temporary.path()).unwrap()
         );
+    }
+
+    fn legacy_host_schema_sql() -> String {
+        HOST_SCHEMA_SQL
+            .replace(
+                "        location_id TEXT NOT NULL REFERENCES project_locations(location_id),\n        provider TEXT NOT NULL,\n        origin",
+                "        location_id TEXT NOT NULL REFERENCES project_locations(location_id),\n        origin",
+            )
+            .replace(
+                "        runtime_id TEXT NOT NULL UNIQUE REFERENCES runtimes(runtime_id),\n        provider TEXT NOT NULL,\n        native_session_id",
+                "        runtime_id TEXT NOT NULL UNIQUE REFERENCES runtimes(runtime_id),\n        native_session_id",
+            )
+            .replace(
+                "        latest_native_session_id TEXT,\n        latest_native_session_provider TEXT,\n",
+                "        latest_native_session_id TEXT,\n",
+            )
+    }
+
+    #[test]
+    fn host_schema_nine_migrates_existing_codex_rows_with_explicit_provider_identity() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let legacy_sql = legacy_host_schema_sql();
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        connection.execute_batch(&legacy_sql).unwrap();
+        let host_id = HostId::new();
+        let location_id = LocationId::new();
+        let workstream_id = WorkstreamId::new();
+        let runtime_id = RuntimeId::new();
+        connection
+            .execute(
+                "INSERT INTO host_identity VALUES (1, ?1, 'generation', 9)",
+                [host_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO project_locations VALUES (?1, '/project', 'project', '', '', 1)",
+                [location_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO workstreams VALUES (?1, ?2, 'external', NULL, 'open', NULL, 1, 0, 1)",
+                params![workstream_id.to_string(), location_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO runtimes VALUES (?1, ?2, 'codex', 'generation', 'session', '/project', NULL, 'stopped', 1)",
+                params![runtime_id.to_string(), workstream_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO provider_bindings VALUES (?1, ?2, 'session-id', 'startup', NULL, NULL, 'unavailable', NULL, NULL, NULL, 'generation', 1)",
+                params![BindingId::new().to_string(), runtime_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA user_version = 9;")
+            .unwrap();
+        drop(connection);
+
+        let registry = HostRegistry::open(&root).unwrap();
+
+        assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
+        let overview = registry.workstream_overviews().unwrap().remove(0);
+        assert_eq!(overview.provider, ProviderKind::Codex);
+        assert_eq!(overview.runtime.unwrap().provider, ProviderKind::Codex);
+        assert_eq!(
+            overview.binding.unwrap().native_session_id,
+            ProviderSessionId::codex("session-id").unwrap()
+        );
+    }
+
+    #[test]
+    fn unknown_legacy_runtime_provider_rejects_and_rolls_back_schema_migration() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        connection.execute_batch(&legacy_host_schema_sql()).unwrap();
+        let host_id = HostId::new();
+        let location_id = LocationId::new();
+        let workstream_id = WorkstreamId::new();
+        let runtime_id = RuntimeId::new();
+        connection
+            .execute(
+                "INSERT INTO host_identity VALUES (1, ?1, 'generation', 9)",
+                [host_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO project_locations VALUES (?1, '/project', 'project', '', '', 1)",
+                [location_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO workstreams VALUES (?1, ?2, 'external', NULL, 'open', NULL, 1, 0, 1)",
+                params![workstream_id.to_string(), location_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO runtimes VALUES (?1, ?2, 'unknown', 'generation', 'session', '/project', NULL, 'stopped', 1)",
+                params![runtime_id.to_string(), workstream_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA user_version = 9;")
+            .unwrap();
+        drop(connection);
+
+        assert!(matches!(
+            HostRegistry::open(&root),
+            Err(StateError::InvalidPersistedValue(_))
+        ));
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        let version: i64 = connection
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 9);
+        let host_schema_version: i64 = connection
+            .query_row(
+                "SELECT schema_version FROM host_identity WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(host_schema_version, 9);
+        let has_provider_column: bool = connection
+            .query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM pragma_table_info('workstreams') WHERE name = 'provider'
+                 )",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!has_provider_column);
+    }
+
+    #[test]
+    fn fresh_schema_requires_explicit_provider_columns_and_persists_kind() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        for table in ["workstreams", "provider_bindings"] {
+            let (not_null, default_value): (i64, Option<String>) = registry
+                .connection
+                .query_row(
+                    &format!(
+                        "SELECT \"notnull\", dflt_value FROM pragma_table_info('{table}') WHERE name = 'provider'"
+                    ),
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
+            assert_eq!(not_null, 1);
+            assert_eq!(default_value, None);
+        }
+        let registered = registry
+            .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
+            .unwrap();
+        let overview = registry.workstream_overviews().unwrap().remove(0);
+        assert_eq!(overview.provider, ProviderKind::OpenCode);
+        let runtime = registry
+            .reserve_runtime_with_provider(registered.workstream_id, ProviderKind::OpenCode)
+            .unwrap();
+        assert_eq!(runtime.provider, ProviderKind::OpenCode);
+    }
+
+    #[test]
+    fn mismatched_workstream_runtime_and_binding_provider_fails_closed() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        registry
+            .connection
+            .execute(
+                "UPDATE workstreams SET provider = 'opencode' WHERE workstream_id = ?1",
+                [registered.workstream_id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            registry.runtime_for_workstream(registered.workstream_id),
+            Err(StateError::ProviderIdentityMismatch)
+        ));
+        registry
+            .connection
+            .execute(
+                "UPDATE workstreams SET provider = 'codex' WHERE workstream_id = ?1",
+                [registered.workstream_id.to_string()],
+            )
+            .unwrap();
+        registry
+            .connection
+            .execute(
+                "INSERT INTO provider_bindings (
+                    binding_id, runtime_id, provider, native_session_id, start_source,
+                    last_settled_turn_id, observed_thread_name, name_state,
+                    name_observed_at, predecessor_native_session_id,
+                    predecessor_effective_name, runtime_generation, revision
+                 ) VALUES (?1, ?2, 'opencode', 'same-id', 'startup', NULL, NULL,
+                    'unavailable', NULL, NULL, NULL, ?3, 1)",
+                params![
+                    BindingId::new().to_string(),
+                    runtime.runtime_id.to_string(),
+                    runtime.tmux_generation,
+                ],
+            )
+            .unwrap();
+        assert!(matches!(
+            registry.binding_for_runtime(runtime.runtime_id),
+            Err(StateError::ProviderIdentityMismatch)
+        ));
+        registry
+            .connection
+            .execute(
+                "INSERT INTO attention_states (
+                    workstream_id, result_unseen_since_revision,
+                    recovery_unseen_since_revision, latest_native_session_id,
+                    latest_native_session_provider, latest_turn_id, revision
+                 ) VALUES (?1, NULL, NULL, 'native-only', NULL, NULL, 1)",
+                [registered.workstream_id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            registry.attention(registered.workstream_id),
+            Err(StateError::Sqlite(_))
+        ));
+        registry
+            .connection
+            .execute(
+                "UPDATE attention_states SET latest_native_session_id = NULL,
+                    latest_native_session_provider = 'codex' WHERE workstream_id = ?1",
+                [registered.workstream_id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            registry.attention(registered.workstream_id),
+            Err(StateError::Sqlite(_))
+        ));
+    }
+
+    #[test]
+    fn attention_provider_mismatch_fails_result_writes_and_overview_hydration() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_project_root(Path::new("/disposable/repository"), ProviderKind::Codex)
+            .unwrap();
+        assert!(matches!(
+            registry.mark_result_attention(
+                registered.workstream_id,
+                ProviderSessionId::new(ProviderKind::OpenCode, "same-native-id").unwrap(),
+                "turn".to_owned(),
+            ),
+            Err(StateError::ProviderIdentityMismatch)
+        ));
+        assert!(matches!(
+            registry.mark_result_attention(
+                WorkstreamId::new(),
+                ProviderSessionId::codex("nonexistent").unwrap(),
+                "turn".to_owned(),
+            ),
+            Err(StateError::UnknownOpenWorkstream(_))
+        ));
+
+        registry
+            .connection
+            .execute(
+                "INSERT INTO attention_states (
+                    workstream_id, result_unseen_since_revision,
+                    recovery_unseen_since_revision, latest_native_session_id,
+                    latest_native_session_provider, latest_turn_id, revision
+                 ) VALUES (?1, NULL, NULL, 'same-native-id', 'opencode', 'turn', 1)",
+                [registered.workstream_id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            registry.workstream_overviews(),
+            Err(StateError::ProviderIdentityMismatch)
+        ));
     }
 
     #[test]
@@ -5874,7 +6719,11 @@ mod tests {
         assert_eq!(prepared.plan.origin, WorkstreamOrigin::Fork);
         assert_eq!(prepared.plan.source_runtime_id, Some(runtime.runtime_id));
         assert_eq!(
-            prepared.plan.source_native_session_id.as_deref(),
+            prepared
+                .plan
+                .source_native_session_id
+                .as_ref()
+                .map(ProviderSessionId::native_id),
             Some("source-session")
         );
         assert_eq!(
@@ -5906,7 +6755,10 @@ mod tests {
             PathBuf::from("/disposable/repository")
         );
         assert_eq!(destination_binding.start_source, "resume");
-        assert_eq!(destination_binding.native_session_id, "destination-session");
+        assert_eq!(
+            destination_binding.native_session_id.native_id(),
+            "destination-session"
+        );
     }
 
     #[test]
@@ -6111,6 +6963,7 @@ mod tests {
                 "repository",
                 Some(&fingerprint),
                 Some("github.com/owner/repository"),
+                ProviderKind::Codex,
             )
             .unwrap();
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
@@ -6128,7 +6981,11 @@ mod tests {
             )
             .unwrap();
         registry
-            .record_thread_metadata(runtime.runtime_id, "session-a", Some("Native title"))
+            .record_thread_metadata(
+                runtime.runtime_id,
+                &ProviderSessionId::codex("session-a").unwrap(),
+                Some("Native title"),
+            )
             .unwrap();
         let overview = registry.workstream_overviews().unwrap();
 
@@ -6174,8 +7031,8 @@ mod tests {
         assert_eq!(overview.lifecycle, WorkstreamLifecycle::RecoveryRequired);
         assert_eq!(overview.runtime.unwrap().status, RuntimeStatus::Unknown);
         assert_eq!(
-            overview.binding.unwrap().native_session_id,
-            "session-a".to_owned()
+            overview.binding.unwrap().native_session_id.native_id(),
+            "session-a"
         );
         assert!(
             overview
@@ -6282,8 +7139,8 @@ mod tests {
         let overview = registry.workstream_overviews().unwrap().remove(0);
         assert_eq!(overview.lifecycle, WorkstreamLifecycle::Open);
         assert_eq!(
-            overview.binding.unwrap().native_session_id,
-            "selected-session".to_owned()
+            overview.binding.unwrap().native_session_id.native_id(),
+            "selected-session"
         );
     }
 
@@ -6531,11 +7388,14 @@ mod tests {
             .binding_for_runtime(runtime.runtime_id)
             .unwrap()
             .unwrap();
-        assert_eq!(binding.native_session_id, "session-b");
+        assert_eq!(binding.native_session_id.native_id(), "session-b");
         assert_eq!(binding.start_source, "clear");
         assert_eq!(binding.last_settled_turn_id, None);
         assert_eq!(
-            binding.predecessor_native_session_id.as_deref(),
+            binding
+                .predecessor_native_session_id
+                .as_ref()
+                .map(ProviderSessionId::native_id),
             Some("session-a")
         );
         assert_eq!(
@@ -6552,7 +7412,8 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .latest_native_session_id
-                .as_deref(),
+                .as_ref()
+                .map(ProviderSessionId::native_id),
             Some("session-a")
         );
     }
@@ -6629,7 +7490,7 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .native_session_id,
-            "session-a"
+            ProviderSessionId::codex("session-a").unwrap()
         );
     }
 

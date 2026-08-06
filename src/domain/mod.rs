@@ -67,6 +67,112 @@ opaque_id!(RuntimeId);
 opaque_id!(BindingId);
 opaque_id!(OperationId);
 
+/// The fixed provider identity of a Workstream lane.
+///
+/// Provider identity is persisted and carried through every authoritative
+/// state operation. Unknown values are rejected rather than treated as a
+/// fallback provider.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProviderKind {
+    Codex,
+    OpenCode,
+}
+
+impl ProviderKind {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::OpenCode => "opencode",
+        }
+    }
+}
+
+impl fmt::Display for ProviderKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ProviderKind {
+    type Err = DomainError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "codex" => Ok(Self::Codex),
+            "opencode" => Ok(Self::OpenCode),
+            _ => Err(DomainError::UnknownProviderKind(value.to_owned())),
+        }
+    }
+}
+
+/// A bounded native provider-session identity namespaced by provider kind.
+///
+/// Native identifiers are opaque to Workstream Navigator. The provider kind
+/// is part of the identity so equal native strings from different providers
+/// can never be confused by state or recovery logic.
+#[derive(Clone, Debug, Eq, Hash, PartialEq, Serialize)]
+pub struct ProviderSessionId {
+    provider: ProviderKind,
+    native_session_id: String,
+}
+
+impl<'de> Deserialize<'de> for ProviderSessionId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            provider: ProviderKind,
+            native_session_id: String,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        Self::new(wire.provider, wire.native_session_id).map_err(serde::de::Error::custom)
+    }
+}
+
+impl ProviderSessionId {
+    /// Constructs a validated namespaced native session identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty, oversized, or line-delimited native
+    /// identifier.
+    pub fn new(
+        provider: ProviderKind,
+        native_session_id: impl Into<String>,
+    ) -> Result<Self, DomainError> {
+        let native_session_id = native_session_id.into();
+        validate_provider_identifier(&native_session_id)?;
+        Ok(Self {
+            provider,
+            native_session_id,
+        })
+    }
+
+    /// Constructs a Codex-native session identity at the provider boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid native identifier.
+    pub fn codex(native_session_id: impl Into<String>) -> Result<Self, DomainError> {
+        Self::new(ProviderKind::Codex, native_session_id)
+    }
+
+    #[must_use]
+    pub const fn provider(&self) -> ProviderKind {
+        self.provider
+    }
+
+    #[must_use]
+    pub fn native_id(&self) -> &str {
+        &self.native_session_id
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
 pub struct Revision(i64);
@@ -279,7 +385,7 @@ pub struct AttentionState {
     pub workstream_id: WorkstreamId,
     pub result_unseen_since_revision: Option<Revision>,
     pub recovery_unseen_since_revision: Option<Revision>,
-    pub latest_native_session_id: Option<String>,
+    pub latest_native_session_id: Option<ProviderSessionId>,
     pub latest_turn_id: Option<String>,
     pub revision: Revision,
 }
@@ -303,8 +409,11 @@ impl AttentionState {
     ///
     /// Returns an error when either provider identifier is empty, oversized, or
     /// contains a line break.
-    pub fn mark_result(&mut self, session_id: String, turn_id: String) -> Result<(), DomainError> {
-        validate_provider_identifier(&session_id)?;
+    pub fn mark_result(
+        &mut self,
+        session_id: ProviderSessionId,
+        turn_id: String,
+    ) -> Result<(), DomainError> {
         validate_provider_identifier(&turn_id)?;
         let next = self.revision.next();
         if self.result_unseen_since_revision.is_none() {
@@ -414,6 +523,8 @@ pub enum DomainError {
     },
     #[error("invalid provider identifier")]
     InvalidProviderIdentifier,
+    #[error("unknown provider kind: {0}")]
+    UnknownProviderKind(String),
     #[error("invalid revision {0}")]
     InvalidRevision(i64),
     #[error("revision conflict: expected {expected:?}, current {current:?}")]
@@ -428,6 +539,50 @@ pub enum DomainError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_kind_parses_only_known_representations() {
+        assert_eq!(
+            "codex".parse::<ProviderKind>().unwrap(),
+            ProviderKind::Codex
+        );
+        assert_eq!(
+            "opencode".parse::<ProviderKind>().unwrap(),
+            ProviderKind::OpenCode
+        );
+        assert!(matches!(
+            "unknown".parse::<ProviderKind>(),
+            Err(DomainError::UnknownProviderKind(value)) if value == "unknown"
+        ));
+        assert_eq!(
+            serde_json::to_string(&ProviderKind::Codex).unwrap(),
+            "\"codex\""
+        );
+    }
+
+    #[test]
+    fn provider_session_id_is_bounded_and_namespaced() {
+        let id = ProviderSessionId::new(ProviderKind::OpenCode, "same-native-id").unwrap();
+        assert_eq!(id.provider(), ProviderKind::OpenCode);
+        assert_eq!(id.native_id(), "same-native-id");
+        let codex = ProviderSessionId::codex("same-native-id").unwrap();
+        assert_ne!(id, codex);
+        assert!(serde_json::from_str::<ProviderSessionId>("\"same-native-id\"").is_err());
+        assert!(
+            serde_json::from_str::<ProviderSessionId>(
+                "{\"provider\":\"codex\",\"native_session_id\":\"\"}"
+            )
+            .is_err()
+        );
+        assert!(matches!(
+            ProviderSessionId::codex(""),
+            Err(DomainError::InvalidProviderIdentifier)
+        ));
+        assert!(matches!(
+            ProviderSessionId::codex("line\nbreak"),
+            Err(DomainError::InvalidProviderIdentifier)
+        ));
+    }
 
     #[test]
     fn recovery_required_operation_can_only_finish() {
@@ -458,11 +613,17 @@ mod tests {
     fn result_attention_is_sticky_and_revision_guarded() {
         let mut attention = AttentionState::new(WorkstreamId::new());
         attention
-            .mark_result("session-a".to_owned(), "turn-a".to_owned())
+            .mark_result(
+                ProviderSessionId::codex("session-a").unwrap(),
+                "turn-a".to_owned(),
+            )
             .unwrap();
         let first_unseen = attention.result_unseen_since_revision;
         attention
-            .mark_result("session-a".to_owned(), "turn-b".to_owned())
+            .mark_result(
+                ProviderSessionId::codex("session-a").unwrap(),
+                "turn-b".to_owned(),
+            )
             .unwrap();
 
         assert_eq!(attention.result_unseen_since_revision, first_unseen);

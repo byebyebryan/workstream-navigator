@@ -5488,7 +5488,9 @@ mod tests {
         std::fs::create_dir(&project).unwrap();
         let root = StateRoot::create(temporary.path().join("state")).unwrap();
         let mut registry = HostRegistry::open(&root).unwrap();
-        let registered = registry.register_project_root(&project).unwrap();
+        let registered = registry
+            .register_project_root(&project, crate::domain::ProviderKind::Codex)
+            .unwrap();
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
         registry
             .record_runtime_process_birth(runtime.runtime_id, runtime.revision, "birth-a")
@@ -7663,11 +7665,17 @@ mod tests {
     fn acknowledgement_uses_the_current_attention_revision_not_first_result() {
         let mut attention = AttentionState::new(WorkstreamId::new());
         attention
-            .mark_result("session-a".to_owned(), "turn-a".to_owned())
+            .mark_result(
+                crate::domain::ProviderSessionId::codex("session-a").unwrap(),
+                "turn-a".to_owned(),
+            )
             .unwrap();
         let first_result_revision = attention.result_unseen_since_revision.unwrap();
         attention
-            .mark_result("session-a".to_owned(), "turn-b".to_owned())
+            .mark_result(
+                crate::domain::ProviderSessionId::codex("session-a").unwrap(),
+                "turn-b".to_owned(),
+            )
             .unwrap();
 
         assert_ne!(attention.revision, first_result_revision);

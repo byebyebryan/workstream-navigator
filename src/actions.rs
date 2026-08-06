@@ -17,8 +17,8 @@ use thiserror::Error;
 
 use crate::{
     domain::{
-        Clock, OperationId, OperationKind, OperationPhase, Revision, RuntimeId, SystemClock,
-        WorkstreamId, WorkstreamLifecycle,
+        Clock, OperationId, OperationKind, OperationPhase, ProviderKind, ProviderSessionId,
+        Revision, RuntimeId, SystemClock, WorkstreamId, WorkstreamLifecycle,
     },
     provider::codex::app_server::{AppServerError, EphemeralAppServer, ForkReconciliation},
     provider::codex::profile::{ObserverProfile, ProfileError},
@@ -58,6 +58,7 @@ pub fn start_independent_workstream(
     request_key: &str,
 ) -> Result<WorkstreamId, ActionError> {
     let source = workstream_overview(registry, source_workstream_id)?;
+    require_codex_provider(source.provider)?;
     if expected_revision.is_some_and(|expected| expected != source.revision) {
         return Err(ActionError::WorkstreamRevisionConflict);
     }
@@ -65,6 +66,7 @@ pub fn start_independent_workstream(
         request_key,
         source_workstream_id,
         source.revision,
+        source.provider,
     )?;
     let _ = start(
         root,
@@ -94,14 +96,16 @@ pub fn fork_workstream(
     request_key: String,
 ) -> Result<WorkstreamId, ActionError> {
     let source = active_workstream_overview(registry, source_workstream_id)?;
+    require_codex_provider(source.provider)?;
     if expected_revision.is_some_and(|expected| expected != source.revision) {
         return Err(ActionError::WorkstreamRevisionConflict);
     }
-    let prepared = registry.prepare_fork(
+    let prepared = registry.prepare_fork_with_provider(
         request_key,
         OperationKind::Fork,
         source_workstream_id,
         source.revision,
+        source.provider,
     )?;
     if prepared.plan.operation.phase == OperationPhase::Committed {
         let _ = start(root, registry, prepared.plan.workstream_id, None)?;
@@ -131,7 +135,8 @@ pub fn fork_workstream(
     };
     let source_session_id = prepared_plan
         .source_native_session_id
-        .as_deref()
+        .as_ref()
+        .map(ProviderSessionId::native_id)
         .ok_or(ActionError::ForkSourceUnavailable)?;
     let settled_turn_id = prepared_plan
         .last_settled_turn_id
@@ -211,6 +216,7 @@ pub fn recover_managed_operation(
     if plan.operation.kind != OperationKind::Fork {
         return Err(ActionError::ForkRecoveryRequired);
     }
+    require_codex_provider(plan.provider)?;
     recover_fork_operation(root, registry, plan)
 }
 
@@ -222,6 +228,7 @@ fn recover_fork_operation(
     if plan.origin != crate::domain::WorkstreamOrigin::Fork {
         return Err(ActionError::ForkRecoveryRequired);
     }
+    require_codex_provider(plan.provider)?;
     let provider_fork_already_attempted = plan.fork_attempted_at_millis.is_some();
     let prepared = if provider_fork_already_attempted {
         plan
@@ -236,7 +243,8 @@ fn recover_fork_operation(
     };
     let source_session_id = prepared
         .source_native_session_id
-        .as_deref()
+        .as_ref()
+        .map(ProviderSessionId::native_id)
         .ok_or(ActionError::ForkSourceUnavailable)?;
     let settled_turn_id = prepared
         .last_settled_turn_id
@@ -300,7 +308,8 @@ fn ensure_live_fork_source(
         .ok_or(ActionError::ForkSourceUnavailable)?;
     let source_session_id = prepared
         .source_native_session_id
-        .as_deref()
+        .as_ref()
+        .map(ProviderSessionId::native_id)
         .ok_or(ActionError::ForkSourceUnavailable)?;
     let runtime = registry
         .runtime_for_workstream(prepared.source_workstream_id)?
@@ -316,7 +325,7 @@ fn ensure_live_fork_source(
         .ok_or(ActionError::ForkSourceUnavailable)?;
     let binding = registry
         .binding_for_runtime(runtime_id)?
-        .filter(|binding| binding.native_session_id == source_session_id)
+        .filter(|binding| binding.native_session_id.native_id() == source_session_id)
         .ok_or(ActionError::ForkSourceUnavailable)?;
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
@@ -367,6 +376,7 @@ pub fn start(
     expected_revision: Option<Revision>,
 ) -> Result<StartOutcome, ActionError> {
     let overview = active_workstream_overview(registry, workstream_id)?;
+    require_codex_provider(overview.provider)?;
     if expected_revision.is_some_and(|expected| expected != overview.revision) {
         return Err(ActionError::WorkstreamRevisionConflict);
     }
@@ -429,7 +439,7 @@ pub fn start(
         .map(|runtime| registry.binding_for_runtime(runtime.runtime_id))
         .transpose()?
         .flatten();
-    let record = registry.reserve_runtime(workstream_id)?;
+    let record = registry.reserve_runtime_with_provider(workstream_id, overview.provider)?;
     launch_reserved_runtime(
         root,
         registry,
@@ -459,6 +469,7 @@ pub fn recover(
     expected_revision: Option<Revision>,
 ) -> Result<StartOutcome, ActionError> {
     let overview = active_workstream_overview(registry, workstream_id)?;
+    require_codex_provider(overview.provider)?;
     if expected_revision.is_some_and(|expected| expected != overview.revision) {
         return Err(ActionError::WorkstreamRevisionConflict);
     }
@@ -507,7 +518,8 @@ pub fn recover(
         }
     }
     let prior_binding = registry.binding_for_runtime(prior_runtime.runtime_id)?;
-    let record = registry.reserve_runtime_recovery(workstream_id)?;
+    let record =
+        registry.reserve_runtime_recovery_with_provider(workstream_id, overview.provider)?;
     launch_reserved_runtime(
         root,
         registry,
@@ -766,6 +778,7 @@ pub fn rename(
     name: &str,
 ) -> Result<(), ActionError> {
     let overview = active_workstream_overview(registry, workstream_id)?;
+    require_codex_provider(overview.provider)?;
     if overview.revision != expected_revision {
         return Err(ActionError::WorkstreamRevisionConflict);
     }
@@ -775,7 +788,7 @@ pub fn rename(
     let binding = registry
         .binding_for_runtime(runtime.runtime_id)?
         .ok_or(ActionError::NoProviderBinding(workstream_id))?;
-    EphemeralAppServer::default().set_thread_name(&binding.native_session_id, name)?;
+    EphemeralAppServer::default().set_thread_name(binding.native_session_id.native_id(), name)?;
     registry.record_thread_name(runtime.runtime_id, &binding.native_session_id, name)?;
     Ok(())
 }
@@ -824,7 +837,7 @@ pub fn codex_launch_program(
     ];
     if let Some(binding) = binding {
         program.push("resume".into());
-        program.push(binding.native_session_id.clone().into());
+        program.push(binding.native_session_id.native_id().to_owned().into());
     }
     program
 }
@@ -841,7 +854,7 @@ pub fn codex_recovery_program(
     let mut program = codex_launch_program(cwd, None);
     program.push("resume".into());
     if let Some(binding) = binding {
-        program.push(binding.native_session_id.clone().into());
+        program.push(binding.native_session_id.native_id().to_owned().into());
     }
     program
 }
@@ -876,6 +889,14 @@ fn ensure_workstream_revision(
         return Err(ActionError::WorkstreamRevisionConflict);
     }
     Ok(())
+}
+
+fn require_codex_provider(provider: ProviderKind) -> Result<(), ActionError> {
+    if provider == ProviderKind::Codex {
+        Ok(())
+    } else {
+        Err(ActionError::UnsupportedProvider(provider))
+    }
 }
 
 fn workstream_revision(
@@ -969,6 +990,8 @@ fn reconcile_observer_trust_with_manager(
 
 #[derive(Debug, Error)]
 pub enum ActionError {
+    #[error("provider {0} is not active in the Codex production adapter")]
+    UnsupportedProvider(ProviderKind),
     #[error("CODEX_HOME cannot be determined")]
     CodexHomeUnavailable,
     #[error("I/O: {0}")]
@@ -1026,7 +1049,10 @@ mod tests {
         let root = crate::state::StateRoot::create(temporary.path()).unwrap();
         let mut registry = crate::state::HostRegistry::open(&root).unwrap();
         let registered = registry
-            .register_project_root(Path::new("/disposable/repository"))
+            .register_project_root(
+                Path::new("/disposable/repository"),
+                crate::domain::ProviderKind::Codex,
+            )
             .unwrap();
         (temporary, registry, registered.workstream_id)
     }
@@ -1129,7 +1155,8 @@ mod tests {
         let cwd = Path::new("/disposable/repository");
         let binding = ProviderBinding {
             runtime_id: RuntimeId::new(),
-            native_session_id: "known-session".to_owned(),
+            provider: crate::domain::ProviderKind::Codex,
+            native_session_id: crate::domain::ProviderSessionId::codex("known-session").unwrap(),
             start_source: "resume".to_owned(),
             last_settled_turn_id: Some("settled-turn".to_owned()),
             observed_thread_name: None,
@@ -1195,7 +1222,10 @@ mod tests {
         let root = crate::state::StateRoot::create(temporary.path()).unwrap();
         let mut registry = crate::state::HostRegistry::open(&root).unwrap();
         let registered = registry
-            .register_project_root(Path::new("/disposable/repository"))
+            .register_project_root(
+                Path::new("/disposable/repository"),
+                crate::domain::ProviderKind::Codex,
+            )
             .unwrap();
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
         registry
@@ -1224,6 +1254,7 @@ mod tests {
         let record = crate::state::RuntimeRecord {
             runtime_id: RuntimeId::new(),
             workstream_id: WorkstreamId::new(),
+            provider: crate::domain::ProviderKind::Codex,
             tmux_generation: "generation".to_owned(),
             tmux_session: "session".to_owned(),
             cwd: PathBuf::from("/disposable/repository"),
@@ -1266,10 +1297,20 @@ mod tests {
     fn independent_creation_reuses_its_request_without_a_git_effect() {
         let (_temporary, mut registry, source) = registry();
         let first = registry
-            .create_independent_workstream("independent-action", source, Revision::INITIAL)
+            .create_independent_workstream(
+                "independent-action",
+                source,
+                Revision::INITIAL,
+                crate::domain::ProviderKind::Codex,
+            )
             .unwrap();
         let replay = registry
-            .create_independent_workstream("independent-action", source, Revision::INITIAL)
+            .create_independent_workstream(
+                "independent-action",
+                source,
+                Revision::INITIAL,
+                crate::domain::ProviderKind::Codex,
+            )
             .unwrap();
 
         assert_eq!(first, replay);
@@ -1294,12 +1335,15 @@ mod tests {
 
         let root = crate::state::StateRoot::create(temporary.path().join("state")).unwrap();
         let mut registry = crate::state::HostRegistry::open(&root).unwrap();
-        let registered = registry.register_project_root(&repository).unwrap();
+        let registered = registry
+            .register_project_root(&repository, crate::domain::ProviderKind::Codex)
+            .unwrap();
         let created = registry
             .create_independent_workstream(
                 "independent-system-git",
                 registered.workstream_id,
                 Revision::INITIAL,
+                crate::domain::ProviderKind::Codex,
             )
             .unwrap();
         let destination_root = registry

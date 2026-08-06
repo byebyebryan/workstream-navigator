@@ -13,7 +13,7 @@ use thiserror::Error;
 
 use crate::{
     actions::{self},
-    domain::{OperationId, Revision, RuntimeId, WorkstreamId},
+    domain::{OperationId, ProviderSessionId, Revision, RuntimeId, WorkstreamId},
     navigator::run_local_navigator,
     presentation::{AttachmentPhase, Presentation},
     provider::codex::app_server::EphemeralAppServer,
@@ -1130,6 +1130,7 @@ fn register(registry: &mut HostRegistry, checkout: &Path) -> Result<(), AppError
         &repository.display_name,
         repository.remote_identity_fingerprint.as_deref(),
         repository.remote_identity_display.as_deref(),
+        crate::domain::ProviderKind::Codex,
     )?;
     println!("registered workstream {}", registered.workstream_id);
     Ok(())
@@ -1566,7 +1567,9 @@ fn observe_hook(state_root: Option<PathBuf>) {
     } else {
         None
     };
-    let session_id = observation.native_session_id.clone();
+    let Ok(session_id) = ProviderSessionId::codex(observation.native_session_id.clone()) else {
+        return;
+    };
     if registry
         .apply_hook_observation(record.runtime_id, &record.tmux_generation, observation)
         .is_ok()
@@ -1860,7 +1863,8 @@ mod tests {
     fn resuming_uses_the_exact_bound_native_session() {
         let binding = crate::state::ProviderBinding {
             runtime_id: RuntimeId::new(),
-            native_session_id: "exact-session".to_owned(),
+            provider: crate::domain::ProviderKind::Codex,
+            native_session_id: crate::domain::ProviderSessionId::codex("exact-session").unwrap(),
             start_source: "startup".to_owned(),
             last_settled_turn_id: Some("settled-turn".to_owned()),
             observed_thread_name: None,

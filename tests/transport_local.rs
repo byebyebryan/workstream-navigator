@@ -5,7 +5,7 @@ use std::{
 };
 
 use wsnav::{
-    domain::WorkstreamId,
+    domain::ProviderKind,
     protocol::CURRENT_PROTOCOL_VERSION,
     protocol::HostAction,
     state::{HostRegistry, StateRoot},
@@ -39,14 +39,22 @@ fn local_subprocess_apply_uses_the_same_revision_guard_as_an_ssh_host() {
     let temporary = tempfile::tempdir().unwrap();
     let state_root = temporary.path().join("state");
     let root = StateRoot::create(&state_root).unwrap();
-    let workstream_id = WorkstreamId::new();
-    let attention_revision = {
+    let (workstream_id, attention_revision) = {
         let mut registry = HostRegistry::open(&root).unwrap();
-        registry
-            .mark_result_attention(workstream_id, "session".to_owned(), "turn".to_owned())
+        let registered = registry
+            .register_project_root(Path::new("/disposable/repository"), ProviderKind::Codex)
+            .unwrap();
+        let workstream_id = registered.workstream_id;
+        let attention_revision = registry
+            .mark_result_attention(
+                workstream_id,
+                wsnav::domain::ProviderSessionId::codex("session").unwrap(),
+                "turn".to_owned(),
+            )
             .unwrap()
             .revision
-            .value()
+            .value();
+        (workstream_id, attention_revision)
     };
     let endpoint = LocalEndpoint {
         executable: PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
@@ -257,7 +265,10 @@ fn local_subprocess_assembles_multiple_bounded_snapshot_pages() {
         let mut registry = HostRegistry::open(&root).unwrap();
         for index in 0..33 {
             registry
-                .register_project_root(Path::new(&format!("/disposable/repository-{index:02}")))
+                .register_project_root(
+                    Path::new(&format!("/disposable/repository-{index:02}")),
+                    wsnav::domain::ProviderKind::Codex,
+                )
                 .unwrap();
         }
     }

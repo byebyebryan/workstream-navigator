@@ -267,6 +267,7 @@ fn apply_register_checkout(registry: &mut HostRegistry, checkout_path: &Path) ->
         &repository.display_name,
         repository.remote_identity_fingerprint.as_deref(),
         repository.remote_identity_display.as_deref(),
+        crate::domain::ProviderKind::Codex,
     ) {
         Ok(registered) => ResponseEnvelope {
             version: CURRENT_PROTOCOL_VERSION,
@@ -972,6 +973,7 @@ mod tests {
         let overview = WorkstreamOverview {
             workstream_id: WorkstreamId::new(),
             location_id: crate::domain::LocationId::new(),
+            provider: crate::domain::ProviderKind::Codex,
             project_repository_path: PathBuf::from("/private/place/dms-power-status"),
             project_display_name: "dms-power-status".to_owned(),
             remote_identity_fingerprint: Some(format!("git-remote-v1:{}", "a".repeat(64))),
@@ -1002,7 +1004,9 @@ mod tests {
         std::fs::create_dir(&project).unwrap();
         let root = StateRoot::create(temporary.path().join("state")).unwrap();
         let mut registry = HostRegistry::open(&root).unwrap();
-        let registered = registry.register_project_root(&project).unwrap();
+        let registered = registry
+            .register_project_root(&project, crate::domain::ProviderKind::Codex)
+            .unwrap();
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
         registry
             .record_runtime_process_birth(runtime.runtime_id, runtime.revision, "birth-a")
@@ -1021,10 +1025,20 @@ mod tests {
     fn revision_guarded_acknowledgement_uses_the_host_transaction() {
         let temporary = tempfile::tempdir().unwrap();
         let root = StateRoot::create(temporary.path().join("state")).unwrap();
-        let workstream_id = crate::domain::WorkstreamId::new();
         let mut registry = HostRegistry::open(&root).unwrap();
+        let registered = registry
+            .register_project_root(
+                Path::new("/disposable/repository"),
+                crate::domain::ProviderKind::Codex,
+            )
+            .unwrap();
+        let workstream_id = registered.workstream_id;
         let attention = registry
-            .mark_result_attention(workstream_id, "session".to_owned(), "turn".to_owned())
+            .mark_result_attention(
+                workstream_id,
+                crate::domain::ProviderSessionId::codex("session").unwrap(),
+                "turn".to_owned(),
+            )
             .unwrap();
         let request = RequestEnvelope {
             version: CURRENT_PROTOCOL_VERSION,

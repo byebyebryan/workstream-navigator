@@ -495,7 +495,7 @@ impl ProviderCapability {
             && self.observe
     }
 
-    fn validate(&self) -> Result<(), ProtocolError> {
+    pub(crate) fn validate(&self) -> Result<(), ProtocolError> {
         match (self.status, self.reason) {
             (ProviderCapabilityStatus::Available, ProviderCapabilityReason::None)
             | (

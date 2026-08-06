@@ -226,6 +226,13 @@ const fn operation_phase_label(phase: OperationPhase) -> &'static str {
     }
 }
 
+const fn provider_label(kind: ProviderKind) -> &'static str {
+    match kind {
+        ProviderKind::Codex => "Codex",
+        ProviderKind::OpenCode => "OpenCode",
+    }
+}
+
 /// A complete bounded projection of the local host registry.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LocalNavigatorSnapshot {
@@ -268,11 +275,7 @@ impl NavigatorHostOverview {
     #[must_use]
     pub fn provider_is_new_eligible(&self, kind: ProviderKind) -> bool {
         self.reachability.is_reachable()
-            && self
-                .provider_capabilities
-                .iter()
-                .find(|capability| capability.kind == kind)
-                .is_some_and(|capability| capability.is_new_eligible())
+            && crate::provider::eligible_new_providers(&self.provider_capabilities).contains(&kind)
     }
 }
 
@@ -984,6 +987,11 @@ enum NavigatorModal {
         hosts: Vec<NavigatorHost>,
         selected: usize,
     },
+    SelectProvider {
+        providers: Vec<ProviderKind>,
+        selected: usize,
+        intent: ProviderChoiceIntent,
+    },
     ProjectBrowser {
         host: NavigatorHost,
         directories: ProjectDirectoriesResponse,
@@ -997,6 +1005,27 @@ enum NavigatorModal {
     },
     RegisterHost {
         value: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ProviderChoiceIntent {
+    New {
+        source: NavigatorWorkstream,
+    },
+    Register {
+        host: NavigatorHost,
+        relative_path: String,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ProviderChoice {
+    None,
+    Immediate(ProviderKind),
+    Modal {
+        providers: Vec<ProviderKind>,
+        selected: usize,
     },
 }
 
@@ -1829,6 +1858,65 @@ impl NavigatorView {
                 reachability: host.reachability,
             }
         })
+    }
+
+    fn eligible_providers_for_host(&self, host: &NavigatorHost) -> Vec<ProviderKind> {
+        self.snapshot
+            .hosts
+            .iter()
+            .find(|overview| overview.alias == host.alias())
+            .filter(|overview| overview.reachability.is_reachable())
+            .map(|overview| {
+                crate::provider::eligible_new_providers(&overview.provider_capabilities)
+            })
+            .unwrap_or_default()
+    }
+
+    fn provider_choice_is_current(&self, host: &NavigatorHost, provider: ProviderKind) -> bool {
+        self.eligible_providers_for_host(host).contains(&provider)
+    }
+
+    fn provider_choice_for_new(&self, source: &NavigatorWorkstream) -> ProviderChoice {
+        let providers = self.eligible_providers_for_host(&source.host);
+        match providers.as_slice() {
+            [] => ProviderChoice::None,
+            [provider] => ProviderChoice::Immediate(*provider),
+            _ => ProviderChoice::Modal {
+                selected: providers
+                    .iter()
+                    .position(|provider| *provider == source.provider)
+                    .unwrap_or(0),
+                providers,
+            },
+        }
+    }
+
+    fn select_provider_next(&mut self) {
+        let Some(NavigatorModal::SelectProvider {
+            providers,
+            selected,
+            ..
+        }) = self.modal.as_mut()
+        else {
+            return;
+        };
+        if !providers.is_empty() {
+            *selected = (*selected + 1) % providers.len();
+        }
+    }
+
+    fn select_provider_previous(&mut self) {
+        let Some(NavigatorModal::SelectProvider {
+            providers,
+            selected,
+            ..
+        }) = self.modal.as_mut()
+        else {
+            return;
+        };
+        if !providers.is_empty() {
+            *selected = selected.checked_sub(1).unwrap_or(providers.len() - 1);
+        }
     }
 
     /// Counts only Runtimes which the host registry still considers live.
@@ -2805,6 +2893,7 @@ fn navigator_modal_area(outer: Rect, modal: &NavigatorModal) -> Rect {
     });
     let desired_height = match modal {
         NavigatorModal::SelectRegistrationHost { hosts, .. } => hosts.len().saturating_add(4),
+        NavigatorModal::SelectProvider { providers, .. } => providers.len().saturating_add(4),
         NavigatorModal::ProjectBrowser { directories, .. } => directories
             .entries
             .len()
@@ -2833,6 +2922,7 @@ fn navigator_modal_area(outer: Rect, modal: &NavigatorModal) -> Rect {
     )
 }
 
+#[allow(clippy::too_many_lines)]
 fn navigator_modal_content(
     modal: NavigatorModal,
     content_width: usize,
@@ -2917,6 +3007,11 @@ fn navigator_modal_content(
         NavigatorModal::SelectRegistrationHost { hosts, selected } => {
             registration_host_picker_modal(hosts, selected, key)
         }
+        NavigatorModal::SelectProvider {
+            providers,
+            selected,
+            ..
+        } => provider_picker_modal(providers, selected, key),
         NavigatorModal::ProjectBrowser {
             ref host,
             ref directories,
@@ -3147,6 +3242,36 @@ fn registration_host_picker_modal(
         Span::raw(" cancel"),
     ]));
     (" Add Project · choose host ".to_owned(), lines)
+}
+
+fn provider_picker_modal(
+    providers: Vec<ProviderKind>,
+    selected: usize,
+    key: Style,
+) -> (String, Vec<Line<'static>>) {
+    let mut lines = vec![Line::raw("Choose the provider for this Workstream:")];
+    lines.extend(providers.into_iter().enumerate().map(|(index, provider)| {
+        let marker = if index == selected { "> " } else { "  " };
+        Line::from(Span::styled(
+            format!("{marker}{}", provider_label(provider)),
+            if index == selected {
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Gray)
+            },
+        ))
+    }));
+    lines.push(Line::from(vec![
+        Span::styled("↑/↓", key),
+        Span::raw(" choose   "),
+        Span::styled("Enter", key),
+        Span::raw(" confirm   "),
+        Span::styled("Esc", key),
+        Span::raw(" cancel"),
+    ]));
+    (" Select provider ".to_owned(), lines)
 }
 
 fn register_host_modal(value: &str, key: Style) -> (String, Vec<Line<'static>>) {
@@ -3985,6 +4110,8 @@ pub enum NavigatorError {
     Transport(#[from] TransportError),
     #[error(transparent)]
     BuildInfo(#[from] BuildInfoError),
+    #[error(transparent)]
+    ProviderSelection(#[from] crate::provider::ProviderSelectionError),
     #[error("could not initialize the local terminal navigator: {0}")]
     Terminal(#[from] io::Error),
     #[error("the local navigator action could not be launched")]
@@ -4258,6 +4385,7 @@ fn handle_navigator_modal_key(
                 &source,
                 CreationAction::Fork,
                 false,
+                None,
             );
         }
         return false;
@@ -4313,6 +4441,7 @@ fn handle_navigator_modal_key(
             | NavigatorModal::SelectHostRemoval { .. }
             | NavigatorModal::ConfirmForgetProject { .. }
             | NavigatorModal::SelectRegistrationHost { .. }
+            | NavigatorModal::SelectProvider { .. }
             | NavigatorModal::ProjectBrowser { .. },
         )
         | None => {}
@@ -4386,13 +4515,16 @@ fn handle_modal_picker_key(key: KeyCode, view: &mut NavigatorView) -> bool {
         Some(NavigatorModal::SelectRegistrationHost { .. })
     );
     let host_removal = matches!(view.modal, Some(NavigatorModal::SelectHostRemoval { .. }));
-    if !registration_host && !host_removal {
+    let provider = matches!(view.modal, Some(NavigatorModal::SelectProvider { .. }));
+    if !registration_host && !host_removal && !provider {
         return false;
     }
     match key {
         KeyCode::Down | KeyCode::Char('j') => {
             if registration_host {
                 view.select_registration_host_next();
+            } else if provider {
+                view.select_provider_next();
             } else {
                 view.toggle_host_removal_mode();
             }
@@ -4400,6 +4532,8 @@ fn handle_modal_picker_key(key: KeyCode, view: &mut NavigatorView) -> bool {
         KeyCode::Up | KeyCode::Char('k') => {
             if registration_host {
                 view.select_registration_host_previous();
+            } else if provider {
+                view.select_provider_previous();
             } else {
                 view.toggle_host_removal_mode();
             }
@@ -4459,6 +4593,47 @@ fn confirm_navigator_modal(
                 open_project_browser(root, view, host, "");
             } else {
                 view.set_message("no registered host is available for Project registration");
+            }
+        }
+        Some(NavigatorModal::SelectProvider {
+            providers,
+            selected,
+            intent,
+        }) => {
+            let Some(provider) = providers.get(selected).copied() else {
+                view.set_message("no provider is eligible for a new Workstream");
+                return;
+            };
+            let host = match &intent {
+                ProviderChoiceIntent::New { source } => &source.host,
+                ProviderChoiceIntent::Register { host, .. } => host,
+            };
+            if !view.provider_choice_is_current(host, provider) {
+                view.set_message("provider choice is no longer available; refresh and try again");
+                return;
+            }
+            match intent {
+                ProviderChoiceIntent::New { source } => create_workstream_from_source(
+                    root,
+                    presentation,
+                    remote,
+                    view,
+                    &source,
+                    CreationAction::Independent,
+                    true,
+                    Some(provider),
+                ),
+                ProviderChoiceIntent::Register {
+                    host,
+                    relative_path,
+                } => register_project_browser_directory_with_provider(
+                    root,
+                    remote,
+                    view,
+                    &host,
+                    &relative_path,
+                    provider,
+                ),
             }
         }
         Some(NavigatorModal::ConfigureProjectBrowserRoot { host, value })
@@ -4887,9 +5062,47 @@ fn create_workstream_selected(
         }
         return;
     };
-    create_workstream_from_source(root, presentation, remote, view, &source, action, true);
+    if action == CreationAction::Fork {
+        create_workstream_from_source(
+            root,
+            presentation,
+            remote,
+            view,
+            &source,
+            action,
+            true,
+            None,
+        );
+        return;
+    }
+    match view.provider_choice_for_new(&source) {
+        ProviderChoice::None => {
+            view.set_message("no provider is currently eligible for a new Workstream");
+        }
+        ProviderChoice::Immediate(provider) => create_workstream_from_source(
+            root,
+            presentation,
+            remote,
+            view,
+            &source,
+            action,
+            true,
+            Some(provider),
+        ),
+        ProviderChoice::Modal {
+            providers,
+            selected,
+        } => {
+            view.modal = Some(NavigatorModal::SelectProvider {
+                providers,
+                selected,
+                intent: ProviderChoiceIntent::New { source },
+            });
+        }
+    }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn create_workstream_from_source(
     root: &StateRoot,
     presentation: &Presentation,
@@ -4898,11 +5111,12 @@ fn create_workstream_from_source(
     source: &NavigatorWorkstream,
     action: CreationAction,
     check_existing_fork: bool,
+    provider: Option<ProviderKind>,
 ) {
     if action == CreationAction::Fork && check_existing_fork && view.begin_fork_recovery(source) {
         return;
     }
-    let destination = match run_creation_action(root, action, source) {
+    let destination = match run_creation_action(root, action, source, provider) {
         Ok(workstream_id) => workstream_id,
         Err(error) => {
             if action == CreationAction::Fork {
@@ -5023,9 +5237,43 @@ fn register_project_browser_directory(
         view.set_message("remote host is unavailable; Project registration was not sent");
         return;
     }
+    let providers = view.eligible_providers_for_host(host);
+    match providers.as_slice() {
+        [] => {
+            view.set_message("no provider is currently eligible for a new Workstream");
+        }
+        [provider] => register_project_browser_directory_with_provider(
+            root,
+            remote,
+            view,
+            host,
+            relative_path,
+            *provider,
+        ),
+        _ => {
+            view.modal = Some(NavigatorModal::SelectProvider {
+                providers,
+                selected: 0,
+                intent: ProviderChoiceIntent::Register {
+                    host: host.clone(),
+                    relative_path: relative_path.to_owned(),
+                },
+            });
+        }
+    }
+}
+
+fn register_project_browser_directory_with_provider(
+    root: &StateRoot,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+    host: &NavigatorHost,
+    relative_path: &str,
+    provider: ProviderKind,
+) {
     let action = crate::protocol::HostAction::RegisterProjectDirectory {
         relative_path: relative_path.to_owned(),
-        provider: crate::domain::ProviderKind::Codex,
+        provider,
     };
     let client = HostClient::new(SystemCommandRunner);
     let result = if host.is_remote() {
@@ -5363,6 +5611,7 @@ fn run_creation_action(
     root: &StateRoot,
     action: CreationAction,
     source: &NavigatorWorkstream,
+    provider: Option<ProviderKind>,
 ) -> Result<WorkstreamId, NavigatorError> {
     if source.host.is_remote() && !source.host.is_reachable() {
         return Err(NavigatorError::RemoteHostUnavailable);
@@ -5370,27 +5619,48 @@ fn run_creation_action(
     let executable = std::env::current_exe().map_err(NavigatorError::ActionLaunch)?;
     let mut command = Command::new(executable);
     command.arg("--state-root").arg(root.base());
-    if source.host.is_remote() {
-        command
-            .arg("host")
-            .arg(action.remote_command())
-            .arg(source.host.alias())
-            .arg(source.workstream_id.to_string())
-            .arg(source.workstream_revision.value().to_string());
-        if action == CreationAction::Independent {
-            command.arg(source.provider.as_str());
-        }
-    } else {
-        command
-            .arg(action.local_command())
-            .arg(source.workstream_id.to_string());
-    }
+    command.args(creation_command_arguments(action, source, provider)?);
     let output =
         output_bounded(&mut command, 1024, 1024).map_err(NavigatorError::from_action_process)?;
     if !output.status.success() {
         return Err(NavigatorError::ActionFailed);
     }
     parse_created_workstream(&output.stdout)
+}
+
+fn creation_command_arguments(
+    action: CreationAction,
+    source: &NavigatorWorkstream,
+    provider: Option<ProviderKind>,
+) -> Result<Vec<String>, NavigatorError> {
+    let mut arguments = if source.host.is_remote() {
+        vec![
+            "host".to_owned(),
+            action.remote_command().to_owned(),
+            source.host.alias().to_owned(),
+            source.workstream_id.to_string(),
+            source.workstream_revision.value().to_string(),
+        ]
+    } else {
+        vec![
+            action.local_command().to_owned(),
+            source.workstream_id.to_string(),
+        ]
+    };
+    if action == CreationAction::Independent {
+        arguments.push("--provider".to_owned());
+        arguments.push(
+            provider
+                .ok_or_else(|| {
+                    NavigatorError::ProviderSelection(
+                        crate::provider::ProviderSelectionError::SelectionRequired,
+                    )
+                })?
+                .as_str()
+                .to_owned(),
+        );
+    }
+    Ok(arguments)
 }
 
 fn run_recovery_operation(
@@ -7824,6 +8094,205 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn provider_choice_refuses_zero_and_auto_selects_sole_codex() {
+        let source = row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle);
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![source.clone()],
+            hosts: vec![NavigatorHostOverview {
+                alias: "local".to_owned(),
+                reachability: RemoteHostReachability::Reachable,
+                observer_status: ObserverStatus::Ready,
+                provider_capabilities: capabilities(true, false),
+            }],
+            ..LocalNavigatorSnapshot::default()
+        });
+        assert_eq!(
+            view.provider_choice_for_new(&source),
+            ProviderChoice::Immediate(ProviderKind::Codex)
+        );
+
+        view.snapshot.hosts[0].provider_capabilities = capabilities(false, false);
+        assert_eq!(view.provider_choice_for_new(&source), ProviderChoice::None);
+    }
+
+    #[test]
+    fn provider_choice_uses_source_provider_and_preserves_source_identity() {
+        let location_id = LocationId::new();
+        let mut source = row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle);
+        source.host = NavigatorHost::Remote {
+            alias: "snap".to_owned(),
+            reachability: RemoteHostReachability::Reachable,
+        };
+        source.provider = ProviderKind::OpenCode;
+        source.location_id = location_id;
+        let view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![source.clone()],
+            hosts: vec![NavigatorHostOverview {
+                alias: "snap".to_owned(),
+                reachability: RemoteHostReachability::Reachable,
+                observer_status: ObserverStatus::Ready,
+                provider_capabilities: capabilities(true, true),
+            }],
+            ..LocalNavigatorSnapshot::default()
+        });
+
+        let ProviderChoice::Modal {
+            providers,
+            selected,
+        } = view.provider_choice_for_new(&source)
+        else {
+            panic!("multiple eligible providers should open a chooser");
+        };
+        assert_eq!(providers, vec![ProviderKind::Codex, ProviderKind::OpenCode]);
+        assert_eq!(selected, 1);
+
+        let intent = ProviderChoiceIntent::New { source };
+        let ProviderChoiceIntent::New { source } = intent else {
+            unreachable!();
+        };
+        assert_eq!(source.host.alias(), "snap");
+        assert_eq!(source.location_id, location_id);
+        assert_eq!(source.provider, ProviderKind::OpenCode);
+    }
+
+    #[test]
+    fn creation_children_propagate_exact_provider_without_changing_fork_arity() {
+        let source = row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle);
+        assert_eq!(
+            creation_command_arguments(
+                CreationAction::Independent,
+                &source,
+                Some(ProviderKind::OpenCode)
+            )
+            .unwrap(),
+            vec![
+                "new-workstream".to_owned(),
+                source.workstream_id.to_string(),
+                "--provider".to_owned(),
+                "opencode".to_owned(),
+            ]
+        );
+        assert_eq!(
+            creation_command_arguments(CreationAction::Fork, &source, None).unwrap(),
+            vec![
+                "fork-workstream".to_owned(),
+                source.workstream_id.to_string()
+            ]
+        );
+
+        let mut remote = source.clone();
+        remote.host = NavigatorHost::Remote {
+            alias: "snap".to_owned(),
+            reachability: RemoteHostReachability::Reachable,
+        };
+        assert_eq!(
+            creation_command_arguments(
+                CreationAction::Independent,
+                &remote,
+                Some(ProviderKind::Codex)
+            )
+            .unwrap(),
+            vec![
+                "host".to_owned(),
+                "new".to_owned(),
+                "snap".to_owned(),
+                remote.workstream_id.to_string(),
+                remote.workstream_revision.value().to_string(),
+                "--provider".to_owned(),
+                "codex".to_owned(),
+            ]
+        );
+        assert_eq!(
+            creation_command_arguments(CreationAction::Fork, &remote, None).unwrap(),
+            vec![
+                "host".to_owned(),
+                "fork".to_owned(),
+                "snap".to_owned(),
+                remote.workstream_id.to_string(),
+                remote.workstream_revision.value().to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn registration_provider_chooser_keeps_pending_host_and_directory_intent() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let host = NavigatorHost::Local;
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            hosts: vec![NavigatorHostOverview {
+                alias: "local".to_owned(),
+                reachability: RemoteHostReachability::Reachable,
+                observer_status: ObserverStatus::Ready,
+                provider_capabilities: capabilities(true, true),
+            }],
+            ..LocalNavigatorSnapshot::default()
+        });
+        let mut remote = RemoteMonitor::new();
+        register_project_browser_directory(&root, &mut remote, &mut view, &host, "projects/demo");
+
+        let Some(NavigatorModal::SelectProvider {
+            providers,
+            selected,
+            intent:
+                ProviderChoiceIntent::Register {
+                    host: pending_host,
+                    relative_path,
+                },
+        }) = view.modal
+        else {
+            panic!("multiple registration providers should open a chooser");
+        };
+        assert_eq!(providers, vec![ProviderKind::Codex, ProviderKind::OpenCode]);
+        assert_eq!(selected, 0);
+        assert_eq!(pending_host, NavigatorHost::Local);
+        assert_eq!(relative_path, "projects/demo");
+    }
+
+    #[test]
+    fn offered_provider_becomes_non_confirmable_when_host_turns_unreachable() {
+        let host = NavigatorHost::Remote {
+            alias: "snap".to_owned(),
+            reachability: RemoteHostReachability::Reachable,
+        };
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            hosts: vec![NavigatorHostOverview {
+                alias: "snap".to_owned(),
+                reachability: RemoteHostReachability::Reachable,
+                observer_status: ObserverStatus::Ready,
+                provider_capabilities: capabilities(true, true),
+            }],
+            ..LocalNavigatorSnapshot::default()
+        });
+        assert!(view.provider_choice_is_current(&host, ProviderKind::OpenCode));
+
+        view.snapshot.hosts[0].reachability =
+            RemoteHostReachability::Unreachable(RemoteHostIssue::ControlCommunicationFailed);
+        assert!(!view.provider_choice_is_current(&host, ProviderKind::OpenCode));
+    }
+
+    #[test]
+    fn offered_provider_becomes_non_confirmable_when_current_capability_changes() {
+        let host = NavigatorHost::Remote {
+            alias: "snap".to_owned(),
+            reachability: RemoteHostReachability::Reachable,
+        };
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            hosts: vec![NavigatorHostOverview {
+                alias: "snap".to_owned(),
+                reachability: RemoteHostReachability::Reachable,
+                observer_status: ObserverStatus::Ready,
+                provider_capabilities: capabilities(true, true),
+            }],
+            ..LocalNavigatorSnapshot::default()
+        });
+        assert!(view.provider_choice_is_current(&host, ProviderKind::OpenCode));
+
+        view.snapshot.hosts[0].provider_capabilities = capabilities(true, false);
+        assert!(!view.provider_choice_is_current(&host, ProviderKind::OpenCode));
+    }
+
     fn row(
         workstream_id: WorkstreamId,
         runtime_status: NavigatorRuntimeStatus,
@@ -7846,5 +8315,45 @@ mod tests {
             last_activity_at_millis: None,
             workstream_revision: Revision::INITIAL,
         }
+    }
+
+    fn capabilities(codex: bool, opencode: bool) -> Vec<ProviderCapability> {
+        [
+            (ProviderKind::Codex, codex),
+            (ProviderKind::OpenCode, opencode),
+        ]
+        .into_iter()
+        .map(|(kind, eligible)| {
+            if eligible {
+                ProviderCapability {
+                    kind,
+                    status: crate::protocol::ProviderCapabilityStatus::Available,
+                    reason: crate::protocol::ProviderCapabilityReason::None,
+                    fresh_launch: true,
+                    exact_resume: true,
+                    observe: true,
+                    metadata_read: true,
+                    rename: true,
+                    fork: true,
+                }
+            } else {
+                ProviderCapability {
+                    kind,
+                    status: crate::protocol::ProviderCapabilityStatus::Unavailable,
+                    reason: if kind == ProviderKind::Codex {
+                        crate::protocol::ProviderCapabilityReason::ObserverNotReady
+                    } else {
+                        crate::protocol::ProviderCapabilityReason::AdapterUnavailable
+                    },
+                    fresh_launch: false,
+                    exact_resume: false,
+                    observe: false,
+                    metadata_read: false,
+                    rename: false,
+                    fork: false,
+                }
+            }
+        })
+        .collect()
     }
 }

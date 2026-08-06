@@ -87,9 +87,19 @@ enum Commands {
     /// Remove only the exact unchanged owned observer profile after all runtimes stop.
     RemoveObserver,
     /// Register one existing Git project as the initial Workstream location.
-    Register { checkout: PathBuf },
+    Register {
+        checkout: PathBuf,
+        /// Provider to use when more than one provider is eligible.
+        #[arg(long)]
+        provider: Option<String>,
+    },
     /// Create and start an independent Workstream from one registered project location.
-    NewWorkstream { source_workstream_id: String },
+    NewWorkstream {
+        source_workstream_id: String,
+        /// Provider to use when the source provider is not an eligible default.
+        #[arg(long)]
+        provider: Option<String>,
+    },
     /// Fork one live Workstream at its last completed native Codex turn.
     ForkWorkstream { source_workstream_id: String },
     /// Start native Codex in a private tmux server for one registered workstream.
@@ -223,7 +233,13 @@ enum HostCommands {
     /// Verify a remote executable's stateless release probe and registered host identity.
     Doctor { alias: String },
     /// Register one existing Git project on a verified SSH host.
-    RegisterCheckout { alias: String, checkout: String },
+    RegisterCheckout {
+        alias: String,
+        checkout: String,
+        /// Provider to use when more than one provider is eligible.
+        #[arg(long)]
+        provider: Option<String>,
+    },
     /// Install or reconcile a remote exact observer profile before native review.
     PrepareObserver { alias: String },
     /// Remove only an exact remote observer profile after managed Runtimes stop.
@@ -270,7 +286,9 @@ enum HostCommands {
         alias: String,
         source_workstream_id: String,
         revision: i64,
-        provider: String,
+        /// Provider to use when the source provider is not an eligible default.
+        #[arg(long)]
+        provider: Option<String>,
     },
     /// Fork one remote live Workstream at its last completed native turn.
     Fork {
@@ -414,13 +432,19 @@ fn execute_state_command(root: &StateRoot, command: Commands) -> Result<(), AppE
         Commands::Doctor => doctor(root, &mut registry),
         Commands::UpdateObserver => update_observer(root, &mut registry),
         Commands::RemoveObserver => remove_observer(root, &mut registry),
-        Commands::Register { checkout } => register(&mut registry, &checkout),
+        Commands::Register { checkout, provider } => register(
+            &mut registry,
+            &checkout,
+            parse_optional_provider(provider.as_deref())?,
+        ),
         Commands::NewWorkstream {
             source_workstream_id,
+            provider,
         } => new_workstream(
             root,
             &mut registry,
             parse_workstream(&source_workstream_id)?,
+            parse_optional_provider(provider.as_deref())?,
         ),
         Commands::ForkWorkstream {
             source_workstream_id,
@@ -568,9 +592,16 @@ fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError>
         HostCommands::Snapshot { alias } => snapshot_ssh_host(&catalog, &alias),
         HostCommands::Operations { alias } => operations_ssh_host(&catalog, &alias),
         HostCommands::Doctor { alias } => doctor_ssh_host(&catalog, &alias),
-        HostCommands::RegisterCheckout { alias, checkout } => {
-            register_remote_checkout(&catalog, &alias, &checkout)
-        }
+        HostCommands::RegisterCheckout {
+            alias,
+            checkout,
+            provider,
+        } => register_remote_checkout(
+            &catalog,
+            &alias,
+            &checkout,
+            parse_optional_provider(provider.as_deref())?,
+        ),
         HostCommands::PrepareObserver { alias } => prepare_remote_observer(&catalog, &alias),
         HostCommands::RemoveObserver { alias } => remove_remote_observer(&catalog, &alias),
         HostCommands::Start {
@@ -614,9 +645,7 @@ fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError>
             &alias,
             &source_workstream_id,
             revision,
-            provider
-                .parse()
-                .map_err(|error| AppError::State(StateError::Domain(error)))?,
+            parse_optional_provider(provider.as_deref())?,
         ),
         HostCommands::Fork {
             alias,
@@ -743,13 +772,20 @@ fn register_remote_checkout(
     catalog: &ClientCatalog,
     alias: &str,
     checkout: &str,
+    requested_provider: Option<crate::domain::ProviderKind>,
 ) -> Result<(), AppError> {
+    let endpoint = checked_ssh_endpoint(catalog, alias)?;
+    let capabilities = HostClient::new(SystemCommandRunner)
+        .snapshot_ssh(&endpoint)?
+        .provider_capabilities;
+    let provider =
+        crate::provider::select_registration_provider(&capabilities, requested_provider)?;
     let workstream_id = create_remote_workstream(
         catalog,
         alias,
         crate::protocol::HostAction::RegisterCheckout {
             checkout_path: checkout.to_owned(),
-            provider: crate::domain::ProviderKind::Codex,
+            provider,
         },
     )?;
     println!("registered workstream {workstream_id}");
@@ -899,13 +935,26 @@ fn new_remote_workstream(
     alias: &str,
     source_workstream_id: &str,
     revision: i64,
-    provider: crate::domain::ProviderKind,
+    requested_provider: Option<crate::domain::ProviderKind>,
 ) -> Result<(), AppError> {
+    let endpoint = checked_ssh_endpoint(catalog, alias)?;
+    let snapshot = HostClient::new(SystemCommandRunner).snapshot_ssh(&endpoint)?;
+    let source_workstream_id = parse_workstream(source_workstream_id)?;
+    let source = snapshot
+        .workstreams
+        .iter()
+        .find(|workstream| workstream.workstream_id == source_workstream_id)
+        .ok_or(StateError::UnknownOpenWorkstream(source_workstream_id))?;
+    let provider = crate::provider::select_new_provider(
+        &snapshot.provider_capabilities,
+        requested_provider,
+        source.provider,
+    )?;
     let workstream_id = create_remote_workstream(
         catalog,
         alias,
         crate::protocol::HostAction::NewWorkstream {
-            source_workstream_id: parse_workstream(source_workstream_id)?,
+            source_workstream_id,
             expected_revision: revision,
             request_key: uuid::Uuid::new_v4().to_string(),
             provider,
@@ -1136,15 +1185,22 @@ fn provider_wait() -> Result<(), AppError> {
     }
 }
 
-fn register(registry: &mut HostRegistry, checkout: &Path) -> Result<(), AppError> {
+fn register(
+    registry: &mut HostRegistry,
+    checkout: &Path,
+    requested_provider: Option<crate::domain::ProviderKind>,
+) -> Result<(), AppError> {
     let repository = crate::repository::inspect(checkout)?;
-    crate::provider::require_new_eligible(registry, crate::domain::ProviderKind::Codex)?;
+    let capabilities = crate::provider::discover_capabilities(registry)?;
+    let provider =
+        crate::provider::select_registration_provider(&capabilities, requested_provider)?;
+    crate::provider::require_new_eligible(registry, provider)?;
     let registered = registry.register_external_workstream_with_metadata(
         &repository.project_root,
         &repository.display_name,
         repository.remote_identity_fingerprint.as_deref(),
         repository.remote_identity_display.as_deref(),
-        crate::domain::ProviderKind::Codex,
+        provider,
     )?;
     println!("registered workstream {}", registered.workstream_id);
     Ok(())
@@ -1154,14 +1210,18 @@ fn new_workstream(
     root: &StateRoot,
     registry: &mut HostRegistry,
     source_workstream_id: WorkstreamId,
+    requested_provider: Option<crate::domain::ProviderKind>,
 ) -> Result<(), AppError> {
     let request_key = uuid::Uuid::new_v4().to_string();
-    let provider = registry
+    let source_provider = registry
         .workstream_overviews()?
         .into_iter()
         .find(|overview| overview.workstream_id == source_workstream_id)
         .ok_or(StateError::UnknownOpenWorkstream(source_workstream_id))?
         .provider;
+    let capabilities = crate::provider::discover_capabilities(registry)?;
+    let provider =
+        crate::provider::select_new_provider(&capabilities, requested_provider, source_provider)?;
     let workstream_id = actions::start_independent_workstream(
         root,
         registry,
@@ -1784,6 +1844,18 @@ fn parse_workstream(value: &str) -> Result<WorkstreamId, AppError> {
     WorkstreamId::from_str(value).map_err(AppError::InvalidWorkstreamId)
 }
 
+fn parse_optional_provider(
+    value: Option<&str>,
+) -> Result<Option<crate::domain::ProviderKind>, AppError> {
+    value
+        .map(|value| {
+            value
+                .parse()
+                .map_err(|error| AppError::State(StateError::Domain(error)))
+        })
+        .transpose()
+}
+
 fn parse_operation(value: &str) -> Result<OperationId, AppError> {
     OperationId::from_str(value).map_err(AppError::InvalidOperationId)
 }
@@ -1856,6 +1928,8 @@ pub(crate) enum AppError {
     Profile(#[from] crate::provider::codex::profile::ProfileError),
     #[error(transparent)]
     Provider(#[from] crate::provider::ProviderReadinessError),
+    #[error(transparent)]
+    ProviderSelection(#[from] crate::provider::ProviderSelectionError),
     #[error(transparent)]
     AppServer(#[from] crate::provider::codex::app_server::AppServerError),
     #[error(transparent)]
@@ -2024,6 +2098,63 @@ mod tests {
                 destination: None,
                 executable: None,
             }) if host == "snap"
+        ));
+    }
+
+    #[test]
+    fn provider_choices_are_optional_flags_on_direct_and_host_creation_commands() {
+        let direct_register =
+            Cli::try_parse_from(["wsnav", "register", "/checkout", "--provider", "opencode"])
+                .unwrap();
+        assert!(matches!(
+            direct_register.command,
+            Some(Commands::Register { provider: Some(provider), .. }) if provider == "opencode"
+        ));
+
+        let direct_new = Cli::try_parse_from([
+            "wsnav",
+            "new-workstream",
+            "00000000-0000-0000-0000-000000000001",
+        ])
+        .unwrap();
+        assert!(matches!(
+            direct_new.command,
+            Some(Commands::NewWorkstream { provider: None, .. })
+        ));
+
+        let remote_register = Cli::try_parse_from([
+            "wsnav",
+            "host",
+            "register-checkout",
+            "snap",
+            "/checkout",
+            "--provider",
+            "codex",
+        ])
+        .unwrap();
+        assert!(matches!(
+            remote_register.command,
+            Some(Commands::Host {
+                command: HostCommands::RegisterCheckout {
+                    provider: Some(provider), ..
+                }
+            }) if provider == "codex"
+        ));
+
+        let remote_new = Cli::try_parse_from([
+            "wsnav",
+            "host",
+            "new",
+            "snap",
+            "00000000-0000-0000-0000-000000000001",
+            "4",
+        ])
+        .unwrap();
+        assert!(matches!(
+            remote_new.command,
+            Some(Commands::Host {
+                command: HostCommands::New { provider: None, .. }
+            })
         ));
     }
 

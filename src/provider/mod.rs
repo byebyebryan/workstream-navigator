@@ -123,6 +123,151 @@ pub struct ProviderReadinessError {
     pub reason: ProviderCapabilityReason,
 }
 
+/// Bounded failure returned when the caller cannot determine one exact
+/// provider for a new Workstream from the currently observed capabilities.
+/// Selection is deliberately provider-neutral; callers choose the appropriate
+/// policy for registration or for a source Workstream before issuing an exact
+/// action.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+pub enum ProviderSelectionError {
+    #[error("no provider is eligible for a new Workstream")]
+    NoEligibleProviders,
+    #[error("a provider must be selected explicitly with --provider <provider>")]
+    SelectionRequired,
+    #[error("requested provider is unavailable for a new Workstream")]
+    ExplicitProviderUnavailable {
+        kind: ProviderKind,
+        status: ProviderCapabilityStatus,
+        reason: ProviderCapabilityReason,
+    },
+}
+
+/// Returns eligible providers in the protocol's fixed known-provider order.
+/// Unknown or duplicate capability records are ignored rather than becoming a
+/// fallback provider; authoritative protocol validation rejects malformed
+/// wire sets before this helper is used.
+#[must_use]
+pub fn eligible_new_providers(capabilities: &[ProviderCapability]) -> Vec<ProviderKind> {
+    if !capability_set_well_formed(capabilities) {
+        return Vec::new();
+    }
+    KNOWN_PROVIDER_KINDS
+        .into_iter()
+        .filter(|kind| {
+            capabilities
+                .iter()
+                .find(|capability| capability.kind == *kind)
+                .is_some_and(|capability| capability.is_new_eligible())
+        })
+        .collect()
+}
+
+/// Selects a provider for initial registration. With no explicit choice this
+/// permits exactly one currently eligible provider; zero or multiple providers
+/// remain bounded, explicit selection outcomes.
+///
+/// # Errors
+///
+/// Returns [`ProviderSelectionError::NoEligibleProviders`] when no provider is
+/// currently eligible, [`ProviderSelectionError::SelectionRequired`] when
+/// more than one is eligible without an explicit choice, or
+/// [`ProviderSelectionError::ExplicitProviderUnavailable`] for an explicit
+/// provider that is not currently eligible.
+pub fn select_registration_provider(
+    capabilities: &[ProviderCapability],
+    requested: Option<ProviderKind>,
+) -> Result<ProviderKind, ProviderSelectionError> {
+    select_provider(capabilities, requested)
+}
+
+/// Selects a provider for a new Workstream derived from `source_provider`.
+/// Without an explicit choice, the source provider is the only implicit
+/// default. If it is unavailable, the caller must choose explicitly even when
+/// another provider is eligible.
+///
+/// # Errors
+///
+/// Returns a bounded selection error when no provider is eligible, an
+/// explicit choice is unavailable, or the source provider cannot authorize an
+/// implicit choice while more than one/another provider is available.
+pub fn select_new_provider(
+    capabilities: &[ProviderCapability],
+    requested: Option<ProviderKind>,
+    source_provider: ProviderKind,
+) -> Result<ProviderKind, ProviderSelectionError> {
+    if requested.is_some() {
+        return select_provider(capabilities, requested);
+    }
+
+    let eligible = eligible_new_providers(capabilities);
+    if eligible.contains(&source_provider) {
+        return Ok(source_provider);
+    }
+    match eligible.as_slice() {
+        [] => Err(ProviderSelectionError::NoEligibleProviders),
+        _ => Err(ProviderSelectionError::SelectionRequired),
+    }
+}
+
+fn select_provider(
+    capabilities: &[ProviderCapability],
+    requested: Option<ProviderKind>,
+) -> Result<ProviderKind, ProviderSelectionError> {
+    if let Some(kind) = requested {
+        if !capability_set_well_formed(capabilities) {
+            return Err(ProviderSelectionError::ExplicitProviderUnavailable {
+                kind,
+                status: ProviderCapabilityStatus::Unknown,
+                reason: ProviderCapabilityReason::ProbeFailed,
+            });
+        }
+        let capability = capabilities
+            .iter()
+            .find(|capability| capability.kind == kind)
+            .copied()
+            .unwrap_or(ProviderCapability {
+                kind,
+                status: ProviderCapabilityStatus::Unknown,
+                reason: ProviderCapabilityReason::ProbeFailed,
+                fresh_launch: false,
+                exact_resume: false,
+                observe: false,
+                metadata_read: false,
+                rename: false,
+                fork: false,
+            });
+        return if capability.is_new_eligible() {
+            Ok(kind)
+        } else {
+            Err(ProviderSelectionError::ExplicitProviderUnavailable {
+                kind,
+                status: capability.status,
+                reason: capability.reason,
+            })
+        };
+    }
+
+    match eligible_new_providers(capabilities).as_slice() {
+        [] => Err(ProviderSelectionError::NoEligibleProviders),
+        [kind] => Ok(*kind),
+        _ => Err(ProviderSelectionError::SelectionRequired),
+    }
+}
+
+fn capability_set_well_formed(capabilities: &[ProviderCapability]) -> bool {
+    capabilities.len() == KNOWN_PROVIDER_KINDS.len()
+        && KNOWN_PROVIDER_KINDS.into_iter().all(|kind| {
+            capabilities
+                .iter()
+                .filter(|capability| capability.kind == kind)
+                .count()
+                == 1
+        })
+        && capabilities
+            .iter()
+            .all(|capability| capability.validate().is_ok())
+}
+
 /// Re-probes one provider immediately before a durable New/registration
 /// transaction. A stale cached snapshot is never used as authorization.
 ///
@@ -182,6 +327,144 @@ mod tests {
         let temporary = tempfile::tempdir().unwrap();
         let root = crate::state::StateRoot::create(temporary.path().join("state")).unwrap();
         (temporary, HostRegistry::open(&root).unwrap())
+    }
+
+    fn eligible(kind: ProviderKind) -> ProviderCapability {
+        ProviderCapability {
+            kind,
+            status: ProviderCapabilityStatus::Available,
+            reason: ProviderCapabilityReason::None,
+            fresh_launch: true,
+            exact_resume: true,
+            observe: true,
+            metadata_read: true,
+            rename: true,
+            fork: true,
+        }
+    }
+
+    #[test]
+    fn selection_refuses_zero_and_auto_selects_sole_codex() {
+        let none = vec![
+            capability(
+                ProviderKind::Codex,
+                ProviderCapabilityStatus::Unavailable,
+                ProviderCapabilityReason::NotInstalled,
+            ),
+            capability(
+                ProviderKind::OpenCode,
+                ProviderCapabilityStatus::Unavailable,
+                ProviderCapabilityReason::AdapterUnavailable,
+            ),
+        ];
+        assert_eq!(
+            select_registration_provider(&none, None),
+            Err(ProviderSelectionError::NoEligibleProviders)
+        );
+
+        let sole = vec![
+            eligible(ProviderKind::Codex),
+            capability(
+                ProviderKind::OpenCode,
+                ProviderCapabilityStatus::Unavailable,
+                ProviderCapabilityReason::AdapterUnavailable,
+            ),
+        ];
+        assert_eq!(
+            select_registration_provider(&sole, None),
+            Ok(ProviderKind::Codex)
+        );
+    }
+
+    #[test]
+    fn selection_requires_explicit_choice_for_multiple_and_preserves_known_order() {
+        let capabilities = vec![
+            eligible(ProviderKind::OpenCode),
+            eligible(ProviderKind::Codex),
+        ];
+        assert_eq!(
+            eligible_new_providers(&capabilities),
+            vec![ProviderKind::Codex, ProviderKind::OpenCode]
+        );
+        assert_eq!(
+            select_registration_provider(&capabilities, None),
+            Err(ProviderSelectionError::SelectionRequired)
+        );
+        assert!(
+            ProviderSelectionError::SelectionRequired
+                .to_string()
+                .contains("--provider")
+        );
+        assert_eq!(
+            select_new_provider(&capabilities, None, ProviderKind::OpenCode),
+            Ok(ProviderKind::OpenCode)
+        );
+        assert_eq!(
+            select_new_provider(&capabilities, None, ProviderKind::Codex),
+            Ok(ProviderKind::Codex)
+        );
+    }
+
+    #[test]
+    fn explicit_selection_never_falls_back_to_another_provider() {
+        let capabilities = vec![
+            eligible(ProviderKind::Codex),
+            capability(
+                ProviderKind::OpenCode,
+                ProviderCapabilityStatus::Unavailable,
+                ProviderCapabilityReason::AdapterUnavailable,
+            ),
+        ];
+        assert_eq!(
+            select_registration_provider(&capabilities, Some(ProviderKind::OpenCode)),
+            Err(ProviderSelectionError::ExplicitProviderUnavailable {
+                kind: ProviderKind::OpenCode,
+                status: ProviderCapabilityStatus::Unavailable,
+                reason: ProviderCapabilityReason::AdapterUnavailable,
+            })
+        );
+        assert_eq!(
+            select_new_provider(
+                &capabilities,
+                Some(ProviderKind::OpenCode),
+                ProviderKind::Codex
+            ),
+            Err(ProviderSelectionError::ExplicitProviderUnavailable {
+                kind: ProviderKind::OpenCode,
+                status: ProviderCapabilityStatus::Unavailable,
+                reason: ProviderCapabilityReason::AdapterUnavailable,
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_capability_sets_fail_closed() {
+        let codex = eligible(ProviderKind::Codex);
+        assert!(eligible_new_providers(&[codex]).is_empty());
+        assert!(eligible_new_providers(&[codex, codex]).is_empty());
+        let malformed_codex = ProviderCapability {
+            reason: ProviderCapabilityReason::AdapterUnavailable,
+            ..codex
+        };
+        assert!(
+            eligible_new_providers(&[
+                malformed_codex,
+                capability(
+                    ProviderKind::OpenCode,
+                    ProviderCapabilityStatus::Unavailable,
+                    ProviderCapabilityReason::AdapterUnavailable,
+                ),
+            ])
+            .is_empty()
+        );
+        assert_eq!(
+            select_registration_provider(&[codex], Some(ProviderKind::Codex)),
+            Err(ProviderSelectionError::ExplicitProviderUnavailable {
+                kind: ProviderKind::Codex,
+                status: ProviderCapabilityStatus::Unknown,
+                reason: ProviderCapabilityReason::ProbeFailed,
+            })
+        );
     }
 
     #[test]

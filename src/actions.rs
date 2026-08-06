@@ -59,10 +59,11 @@ pub fn start_independent_workstream(
     provider: ProviderKind,
 ) -> Result<WorkstreamId, ActionError> {
     let source = workstream_overview(registry, source_workstream_id)?;
-    require_codex_provider(provider)?;
     if expected_revision.is_some_and(|expected| expected != source.revision) {
         return Err(ActionError::WorkstreamRevisionConflict);
     }
+    crate::provider::require_new_eligible(registry, provider)
+        .map_err(ActionError::ProviderReadiness)?;
     let created = registry.create_independent_workstream(
         request_key,
         source_workstream_id,
@@ -991,6 +992,8 @@ fn reconcile_observer_trust_with_manager(
 
 #[derive(Debug, Error)]
 pub enum ActionError {
+    #[error(transparent)]
+    ProviderReadiness(crate::provider::ProviderReadinessError),
     #[error("provider {0} is not active in the Codex production adapter")]
     UnsupportedProvider(ProviderKind),
     #[error("CODEX_HOME cannot be determined")]

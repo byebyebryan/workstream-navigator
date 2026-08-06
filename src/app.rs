@@ -1138,6 +1138,7 @@ fn provider_wait() -> Result<(), AppError> {
 
 fn register(registry: &mut HostRegistry, checkout: &Path) -> Result<(), AppError> {
     let repository = crate::repository::inspect(checkout)?;
+    crate::provider::require_new_eligible(registry, crate::domain::ProviderKind::Codex)?;
     let registered = registry.register_external_workstream_with_metadata(
         &repository.project_root,
         &repository.display_name,
@@ -1853,6 +1854,8 @@ pub(crate) enum AppError {
     BuildInfo(#[from] crate::build_info::BuildInfoError),
     #[error(transparent)]
     Profile(#[from] crate::provider::codex::profile::ProfileError),
+    #[error(transparent)]
+    Provider(#[from] crate::provider::ProviderReadinessError),
     #[error(transparent)]
     AppServer(#[from] crate::provider::codex::app_server::AppServerError),
     #[error(transparent)]

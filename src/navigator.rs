@@ -42,7 +42,10 @@ use crate::{
     },
     presentation::{AttachmentPhase, AttachmentStatus, Presentation, PresentationError},
     process::{BoundedProcessError, output_bounded},
-    protocol::{HostAction, ObserverStatus, ProjectDirectoriesResponse, ProjectDirectoryEntry},
+    protocol::{
+        HostAction, ObserverStatus, ProjectDirectoriesResponse, ProjectDirectoryEntry,
+        ProviderCapability, SnapshotResponse,
+    },
     provider::codex::names::{NameContext, resolve_name},
     runtime::RuntimeError,
     state::{
@@ -255,6 +258,22 @@ pub struct NavigatorHostOverview {
     pub alias: String,
     pub reachability: RemoteHostReachability,
     pub observer_status: ObserverStatus,
+    pub provider_capabilities: Vec<ProviderCapability>,
+}
+
+impl NavigatorHostOverview {
+    /// Cached provider evidence is authoritative only while the host is
+    /// reachable. An unreachable host retains records for display but cannot
+    /// authorize a new Workstream action.
+    #[must_use]
+    pub fn provider_is_new_eligible(&self, kind: ProviderKind) -> bool {
+        self.reachability.is_reachable()
+            && self
+                .provider_capabilities
+                .iter()
+                .find(|capability| capability.kind == kind)
+                .is_some_and(|capability| capability.is_new_eligible())
+    }
 }
 
 /// Reads a fresh local-only navigator projection from durable host state.
@@ -273,6 +292,7 @@ pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, Naviga
     crate::repository::refresh_pending_metadata(&mut registry)?;
     let host = registry.identity()?;
     let observer_status = observer_status(&registry)?;
+    let provider_capabilities = crate::provider::discover_capabilities(&registry)?;
     let mut catalog = ClientCatalog::open(root)?;
     let executable = std::env::current_exe().map_err(NavigatorError::CurrentExecutable)?;
     let workstreams = registry
@@ -301,6 +321,7 @@ pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, Naviga
             alias: "local".to_owned(),
             reachability: RemoteHostReachability::Reachable,
             observer_status,
+            provider_capabilities,
         }],
         unreachable_hosts: Vec::new(),
         unresolved_operation_count: unresolved_operations.len(),
@@ -564,6 +585,7 @@ struct CachedRemoteHost {
     unresolved_operation_count: usize,
     unresolved_operations: Vec<NavigatorOperation>,
     observer_status: ObserverStatus,
+    provider_capabilities: Vec<ProviderCapability>,
     reachability: RemoteHostReachability,
     pending: bool,
     next_poll: Instant,
@@ -614,6 +636,7 @@ impl RemoteMonitor {
                     unresolved_operation_count: 0,
                     unresolved_operations: Vec::new(),
                     observer_status: ObserverStatus::NotInstalled,
+                    provider_capabilities: SnapshotResponse::default().provider_capabilities,
                     reachability: RemoteHostReachability::Unreachable(RemoteHostIssue::Checking),
                     pending: false,
                     next_poll: now,
@@ -667,6 +690,7 @@ impl RemoteMonitor {
                     .collect();
                 host.unresolved_operation_count = usize::from(snapshot.unresolved_operation_count);
                 host.observer_status = snapshot.observer_status;
+                host.provider_capabilities = snapshot.provider_capabilities;
                 host.unresolved_operations = operations
                     .operations
                     .into_iter()
@@ -704,6 +728,7 @@ impl RemoteMonitor {
                 alias: alias.clone(),
                 reachability: host.reachability,
                 observer_status: host.observer_status,
+                provider_capabilities: host.provider_capabilities.clone(),
             });
             local
                 .workstreams
@@ -5698,11 +5723,13 @@ mod tests {
                     alias: "local".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
                     observer_status: ObserverStatus::NotInstalled,
+                    provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 },
                 NavigatorHostOverview {
                     alias: "snap".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
                     observer_status: ObserverStatus::NotInstalled,
+                    provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 },
             ],
             unreachable_hosts: Vec::new(),
@@ -6346,6 +6373,7 @@ mod tests {
                 alias: "snap".to_owned(),
                 reachability: RemoteHostReachability::Reachable,
                 observer_status: ObserverStatus::NotInstalled,
+                provider_capabilities: SnapshotResponse::default().provider_capabilities,
             }],
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 3,
@@ -6738,11 +6766,13 @@ mod tests {
                     alias: "local".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
                     observer_status: ObserverStatus::NotInstalled,
+                    provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 },
                 NavigatorHostOverview {
                     alias: "snap".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
                     observer_status: ObserverStatus::NotInstalled,
+                    provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 },
                 NavigatorHostOverview {
                     alias: "spare".to_owned(),
@@ -6750,6 +6780,7 @@ mod tests {
                         RemoteHostIssue::SshOrRemoteExecutableUnavailable,
                     ),
                     observer_status: ObserverStatus::NotInstalled,
+                    provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 },
             ],
             unreachable_hosts: Vec::new(),
@@ -6835,6 +6866,7 @@ mod tests {
                 alias: "local".to_owned(),
                 reachability: RemoteHostReachability::Reachable,
                 observer_status: ObserverStatus::Ready,
+                provider_capabilities: SnapshotResponse::default().provider_capabilities,
             }],
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
@@ -6870,6 +6902,7 @@ mod tests {
                     alias: "local".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
                     observer_status: ObserverStatus::Ready,
+                    provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 },
                 NavigatorHostOverview {
                     alias: "snap".to_owned(),
@@ -6880,6 +6913,7 @@ mod tests {
                         },
                     ),
                     observer_status: ObserverStatus::TrustPending,
+                    provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 },
             ],
             unreachable_hosts: Vec::new(),
@@ -6952,11 +6986,13 @@ mod tests {
                     alias: "local".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
                     observer_status: ObserverStatus::Ready,
+                    provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 },
                 NavigatorHostOverview {
                     alias: "snap".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
                     observer_status: ObserverStatus::Ready,
+                    provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 },
             ],
             unreachable_hosts: Vec::new(),
@@ -7015,6 +7051,7 @@ mod tests {
                 alias: "snap".to_owned(),
                 reachability: RemoteHostReachability::Reachable,
                 observer_status: ObserverStatus::Ready,
+                provider_capabilities: SnapshotResponse::default().provider_capabilities,
             }],
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
@@ -7075,6 +7112,7 @@ mod tests {
                 alias: "snap".to_owned(),
                 reachability: RemoteHostReachability::Reachable,
                 observer_status: ObserverStatus::NotInstalled,
+                provider_capabilities: SnapshotResponse::default().provider_capabilities,
             }],
             unreachable_hosts: Vec::new(),
             unresolved_operation_count: 0,
@@ -7119,11 +7157,13 @@ mod tests {
                     alias: "local".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
                     observer_status: ObserverStatus::NotInstalled,
+                    provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 },
                 NavigatorHostOverview {
                     alias: "snap".to_owned(),
                     reachability: RemoteHostReachability::Reachable,
                     observer_status: ObserverStatus::NotInstalled,
+                    provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 },
             ],
             unreachable_hosts: Vec::new(),
@@ -7468,6 +7508,12 @@ mod tests {
     fn unreachable_remote_keeps_cached_status_and_attention_without_claiming_a_stop() {
         let mut monitor = RemoteMonitor::new();
         let workstream_id = WorkstreamId::new();
+        let mut cached_capabilities = SnapshotResponse::default().provider_capabilities;
+        cached_capabilities[0].status = crate::protocol::ProviderCapabilityStatus::Available;
+        cached_capabilities[0].reason = crate::protocol::ProviderCapabilityReason::None;
+        cached_capabilities[0].fresh_launch = true;
+        cached_capabilities[0].exact_resume = true;
+        cached_capabilities[0].observe = true;
         monitor.hosts.insert(
             "snap".to_owned(),
             CachedRemoteHost {
@@ -7482,6 +7528,7 @@ mod tests {
                 unresolved_operation_count: 0,
                 unresolved_operations: Vec::new(),
                 observer_status: ObserverStatus::NotInstalled,
+                provider_capabilities: cached_capabilities,
                 reachability: RemoteHostReachability::Unreachable(
                     RemoteHostIssue::SshOrRemoteExecutableUnavailable,
                 ),
@@ -7499,9 +7546,76 @@ mod tests {
         assert!(!cached.host.is_reachable());
         assert_eq!(snapshot.unreachable_hosts, vec!["snap"]);
         assert_eq!(
-            NavigatorView::new(snapshot).footer_status(),
+            NavigatorView::new(snapshot.clone()).footer_status(),
             "snap SSH/wsnav unavailable; showing cached state"
         );
+        let host = snapshot
+            .hosts
+            .iter()
+            .find(|host| host.alias == "snap")
+            .unwrap();
+        assert!(host.provider_capabilities[0].is_new_eligible());
+        assert!(!host.provider_is_new_eligible(ProviderKind::Codex));
+    }
+
+    #[test]
+    fn local_snapshot_caches_fresh_provider_capabilities() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+
+        let snapshot = local_snapshot(&root).unwrap();
+        let capabilities = &snapshot.hosts[0].provider_capabilities;
+
+        assert_eq!(
+            capabilities
+                .iter()
+                .map(|capability| capability.kind)
+                .collect::<Vec<_>>(),
+            crate::protocol::KNOWN_PROVIDER_KINDS,
+        );
+    }
+
+    #[test]
+    fn reachable_remote_snapshot_replaces_cached_provider_capabilities() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut catalog = ClientCatalog::open(&root).unwrap();
+        let mut monitor = RemoteMonitor::new();
+        monitor.hosts.insert(
+            "snap".to_owned(),
+            CachedRemoteHost {
+                workstreams: Vec::new(),
+                unresolved_operation_count: 0,
+                unresolved_operations: Vec::new(),
+                observer_status: ObserverStatus::NotInstalled,
+                provider_capabilities: SnapshotResponse::default().provider_capabilities,
+                reachability: RemoteHostReachability::Unreachable(RemoteHostIssue::Checking),
+                pending: false,
+                next_poll: Instant::now(),
+                backoff: REMOTE_INITIAL_BACKOFF,
+            },
+        );
+        let mut snapshot = SnapshotResponse::default();
+        snapshot.provider_capabilities[0].status =
+            crate::protocol::ProviderCapabilityStatus::Available;
+        snapshot.provider_capabilities[0].reason = crate::protocol::ProviderCapabilityReason::None;
+        snapshot.provider_capabilities[0].fresh_launch = true;
+        snapshot.provider_capabilities[0].exact_resume = true;
+        snapshot.provider_capabilities[0].observe = true;
+        let expected = snapshot.provider_capabilities.clone();
+        monitor
+            .sender
+            .send(RemotePollResult {
+                alias: "snap".to_owned(),
+                host_id: HostId::new(),
+                outcome: Ok((snapshot, crate::protocol::OperationsResponse::default())),
+            })
+            .unwrap();
+
+        monitor.collect(Instant::now(), &mut catalog).unwrap();
+
+        assert_eq!(monitor.hosts["snap"].provider_capabilities, expected);
+        assert!(monitor.hosts["snap"].reachability.is_reachable());
     }
 
     #[test]
@@ -7527,6 +7641,7 @@ mod tests {
                 unresolved_operation_count: 0,
                 unresolved_operations: Vec::new(),
                 observer_status: ObserverStatus::NotInstalled,
+                provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 reachability: RemoteHostReachability::Reachable,
                 pending: false,
                 next_poll: Instant::now(),

@@ -26,7 +26,7 @@ use wsnav::{
         LocalNavigatorSnapshot, NavigatorHost, NavigatorHostOverview, NavigatorRuntimeStatus,
         NavigatorView, NavigatorWorkstream, RemoteHostReachability,
     },
-    protocol::ObserverStatus,
+    protocol::{ObserverStatus, SnapshotResponse},
 };
 
 /// The normal presentation is a 141-column terminal with the navigator held
@@ -304,11 +304,13 @@ fn ready_hosts() -> Vec<NavigatorHostOverview> {
             alias: "local".to_owned(),
             reachability: RemoteHostReachability::Reachable,
             observer_status: ObserverStatus::Ready,
+            provider_capabilities: SnapshotResponse::default().provider_capabilities,
         },
         NavigatorHostOverview {
             alias: "snap".to_owned(),
             reachability: RemoteHostReachability::Reachable,
             observer_status: ObserverStatus::Ready,
+            provider_capabilities: SnapshotResponse::default().provider_capabilities,
         },
     ]
 }

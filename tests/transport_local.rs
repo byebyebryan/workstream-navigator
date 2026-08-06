@@ -8,9 +8,74 @@ use wsnav::{
     domain::ProviderKind,
     protocol::CURRENT_PROTOCOL_VERSION,
     protocol::HostAction,
-    state::{HostRegistry, StateRoot},
+    provider::codex::profile::ProfileOwnership,
+    state::{HostRegistry, IntegrationLifecycle, StateRoot},
     transport::{HostClient, LocalEndpoint, SystemCommandRunner},
 };
+
+fn record_ready_codex_observer(root: &StateRoot) {
+    HostRegistry::open(root)
+        .unwrap()
+        .record_codex_integration(
+            ProfileOwnership {
+                canonical_path: PathBuf::from("/tmp/wsnav-test-observer.json"),
+                owner_id: "wsnav-test".to_owned(),
+                profile_schema_version: 2,
+                hook_executable: PathBuf::from("/tmp/wsnav-test"),
+                content_hash: "hash".to_owned(),
+            },
+            IntegrationLifecycle::Ready,
+        )
+        .unwrap();
+}
+
+#[cfg(unix)]
+fn provider_fixture_endpoint(temporary: &tempfile::TempDir, state_root: PathBuf) -> LocalEndpoint {
+    use std::os::unix::fs::PermissionsExt;
+
+    fn write_executable(path: &Path, contents: &str) {
+        fs::write(path, contents).unwrap();
+        let mut permissions = fs::metadata(path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+    }
+
+    fn shell_quote(path: &Path) -> String {
+        format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+    }
+
+    let bin = temporary.path().join("provider-bin");
+    fs::create_dir(&bin).unwrap();
+    write_executable(
+        &bin.join("codex"),
+        "#!/bin/sh\n[ \"$1\" = \"--version\" ] || exit 1\nprintf 'codex fixture\\n'\n",
+    );
+    write_executable(
+        &bin.join("tmux"),
+        "#!/bin/sh\n[ \"$1\" = \"-V\" ] || exit 1\nprintf 'tmux fixture\\n'\n",
+    );
+    let wrapper = temporary.path().join("wsnav-provider-fixture");
+    write_executable(
+        &wrapper,
+        &format!(
+            "#!/bin/sh\nPATH={}:${{PATH:-}}\nexport PATH\nexec {} \"$@\"\n",
+            shell_quote(&bin),
+            shell_quote(Path::new(env!("CARGO_BIN_EXE_wsnav"))),
+        ),
+    );
+    LocalEndpoint {
+        executable: wrapper,
+        state_root,
+    }
+}
+
+#[cfg(not(unix))]
+fn provider_fixture_endpoint(_temporary: &tempfile::TempDir, state_root: PathBuf) -> LocalEndpoint {
+    LocalEndpoint {
+        executable: PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
+        state_root,
+    }
+}
 
 #[test]
 fn local_subprocess_uses_the_same_bounded_protocol_service_as_ssh() {
@@ -122,10 +187,8 @@ fn local_subprocess_registers_one_existing_checkout_without_returning_its_path()
             .unwrap()
             .success()
     );
-    let endpoint = LocalEndpoint {
-        executable: PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
-        state_root: state_root.clone(),
-    };
+    let endpoint = provider_fixture_endpoint(&temporary, state_root.clone());
+    record_ready_codex_observer(&StateRoot::create(&state_root).unwrap());
 
     let workstream_id = HostClient::new(SystemCommandRunner)
         .create_local(
@@ -213,14 +276,23 @@ fn local_subprocess_browses_and_registers_a_host_private_project_directory() {
             .success()
     );
     let root = StateRoot::create(&state_root).unwrap();
-    HostRegistry::open(&root)
-        .unwrap()
+    let mut registry = HostRegistry::open(&root).unwrap();
+    registry
         .set_project_browser_root(&browser_root.to_string_lossy())
         .unwrap();
-    let endpoint = LocalEndpoint {
-        executable: PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
-        state_root,
-    };
+    registry
+        .record_codex_integration(
+            ProfileOwnership {
+                canonical_path: PathBuf::from("/tmp/wsnav-test-observer.json"),
+                owner_id: "wsnav-test".to_owned(),
+                profile_schema_version: 2,
+                hook_executable: PathBuf::from("/tmp/wsnav-test"),
+                content_hash: "hash".to_owned(),
+            },
+            IntegrationLifecycle::Ready,
+        )
+        .unwrap();
+    let endpoint = provider_fixture_endpoint(&temporary, state_root);
     let client = HostClient::new(SystemCommandRunner);
 
     let directories = client.project_directories_local(&endpoint, "").unwrap();

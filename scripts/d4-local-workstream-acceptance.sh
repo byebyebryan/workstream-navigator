@@ -33,6 +33,11 @@ cat >"$fake_bin/codex" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 
+if [[ "${1:-}" == "--version" ]]; then
+    printf 'codex fixture 0.1.0\n'
+    exit 0
+fi
+
 if [[ "${1:-}" == "app-server" ]]; then
     while IFS= read -r line; do
         case "$line" in

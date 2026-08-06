@@ -28,6 +28,9 @@ use crate::{
     state::{HostRegistry, IntegrationLifecycle, ProviderBinding, StateError},
 };
 
+#[cfg(test)]
+use crate::provider::names::NameState;
+
 const PARK_CONFIRM_TIMEOUT: Duration = Duration::from_millis(500);
 const PARK_CONFIRM_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -1164,7 +1167,7 @@ mod tests {
             start_source: "resume".to_owned(),
             last_settled_turn_id: Some("settled-turn".to_owned()),
             observed_thread_name: None,
-            name_state: crate::provider::codex::names::NameState::Unavailable,
+            name_state: NameState::Unavailable,
             predecessor_native_session_id: None,
             predecessor_effective_name: None,
             revision: Revision::INITIAL,

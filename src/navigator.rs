@@ -46,7 +46,7 @@ use crate::{
         HostAction, ObserverStatus, ProjectDirectoriesResponse, ProjectDirectoryEntry,
         ProviderCapability, SnapshotResponse,
     },
-    provider::codex::names::{NameContext, resolve_name},
+    provider::names::{NameContext, resolve_name},
     runtime::RuntimeError,
     state::{
         ClientCatalog, ClientHost, ClientHostTransport, ClientProjectLocation, HostIdentity,

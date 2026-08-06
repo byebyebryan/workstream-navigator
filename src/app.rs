@@ -19,6 +19,7 @@ use crate::{
     provider::codex::app_server::EphemeralAppServer,
     provider::codex::hooks::drain_and_parse,
     provider::codex::profile::{OBSERVER_PROFILE_SCHEMA_VERSION, ObserverProfile},
+    provider::lifecycle::LifecycleEvent,
     runtime::{
         LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
         await_launch_release, is_direct_provider_hook,
@@ -32,6 +33,9 @@ use crate::{
         SystemCommandRunner, attach_ssh,
     },
 };
+
+#[cfg(test)]
+use crate::provider::names::NameState;
 
 const ABOUT: &str =
     "A native-workflow terminal navigator for persistent coding workstreams across hosts.";
@@ -1637,10 +1641,7 @@ fn observe_hook(state_root: Option<PathBuf>) {
     let [record] = matches.as_slice() else {
         return;
     };
-    let metadata = if matches!(
-        observation.event,
-        crate::provider::codex::hooks::LifecycleEvent::SessionStart
-    ) {
+    let metadata = if matches!(observation.event, LifecycleEvent::SessionStart) {
         match EphemeralAppServer::default().read_thread_for_hook(&observation.native_session_id) {
             Ok(metadata) => Some(metadata),
             Err(_) => return,
@@ -1652,7 +1653,7 @@ fn observe_hook(state_root: Option<PathBuf>) {
         return;
     };
     if registry
-        .apply_hook_observation(record.runtime_id, &record.tmux_generation, observation)
+        .apply_lifecycle_observation(record.runtime_id, &record.tmux_generation, observation)
         .is_ok()
         && let Some(metadata) = metadata
     {
@@ -1965,7 +1966,7 @@ mod tests {
             start_source: "startup".to_owned(),
             last_settled_turn_id: Some("settled-turn".to_owned()),
             observed_thread_name: None,
-            name_state: crate::provider::codex::names::NameState::Unavailable,
+            name_state: NameState::Unavailable,
             predecessor_native_session_id: None,
             predecessor_effective_name: None,
             revision: crate::domain::Revision::INITIAL,

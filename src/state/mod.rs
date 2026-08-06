@@ -18,11 +18,11 @@ use crate::protocol::{
     Capabilities, HelloResponse, MAX_PROJECT_BROWSER_ENTRIES, ProjectDirectoriesResponse,
     ProjectDirectoryEntry,
 };
-use crate::provider::codex::hooks::{HookObservation, LifecycleEvent};
-use crate::provider::codex::names::NameState;
 #[cfg(test)]
 use crate::provider::codex::profile::OBSERVER_PROFILE_SCHEMA_VERSION;
 use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
+use crate::provider::lifecycle::{LifecycleEvent, LifecycleObservation};
+use crate::provider::names::NameState;
 
 /// The newest host-registry schema this build can open or create.
 ///
@@ -2493,11 +2493,11 @@ impl HostRegistry {
     ///
     /// Returns an error when runtime generation, cwd, binding, lifecycle, or
     /// revision evidence is ambiguous or does not match a managed runtime.
-    pub fn apply_hook_observation(
+    pub fn apply_lifecycle_observation(
         &mut self,
         runtime_id: RuntimeId,
         generation: &str,
-        observation: HookObservation,
+        observation: LifecycleObservation,
     ) -> Result<(), StateError> {
         let activity_at_millis = match observation.event {
             LifecycleEvent::UserPromptSubmit | LifecycleEvent::Stop => {
@@ -5392,21 +5392,21 @@ mod tests {
             .record_runtime_process_birth(initial.runtime_id, initial.revision, "birth-a")
             .unwrap();
         for event in [
-            HookObservation {
+            LifecycleObservation {
                 event: LifecycleEvent::SessionStart,
                 cwd: cwd.clone(),
                 native_session_id: "session-a".to_owned(),
                 turn_id: None,
                 source: Some("startup".to_owned()),
             },
-            HookObservation {
+            LifecycleObservation {
                 event: LifecycleEvent::UserPromptSubmit,
                 cwd: cwd.clone(),
                 native_session_id: "session-a".to_owned(),
                 turn_id: None,
                 source: None,
             },
-            HookObservation {
+            LifecycleObservation {
                 event: LifecycleEvent::Stop,
                 cwd,
                 native_session_id: "session-a".to_owned(),
@@ -5419,7 +5419,7 @@ mod tests {
                 .unwrap()
                 .unwrap();
             registry
-                .apply_hook_observation(runtime.runtime_id, &runtime.tmux_generation, event)
+                .apply_lifecycle_observation(runtime.runtime_id, &runtime.tmux_generation, event)
                 .unwrap();
         }
         registry
@@ -6796,10 +6796,10 @@ mod tests {
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
         let cwd = runtime.cwd.to_string_lossy().into_owned();
         registry
-            .apply_hook_observation(
+            .apply_lifecycle_observation(
                 runtime.runtime_id,
                 &runtime.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::SessionStart,
                     cwd: cwd.clone(),
                     native_session_id: "source-session".to_owned(),
@@ -6809,10 +6809,10 @@ mod tests {
             )
             .unwrap();
         registry
-            .apply_hook_observation(
+            .apply_lifecycle_observation(
                 runtime.runtime_id,
                 &runtime.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::UserPromptSubmit,
                     cwd: cwd.clone(),
                     native_session_id: "source-session".to_owned(),
@@ -6822,10 +6822,10 @@ mod tests {
             )
             .unwrap();
         registry
-            .apply_hook_observation(
+            .apply_lifecycle_observation(
                 runtime.runtime_id,
                 &runtime.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::Stop,
                     cwd,
                     native_session_id: "source-session".to_owned(),
@@ -6929,10 +6929,10 @@ mod tests {
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
         let cwd = runtime.cwd.to_string_lossy().into_owned();
         registry
-            .apply_hook_observation(
+            .apply_lifecycle_observation(
                 runtime.runtime_id,
                 &runtime.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::SessionStart,
                     cwd: cwd.clone(),
                     native_session_id: "source-session".to_owned(),
@@ -6942,10 +6942,10 @@ mod tests {
             )
             .unwrap();
         registry
-            .apply_hook_observation(
+            .apply_lifecycle_observation(
                 runtime.runtime_id,
                 &runtime.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::Stop,
                     cwd,
                     native_session_id: "source-session".to_owned(),
@@ -7040,10 +7040,10 @@ mod tests {
             None
         );
         registry
-            .apply_hook_observation(
+            .apply_lifecycle_observation(
                 runtime.runtime_id,
                 &runtime.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::SessionStart,
                     cwd: cwd.clone(),
                     native_session_id: "session-a".to_owned(),
@@ -7057,10 +7057,10 @@ mod tests {
             None
         );
         registry
-            .apply_hook_observation(
+            .apply_lifecycle_observation(
                 runtime.runtime_id,
                 &runtime.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::UserPromptSubmit,
                     cwd: cwd.clone(),
                     native_session_id: "session-a".to_owned(),
@@ -7102,10 +7102,10 @@ mod tests {
             .unwrap();
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
         registry
-            .apply_hook_observation(
+            .apply_lifecycle_observation(
                 runtime.runtime_id,
                 &runtime.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::SessionStart,
                     cwd: runtime.cwd.to_string_lossy().into_owned(),
                     native_session_id: "session-a".to_owned(),
@@ -7188,10 +7188,10 @@ mod tests {
             .unwrap();
         let cwd = recovery.cwd.to_string_lossy().into_owned();
         assert!(matches!(
-            registry.apply_hook_observation(
+            registry.apply_lifecycle_observation(
                 recovery.runtime_id,
                 &recovery.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::SessionStart,
                     cwd: cwd.clone(),
                     native_session_id: "session-a".to_owned(),
@@ -7202,10 +7202,10 @@ mod tests {
             Err(StateError::HookEvidenceMismatch)
         ));
         registry
-            .apply_hook_observation(
+            .apply_lifecycle_observation(
                 recovery.runtime_id,
                 &recovery.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::SessionStart,
                     cwd,
                     native_session_id: "session-a".to_owned(),
@@ -7247,7 +7247,7 @@ mod tests {
         let recovery = registry
             .reserve_runtime_recovery(registered.workstream_id)
             .unwrap();
-        let observation = |source: &str| HookObservation {
+        let observation = |source: &str| LifecycleObservation {
             event: LifecycleEvent::SessionStart,
             cwd: recovery.cwd.to_string_lossy().into_owned(),
             native_session_id: "selected-session".to_owned(),
@@ -7256,7 +7256,7 @@ mod tests {
         };
 
         assert!(matches!(
-            registry.apply_hook_observation(
+            registry.apply_lifecycle_observation(
                 recovery.runtime_id,
                 &recovery.tmux_generation,
                 observation("startup"),
@@ -7264,7 +7264,7 @@ mod tests {
             Err(StateError::HookEvidenceMismatch)
         ));
         registry
-            .apply_hook_observation(
+            .apply_lifecycle_observation(
                 recovery.runtime_id,
                 &recovery.tmux_generation,
                 observation("resume"),
@@ -7298,21 +7298,21 @@ mod tests {
         let runtime = registry.reserve_runtime(first.workstream_id).unwrap();
         let cwd = runtime.cwd.to_string_lossy().into_owned();
         for observation in [
-            HookObservation {
+            LifecycleObservation {
                 event: LifecycleEvent::SessionStart,
                 cwd: cwd.clone(),
                 native_session_id: "session-a".to_owned(),
                 turn_id: None,
                 source: Some("startup".to_owned()),
             },
-            HookObservation {
+            LifecycleObservation {
                 event: LifecycleEvent::UserPromptSubmit,
                 cwd: cwd.clone(),
                 native_session_id: "session-a".to_owned(),
                 turn_id: Some("turn-a".to_owned()),
                 source: None,
             },
-            HookObservation {
+            LifecycleObservation {
                 event: LifecycleEvent::Stop,
                 cwd,
                 native_session_id: "session-a".to_owned(),
@@ -7321,7 +7321,11 @@ mod tests {
             },
         ] {
             registry
-                .apply_hook_observation(runtime.runtime_id, &runtime.tmux_generation, observation)
+                .apply_lifecycle_observation(
+                    runtime.runtime_id,
+                    &runtime.tmux_generation,
+                    observation,
+                )
                 .unwrap();
         }
 
@@ -7413,7 +7417,7 @@ mod tests {
             )
             .unwrap();
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
-        let start = HookObservation {
+        let start = LifecycleObservation {
             event: LifecycleEvent::SessionStart,
             cwd: runtime.cwd.to_string_lossy().into_owned(),
             native_session_id: "session-a".to_owned(),
@@ -7421,9 +7425,9 @@ mod tests {
             source: Some("startup".to_owned()),
         };
         registry
-            .apply_hook_observation(runtime.runtime_id, &runtime.tmux_generation, start)
+            .apply_lifecycle_observation(runtime.runtime_id, &runtime.tmux_generation, start)
             .unwrap();
-        let prompt = HookObservation {
+        let prompt = LifecycleObservation {
             event: LifecycleEvent::UserPromptSubmit,
             cwd: runtime.cwd.to_string_lossy().into_owned(),
             native_session_id: "session-a".to_owned(),
@@ -7431,9 +7435,9 @@ mod tests {
             source: None,
         };
         registry
-            .apply_hook_observation(runtime.runtime_id, &runtime.tmux_generation, prompt)
+            .apply_lifecycle_observation(runtime.runtime_id, &runtime.tmux_generation, prompt)
             .unwrap();
-        let stop = HookObservation {
+        let stop = LifecycleObservation {
             event: LifecycleEvent::Stop,
             cwd: runtime.cwd.to_string_lossy().into_owned(),
             native_session_id: "session-a".to_owned(),
@@ -7441,7 +7445,7 @@ mod tests {
             source: None,
         };
         registry
-            .apply_hook_observation(runtime.runtime_id, &runtime.tmux_generation, stop)
+            .apply_lifecycle_observation(runtime.runtime_id, &runtime.tmux_generation, stop)
             .unwrap();
 
         assert_eq!(
@@ -7477,21 +7481,21 @@ mod tests {
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
         let cwd = runtime.cwd.to_string_lossy().into_owned();
         for observation in [
-            HookObservation {
+            LifecycleObservation {
                 event: LifecycleEvent::SessionStart,
                 cwd: cwd.clone(),
                 native_session_id: "session-a".to_owned(),
                 turn_id: None,
                 source: Some("startup".to_owned()),
             },
-            HookObservation {
+            LifecycleObservation {
                 event: LifecycleEvent::UserPromptSubmit,
                 cwd: cwd.clone(),
                 native_session_id: "session-a".to_owned(),
                 turn_id: Some("turn-a".to_owned()),
                 source: None,
             },
-            HookObservation {
+            LifecycleObservation {
                 event: LifecycleEvent::Stop,
                 cwd: cwd.clone(),
                 native_session_id: "session-a".to_owned(),
@@ -7500,15 +7504,19 @@ mod tests {
             },
         ] {
             registry
-                .apply_hook_observation(runtime.runtime_id, &runtime.tmux_generation, observation)
+                .apply_lifecycle_observation(
+                    runtime.runtime_id,
+                    &runtime.tmux_generation,
+                    observation,
+                )
                 .unwrap();
         }
 
         registry
-            .apply_hook_observation(
+            .apply_lifecycle_observation(
                 runtime.runtime_id,
                 &runtime.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::SessionStart,
                     cwd,
                     native_session_id: "session-b".to_owned(),
@@ -7565,10 +7573,10 @@ mod tests {
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
         let cwd = runtime.cwd.to_string_lossy().into_owned();
         registry
-            .apply_hook_observation(
+            .apply_lifecycle_observation(
                 runtime.runtime_id,
                 &runtime.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::SessionStart,
                     cwd: cwd.clone(),
                     native_session_id: "session-a".to_owned(),
@@ -7578,10 +7586,10 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            registry.apply_hook_observation(
+            registry.apply_lifecycle_observation(
                 runtime.runtime_id,
                 &runtime.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::SessionStart,
                     cwd: cwd.clone(),
                     native_session_id: "session-b".to_owned(),
@@ -7592,10 +7600,10 @@ mod tests {
             Err(StateError::HookEvidenceMismatch)
         ));
         registry
-            .apply_hook_observation(
+            .apply_lifecycle_observation(
                 runtime.runtime_id,
                 &runtime.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::UserPromptSubmit,
                     cwd: cwd.clone(),
                     native_session_id: "session-a".to_owned(),
@@ -7605,10 +7613,10 @@ mod tests {
             )
             .unwrap();
         assert!(matches!(
-            registry.apply_hook_observation(
+            registry.apply_lifecycle_observation(
                 runtime.runtime_id,
                 &runtime.tmux_generation,
-                HookObservation {
+                LifecycleObservation {
                     event: LifecycleEvent::SessionStart,
                     cwd,
                     native_session_id: "session-b".to_owned(),
@@ -7639,7 +7647,7 @@ mod tests {
             )
             .unwrap();
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
-        let forged = HookObservation {
+        let forged = LifecycleObservation {
             event: LifecycleEvent::SessionStart,
             cwd: runtime.cwd.to_string_lossy().into_owned(),
             native_session_id: "forged-session".to_owned(),
@@ -7648,13 +7656,38 @@ mod tests {
         };
 
         assert!(matches!(
-            registry.apply_hook_observation(runtime.runtime_id, "stale", forged),
+            registry.apply_lifecycle_observation(runtime.runtime_id, "stale", forged),
             Err(StateError::HookEvidenceMismatch)
         ));
         assert_eq!(
             registry.binding_for_runtime(runtime.runtime_id).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn neutral_lifecycle_observation_still_rejects_non_codex_runtime_identity() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        let observation = LifecycleObservation {
+            event: LifecycleEvent::SessionStart,
+            cwd: runtime.cwd.to_string_lossy().into_owned(),
+            native_session_id: "opencode-session".to_owned(),
+            turn_id: None,
+            source: Some("startup".to_owned()),
+        };
+
+        assert!(matches!(
+            registry.apply_lifecycle_observation(
+                runtime.runtime_id,
+                &runtime.tmux_generation,
+                observation,
+            ),
+            Err(StateError::ProviderIdentityMismatch)
+        ));
     }
 
     #[test]

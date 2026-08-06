@@ -5,27 +5,10 @@ use std::io::Read;
 use serde::Deserialize;
 use thiserror::Error;
 
+use crate::provider::lifecycle::{LifecycleEvent, LifecycleObservation};
+
 const MAX_HOOK_PAYLOAD_BYTES: usize = 256 * 1024;
 const MAX_IDENTIFIER_BYTES: usize = 256;
-
-/// The four Codex events accepted by the observer profile.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LifecycleEvent {
-    SessionStart,
-    UserPromptSubmit,
-    Stop,
-    SessionEnd,
-}
-
-/// Minimal event evidence retained after raw hook input is discarded.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HookObservation {
-    pub event: LifecycleEvent,
-    pub cwd: String,
-    pub native_session_id: String,
-    pub turn_id: Option<String>,
-    pub source: Option<String>,
-}
 
 /// Reads all hook stdin before parsing a bounded prefix.
 ///
@@ -37,7 +20,7 @@ pub struct HookObservation {
 ///
 /// Returns an error after draining input if reading fails, the input exceeds the
 /// bounded parse limit, or the retained prefix is malformed.
-pub fn drain_and_parse(input: &mut impl Read) -> Result<HookObservation, HookError> {
+pub fn drain_and_parse(input: &mut impl Read) -> Result<LifecycleObservation, HookError> {
     let mut retained = Vec::with_capacity(4096);
     let mut total = 0_usize;
     let mut chunk = [0_u8; 8192];
@@ -57,7 +40,7 @@ pub fn drain_and_parse(input: &mut impl Read) -> Result<HookObservation, HookErr
     }
 
     let payload: HookPayload = serde_json::from_slice(&retained).map_err(HookError::Malformed)?;
-    HookObservation::try_from(payload)
+    LifecycleObservation::try_from(payload)
 }
 
 #[derive(Deserialize)]
@@ -70,7 +53,7 @@ struct HookPayload {
     reason: Option<String>,
 }
 
-impl TryFrom<HookPayload> for HookObservation {
+impl TryFrom<HookPayload> for LifecycleObservation {
     type Error = HookError;
 
     fn try_from(value: HookPayload) -> Result<Self, Self::Error> {
@@ -148,7 +131,7 @@ mod tests {
         let mut input = Cursor::new(
             br#"{"hook_event_name":"Stop","cwd":"/repo","session_id":"session","turn_id":"turn","prompt":"secret"}"#,
         );
-        let observation = drain_and_parse(&mut input).unwrap();
+        let observation: LifecycleObservation = drain_and_parse(&mut input).unwrap();
 
         assert_eq!(observation.event, LifecycleEvent::Stop);
         assert_eq!(observation.native_session_id, "session");

@@ -15,6 +15,8 @@ use crate::{
 };
 
 pub mod codex;
+pub mod lifecycle;
+pub mod names;
 
 /// Dynamically observed provider readiness evidence. This is intentionally
 /// read-only and bounded; it never carries process output, paths, prompts, or

@@ -19,7 +19,7 @@ use crate::{
         HostResponse, MAX_FRAME_BYTES, ObserverStatus, OperationSnapshot, OperationsResponse,
         RequestEnvelope, ResponseEnvelope, SnapshotResponse, SnapshotWorkstream,
     },
-    provider::codex::names::{NameContext, resolve_name},
+    provider::names::{NameContext, resolve_name},
     runtime::{LinuxProcessProbe, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux},
     state::{HostRegistry, IntegrationLifecycle, StateError, StateRoot, WorkstreamOverview},
 };

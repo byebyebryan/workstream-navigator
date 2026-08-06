@@ -2,5 +2,4 @@
 
 pub mod app_server;
 pub mod hooks;
-pub mod names;
 pub mod profile;

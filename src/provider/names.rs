@@ -1,4 +1,4 @@
-//! Contextual display fallbacks for the Codex-owned current thread name.
+//! Contextual display fallbacks for a provider-owned current thread name.
 
 /// Whether an exact metadata read observed a usable native thread name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -37,7 +37,7 @@ pub enum EffectiveNameSource {
     Synthetic,
 }
 
-/// Resolves a current-tip display without writing to Codex or inventing a label.
+/// Resolves a current-tip display without writing to a provider or inventing a label.
 #[must_use]
 pub fn resolve_name(
     state: NameState,

@@ -1729,10 +1729,27 @@ impl NavigatorView {
                     if status.phase == AttachmentPhase::Pending {
                         self.set_message("provider attachment starting");
                     } else {
-                        self.set_transient_message(
-                            "provider attached; use the native Codex UI directly",
-                            Instant::now(),
-                        );
+                        let message = self
+                            .snapshot
+                            .workstreams
+                            .iter()
+                            .find(|workstream| {
+                                workstream.host.alias() == status.host_alias
+                                    && workstream.workstream_id == status.workstream_id
+                            })
+                            .map_or_else(
+                                || {
+                                    "provider attached; use the native provider UI directly"
+                                        .to_owned()
+                                },
+                                |workstream| {
+                                    let provider = provider_label(workstream.provider);
+                                    format!(
+                                        "{provider} attached; use the native {provider} UI directly"
+                                    )
+                                },
+                            );
+                        self.set_transient_message(message, Instant::now());
                     }
                 }
             }
@@ -2401,7 +2418,7 @@ impl NavigatorView {
             "none"
         };
         let visibility = if workstream.archived {
-            "archived; restore does not start Codex"
+            "archived"
         } else {
             "active"
         };
@@ -2416,9 +2433,17 @@ impl NavigatorView {
                     workstream.host.alias(),
                     workstream.project_label
                 )),
+                Line::raw(format!("Provider: {}", provider_label(workstream.provider))),
                 Line::raw(format!("Runtime: {}", workstream.runtime_status.label())),
                 Line::raw(format!("Attention: {attention}")),
-                Line::raw(format!("Visibility: {visibility}")),
+                Line::raw(if workstream.archived {
+                    format!(
+                        "Visibility: {visibility}; restore does not start {}",
+                        provider_label(workstream.provider)
+                    )
+                } else {
+                    format!("Visibility: {visibility}")
+                }),
                 Line::raw("Enter or Esc returns to Workstreams"),
             ])
             .block(
@@ -2938,7 +2963,10 @@ fn navigator_modal_content(
                         .fg(Color::White)
                         .add_modifier(Modifier::BOLD),
                 )),
-                Line::raw("This parks the working Codex Runtime before archiving."),
+                Line::raw(format!(
+                    "This parks the working {} Runtime before archiving.",
+                    provider_label(workstream.provider)
+                )),
                 Line::from(vec![
                     Span::styled("Enter/y", key),
                     Span::raw(" confirm   "),
@@ -2986,10 +3014,13 @@ fn navigator_modal_content(
             location_count,
             ..
         } => forget_project_modal(label, archived_workstream_count, location_count, key),
-        NavigatorModal::Rename { value, .. } => (
+        NavigatorModal::Rename { workstream, value } => (
             " Rename Workstream ".to_owned(),
             vec![
-                Line::raw("Set the canonical Codex thread title:"),
+                Line::raw(format!(
+                    "Set the canonical {} thread title:",
+                    provider_label(workstream.provider)
+                )),
                 Line::from(Span::styled(
                     truncate_display(&value, 44),
                     Style::default()
@@ -3205,7 +3236,7 @@ fn forget_project_modal(
                 },
                 if location_count == 1 { "" } else { "s" },
             )),
-            Line::raw("Retains host state, Git project files, and native Codex history."),
+            Line::raw("Retains host state, Git project files, and native provider history."),
             confirmation_line("remove", key),
         ],
     )
@@ -3426,7 +3457,7 @@ fn workstream_help_lines(
     if view_mode.is_archived() {
         lines.push(Line::from(vec![
             Span::styled("u", key),
-            Span::raw("          restore without starting Codex"),
+            Span::raw("          restore without starting the native provider"),
         ]));
     } else {
         lines.push(Line::from(vec![
@@ -3445,7 +3476,7 @@ fn workstream_help_lines(
             Line::from(vec![Span::styled("p", key), Span::raw("          park")]),
             Line::from(vec![
                 Span::styled("r", key),
-                Span::raw("          rename canonical Codex thread"),
+                Span::raw("          rename canonical provider thread"),
             ]),
             Line::from(vec![
                 Span::styled("x", key),
@@ -3781,42 +3812,57 @@ fn workstream_context_line(
     project_colors: &BTreeMap<ProjectId, Color>,
     available_width: u16,
 ) -> Line<'static> {
-    let host = || {
-        Span::styled(
-            row.host.alias().to_owned(),
-            Style::default()
-                .fg(host_color(row.host.alias()))
-                .add_modifier(Modifier::BOLD),
-        )
-    };
-    let project = || {
-        Span::styled(
-            row.project_label.clone(),
-            Style::default()
-                .fg(project_accent(row.project_id, project_colors))
-                .add_modifier(Modifier::BOLD),
-        )
-    };
     match context {
         WorkstreamRowContext::Recent => recent_context_line(
             prefix,
             &row.project_label,
             row.project_id,
             row.host.alias(),
+            row.provider,
             project_colors,
             available_width,
         ),
-        WorkstreamRowContext::Host => Line::from(vec![
-            Span::raw(prefix.to_owned()),
-            project_marker(row.project_id, project_colors),
-            Span::raw(" "),
-            project(),
-        ]),
-        WorkstreamRowContext::Project => Line::from(vec![Span::raw(prefix.to_owned()), host()]),
+        WorkstreamRowContext::Host => {
+            let prefix_width = Line::raw(prefix).width();
+            let fixed_width = prefix_width
+                .saturating_add(2)
+                .saturating_add(provider_context_width(row.provider));
+            let project_budget = usize::from(available_width).saturating_sub(fixed_width);
+            let project = truncate_display_width(&row.project_label, project_budget);
+            let mut line = vec![Span::raw(prefix.to_owned())];
+            line.extend(provider_context_spans(row.provider));
+            line.extend([
+                project_marker(row.project_id, project_colors),
+                Span::raw(" "),
+                Span::styled(
+                    project,
+                    Style::default()
+                        .fg(project_accent(row.project_id, project_colors))
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ]);
+            Line::from(line)
+        }
+        WorkstreamRowContext::Project => {
+            let host_budget = usize::from(available_width)
+                .saturating_sub(Line::raw(prefix).width())
+                .saturating_sub(provider_context_width(row.provider));
+            let host = truncate_display_width(row.host.alias(), host_budget);
+            let mut line = vec![Span::raw(prefix.to_owned())];
+            line.extend(provider_context_spans(row.provider));
+            line.push(Span::styled(
+                host,
+                Style::default()
+                    .fg(host_color(row.host.alias()))
+                    .add_modifier(Modifier::BOLD),
+            ));
+            Line::from(line)
+        }
     }
 }
 
-/// A Recent row is intentionally project-first. The host is useful location
+/// A Recent row reserves its fixed provider segment first. Within the remaining
+/// width it remains intentionally project-first: the host is useful location
 /// evidence, but secondary to finding the right workstream, so it occupies a
 /// bounded right-aligned column rather than competing with the Project name.
 fn recent_context_line(
@@ -3824,6 +3870,7 @@ fn recent_context_line(
     project_label: &str,
     project_id: ProjectId,
     host_alias: &str,
+    provider: ProviderKind,
     project_colors: &BTreeMap<ProjectId, Color>,
     available_width: u16,
 ) -> Line<'static> {
@@ -3831,7 +3878,9 @@ fn recent_context_line(
     const MAX_HOST_WIDTH: usize = 12;
 
     let prefix_width = Line::raw(prefix).width();
-    let content_width = usize::from(available_width).saturating_sub(prefix_width);
+    let content_width = usize::from(available_width)
+        .saturating_sub(prefix_width)
+        .saturating_sub(provider_context_width(provider));
     let host_budget = content_width
         .saturating_sub(MIN_PROJECT_WIDTH.saturating_add(1))
         .min(MAX_HOST_WIDTH);
@@ -3843,11 +3892,11 @@ fn recent_context_line(
     let project = truncate_display_width(project_label, project_budget);
     let used_width = prefix_width + Line::raw(&project).width() + host_width;
     let padding = usize::from(available_width)
-        .saturating_sub(used_width)
+        .saturating_sub(used_width + provider_context_width(provider))
         .max(1);
-
-    Line::from(vec![
-        Span::raw(prefix.to_owned()),
+    let mut line = vec![Span::raw(prefix.to_owned())];
+    line.extend(provider_context_spans(provider));
+    line.extend([
         Span::styled(
             project,
             Style::default()
@@ -3861,7 +3910,19 @@ fn recent_context_line(
                 .fg(host_color(host_alias))
                 .add_modifier(Modifier::BOLD),
         ),
-    ])
+    ]);
+    Line::from(line)
+}
+
+fn provider_context_width(provider: ProviderKind) -> usize {
+    3 + provider_label(provider).chars().count()
+}
+
+fn provider_context_spans(provider: ProviderKind) -> Vec<Span<'static>> {
+    vec![
+        Span::styled(provider_label(provider), Style::default().fg(Color::Gray)),
+        Span::styled(" · ", Style::default().fg(PROJECT_TREE_COLOR)),
+    ]
 }
 
 fn project_marker(
@@ -4790,7 +4851,10 @@ fn activate_selected(
         return;
     };
     if selected.archived {
-        view.set_message("restore this Workstream before opening Codex");
+        view.set_message(format!(
+            "restore this Workstream before opening {}",
+            provider_label(selected.provider)
+        ));
         return;
     }
     if selected.host.is_remote() && !selected.host.is_reachable() {
@@ -4918,7 +4982,10 @@ fn rename_workstream(
         Ok(()) => {
             remote.request_soon(selected.host.alias());
             refresh_view(root, remote, view);
-            view.set_message("canonical Codex thread title updated");
+            view.set_message(format!(
+                "canonical {} thread title updated",
+                provider_label(selected.provider)
+            ));
         }
         Err(error) => view.set_message(action_message(&error)),
     }
@@ -4966,7 +5033,10 @@ fn restore_selected(root: &StateRoot, remote: &mut RemoteMonitor, view: &mut Nav
         Ok(()) => {
             remote.request_soon(selected.host.alias());
             refresh_view(root, remote, view);
-            view.set_message("Workstream restored; select it to start or resume Codex");
+            view.set_message(format!(
+                "Workstream restored; select it to start or resume {}",
+                provider_label(selected.provider)
+            ));
         }
         Err(error) => view.set_message(action_message(&error)),
     }
@@ -5039,10 +5109,18 @@ impl CreationAction {
         }
     }
 
-    const fn success_message(self) -> &'static str {
+    fn success_message(self, provider: Option<ProviderKind>) -> String {
         match self {
-            Self::Independent => "new Workstream started; use the native Codex UI directly",
-            Self::Fork => "forked Workstream started at the last completed native turn",
+            Self::Independent => provider.map_or_else(
+                || "new Workstream started; use the native provider UI directly".to_owned(),
+                |provider| {
+                    let provider = provider_label(provider);
+                    format!(
+                        "new {provider} Workstream started; use the native {provider} UI directly"
+                    )
+                },
+            ),
+            Self::Fork => "forked Workstream started at the last completed native turn".to_owned(),
         }
     }
 }
@@ -5148,7 +5226,7 @@ fn create_workstream_from_source(
         view.observe_attachment(&status);
         presentation.focus_provider()
     }) {
-        Ok(()) => view.set_message(action.success_message()),
+        Ok(()) => view.set_message(action.success_message(provider)),
         Err(error) => view.set_message(action_message(&error)),
     }
 }
@@ -5298,11 +5376,21 @@ fn register_project_browser_directory_with_provider(
             remote.request_soon(host.alias());
             refresh_view(root, remote, view);
             if view.select_project_for_workstream(host.alias(), workstream_id) {
-                view.set_message("Project registered; select it to start Codex");
+                view.set_message(format!(
+                    "Project registered for {}; select it to start {}",
+                    provider_label(provider),
+                    provider_label(provider)
+                ));
             } else if host.is_remote() {
-                view.set_message("remote Project registered; waiting for its bounded snapshot");
+                view.set_message(format!(
+                    "remote {} Project registered; waiting for its bounded snapshot",
+                    provider_label(provider)
+                ));
             } else {
-                view.set_message("Project registration completed; refresh the Project view");
+                view.set_message(format!(
+                    "{} Project registration completed; refresh the Project view",
+                    provider_label(provider)
+                ));
             }
         }
         Err(error) => view.set_message(action_message(&error)),
@@ -5952,9 +6040,35 @@ mod tests {
             .map(ratatui::buffer::Cell::symbol)
             .collect::<String>();
         assert!(rendered.contains("Workstream status"));
+        assert!(rendered.contains("Provider: Codex"));
         assert!(rendered.contains("Runtime: working"));
         assert!(rendered.contains("Visibility: active"));
         assert!(!rendered.contains(&workstream_id.to_string()));
+    }
+
+    #[test]
+    fn workstream_detail_shows_the_full_open_code_provider_label() {
+        let workstream_id = WorkstreamId::new();
+        let workstream = NavigatorWorkstream {
+            provider: ProviderKind::OpenCode,
+            ..row(workstream_id, NavigatorRuntimeStatus::Idle)
+        };
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![workstream],
+            ..LocalNavigatorSnapshot::default()
+        });
+        view.open_selected_detail();
+        let mut terminal = Terminal::new(TestBackend::new(80, 16)).unwrap();
+        terminal.draw(|frame| view.render(frame)).unwrap();
+
+        let rendered = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(ratatui::buffer::Cell::symbol)
+            .collect::<String>();
+        assert!(rendered.contains("Provider: OpenCode"));
     }
 
     #[test]
@@ -5982,6 +6096,40 @@ mod tests {
         assert!(rendered.contains("Rename Workstream"));
         assert!(rendered.contains("Set the canonical Codex thread title"));
         assert!(view.modal_visible());
+    }
+
+    #[test]
+    fn provider_known_modals_keep_open_code_feedback_exact() {
+        let workstream = NavigatorWorkstream {
+            provider: ProviderKind::OpenCode,
+            ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Working)
+        };
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![workstream.clone()],
+            ..LocalNavigatorSnapshot::default()
+        });
+
+        view.begin_archive_confirmation(workstream.clone());
+        let (_, archive_lines) = navigator_modal_content(view.modal.clone().unwrap(), 48);
+        let archive = archive_lines
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect::<String>();
+        assert!(archive.contains("OpenCode Runtime"));
+
+        view.dismiss_modal();
+        view.begin_rename(workstream);
+        let (_, rename_lines) = navigator_modal_content(view.modal.clone().unwrap(), 48);
+        let rename = rename_lines
+            .into_iter()
+            .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+            .collect::<String>();
+        assert!(rename.contains("canonical OpenCode thread title"));
+
+        assert_eq!(
+            CreationAction::Independent.success_message(Some(ProviderKind::OpenCode)),
+            "new OpenCode Workstream started; use the native OpenCode UI directly"
+        );
     }
 
     #[test]
@@ -6165,7 +6313,7 @@ mod tests {
         });
         assert_eq!(
             view.footer_status(),
-            "provider attached; use the native Codex UI directly"
+            "Codex attached; use the native Codex UI directly"
         );
         assert!(view.is_attached_to(&workstream));
 
@@ -6174,6 +6322,31 @@ mod tests {
         ));
         assert_eq!(view.footer_status(), "");
         assert!(view.is_attached_to(&workstream));
+    }
+
+    #[test]
+    fn attachment_feedback_uses_the_resolved_open_code_provider_label() {
+        let workstream_id = WorkstreamId::new();
+        let workstream = NavigatorWorkstream {
+            provider: ProviderKind::OpenCode,
+            ..row(workstream_id, NavigatorRuntimeStatus::Idle)
+        };
+        let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+            workstreams: vec![workstream],
+            ..LocalNavigatorSnapshot::default()
+        });
+
+        view.observe_attachment(&AttachmentStatus {
+            attempt_id: uuid::Uuid::new_v4(),
+            host_alias: "local".to_owned(),
+            workstream_id,
+            phase: AttachmentPhase::Running,
+        });
+
+        assert_eq!(
+            view.footer_status(),
+            "OpenCode attached; use the native OpenCode UI directly"
+        );
     }
 
     #[test]
@@ -6485,10 +6658,15 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<String>();
         assert_eq!(line.width(), 30);
-        assert!(rendered.starts_with("   project"));
+        assert!(rendered.starts_with("   Codex · project"));
         assert!(rendered.ends_with("local"));
-        assert_eq!(line.spans[3].style.fg, Some(Color::LightBlue));
-        assert!(!rendered.contains(" · "));
+        assert!(rendered.contains("Codex"));
+        assert!(
+            line.spans
+                .iter()
+                .any(|span| span.style.fg == Some(Color::LightBlue))
+        );
+        assert!(rendered.contains(" · "));
         assert!(!rendered.contains('•'));
     }
 
@@ -6516,7 +6694,7 @@ mod tests {
             WorkstreamRowContext::Recent,
             "   ",
             &project_colors,
-            16,
+            30,
         );
         let rendered = line
             .spans
@@ -6524,9 +6702,45 @@ mod tests {
             .map(|span| span.content.as_ref())
             .collect::<String>();
 
-        assert_eq!(line.width(), 16);
-        assert!(rendered.starts_with("   pro…"));
-        assert!(rendered.ends_with("remote-…"));
+        assert_eq!(line.width(), 30);
+        assert!(rendered.starts_with("   Codex · "));
+        assert!(rendered.contains('…'));
+        assert!(rendered.contains("remote-term"));
+        assert!(rendered.ends_with('…'));
+    }
+
+    #[test]
+    fn every_workstream_context_keeps_open_code_visible_at_supported_narrow_width() {
+        let snapshot = LocalNavigatorSnapshot {
+            workstreams: vec![NavigatorWorkstream {
+                provider: ProviderKind::OpenCode,
+                host: NavigatorHost::Remote {
+                    alias: "remote-host-with-a-long-label".to_owned(),
+                    reachability: RemoteHostReachability::Reachable,
+                },
+                project_label: "project-with-a-long-label".to_owned(),
+                ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
+            }],
+            ..LocalNavigatorSnapshot::default()
+        };
+        let row = &snapshot.workstreams[0];
+        let project_colors = visible_project_colors(&snapshot);
+
+        for (context, prefix) in [
+            (WorkstreamRowContext::Recent, "   "),
+            (WorkstreamRowContext::Host, " └─ "),
+            (WorkstreamRowContext::Project, " └─ "),
+        ] {
+            let line = workstream_context_line(row, context, prefix, &project_colors, 30);
+            let rendered = line
+                .spans
+                .iter()
+                .map(|span| span.content.as_ref())
+                .collect::<String>();
+            assert!(line.width() <= 30);
+            assert!(rendered.contains("OpenCode"), "{context:?}: {rendered:?}");
+            assert!(rendered.contains('…'), "{context:?}: {rendered:?}");
+        }
     }
 
     #[test]
@@ -7596,7 +7810,7 @@ mod tests {
         .into_iter()
         .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
         .collect::<String>();
-        assert!(archived_help.contains("restore without starting Codex"));
+        assert!(archived_help.contains("restore without starting the native provider"));
         assert!(!archived_help.contains("new Workstream"));
         assert!(!archived_help.contains("focus native agent"));
 

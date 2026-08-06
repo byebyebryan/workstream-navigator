@@ -26,15 +26,15 @@ and ProjectLocation registration first. Cross-provider work is an independent
 New Workstream with an empty conversation, never Fork, migration, or automatic
 context transfer.
 
-D8.0 is now the active implementation checkpoint. It introduces the provider
-identity and dispatch foundation, preserves Codex behavior, and makes provider
-kind visible without adding OpenCode production launch. The D8.1 evidence gate
-now passes for OpenCode `1.18.11`, so D8.1 is ready to activate after D8.0;
-D8.2 remains inactive. There is no generic provider
+D8.0 completed on 2026-08-05. It introduced the provider identity and dispatch
+foundation, preserved Codex behavior, and made provider kind visible without
+adding OpenCode production launch. The D8.1 evidence gate now passes for
+OpenCode `1.18.11`; D8.1 is the next checkpoint but remains inactive pending
+explicit activation. D8.2 remains inactive. There is no generic provider
 onboarding, provider view or filter, model selector, role/preset system, or
-remembered per-Project provider policy in D8. Availability is dynamic
-host-owned snapshot state rather than immutable client-registration identity,
-and every creation action revalidates it on the authoritative host.
+remembered per-Project provider policy in D8. Availability is dynamic host-owned
+snapshot state rather than immutable client-registration identity, and every
+creation action revalidates it on the authoritative host.
 
 ## 2026-08-04 terminal-fidelity root cause is upstream tmux
 
@@ -145,9 +145,9 @@ an automatic migration from the retired schema.
 
 Date: 2026-08-05
 
-Status: D0 through D7.6 are complete. V1 remains a source-installed operator
-beta. D8.0 is the active checkpoint; D8.1 is ready after its passing evidence
-gate and D8.2 is inactive.
+Status: D0 through D8.0 are complete. V1 remains a source-installed operator
+beta. D8.1 is the next checkpoint but remains inactive pending explicit
+activation; its prerequisite evidence gate passed. D8.2 is inactive.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -193,8 +193,8 @@ This document owns sequencing, exit gates, and progress.
 | D6.9 | Codex observer authority repair | Complete |
 | D7 | Navigator workflow and lifecycle management | Complete through D7.6 |
 | D7.6 | Host-private Project directory browser | Complete |
-| D8.0 | Provider identity foundation and Codex parity | Active |
-| D8.1 | Provider-aware New and OpenCode New/Resume vertical slice | Ready after D8.0 |
+| D8.0 | Provider identity foundation and Codex parity | Complete (2026-08-05) |
+| D8.1 | Provider-aware New and OpenCode New/Resume vertical slice | Next; inactive pending explicit activation (prerequisite evidence passed) |
 | D8.2 | OpenCode Fork, recovery, and integrated acceptance | Inactive |
 
 The completed checkpoints describe the source-installed operator-beta at the
@@ -995,10 +995,11 @@ Exit gate:
 
 ## D8 - Multi-provider Workstreams
 
-Implementation status: D8.0 is approved and active. D8.1's fresh-session and
-observer evidence passes on OpenCode `1.18.11`, so it is ready to activate
-after D8.0; D8.2 is an inactive follow-up. The [multi-provider design](design.md#multi-provider-and-multi-agent-design)
-is authoritative for the shared provider boundary and privacy invariants.
+Implementation status: D8.0 is complete (2026-08-05). D8.1's fresh-session and
+observer evidence passes on OpenCode `1.18.11`; it is the next checkpoint but
+remains inactive pending explicit activation. D8.2 is an inactive follow-up. The
+[multi-provider design](design.md#multi-provider-and-multi-agent-design) is
+authoritative for the shared provider boundary and privacy invariants.
 
 The product goal is deliberately narrower than provider orchestration. A user
 can start independent Workstreams at the same ProjectLocation, choose among
@@ -1030,6 +1031,8 @@ effort fields, remembered per-Project provider policy, and generalized
 provider-management UI have no approved checkpoint.
 
 ### D8.0 - Provider identity foundation and Codex parity
+
+Status: Complete on 2026-08-05.
 
 Scope:
 
@@ -1092,6 +1095,20 @@ Exit gate:
 - formatting, tests, lint, package checks, and `git diff --check` pass through
   `scripts/check`.
 
+Completion evidence (2026-08-05): D8.0 now has typed provider identity across
+the schema 10 and protocol 17 boundaries, dynamic capability and
+action-boundary revalidation, deterministic provider selection, and
+provider-visible presentation while preserving Codex's native launch,
+observation, resume, and Fork behavior.
+The final gates report 277 library tests plus 5 local-transport tests (282
+all-target tests), with format, clippy, package/license/advisory, shell, fixture,
+and diff checks green through `scripts/check`. Disposable local acceptance
+exercised fake-Codex launch and lifecycle observation, settled-prefix Fork,
+native attachment with the marker visible through the outer attach driver,
+detachment while the private Runtime remained live, exact recovery/resume, and
+cleanup with the default tmux server unchanged. No OpenCode production process
+launch is claimed.
+
 ### Required evidence before D8.1 - OpenCode fresh binding and observer ownership
 
 Status: passed on 2026-08-05 for OpenCode `1.18.11`. This remains an
@@ -1131,10 +1148,11 @@ inactive and narrows it rather than weakening a core invariant.
 
 ### D8.1 - Provider-aware New and OpenCode New/Resume vertical slice
 
-Activation gate: the evidence checkpoint above passes on explicitly allowlisted
-OpenCode `1.18.11`, and the design records blank-session precreation as the
-selected fresh-binding mechanism. D8.1 is ready after D8.0 completes; any
-provider upgrade requires a fresh evidence rerun before eligibility.
+Status: Next checkpoint, inactive pending explicit activation. The prerequisite
+evidence checkpoint above passes on explicitly allowlisted OpenCode `1.18.11`,
+and the design records blank-session precreation as the selected fresh-binding
+mechanism. D8.1 requires explicit activation before implementation; any provider
+upgrade requires a fresh evidence rerun before eligibility.
 
 Scope:
 

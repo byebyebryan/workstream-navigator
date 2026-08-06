@@ -57,6 +57,10 @@ fn spawned_observer_identity_matches<P: ProcessProbe + ?Sized>(
         && observer_identity_matches(probe, pid, birth)
 }
 
+fn attachment_runtime_matches(record: &crate::state::RuntimeRecord, probe: &RuntimeProbe) -> bool {
+    matches_recorded_runtime(record, probe, false)
+}
+
 /// The durable outcome of a start-or-resume request.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartOutcome {
@@ -149,6 +153,75 @@ pub fn start_independent_workstream(
         |root, registry, workstream_id, expected_revision, _provider| {
             start(root, registry, workstream_id, expected_revision)
         },
+    )
+}
+
+/// Provider-readiness seam for the remote control path. Production callers use
+/// this wrapper to perform the live capability re-probe; deterministic tests
+/// use the adjacent injected-starter variant so they exercise the exact same
+/// revision/request-key/provider path without launching a real provider.
+pub(crate) fn start_independent_workstream_with_readiness<F>(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    source_workstream_id: WorkstreamId,
+    expected_revision: Option<Revision>,
+    request_key: &str,
+    provider: ProviderKind,
+    readiness: F,
+) -> Result<WorkstreamId, ActionError>
+where
+    F: FnOnce(&HostRegistry, ProviderKind) -> Result<(), crate::provider::ProviderReadinessError>,
+{
+    start_independent_workstream_with_readiness_and_starter(
+        root,
+        registry,
+        source_workstream_id,
+        expected_revision,
+        request_key,
+        provider,
+        readiness,
+        |root, registry, workstream_id, expected_revision, _provider| {
+            start(root, registry, workstream_id, expected_revision)
+        },
+    )
+}
+
+/// Provider-readiness seam with an injected native starter for bounded
+/// protocol tests. Production callers should use
+/// [`start_independent_workstream_with_readiness`], which supplies the real
+/// provider-scoped start action.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn start_independent_workstream_with_readiness_and_starter<F, S>(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    source_workstream_id: WorkstreamId,
+    expected_revision: Option<Revision>,
+    request_key: &str,
+    provider: ProviderKind,
+    readiness: F,
+    starter: S,
+) -> Result<WorkstreamId, ActionError>
+where
+    F: FnOnce(&HostRegistry, ProviderKind) -> Result<(), crate::provider::ProviderReadinessError>,
+    S: FnOnce(
+        &crate::state::StateRoot,
+        &mut HostRegistry,
+        WorkstreamId,
+        Option<Revision>,
+        ProviderKind,
+    ) -> Result<StartOutcome, ActionError>,
+{
+    start_independent_workstream_with(
+        root,
+        registry,
+        IndependentStartSpec {
+            source_workstream_id,
+            expected_revision,
+            request_key,
+            provider,
+        },
+        |registry, provider| readiness(registry, provider).map_err(ActionError::ProviderReadiness),
+        starter,
     )
 }
 
@@ -689,6 +762,7 @@ fn validate_opencode_live_runtime(
         && handle.observer_status == crate::state::OpenCodeObserverStatus::Ready
         && observer_live
         && cwd == &runtime.cwd
+        && runtime.process_birth.as_deref() == Some(process_birth)
         && endpoint_owned_by_process(&endpoint, *pane_pid, process_birth)
         && session_exact
         && OpenCodeClient::new(endpoint.clone()).health().is_ok()
@@ -701,6 +775,85 @@ fn validate_opencode_live_runtime(
         return Err(ActionError::RuntimeProbeAmbiguous);
     }
     Ok(PriorOpenCodeRuntime::AlreadyLive)
+}
+
+/// Performs the authoritative, provider-aware checks required immediately
+/// before attaching a native provider pane.
+///
+/// The local presentation path and the remote interactive `_attach` endpoint
+/// both call this function.  A private tmux pane is never enough evidence for
+/// `OpenCode`: the exact Runtime generation, provider process birth, binding,
+/// observer identity/status, loopback ownership, health, and root-session
+/// status must corroborate the persisted handle.  Codex likewise requires a
+/// live probe whose cwd and process birth exactly match its persisted Runtime.
+///
+/// # Errors
+///
+/// Returns a bounded action error when the Runtime is missing, ambiguous, or
+/// fails any provider-specific ownership check.  A failed `OpenCode` check marks
+/// only its exact observer handle `Unknown`; it never adopts a different pane
+/// or session.
+pub fn preflight_attachment(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+) -> Result<crate::state::RuntimeRecord, ActionError> {
+    let runtime_record = registry
+        .runtime_for_workstream(workstream_id)?
+        .ok_or(ActionError::NoRuntime(workstream_id))?;
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(
+        &tmux,
+        &process_probe,
+        RuntimePaths::for_record(
+            root.base(),
+            runtime_record.runtime_id,
+            &runtime_record.tmux_session,
+        )?,
+    );
+    let probe = runtime.probe()?;
+    if !attachment_runtime_matches(&runtime_record, &probe) {
+        if runtime_record.provider == ProviderKind::OpenCode
+            && let Some(handle) = registry.opencode_runtime_handle(runtime_record.runtime_id)?
+        {
+            crate::provider::opencode::mark_unknown_handle(
+                registry,
+                &handle,
+                &runtime_record.tmux_generation,
+            );
+        }
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    if runtime_record.provider == ProviderKind::OpenCode {
+        validate_opencode_live_runtime(registry, &runtime_record, &probe)?;
+    }
+    Ok(runtime_record)
+}
+
+/// Runtime-ID form of [`preflight_attachment`] used by the SSH `_attach`
+/// endpoint.  The requested opaque Runtime identity is part of the authority
+/// boundary: if the Workstream has rotated to another generation between the
+/// control lookup and this preflight, refuse rather than silently attaching
+/// the replacement.
+///
+/// # Errors
+///
+/// Returns a bounded action error when the Runtime is unknown, no longer the
+/// Workstream's current generation, or fails provider-specific preflight.
+pub fn preflight_attachment_runtime(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    runtime_id: RuntimeId,
+) -> Result<crate::state::RuntimeRecord, ActionError> {
+    let requested = registry
+        .runtime_by_id(runtime_id)?
+        .ok_or(ActionError::RuntimeProbeAmbiguous)?;
+    let current = preflight_attachment(root, registry, requested.workstream_id)?;
+    if current.runtime_id != runtime_id {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    Ok(current)
 }
 
 fn prepare_opencode_runtime(
@@ -1635,7 +1788,7 @@ fn reconcile_observer_trust_with_manager(
 pub enum ActionError {
     #[error(transparent)]
     ProviderReadiness(crate::provider::ProviderReadinessError),
-    #[error("provider {0} is not active in the Codex production adapter")]
+    #[error("provider {0} does not support this action in the active V1 slice")]
     UnsupportedProvider(ProviderKind),
     #[error("provider {0} does not expose the bounded native recovery flow")]
     ProviderRecoveryUnavailable(ProviderKind),
@@ -1653,7 +1806,7 @@ pub enum ActionError {
         "observer profile trust is pending; open wsnav and complete native Codex /hooks review"
     )]
     ObserverNotReady,
-    #[error("private runtime probe is ambiguous; refusing to create another Codex process")]
+    #[error("private runtime probe is ambiguous; refusing to create another provider process")]
     RuntimeProbeAmbiguous,
     #[error("private runtime disappeared; select native recovery before continuing")]
     NativeRecoveryRequired,
@@ -1919,6 +2072,7 @@ mod tests {
             process_birth: Some("birth-a".to_owned()),
         };
 
+        assert!(attachment_runtime_matches(&record, &exact));
         assert!(matches_recorded_runtime(&record, &exact, false));
         assert!(!matches_recorded_runtime(&record, &exact, true));
         assert!(!matches_recorded_runtime(
@@ -1941,6 +2095,36 @@ mod tests {
             },
             false,
         ));
+        assert!(!attachment_runtime_matches(&record, &RuntimeProbe::Missing));
+        assert!(!attachment_runtime_matches(
+            &record,
+            &RuntimeProbe::Unknown {
+                diagnostic: "probe unavailable".to_owned(),
+            },
+        ));
+    }
+
+    #[test]
+    fn codex_attachment_requires_a_recorded_process_birth() {
+        let record = crate::state::RuntimeRecord {
+            runtime_id: RuntimeId::new(),
+            workstream_id: WorkstreamId::new(),
+            provider: crate::domain::ProviderKind::Codex,
+            tmux_generation: "generation".to_owned(),
+            tmux_session: "session".to_owned(),
+            cwd: PathBuf::from("/disposable/repository"),
+            process_birth: None,
+            status: crate::domain::RuntimeStatus::Idle,
+            revision: Revision::INITIAL,
+        };
+        let live = RuntimeProbe::Live {
+            pane_id: "%1".to_owned(),
+            pane_pid: 1,
+            cwd: record.cwd.clone(),
+            process_birth: Some("birth-a".to_owned()),
+        };
+
+        assert!(!attachment_runtime_matches(&record, &live));
     }
 
     #[test]

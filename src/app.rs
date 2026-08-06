@@ -1,4 +1,4 @@
-//! Thin local CLI orchestration for the D1 native Codex slice.
+//! Thin provider-aware CLI orchestration for local and SSH Workstreams.
 
 use std::{
     collections::BTreeMap,
@@ -21,8 +21,8 @@ use crate::{
     provider::codex::profile::{OBSERVER_PROFILE_SCHEMA_VERSION, ObserverProfile},
     provider::lifecycle::LifecycleEvent,
     runtime::{
-        LinuxProcessProbe, NativeLaunch, PrivateRuntime, ProcessProbe, RuntimePaths, RuntimeProbe,
-        SystemTmux, await_launch_release, is_direct_provider_hook,
+        LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
+        await_launch_release, is_direct_provider_hook,
     },
     state::{
         ClientCatalog, ClientHostTransport, HostIdentity, HostRegistry, IntegrationLifecycle,
@@ -106,20 +106,20 @@ enum Commands {
     },
     /// Fork one live Workstream at its last completed native Codex turn.
     ForkWorkstream { source_workstream_id: String },
-    /// Start native Codex in a private tmux server for one registered workstream.
+    /// Start the Workstream's native provider in its private tmux server.
     Start { workstream_id: String },
     /// Recover a lost private Runtime through Codex's native resume flow.
     Recover { workstream_id: String },
-    /// Attach this terminal directly to a live native Codex runtime.
+    /// Attach this terminal directly to a live native provider Runtime.
     Attach { workstream_id: String },
-    /// Park a runtime without deleting project files or Codex session history.
+    /// Park a Runtime without deleting project files or provider session history.
     Park { workstream_id: String },
     /// Hide a Workstream from the ordinary navigator without deleting retained state.
     Archive {
         workstream_id: String,
         revision: i64,
     },
-    /// Return an archived Workstream to the ordinary navigator without starting Codex.
+    /// Return an archived Workstream without starting its native provider.
     Restore {
         workstream_id: String,
         revision: i64,
@@ -284,7 +284,7 @@ enum HostCommands {
         workstream_id: String,
         revision: i64,
     },
-    /// Return one archived remote Workstream without starting Codex.
+    /// Return one archived remote Workstream without starting its native provider.
     Restore {
         alias: String,
         workstream_id: String,
@@ -617,24 +617,16 @@ fn opencode_observer(
     crate::provider::opencode::run_observer(root, &context).map_err(AppError::OpenCodeObserver)
 }
 
-fn mark_opencode_observer_unknown_handle(
-    registry: &mut HostRegistry,
-    handle: &crate::state::OpenCodeRuntimeHandle,
-    generation: &str,
-) {
-    crate::provider::opencode::mark_unknown_handle(registry, handle, generation);
-}
-
 fn navigator(root: &StateRoot) -> Result<(), AppError> {
     let activation = {
         let mut registry = HostRegistry::open(root)?;
-        prepare_observer_activation(root, &mut registry)?
+        prepare_navigator_observer_activation(root, &mut registry)?
     };
     let (presentation, fresh) = Presentation::open_or_create(root.base())?;
     if fresh {
         presentation.start()?;
     }
-    if activation == ObserverActivation::ReviewRequired && fresh {
+    if activation == Some(ObserverActivation::ReviewRequired) && fresh {
         presentation.start_observer_review()?;
         presentation.focus_provider()?;
     }
@@ -654,6 +646,34 @@ fn navigator(root: &StateRoot) -> Result<(), AppError> {
             Err(AppError::Presentation(error))
         }
     }
+}
+
+/// Keeps provider startup scoped to the provider that can actually authorize
+/// a Workstream action.  An unready Codex observer must not force a native
+/// review (or otherwise block the navigator) when an eligible `OpenCode`
+/// adapter is already available.  Codex setup remains an explicit Hosts-page
+/// action in that case.
+fn prepare_navigator_observer_activation(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+) -> Result<Option<ObserverActivation>, AppError> {
+    let capabilities = crate::provider::discover_capabilities(registry)?;
+    if !should_prepare_codex_observer(&capabilities) {
+        return Ok(None);
+    }
+    prepare_observer_activation(root, registry).map(Some)
+}
+
+fn should_prepare_codex_observer(capabilities: &[crate::protocol::ProviderCapability]) -> bool {
+    let opencode_eligible = capabilities
+        .iter()
+        .find(|capability| capability.kind == crate::domain::ProviderKind::OpenCode)
+        .is_some_and(|capability| capability.is_new_eligible());
+    let codex_eligible = capabilities
+        .iter()
+        .find(|capability| capability.kind == crate::domain::ProviderKind::Codex)
+        .is_some_and(|capability| capability.is_new_eligible());
+    !opencode_eligible || codex_eligible
 }
 
 fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError> {
@@ -1107,7 +1127,7 @@ fn attach_remote_workstream(
 
 /// Runs an attachment only inside the presentation provider pane.
 ///
-/// A provider pane is reserved for native Codex bytes. The navigator refreshes
+/// A provider pane is reserved for native provider bytes. The navigator refreshes
 /// lifecycle state independently, so an unavailable or unexpectedly stopped
 /// Runtime must leave this pane blank rather than render a CLI diagnostic.
 fn provider_attach(
@@ -1748,9 +1768,7 @@ fn attach(
     registry: &mut HostRegistry,
     workstream_id: WorkstreamId,
 ) -> Result<(), AppError> {
-    let record = registry
-        .runtime_for_workstream(workstream_id)?
-        .ok_or(AppError::NoRuntime(workstream_id))?;
+    let record = actions::preflight_attachment(root, registry, workstream_id)?;
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
     let runtime = PrivateRuntime::new(
@@ -1758,45 +1776,6 @@ fn attach(
         &process_probe,
         RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
     );
-    match record.provider {
-        crate::domain::ProviderKind::Codex => {}
-        crate::domain::ProviderKind::OpenCode => {
-            let Some(handle) = registry.opencode_runtime_handle(record.runtime_id)? else {
-                return Err(AppError::RuntimeProbeAmbiguous);
-            };
-            let RuntimeProbe::Live {
-                pane_pid,
-                cwd,
-                process_birth: Some(process_birth),
-                ..
-            } = runtime.probe()?
-            else {
-                mark_opencode_observer_unknown_handle(registry, &handle, &record.tmux_generation);
-                return Err(AppError::RuntimeProbeAmbiguous);
-            };
-            let observer_live = handle
-                .observer_pid
-                .zip(handle.observer_birth.as_deref())
-                .is_some_and(|(pid, birth)| {
-                    LinuxProcessProbe.process_birth(pid).as_deref() == Some(birth)
-                });
-            if handle.runtime_generation != record.tmux_generation
-                || handle.observer_status != crate::state::OpenCodeObserverStatus::Ready
-                || cwd != record.cwd
-                || record.process_birth.as_deref() != Some(process_birth.as_str())
-                || !observer_live
-                || !crate::provider::opencode::endpoint_owned_by_process(
-                    &crate::provider::opencode::OpenCodeEndpoint::loopback(handle.endpoint_port)
-                        .map_err(AppError::OpenCode)?,
-                    pane_pid,
-                    &process_birth,
-                )
-            {
-                mark_opencode_observer_unknown_handle(registry, &handle, &record.tmux_generation);
-                return Err(AppError::RuntimeProbeAmbiguous);
-            }
-        }
-    }
     let mut command = runtime.attach_command();
     command.stderr(Stdio::null());
     let status = command.status().map_err(AppError::Io)?;
@@ -1984,8 +1963,6 @@ fn default_state_root() -> PathBuf {
 pub(crate) enum AppError {
     #[error("native tmux attach failed")]
     AttachFailed,
-    #[error("private runtime probe is ambiguous")]
-    RuntimeProbeAmbiguous,
     #[error("attention revision is invalid")]
     InvalidAttentionRevision,
     #[error("invalid workstream ID")]
@@ -2214,6 +2191,35 @@ mod tests {
     }
 
     #[test]
+    fn eligible_opencode_does_not_require_codex_observer_review() {
+        let capabilities = vec![
+            crate::protocol::ProviderCapability {
+                kind: crate::domain::ProviderKind::Codex,
+                status: crate::protocol::ProviderCapabilityStatus::Unavailable,
+                reason: crate::protocol::ProviderCapabilityReason::ObserverNotReady,
+                fresh_launch: false,
+                exact_resume: false,
+                observe: false,
+                metadata_read: false,
+                rename: false,
+                fork: false,
+            },
+            crate::protocol::ProviderCapability {
+                kind: crate::domain::ProviderKind::OpenCode,
+                status: crate::protocol::ProviderCapabilityStatus::Available,
+                reason: crate::protocol::ProviderCapabilityReason::None,
+                fresh_launch: true,
+                exact_resume: true,
+                observe: true,
+                metadata_read: true,
+                rename: false,
+                fork: false,
+            },
+        ];
+        assert!(!should_prepare_codex_observer(&capabilities));
+    }
+
+    #[test]
     fn observer_activation_and_manual_reconciliation_are_hidden_from_normal_cli_help() {
         let help = Cli::command().render_help().to_string();
 
@@ -2221,6 +2227,10 @@ mod tests {
         assert!(!help.contains("update-observer"));
         assert!(!help.contains("trust-observer"));
         assert!(!help.contains("_observer_review"));
+        assert!(help.contains("Start the Workstream's native provider"));
+        assert!(help.contains("live native provider Runtime"));
+        assert!(!help.contains("Start native Codex"));
+        assert!(help.contains("Recover a lost private Runtime through Codex"));
     }
 
     #[test]

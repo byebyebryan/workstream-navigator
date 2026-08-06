@@ -60,10 +60,16 @@ pub fn serve(
 /// Returns an error for an unknown/non-live runtime or a failed private tmux
 /// attachment.
 pub fn attach(root: &StateRoot, runtime_id: RuntimeId) -> Result<(), RemoteError> {
-    let registry = HostRegistry::open(root)?;
-    let runtime_record = registry
-        .runtime_by_id(runtime_id)?
-        .ok_or(RemoteError::UnknownRuntime)?;
+    let mut registry = HostRegistry::open(root)?;
+    let runtime_record = crate::actions::preflight_attachment_runtime(
+        root,
+        &mut registry,
+        runtime_id,
+    )
+    .map_err(|error| match error {
+        crate::actions::ActionError::RuntimeProbeAmbiguous => RemoteError::RuntimeUnavailable,
+        other => RemoteError::Action(other),
+    })?;
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
     let runtime = PrivateRuntime::new(
@@ -142,11 +148,24 @@ fn dispatch(state_root: Option<std::path::PathBuf>, request: &RequestEnvelope) -
             }
         }
         HostRequest::Attach { runtime_id } => match registry.runtime_by_id(*runtime_id) {
-            Ok(Some(_)) => ResponseEnvelope {
-                version: CURRENT_PROTOCOL_VERSION,
-                response: HostResponse::Attach {
-                    runtime_id: *runtime_id,
+            Ok(Some(runtime)) => match crate::actions::preflight_attachment_runtime(
+                &root,
+                &mut registry,
+                runtime.runtime_id,
+            ) {
+                Ok(_) => ResponseEnvelope {
+                    version: CURRENT_PROTOCOL_VERSION,
+                    response: HostResponse::Attach {
+                        runtime_id: *runtime_id,
+                    },
                 },
+                Err(crate::actions::ActionError::ProviderReadiness(error)) => {
+                    provider_rejected(error)
+                }
+                Err(crate::actions::ActionError::UnsupportedProvider(provider)) => {
+                    rejected(&format!("{provider} provider attachment is unavailable"))
+                }
+                Err(_) => rejected("runtime is unavailable"),
             },
             Ok(None) | Err(_) => rejected("runtime is unavailable"),
         },
@@ -266,16 +285,25 @@ fn apply_register_checkout(
     checkout_path: &Path,
     provider: crate::domain::ProviderKind,
 ) -> ResponseEnvelope {
+    apply_register_checkout_with(registry, checkout_path, provider, |registry, provider| {
+        crate::provider::require_new_eligible(registry, provider)
+    })
+}
+
+fn apply_register_checkout_with(
+    registry: &mut HostRegistry,
+    checkout_path: &Path,
+    provider: crate::domain::ProviderKind,
+    readiness: impl FnOnce(
+        &HostRegistry,
+        crate::domain::ProviderKind,
+    ) -> Result<(), crate::provider::ProviderReadinessError>,
+) -> ResponseEnvelope {
     let Ok(repository) = crate::repository::inspect(checkout_path) else {
         return rejected("project is unavailable");
     };
-    // Keep OpenCode remote registration unavailable until the remote transport
-    // owns its endpoint and observer lifecycle contract.
-    if provider == crate::domain::ProviderKind::OpenCode {
-        return rejected("provider is unavailable");
-    }
-    if crate::provider::require_new_eligible(registry, provider).is_err() {
-        return rejected("provider is unavailable");
+    if let Err(error) = readiness(registry, provider) {
+        return provider_rejected(error);
     }
     match registry.register_external_workstream_with_metadata(
         &repository.project_root,
@@ -315,17 +343,55 @@ fn apply_new_workstream(
     request_key: &str,
     provider: crate::domain::ProviderKind,
 ) -> ResponseEnvelope {
-    if provider == crate::domain::ProviderKind::OpenCode {
-        return rejected("workstream creation is unavailable");
-    }
     apply_created_workstream(
-        &crate::actions::start_independent_workstream(
+        &crate::actions::start_independent_workstream_with_readiness(
             root,
             registry,
             source_workstream_id,
             Revision::try_from(expected_revision).ok(),
             request_key,
             provider,
+            crate::provider::require_new_eligible,
+        ),
+        registry,
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn apply_new_workstream_with<R, S>(
+    root: &StateRoot,
+    registry: &mut HostRegistry,
+    source_workstream_id: WorkstreamId,
+    expected_revision: i64,
+    request_key: &str,
+    provider: crate::domain::ProviderKind,
+    readiness: R,
+    starter: S,
+) -> ResponseEnvelope
+where
+    R: FnOnce(
+        &HostRegistry,
+        crate::domain::ProviderKind,
+    ) -> Result<(), crate::provider::ProviderReadinessError>,
+    S: FnOnce(
+        &StateRoot,
+        &mut HostRegistry,
+        WorkstreamId,
+        Option<Revision>,
+        crate::domain::ProviderKind,
+    ) -> Result<crate::actions::StartOutcome, crate::actions::ActionError>,
+{
+    apply_created_workstream(
+        &crate::actions::start_independent_workstream_with_readiness_and_starter(
+            root,
+            registry,
+            source_workstream_id,
+            Revision::try_from(expected_revision).ok(),
+            request_key,
+            provider,
+            readiness,
+            starter,
         ),
         registry,
     )
@@ -393,6 +459,13 @@ fn apply_created_workstream(
         }
         Err(crate::actions::ActionError::ForkSourceUnavailable) => {
             rejected("fork source is no longer available")
+        }
+        Err(crate::actions::ActionError::ProviderReadiness(error)) => provider_rejected(*error),
+        Err(crate::actions::ActionError::UnsupportedProvider(provider)) => {
+            rejected(&format!("{provider} provider action is unavailable"))
+        }
+        Err(crate::actions::ActionError::ProviderRecoveryUnavailable(provider)) => {
+            rejected(&format!("{provider} provider recovery is unavailable"))
         }
         Err(_) => rejected("workstream creation is unavailable"),
     }
@@ -492,6 +565,9 @@ fn apply_rename(
         Err(crate::actions::ActionError::WorkstreamRevisionConflict) => {
             rejected("revision conflict; refresh this host")
         }
+        Err(crate::actions::ActionError::UnsupportedProvider(provider)) => {
+            rejected(&format!("{provider} provider rename is unavailable"))
+        }
         Err(_) => rejected("rename is unavailable"),
     }
 }
@@ -519,6 +595,13 @@ fn apply_start(
         },
         Err(crate::actions::ActionError::WorkstreamRevisionConflict) => {
             rejected("revision conflict; refresh this host")
+        }
+        Err(crate::actions::ActionError::ProviderReadiness(error)) => provider_rejected(error),
+        Err(crate::actions::ActionError::UnsupportedProvider(provider)) => {
+            rejected(&format!("{provider} provider action is unavailable"))
+        }
+        Err(crate::actions::ActionError::ProviderRecoveryUnavailable(provider)) => {
+            rejected(&format!("{provider} provider recovery is unavailable"))
         }
         Err(_) => rejected("remote start is unavailable"),
     }
@@ -553,6 +636,9 @@ fn apply_recover(
         }
         Err(crate::actions::ActionError::RuntimeProbeAmbiguous) => {
             rejected("native recovery probe is ambiguous")
+        }
+        Err(crate::actions::ActionError::ProviderRecoveryUnavailable(provider)) => {
+            rejected(&format!("{provider} provider recovery is unavailable"))
         }
         Err(_) => rejected("native recovery is unavailable"),
     }
@@ -754,6 +840,7 @@ fn rejection_for_error(error: &RemoteError) -> ResponseEnvelope {
         }
         RemoteError::Io(_) | RemoteError::Protocol(_) => rejected("malformed protocol request"),
         RemoteError::State(_)
+        | RemoteError::Action(_)
         | RemoteError::Runtime(_)
         | RemoteError::UnknownRuntime
         | RemoteError::RuntimeUnavailable
@@ -764,6 +851,21 @@ fn rejection_for_error(error: &RemoteError) -> ResponseEnvelope {
 fn rejected(message: &str) -> ResponseEnvelope {
     ResponseEnvelope::rejected(message.to_owned())
         .expect("fixed protocol rejection diagnostics are bounded")
+}
+
+fn provider_rejected(error: crate::provider::ProviderReadinessError) -> ResponseEnvelope {
+    let reason = match error.reason {
+        crate::protocol::ProviderCapabilityReason::None => "unavailable",
+        crate::protocol::ProviderCapabilityReason::AdapterUnavailable => "adapter unavailable",
+        crate::protocol::ProviderCapabilityReason::NotInstalled => "not installed",
+        crate::protocol::ProviderCapabilityReason::UnsupportedVersion => "unsupported version",
+        crate::protocol::ProviderCapabilityReason::ObserverNotReady => "observer not ready",
+        crate::protocol::ProviderCapabilityReason::RuntimePrerequisiteMissing => {
+            "runtime prerequisite missing"
+        }
+        crate::protocol::ProviderCapabilityReason::ProbeFailed => "probe failed",
+    };
+    rejected(&format!("{} provider unavailable: {reason}", error.kind))
 }
 
 fn default_state_root() -> std::path::PathBuf {
@@ -785,6 +887,8 @@ pub enum RemoteError {
     #[error(transparent)]
     State(#[from] StateError),
     #[error(transparent)]
+    Action(#[from] crate::actions::ActionError),
+    #[error(transparent)]
     Runtime(#[from] crate::runtime::RuntimeError),
     #[error("protocol frame exceeds its maximum size")]
     FrameTooLarge,
@@ -798,12 +902,23 @@ pub enum RemoteError {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
     use std::path::PathBuf;
     use std::{io::Cursor, process::Command};
 
     use crate::protocol::{ProviderCapability, ProviderCapabilityReason, ProviderCapabilityStatus};
 
     use super::*;
+
+    fn unavailable(
+        provider: crate::domain::ProviderKind,
+    ) -> crate::provider::ProviderReadinessError {
+        crate::provider::ProviderReadinessError {
+            kind: provider,
+            status: ProviderCapabilityStatus::Unavailable,
+            reason: ProviderCapabilityReason::AdapterUnavailable,
+        }
+    }
 
     #[test]
     fn malformed_or_oversized_input_is_drained_then_rejected_in_one_frame() {
@@ -964,16 +1079,17 @@ mod tests {
         let mut registry = HostRegistry::open(&root).unwrap();
         let before = registry.workstream_overviews().unwrap().len();
 
-        let response = apply_register_checkout(
+        let response = apply_register_checkout_with(
             &mut registry,
             &checkout,
             crate::domain::ProviderKind::OpenCode,
+            |_, provider| Err(unavailable(provider)),
         );
 
         assert!(matches!(
             response.response,
             HostResponse::Rejected { ref diagnostic }
-                if diagnostic == "provider is unavailable"
+                if diagnostic == "opencode provider unavailable: adapter unavailable"
         ));
         assert_eq!(registry.workstream_overviews().unwrap().len(), before);
     }
@@ -995,15 +1111,66 @@ mod tests {
         let mut registry = HostRegistry::open(&root).unwrap();
         let before = registry.workstream_overviews().unwrap().len();
 
-        let response =
-            apply_register_checkout(&mut registry, &checkout, crate::domain::ProviderKind::Codex);
+        let response = apply_register_checkout_with(
+            &mut registry,
+            &checkout,
+            crate::domain::ProviderKind::Codex,
+            |_, provider| Err(unavailable(provider)),
+        );
 
         assert!(matches!(
             response.response,
             HostResponse::Rejected { ref diagnostic }
-                if diagnostic == "provider is unavailable"
+                if diagnostic == "codex provider unavailable: adapter unavailable"
         ));
         assert_eq!(registry.workstream_overviews().unwrap().len(), before);
+    }
+
+    #[test]
+    fn opencode_registration_persists_the_authoritative_provider_after_readiness() {
+        let temporary = tempfile::tempdir().unwrap();
+        let checkout = temporary.path().join("checkout");
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(&checkout)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let response = apply_register_checkout_with(
+            &mut registry,
+            &checkout,
+            crate::domain::ProviderKind::OpenCode,
+            |_, provider| {
+                assert_eq!(provider, crate::domain::ProviderKind::OpenCode);
+                Ok(())
+            },
+        );
+
+        let workstream_id = match response.response {
+            HostResponse::WorkstreamCreated {
+                workstream_id,
+                provider,
+                revision,
+            } => {
+                assert_eq!(provider, crate::domain::ProviderKind::OpenCode);
+                assert_eq!(revision, Revision::INITIAL.value());
+                workstream_id
+            }
+            other => panic!("expected OpenCode WorkstreamCreated response, got {other:?}"),
+        };
+        let overview = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == workstream_id)
+            .unwrap();
+        assert_eq!(overview.provider, crate::domain::ProviderKind::OpenCode);
+        assert_eq!(overview.revision, Revision::INITIAL);
     }
 
     #[test]
@@ -1018,19 +1185,21 @@ mod tests {
             .unwrap();
         let before = registry.workstream_overviews().unwrap().len();
 
-        let response = apply_new_workstream(
+        let response = apply_new_workstream_with(
             &root,
             &mut registry,
             source.workstream_id,
             Revision::INITIAL.value(),
             "opencode-new",
             crate::domain::ProviderKind::OpenCode,
+            |_, provider| Err(unavailable(provider)),
+            |_, _, _, _, _| Ok(crate::actions::StartOutcome::Started),
         );
 
         assert!(matches!(
             response.response,
             HostResponse::Rejected { ref diagnostic }
-                if diagnostic == "workstream creation is unavailable"
+                if diagnostic == "opencode provider unavailable: adapter unavailable"
         ));
         assert_eq!(registry.workstream_overviews().unwrap().len(), before);
         assert!(
@@ -1039,6 +1208,128 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn opencode_new_returns_the_exact_destination_without_a_codex_effect() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let source = registry
+            .register_project_root(&project, crate::domain::ProviderKind::Codex)
+            .unwrap();
+        let starter_provider = Cell::new(None);
+        let starter_revision = Cell::new(None);
+        let starter_destination = Cell::new(None);
+
+        let response = apply_new_workstream_with(
+            &root,
+            &mut registry,
+            source.workstream_id,
+            Revision::INITIAL.value(),
+            "opencode-positive-new",
+            crate::domain::ProviderKind::OpenCode,
+            |_, provider| {
+                assert_eq!(provider, crate::domain::ProviderKind::OpenCode);
+                Ok(())
+            },
+            |_root, registry, workstream_id, expected_revision, provider| {
+                starter_provider.set(Some(provider));
+                starter_revision.set(expected_revision);
+                starter_destination.set(Some(workstream_id));
+                let destination = registry
+                    .workstream_overviews()
+                    .unwrap()
+                    .into_iter()
+                    .find(|overview| overview.workstream_id == workstream_id)
+                    .unwrap();
+                assert_eq!(destination.provider, crate::domain::ProviderKind::OpenCode);
+                assert_eq!(expected_revision, Some(destination.revision));
+                Ok(crate::actions::StartOutcome::Started)
+            },
+        );
+        let destination_id = match response.response {
+            HostResponse::WorkstreamCreated {
+                workstream_id,
+                provider,
+                revision,
+            } => {
+                assert_eq!(provider, crate::domain::ProviderKind::OpenCode);
+                assert_eq!(revision, Revision::INITIAL.value());
+                workstream_id
+            }
+            other => panic!("expected OpenCode WorkstreamCreated response, got {other:?}"),
+        };
+
+        assert_eq!(
+            starter_provider.get(),
+            Some(crate::domain::ProviderKind::OpenCode)
+        );
+        assert_eq!(starter_revision.get(), Some(Revision::INITIAL));
+        assert_eq!(starter_destination.get(), Some(destination_id));
+        let overviews = registry.workstream_overviews().unwrap();
+        assert_eq!(overviews.len(), 2);
+        let source_overview = overviews
+            .iter()
+            .find(|overview| overview.workstream_id == source.workstream_id)
+            .unwrap();
+        assert_eq!(source_overview.provider, crate::domain::ProviderKind::Codex);
+        assert_eq!(source_overview.revision, Revision::INITIAL);
+        let destination = overviews
+            .iter()
+            .find(|overview| overview.workstream_id == destination_id)
+            .unwrap();
+        assert_eq!(destination.provider, crate::domain::ProviderKind::OpenCode);
+        assert_eq!(destination.project_repository_path, project);
+        assert!(destination.runtime.is_none());
+
+        let replay = apply_new_workstream_with(
+            &root,
+            &mut registry,
+            source.workstream_id,
+            Revision::INITIAL.value(),
+            "opencode-positive-new",
+            crate::domain::ProviderKind::OpenCode,
+            |_, provider| {
+                assert_eq!(provider, crate::domain::ProviderKind::OpenCode);
+                Ok(())
+            },
+            |_root, _registry, _workstream_id, _expected_revision, provider| {
+                assert_eq!(provider, crate::domain::ProviderKind::OpenCode);
+                Ok(crate::actions::StartOutcome::Started)
+            },
+        );
+        assert!(matches!(
+            replay.response,
+            HostResponse::WorkstreamCreated {
+                workstream_id,
+                provider: crate::domain::ProviderKind::OpenCode,
+                revision: 1,
+            } if workstream_id == destination_id
+        ));
+        assert_eq!(registry.workstream_overviews().unwrap().len(), 2);
+        let connection =
+            rusqlite::Connection::open(temporary.path().join("state/host.sqlite")).unwrap();
+        let request = connection
+            .query_row(
+                "SELECT source_workstream_id, source_revision, workstream_id
+                 FROM independent_creation_requests WHERE request_key = ?1",
+                ["opencode-positive-new"],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(request.0, source.workstream_id.to_string());
+        assert_eq!(request.1, Revision::INITIAL.value());
+        assert_eq!(request.2, destination_id.to_string());
     }
 
     #[test]
@@ -1053,19 +1344,21 @@ mod tests {
             .unwrap();
         let before = registry.workstream_overviews().unwrap().len();
 
-        let response = apply_new_workstream(
+        let response = apply_new_workstream_with(
             &root,
             &mut registry,
             source.workstream_id,
             Revision::INITIAL.value(),
             "stale-codex-new",
             crate::domain::ProviderKind::Codex,
+            |_, provider| Err(unavailable(provider)),
+            |_, _, _, _, _| Ok(crate::actions::StartOutcome::Started),
         );
 
         assert!(matches!(
             response.response,
             HostResponse::Rejected { ref diagnostic }
-                if diagnostic == "workstream creation is unavailable"
+                if diagnostic == "codex provider unavailable: adapter unavailable"
         ));
         assert_eq!(registry.workstream_overviews().unwrap().len(), before);
         assert!(
@@ -1074,6 +1367,57 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    #[test]
+    fn opencode_rename_fork_and_recovery_are_bounded_no_effect_refusals() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let source = registry
+            .register_project_root(&project, crate::domain::ProviderKind::OpenCode)
+            .unwrap();
+        let before = registry.workstream_overviews().unwrap();
+
+        let rename = apply_rename(
+            &mut registry,
+            source.workstream_id,
+            Revision::INITIAL.value(),
+            "unavailable-name",
+        );
+        assert!(matches!(
+            rename.response,
+            HostResponse::Rejected { ref diagnostic }
+                if diagnostic == "opencode provider rename is unavailable"
+        ));
+
+        let fork = apply_fork_workstream(
+            &root,
+            &mut registry,
+            source.workstream_id,
+            Revision::INITIAL.value(),
+            "opencode-fork".to_owned(),
+        );
+        assert!(matches!(
+            fork.response,
+            HostResponse::Rejected { ref diagnostic }
+                if diagnostic == "opencode provider action is unavailable"
+        ));
+
+        let recovery = apply_recover(
+            &root,
+            &mut registry,
+            source.workstream_id,
+            Revision::INITIAL.value(),
+        );
+        assert!(matches!(
+            recovery.response,
+            HostResponse::Rejected { ref diagnostic }
+                if diagnostic == "opencode provider recovery is unavailable"
+        ));
+        assert_eq!(registry.workstream_overviews().unwrap(), before);
     }
 
     #[test]

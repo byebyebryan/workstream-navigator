@@ -1198,6 +1198,27 @@ Exit gate:
   sidecars, provider processes, tmux servers, and provider roots are removed;
 - `scripts/check` passes.
 
+Tranche-2 evidence (2026-08-05): the shared provider-aware action boundary is
+implemented. Local and remote Register/New re-probe the exact selected
+provider with no fallback; local and SSH attachment share exact
+Runtime/observer/endpoint/session preflight; provider-scoped startup leaves an
+eligible OpenCode lane actionable while Codex observer review is pending; and
+OpenCode Rename, Fork, and recovery remain bounded no-effect refusals. The
+deterministic all-target suite, fake OpenCode/private-tmux acceptance, and
+mixed-provider disposable acceptance cover provider identity separation,
+independent local and RemoteAttach native attachment/detachment, exact pane
+and observer process/port/socket cleanup, bounded launch-flag/privacy checks,
+unsupported OpenCode no-effect actions, and ordinary-tmux non-interference.
+
+The remaining gate is operator-gated real-provider/real-SSH acceptance on an
+explicitly disposable host: rerun allowlisted OpenCode `1.18.11` Register/New,
+exact resume, helper crash/Unknown, attach/detach, park, and cleanup checks
+locally and over SSH with sanitized evidence; exercise one mixed-provider
+project without ordinary Codex/tmux state; and independently verify the fixed
+SSH TTY command and host identity. A provider upgrade or any failed identity,
+native-workflow, privacy, persistence, or cleanup assertion keeps D8.1 active
+and requires a fresh evidence rerun. D8.2 remains inactive.
+
 ### D8.2 - OpenCode Fork, recovery, and integrated acceptance
 
 Scope:

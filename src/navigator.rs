@@ -2815,6 +2815,7 @@ impl NavigatorView {
             ],
             NavigatorPage::Hosts => vec![
                 ("a", "add"),
+                ("s", "Codex observer"),
                 ("x", "remove"),
                 ("r", "root"),
                 (",", "projects"),
@@ -3417,6 +3418,10 @@ fn help_lines(
                 Line::from(vec![
                     Span::styled("a", key),
                     Span::raw("          add, verify, and set up a remote SSH host"),
+                ]),
+                Line::from(vec![
+                    Span::styled("s", key),
+                    Span::raw("          review the selected Host's Codex observer"),
                 ]),
                 Line::from(vec![
                     Span::styled("r", key),
@@ -4309,7 +4314,10 @@ fn handle_navigator_key(
     if workstreams && handle_workstream_action_key(key.code, root, presentation, remote, view) {
         return false;
     }
-    if !workstreams && view.detail.is_none() && handle_management_page_key(key.code, view) {
+    if !workstreams
+        && view.detail.is_none()
+        && handle_management_page_key(key.code, root, presentation, remote, view)
+    {
         return false;
     }
     match key.code {
@@ -4370,11 +4378,20 @@ fn handle_navigator_key(
     }
 }
 
-fn handle_management_page_key(key: KeyCode, view: &mut NavigatorView) -> bool {
+fn handle_management_page_key(
+    key: KeyCode,
+    root: &StateRoot,
+    presentation: &Presentation,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+) -> bool {
     match (view.page(), key) {
         (NavigatorPage::Projects, KeyCode::Char('a')) => view.begin_checkout_registration(),
         (NavigatorPage::Projects, KeyCode::Char('x')) => view.begin_project_forget(),
         (NavigatorPage::Hosts, KeyCode::Char('a')) => view.begin_host_registration(),
+        (NavigatorPage::Hosts, KeyCode::Char('s')) => {
+            activate_selected_host(root, presentation, remote, view);
+        }
         (NavigatorPage::Hosts, KeyCode::Char('r')) => {
             view.begin_project_browser_root_configuration();
         }
@@ -4798,7 +4815,7 @@ fn handle_navigator_mouse(
 }
 
 fn initialize_observer_activation_message(root: &StateRoot, view: &mut NavigatorView) -> bool {
-    let pending = observer_review_pending(root);
+    let pending = observer_review_pending(root, local_provider_capabilities(&view.snapshot));
     if pending {
         view.set_message(
             "approve the observer hooks in the native Codex pane with /hooks, then exit Codex",
@@ -4816,15 +4833,19 @@ fn refresh_navigator(
 ) -> bool {
     let mut changed = false;
     let selected_host = view.selected_host_alias().map(str::to_owned);
-    match combined_snapshot(root, remote, selected_host.as_deref()) {
-        Ok(snapshot) => changed |= view.replace_snapshot(snapshot),
+    let now_pending = match combined_snapshot(root, remote, selected_host.as_deref()) {
+        Ok(snapshot) => {
+            let now_pending = observer_review_pending(root, local_provider_capabilities(&snapshot));
+            changed |= view.replace_snapshot(snapshot);
+            now_pending
+        }
         Err(error) => {
             view.set_message(action_message(&error));
             changed = true;
+            observer_review_pending(root, local_provider_capabilities(&view.snapshot))
         }
-    }
+    };
     changed |= refresh_attachment_status(presentation, view);
-    let now_pending = observer_review_pending(root);
     if *observer_needs_review && !now_pending {
         view.set_message("observer ready; native Workstreams can now start");
         changed = true;
@@ -4833,10 +4854,33 @@ fn refresh_navigator(
     changed
 }
 
-fn observer_review_pending(root: &StateRoot) -> bool {
-    HostRegistry::open(root)
+fn local_provider_capabilities(snapshot: &LocalNavigatorSnapshot) -> &[ProviderCapability] {
+    snapshot
+        .hosts
+        .iter()
+        .find(|host| host.alias == "local")
+        .map_or(&[], |host| host.provider_capabilities.as_slice())
+}
+
+fn observer_review_pending(root: &StateRoot, capabilities: &[ProviderCapability]) -> bool {
+    let Ok(registry) = HostRegistry::open(root) else {
+        return false;
+    };
+    let opencode_eligible = capabilities
+        .iter()
+        .find(|capability| capability.kind == ProviderKind::OpenCode)
+        .is_some_and(|capability| capability.is_new_eligible());
+    let codex_eligible = capabilities
+        .iter()
+        .find(|capability| capability.kind == ProviderKind::Codex)
+        .is_some_and(|capability| capability.is_new_eligible());
+    if opencode_eligible && !codex_eligible {
+        return false;
+    }
+    registry
+        .codex_integration()
         .ok()
-        .and_then(|registry| registry.codex_integration().ok().flatten())
+        .flatten()
         .is_none_or(|integration| integration.lifecycle != IntegrationLifecycle::Ready)
 }
 
@@ -4964,6 +5008,10 @@ fn rename_selected(view: &mut NavigatorView) {
         view.set_message("no active Workstream is selected");
         return;
     };
+    if selected.provider == ProviderKind::OpenCode {
+        view.set_message("OpenCode provider rename is unavailable");
+        return;
+    }
     if selected.host.is_remote() && !selected.host.is_reachable() {
         view.set_message("remote host is unavailable; cached state is not actionable");
         return;
@@ -5141,6 +5189,10 @@ fn create_workstream_selected(
         return;
     };
     if action == CreationAction::Fork {
+        if source.provider == ProviderKind::OpenCode {
+            view.set_message("OpenCode provider Fork is unavailable");
+            return;
+        }
         create_workstream_from_source(
             root,
             presentation,

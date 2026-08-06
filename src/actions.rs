@@ -41,6 +41,55 @@ pub enum StartOutcome {
     AlreadyLive,
 }
 
+#[derive(Clone, Copy)]
+struct IndependentStartSpec<'a> {
+    source_workstream_id: WorkstreamId,
+    expected_revision: Option<Revision>,
+    request_key: &'a str,
+    provider: ProviderKind,
+}
+
+fn start_independent_workstream_with<R, S>(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    spec: IndependentStartSpec<'_>,
+    readiness: R,
+    starter: S,
+) -> Result<WorkstreamId, ActionError>
+where
+    R: FnOnce(&HostRegistry, ProviderKind) -> Result<(), ActionError>,
+    S: FnOnce(
+        &crate::state::StateRoot,
+        &mut HostRegistry,
+        WorkstreamId,
+        Option<Revision>,
+        ProviderKind,
+    ) -> Result<StartOutcome, ActionError>,
+{
+    let source = workstream_overview(registry, spec.source_workstream_id)?;
+    if spec
+        .expected_revision
+        .is_some_and(|expected| expected != source.revision)
+    {
+        return Err(ActionError::WorkstreamRevisionConflict);
+    }
+    readiness(registry, spec.provider)?;
+    let created = registry.create_independent_workstream(
+        spec.request_key,
+        spec.source_workstream_id,
+        source.revision,
+        spec.provider,
+    )?;
+    let _ = starter(
+        root,
+        registry,
+        created.workstream_id,
+        Some(created.revision),
+        spec.provider,
+    )?;
+    Ok(created.workstream_id)
+}
+
 /// Creates an independent Workstream at a registered project's root, then
 /// starts its first native Codex Runtime. The retained source may be archived:
 /// archive changes navigator visibility only and does not revoke its project.
@@ -61,25 +110,23 @@ pub fn start_independent_workstream(
     request_key: &str,
     provider: ProviderKind,
 ) -> Result<WorkstreamId, ActionError> {
-    let source = workstream_overview(registry, source_workstream_id)?;
-    if expected_revision.is_some_and(|expected| expected != source.revision) {
-        return Err(ActionError::WorkstreamRevisionConflict);
-    }
-    crate::provider::require_new_eligible(registry, provider)
-        .map_err(ActionError::ProviderReadiness)?;
-    let created = registry.create_independent_workstream(
-        request_key,
-        source_workstream_id,
-        source.revision,
-        provider,
-    )?;
-    let _ = start(
+    start_independent_workstream_with(
         root,
         registry,
-        created.workstream_id,
-        Some(created.revision),
-    )?;
-    Ok(created.workstream_id)
+        IndependentStartSpec {
+            source_workstream_id,
+            expected_revision,
+            request_key,
+            provider,
+        },
+        |registry, provider| {
+            crate::provider::require_new_eligible(registry, provider)
+                .map_err(ActionError::ProviderReadiness)
+        },
+        |root, registry, workstream_id, expected_revision, _provider| {
+            start(root, registry, workstream_id, expected_revision)
+        },
+    )
 }
 
 /// Forks an active Codex Workstream at its last completed turn without
@@ -1044,6 +1091,7 @@ pub enum ActionError {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::Cell,
         fmt::Write as _,
         fs,
         path::{Path, PathBuf},
@@ -1364,5 +1412,88 @@ mod tests {
         assert_eq!(destination_root, repository);
         assert!(repository.join("source-only.txt").is_file());
         assert_eq!(created.origin, crate::domain::WorkstreamOrigin::Independent);
+    }
+
+    #[test]
+    fn independent_creation_survives_one_provider_start_failure_without_fallback() {
+        let (temporary, mut registry, source_workstream_id) = registry();
+        let root = crate::state::StateRoot::create(temporary.path()).unwrap();
+        let readiness_calls = Cell::new(0);
+        let starter_calls = Cell::new(0);
+        let starter_provider = Cell::new(None);
+        let selected_provider = ProviderKind::Codex;
+
+        let result = start_independent_workstream_with(
+            &root,
+            &mut registry,
+            IndependentStartSpec {
+                source_workstream_id,
+                expected_revision: Some(Revision::INITIAL),
+                request_key: "independent-start-failure",
+                provider: selected_provider,
+            },
+            |registry, provider| {
+                readiness_calls.set(readiness_calls.get() + 1);
+                assert_eq!(provider, selected_provider);
+                assert_eq!(
+                    registry
+                        .workstream_overviews()
+                        .unwrap()
+                        .iter()
+                        .filter(|overview| overview.provider == selected_provider)
+                        .count(),
+                    1
+                );
+                Ok(())
+            },
+            |_root, registry, workstream_id, expected_revision, provider| {
+                starter_calls.set(starter_calls.get() + 1);
+                starter_provider.set(Some(provider));
+                let created = registry
+                    .workstream_overviews()
+                    .unwrap()
+                    .into_iter()
+                    .find(|overview| overview.workstream_id == workstream_id)
+                    .unwrap();
+                assert_eq!(created.provider, selected_provider);
+                assert_eq!(expected_revision, Some(created.revision));
+                let reserved = registry
+                    .reserve_runtime_with_provider(workstream_id, provider)
+                    .unwrap();
+                registry
+                    .mark_runtime_recovery_required(reserved.runtime_id, reserved.revision)
+                    .unwrap();
+                Err(ActionError::Runtime(
+                    crate::runtime::RuntimeError::TmuxRejected(
+                        "fixture provider launch failed".to_owned(),
+                    ),
+                ))
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(ActionError::Runtime(
+                crate::runtime::RuntimeError::TmuxRejected(ref diagnostic)
+            )) if diagnostic == "fixture provider launch failed"
+        ));
+        assert_eq!(readiness_calls.get(), 1);
+        assert_eq!(starter_calls.get(), 1);
+        assert_eq!(starter_provider.get(), Some(selected_provider));
+
+        let independent = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id != source_workstream_id)
+            .expect("durable independent Workstream remains visible");
+        assert_eq!(independent.provider, selected_provider);
+        assert_eq!(independent.archived_at_millis, None);
+        assert_eq!(independent.lifecycle, WorkstreamLifecycle::RecoveryRequired);
+        let runtime = independent
+            .runtime
+            .expect("failed launch retains its Runtime record");
+        assert_eq!(runtime.provider, selected_provider);
+        assert_eq!(runtime.status, crate::domain::RuntimeStatus::Unknown);
     }
 }

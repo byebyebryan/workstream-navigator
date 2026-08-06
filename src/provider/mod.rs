@@ -517,6 +517,68 @@ mod tests {
     }
 
     #[test]
+    fn capability_probe_drift_does_not_reregister_the_host() {
+        let (_temporary, mut registry) = registry();
+        let ready = crate::provider::codex::profile::ProfileOwnership {
+            canonical_path: PathBuf::from("/tmp/wsnav-observer.json"),
+            owner_id: "owner".to_owned(),
+            profile_schema_version: 2,
+            hook_executable: PathBuf::from("/tmp/wsnav"),
+            content_hash: "hash".to_owned(),
+        };
+        registry
+            .record_codex_integration(ready, IntegrationLifecycle::Ready)
+            .unwrap();
+        let identity_before = registry.identity().unwrap();
+
+        let available =
+            discover_capabilities_with(&registry, |program| matches!(program, "codex" | "tmux"))
+                .unwrap();
+        assert_eq!(
+            available
+                .iter()
+                .find(|capability| capability.kind == ProviderKind::Codex)
+                .map(|capability| capability.status),
+            Some(ProviderCapabilityStatus::Available)
+        );
+        assert!(
+            require_new_eligible_with(&registry, ProviderKind::Codex, |program| {
+                matches!(program, "codex" | "tmux")
+            })
+            .is_ok()
+        );
+
+        // The same persisted registration is observed after the executable
+        // probe changes. A capability refresh is evidence only: it cannot
+        // mutate or replace host registration identity.
+        let unavailable =
+            discover_capabilities_with(&registry, |program| program == "tmux").unwrap();
+        assert_eq!(
+            unavailable
+                .iter()
+                .find(|capability| capability.kind == ProviderKind::Codex)
+                .map(|capability| capability.reason),
+            Some(ProviderCapabilityReason::NotInstalled)
+        );
+        assert_eq!(
+            require_new_eligible_with(&registry, ProviderKind::Codex, |program| program == "tmux"),
+            Err(ProviderReadinessError {
+                kind: ProviderKind::Codex,
+                status: ProviderCapabilityStatus::Unavailable,
+                reason: ProviderCapabilityReason::NotInstalled,
+            })
+        );
+        assert_eq!(registry.identity().unwrap(), identity_before);
+        assert_eq!(
+            registry
+                .codex_integration()
+                .unwrap()
+                .map(|integration| integration.lifecycle),
+            Some(IntegrationLifecycle::Ready)
+        );
+    }
+
+    #[test]
     fn opencode_is_always_adapter_unavailable_without_a_probe() {
         let (_temporary, registry) = registry();
         let capabilities = discover_capabilities_with(&registry, |_| true).unwrap();

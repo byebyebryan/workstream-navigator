@@ -9,8 +9,12 @@ wsnav_bin=""
 state_root=""
 source_workstream_id=""
 destination_workstream_id=""
+attach_socket=""
 
 cleanup() {
+    if [[ -n "$attach_socket" ]]; then
+        env -u TMUX tmux -S "$attach_socket" kill-server >/dev/null 2>&1 || true
+    fi
     if [[ -n "$wsnav_bin" && -n "$state_root" ]]; then
         [[ -z "$destination_workstream_id" ]] || "$wsnav_bin" --state-root "$state_root" park "$destination_workstream_id" >/dev/null 2>&1 || true
         [[ -z "$source_workstream_id" ]] || "$wsnav_bin" --state-root "$state_root" park "$source_workstream_id" >/dev/null 2>&1 || true
@@ -73,6 +77,7 @@ if [[ "$session_id" == "source-session" ]]; then
     # use only the preceding settled-turn boundary.
     printf '{"hook_event_name":"UserPromptSubmit","cwd":"%s","session_id":"source-session","turn_id":"running-turn"}' "$PWD" | wsnav --state-root "$FAKE_STATE_ROOT" _hook
 fi
+printf 'WSNAV_FAKE_PROVIDER_NATIVE_SURFACE\n'
 sleep 60
 EOF
 chmod 700 "$fake_bin/codex"
@@ -106,6 +111,46 @@ source_status="$("$wsnav_bin" --state-root "$state_root" status "$source_workstr
 grep -F 'lifecycle: Working' <<<"$source_status" >/dev/null
 grep -F 'private runtime: live' <<<"$source_status" >/dev/null
 
+runtime_socket="$(find "$state_root/run" -type s -name tmux.sock -print -quit)"
+test -n "$runtime_socket"
+runtime_session="$(env -u TMUX tmux -S "$runtime_socket" list-sessions -F '#{session_name}' | head -n 1)"
+test -n "$runtime_session"
+attach_socket="$task_root/attach.sock"
+attach_session="wsnav-attach-driver"
+attach_done="$task_root/attach.done"
+printf -v attach_command '%q --state-root %q attach %q && touch %q' \
+    "$wsnav_bin" "$state_root" "$source_workstream_id" "$attach_done"
+env -u TMUX tmux -u -f /dev/null -S "$attach_socket" \
+    new-session -d -s "$attach_session" -c "$repository" "$attach_command"
+
+surface_seen=0
+attached_client=""
+for _ in {1..100}; do
+    attached_clients="$(env -u TMUX tmux -S "$runtime_socket" list-clients -F '#{client_session}' 2>/dev/null || true)"
+    if grep -Fx "$runtime_session" <<<"$attached_clients" >/dev/null 2>&1; then
+        attached_client="$(env -u TMUX tmux -S "$runtime_socket" list-clients -F '#{client_tty}' | head -n 1)"
+        test -n "$attached_client"
+        native_surface="$(env -u TMUX tmux -S "$runtime_socket" capture-pane -p -J -t "$runtime_session:0.0" 2>/dev/null || true)"
+        driver_surface="$(env -u TMUX tmux -S "$attach_socket" capture-pane -p -J -t "$attach_session:0.0" 2>/dev/null || true)"
+        if grep -F 'WSNAV_FAKE_PROVIDER_NATIVE_SURFACE' <<<"$native_surface" >/dev/null \
+            && grep -F 'WSNAV_FAKE_PROVIDER_NATIVE_SURFACE' <<<"$driver_surface" >/dev/null; then
+            surface_seen=1
+            break
+        fi
+    fi
+    sleep 0.1
+done
+test "$surface_seen" -eq 1
+
+env -u TMUX tmux -S "$runtime_socket" detach-client -t "$attached_client"
+for _ in {1..100}; do
+    [[ -f "$attach_done" ]] && break
+    sleep 0.1
+done
+test -f "$attach_done"
+attached_status="$("$wsnav_bin" --state-root "$state_root" status "$source_workstream_id")"
+grep -F 'private runtime: live' <<<"$attached_status" >/dev/null
+
 forked="$("$wsnav_bin" --state-root "$state_root" fork-workstream "$source_workstream_id")"
 destination_workstream_id="${forked##* }"
 sleep 1
@@ -125,6 +170,8 @@ test ! -e "$state_root/worktrees"
 "$wsnav_bin" --state-root "$state_root" park "$destination_workstream_id"
 "$wsnav_bin" --state-root "$state_root" park "$source_workstream_id"
 "$wsnav_bin" --state-root "$state_root" remove-observer
+env -u TMUX tmux -S "$attach_socket" kill-server >/dev/null 2>&1 || true
+attach_socket=""
 destination_workstream_id=""
 source_workstream_id=""
 ordinary_tmux_after="$(env -u TMUX tmux list-sessions -F '#{session_name}:#{session_created}:#{session_windows}' -O name 2>/dev/null || true)"

@@ -28,7 +28,7 @@ use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 ///
 /// This is safe release-probe metadata; it is not a host-state observation.
 pub const HOST_SCHEMA_VERSION: i64 = 10;
-const CLIENT_SCHEMA_VERSION: i64 = 4;
+const CLIENT_SCHEMA_VERSION: i64 = 5;
 const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
 const DEFAULT_PROJECT_BROWSER_ROOT: &str = "code";
@@ -4054,7 +4054,7 @@ fn migrate_client_schema(connection: &mut Connection) -> Result<(), StateError> 
                  ALTER TABLE hosts ADD COLUMN transport TEXT NOT NULL DEFAULT 'local';
                  ALTER TABLE hosts ADD COLUMN ssh_destination TEXT;
                  ALTER TABLE hosts ADD COLUMN capabilities_json TEXT NOT NULL
-                    DEFAULT '{\"codex\":false,\"git\":false,\"tmux\":false}';
+                    DEFAULT '{\"git\":false,\"tmux\":false}';
                  CREATE TABLE projects (
                     project_id TEXT PRIMARY KEY,
                     display_name TEXT NOT NULL,
@@ -4097,9 +4097,11 @@ fn migrate_client_schema(connection: &mut Connection) -> Result<(), StateError> 
                  );",
             )
             .map_err(StateError::Sqlite)?,
+        4 => {}
         CLIENT_SCHEMA_VERSION => return Ok(()),
         _ => return Err(StateError::UnsupportedSchemaVersion(current)),
     }
+    migrate_client_capabilities_4_to_5(&transaction)?;
     transaction
         .execute(
             &format!("PRAGMA user_version = {CLIENT_SCHEMA_VERSION}"),
@@ -4107,6 +4109,49 @@ fn migrate_client_schema(connection: &mut Connection) -> Result<(), StateError> 
         )
         .map_err(StateError::Sqlite)?;
     transaction.commit().map_err(StateError::Sqlite)
+}
+
+fn migrate_client_capabilities_4_to_5(
+    transaction: &rusqlite::Transaction<'_>,
+) -> Result<(), StateError> {
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct LegacyCapabilities {
+        #[serde(rename = "codex")]
+        _codex: bool,
+        git: bool,
+        tmux: bool,
+    }
+
+    let legacy = {
+        let mut statement = transaction
+            .prepare("SELECT host_alias, capabilities_json FROM hosts")
+            .map_err(StateError::Sqlite)?;
+        statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(StateError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::Sqlite)?
+    };
+    for (alias, capabilities_json) in legacy {
+        let capabilities = match serde_json::from_str::<LegacyCapabilities>(&capabilities_json) {
+            Ok(legacy) => Capabilities {
+                git: legacy.git,
+                tmux: legacy.tmux,
+            },
+            Err(_) => serde_json::from_str::<Capabilities>(&capabilities_json)
+                .map_err(|_| StateError::InvalidPersistedCapabilities)?,
+        };
+        transaction
+            .execute(
+                "UPDATE hosts SET capabilities_json = ?1 WHERE host_alias = ?2",
+                params![serialize_capabilities(&capabilities)?, alias],
+            )
+            .map_err(StateError::Sqlite)?;
+    }
+    Ok(())
 }
 
 fn ensure_local_client_host(
@@ -6307,6 +6352,87 @@ mod tests {
     }
 
     #[test]
+    fn client_schema_four_migration_strips_codex_without_losing_catalog_state() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let connection = Connection::open(root.client_database_path()).unwrap();
+        connection.execute_batch(CLIENT_SCHEMA_SQL).unwrap();
+        let host_id = HostId::new();
+        let location_id = LocationId::new();
+        let project_id = ProjectId::new();
+        connection
+            .execute(
+                "INSERT INTO hosts VALUES (
+                    'snap', ?1, 'generation', '/bin/wsnav', 'ssh', 'snap',
+                    '{\"codex\":true,\"git\":true,\"tmux\":false}', 7
+                 )",
+                [host_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects VALUES (?1, 'project', NULL, 3)",
+                [project_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO project_locations VALUES (?1, ?2, ?3)",
+                params![
+                    project_id.to_string(),
+                    host_id.to_string(),
+                    location_id.to_string(),
+                ],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "INSERT INTO ignored_project_locations VALUES (?1, ?2)",
+                params![host_id.to_string(), location_id.to_string()],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA user_version = 4;")
+            .unwrap();
+        drop(connection);
+
+        let catalog = ClientCatalog::open(&root).unwrap();
+        assert_eq!(catalog.schema_version().unwrap(), CLIENT_SCHEMA_VERSION);
+        let host = catalog.host("snap").unwrap().unwrap();
+        assert_eq!(host.revision, Revision::try_from(7).unwrap());
+        assert_eq!(
+            host.capabilities,
+            Capabilities {
+                git: true,
+                tmux: false
+            }
+        );
+        let persisted: String = catalog
+            .connection
+            .query_row(
+                "SELECT capabilities_json FROM hosts WHERE host_alias = 'snap'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(persisted, r#"{"git":true,"tmux":false}"#);
+        assert!(!persisted.contains("codex"));
+        assert_eq!(
+            catalog
+                .local_project_location(host_id, location_id)
+                .unwrap()
+                .unwrap()
+                .project_id,
+            project_id
+        );
+        assert!(
+            catalog
+                .project_location_is_ignored(host_id, location_id)
+                .unwrap()
+        );
+    }
+
+    #[test]
     fn registered_ssh_host_refuses_identity_generation_and_capability_drift() {
         let temporary = tempfile::tempdir().unwrap();
         let root = StateRoot::create(temporary.path()).unwrap();
@@ -6316,7 +6442,6 @@ mod tests {
             registry_generation: "generation-a".to_owned(),
         };
         let capabilities = Capabilities {
-            codex: true,
             git: true,
             tmux: true,
         };
@@ -6334,6 +6459,15 @@ mod tests {
             registered.transport,
             ClientHostTransport::Ssh { ref destination } if destination == "snap"
         ));
+        let persisted: String = catalog
+            .connection
+            .query_row(
+                "SELECT capabilities_json FROM hosts WHERE host_alias = 'snap'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!persisted.contains("codex"));
         assert_eq!(catalog.ssh_hosts().unwrap(), vec![registered.clone()]);
         assert_eq!(
             catalog

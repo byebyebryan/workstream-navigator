@@ -17,7 +17,8 @@ use crate::{
     process::output_bounded,
     protocol::{
         CURRENT_PROTOCOL_VERSION, Capabilities, HelloResponse, HostAction, HostRequest,
-        HostResponse, MAX_FRAME_BYTES, ObserverStatus, OperationSnapshot, OperationsResponse,
+        HostResponse, KNOWN_PROVIDER_KINDS, MAX_FRAME_BYTES, ObserverStatus, OperationSnapshot,
+        OperationsResponse, ProviderCapability, ProviderCapabilityReason, ProviderCapabilityStatus,
         RequestEnvelope, ResponseEnvelope, SnapshotResponse, SnapshotWorkstream,
     },
     provider::codex::names::{NameContext, resolve_name},
@@ -167,12 +168,14 @@ fn apply(root: &StateRoot, registry: &mut HostRegistry, action: HostAction) -> R
             Ok(()) => applied(1),
             Err(_) => rejected("observer removal is unavailable"),
         },
-        HostAction::RegisterCheckout { checkout_path } => {
-            apply_register_checkout(registry, Path::new(&checkout_path))
-        }
-        HostAction::RegisterProjectDirectory { relative_path } => {
-            apply_register_project_directory(registry, &relative_path)
-        }
+        HostAction::RegisterCheckout {
+            checkout_path,
+            provider,
+        } => apply_register_checkout(registry, Path::new(&checkout_path), provider),
+        HostAction::RegisterProjectDirectory {
+            relative_path,
+            provider,
+        } => apply_register_project_directory(registry, &relative_path, provider),
         HostAction::SetProjectBrowserRoot { root_path } => {
             match registry.set_project_browser_root(&root_path) {
                 Ok(()) => applied(1),
@@ -230,12 +233,14 @@ fn apply(root: &StateRoot, registry: &mut HostRegistry, action: HostAction) -> R
             source_workstream_id,
             expected_revision,
             request_key,
+            provider,
         } => apply_new_workstream(
             root,
             registry,
             source_workstream_id,
             expected_revision,
             &request_key,
+            provider,
         ),
         HostAction::ForkWorkstream {
             source_workstream_id,
@@ -258,7 +263,14 @@ fn applied(revision: i64) -> ResponseEnvelope {
     }
 }
 
-fn apply_register_checkout(registry: &mut HostRegistry, checkout_path: &Path) -> ResponseEnvelope {
+fn apply_register_checkout(
+    registry: &mut HostRegistry,
+    checkout_path: &Path,
+    provider: crate::domain::ProviderKind,
+) -> ResponseEnvelope {
+    if provider != crate::domain::ProviderKind::Codex {
+        return rejected("provider is unavailable");
+    }
     let Ok(repository) = crate::repository::inspect(checkout_path) else {
         return rejected("project is unavailable");
     };
@@ -267,12 +279,13 @@ fn apply_register_checkout(registry: &mut HostRegistry, checkout_path: &Path) ->
         &repository.display_name,
         repository.remote_identity_fingerprint.as_deref(),
         repository.remote_identity_display.as_deref(),
-        crate::domain::ProviderKind::Codex,
+        provider,
     ) {
         Ok(registered) => ResponseEnvelope {
             version: CURRENT_PROTOCOL_VERSION,
             response: HostResponse::WorkstreamCreated {
                 workstream_id: registered.workstream_id,
+                provider,
                 revision: Revision::INITIAL.value(),
             },
         },
@@ -283,11 +296,12 @@ fn apply_register_checkout(registry: &mut HostRegistry, checkout_path: &Path) ->
 fn apply_register_project_directory(
     registry: &mut HostRegistry,
     relative_path: &str,
+    provider: crate::domain::ProviderKind,
 ) -> ResponseEnvelope {
     let Ok(directory) = registry.project_browser_directory(relative_path) else {
         return rejected("project browser selection is unavailable");
     };
-    apply_register_checkout(registry, directory.as_path())
+    apply_register_checkout(registry, directory.as_path(), provider)
 }
 
 fn apply_new_workstream(
@@ -296,6 +310,7 @@ fn apply_new_workstream(
     source_workstream_id: WorkstreamId,
     expected_revision: i64,
     request_key: &str,
+    provider: crate::domain::ProviderKind,
 ) -> ResponseEnvelope {
     apply_created_workstream(
         &crate::actions::start_independent_workstream(
@@ -304,6 +319,7 @@ fn apply_new_workstream(
             source_workstream_id,
             Revision::try_from(expected_revision).ok(),
             request_key,
+            provider,
         ),
         registry,
     )
@@ -344,15 +360,24 @@ fn apply_created_workstream(
     registry: &HostRegistry,
 ) -> ResponseEnvelope {
     match outcome {
-        Ok(workstream_id) => match workstream_revision(registry, *workstream_id) {
-            Ok(revision) => ResponseEnvelope {
+        Ok(workstream_id) => match registry
+            .workstream_overviews()
+            .ok()
+            .and_then(|workstreams| {
+                workstreams
+                    .into_iter()
+                    .find(|overview| overview.workstream_id == *workstream_id)
+                    .map(|overview| (overview.provider, overview.revision))
+            }) {
+            Some((provider, revision)) => ResponseEnvelope {
                 version: CURRENT_PROTOCOL_VERSION,
                 response: HostResponse::WorkstreamCreated {
                     workstream_id: *workstream_id,
+                    provider,
                     revision: revision.value(),
                 },
             },
-            Err(_) => rejected("workstream outcome needs recovery"),
+            None => rejected("workstream outcome needs recovery"),
         },
         Err(crate::actions::ActionError::WorkstreamRevisionConflict) => {
             rejected("revision conflict; refresh this host")
@@ -561,8 +586,96 @@ fn snapshot(
         workstreams,
         unresolved_operation_count,
         observer_status: observer_status(registry)?,
+        provider_capabilities: provider_capabilities(registry)?,
         next_cursor: page.next_cursor,
     })
+}
+
+fn provider_capabilities(registry: &HostRegistry) -> Result<Vec<ProviderCapability>, StateError> {
+    provider_capabilities_with(registry, command_available)
+}
+
+fn provider_capabilities_with(
+    registry: &HostRegistry,
+    command_available: impl Fn(&str) -> bool,
+) -> Result<Vec<ProviderCapability>, StateError> {
+    let codex_installed = command_available("codex");
+    let runtime_ready = command_available("tmux");
+    let observer_ready = matches!(
+        registry
+            .codex_integration()?
+            .map(|integration| integration.lifecycle),
+        Some(IntegrationLifecycle::Ready)
+    );
+    let codex = if !codex_installed {
+        ProviderCapability {
+            kind: crate::domain::ProviderKind::Codex,
+            status: ProviderCapabilityStatus::Unavailable,
+            reason: ProviderCapabilityReason::NotInstalled,
+            fresh_launch: false,
+            exact_resume: false,
+            observe: false,
+            metadata_read: false,
+            rename: false,
+            fork: false,
+        }
+    } else if !runtime_ready {
+        ProviderCapability {
+            kind: crate::domain::ProviderKind::Codex,
+            status: ProviderCapabilityStatus::Unavailable,
+            reason: ProviderCapabilityReason::RuntimePrerequisiteMissing,
+            fresh_launch: false,
+            exact_resume: false,
+            observe: false,
+            metadata_read: false,
+            rename: false,
+            fork: false,
+        }
+    } else if !observer_ready {
+        ProviderCapability {
+            kind: crate::domain::ProviderKind::Codex,
+            status: ProviderCapabilityStatus::Unavailable,
+            reason: ProviderCapabilityReason::ObserverNotReady,
+            fresh_launch: false,
+            exact_resume: false,
+            observe: false,
+            metadata_read: false,
+            rename: false,
+            fork: false,
+        }
+    } else {
+        ProviderCapability {
+            kind: crate::domain::ProviderKind::Codex,
+            status: ProviderCapabilityStatus::Available,
+            reason: ProviderCapabilityReason::None,
+            fresh_launch: true,
+            exact_resume: true,
+            observe: true,
+            metadata_read: true,
+            rename: true,
+            fork: true,
+        }
+    };
+    let opencode = ProviderCapability {
+        kind: crate::domain::ProviderKind::OpenCode,
+        status: ProviderCapabilityStatus::Unavailable,
+        reason: ProviderCapabilityReason::AdapterUnavailable,
+        fresh_launch: false,
+        exact_resume: false,
+        observe: false,
+        metadata_read: false,
+        rename: false,
+        fork: false,
+    };
+    let capabilities = vec![codex, opencode];
+    debug_assert_eq!(
+        capabilities
+            .iter()
+            .map(|capability| capability.kind)
+            .collect::<Vec<_>>(),
+        KNOWN_PROVIDER_KINDS,
+    );
+    Ok(capabilities)
 }
 
 fn observer_status(registry: &HostRegistry) -> Result<ObserverStatus, StateError> {
@@ -605,6 +718,7 @@ fn snapshot_workstream(overview: &WorkstreamOverview) -> SnapshotWorkstream {
     SnapshotWorkstream {
         workstream_id: overview.workstream_id,
         location_id: overview.location_id,
+        provider: overview.provider,
         project_display_name: bounded_display_name(&overview.project_display_name),
         repository_fingerprint: overview.remote_identity_fingerprint.clone(),
         remote_identity_display: overview
@@ -688,7 +802,6 @@ fn bounded_display_name(value: &str) -> String {
 
 fn local_capabilities() -> Capabilities {
     Capabilities {
-        codex: command_available("codex"),
         git: command_available("git"),
         tmux: command_available("tmux"),
     }
@@ -772,8 +885,8 @@ pub enum RemoteError {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Cursor;
     use std::path::PathBuf;
+    use std::{io::Cursor, process::Command};
 
     use super::*;
 
@@ -836,6 +949,150 @@ mod tests {
                 ..
             }) if workstreams.is_empty()
         ));
+    }
+
+    #[test]
+    fn codex_capability_is_ready_only_with_install_runtime_and_observer_evidence() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        registry
+            .record_codex_integration(
+                crate::provider::codex::profile::ProfileOwnership {
+                    canonical_path: PathBuf::from("/tmp/wsnav-observer.json"),
+                    owner_id: "owner".to_owned(),
+                    profile_schema_version: 2,
+                    hook_executable: PathBuf::from("/tmp/wsnav"),
+                    content_hash: "hash".to_owned(),
+                },
+                IntegrationLifecycle::Ready,
+            )
+            .unwrap();
+
+        let capabilities =
+            provider_capabilities_with(&registry, |program| matches!(program, "codex" | "tmux"))
+                .unwrap();
+        let codex = capabilities
+            .iter()
+            .find(|capability| capability.kind == crate::domain::ProviderKind::Codex)
+            .unwrap();
+        assert_eq!(codex.status, ProviderCapabilityStatus::Available);
+        assert_eq!(codex.reason, ProviderCapabilityReason::None);
+        assert!(codex.is_new_eligible());
+        assert_eq!(
+            capabilities[1],
+            ProviderCapability {
+                kind: crate::domain::ProviderKind::OpenCode,
+                status: ProviderCapabilityStatus::Unavailable,
+                reason: ProviderCapabilityReason::AdapterUnavailable,
+                fresh_launch: false,
+                exact_resume: false,
+                observe: false,
+                metadata_read: false,
+                rename: false,
+                fork: false,
+            }
+        );
+    }
+
+    #[test]
+    fn codex_capability_reports_conservative_unready_reasons() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let registry = HostRegistry::open(&root).unwrap();
+
+        let missing = provider_capabilities_with(&registry, |program| program == "tmux")
+            .unwrap()
+            .remove(0);
+        assert_eq!(missing.reason, ProviderCapabilityReason::NotInstalled);
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let registry = HostRegistry::open(&root).unwrap();
+        let no_tmux = provider_capabilities_with(&registry, |program| program == "codex")
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            no_tmux.reason,
+            ProviderCapabilityReason::RuntimePrerequisiteMissing
+        );
+
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let registry = HostRegistry::open(&root).unwrap();
+        let no_observer = provider_capabilities_with(&registry, |_| true)
+            .unwrap()
+            .remove(0);
+        assert_eq!(
+            no_observer.reason,
+            ProviderCapabilityReason::ObserverNotReady
+        );
+    }
+
+    #[test]
+    fn opencode_registration_rejects_before_recording_a_workstream() {
+        let temporary = tempfile::tempdir().unwrap();
+        let checkout = temporary.path().join("checkout");
+        assert!(
+            Command::new("git")
+                .args(["init", "--quiet"])
+                .arg(&checkout)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let before = registry.workstream_overviews().unwrap().len();
+
+        let response = apply_register_checkout(
+            &mut registry,
+            &checkout,
+            crate::domain::ProviderKind::OpenCode,
+        );
+
+        assert!(matches!(
+            response.response,
+            HostResponse::Rejected { ref diagnostic }
+                if diagnostic == "provider is unavailable"
+        ));
+        assert_eq!(registry.workstream_overviews().unwrap().len(), before);
+    }
+
+    #[test]
+    fn opencode_new_rejects_before_recording_or_launching_a_destination() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let source = registry
+            .register_project_root(&project, crate::domain::ProviderKind::Codex)
+            .unwrap();
+        let before = registry.workstream_overviews().unwrap().len();
+
+        let response = apply_new_workstream(
+            &root,
+            &mut registry,
+            source.workstream_id,
+            Revision::INITIAL.value(),
+            "opencode-new",
+            crate::domain::ProviderKind::OpenCode,
+        );
+
+        assert!(matches!(
+            response.response,
+            HostResponse::Rejected { ref diagnostic }
+                if diagnostic == "workstream creation is unavailable"
+        ));
+        assert_eq!(registry.workstream_overviews().unwrap().len(), before);
+        assert!(
+            registry
+                .runtime_for_workstream(source.workstream_id)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

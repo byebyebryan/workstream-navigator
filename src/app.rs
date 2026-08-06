@@ -25,7 +25,7 @@ use crate::{
     },
     state::{
         ClientCatalog, ClientHostTransport, HostIdentity, HostRegistry, IntegrationLifecycle,
-        StateRoot,
+        StateError, StateRoot,
     },
     transport::{
         HostClient, RemoteExecutable, STANDARD_REMOTE_EXECUTABLE, SshDestination, SshEndpoint,
@@ -270,6 +270,7 @@ enum HostCommands {
         alias: String,
         source_workstream_id: String,
         revision: i64,
+        provider: String,
     },
     /// Fork one remote live Workstream at its last completed native turn.
     Fork {
@@ -607,7 +608,16 @@ fn host_command(root: &StateRoot, command: HostCommands) -> Result<(), AppError>
             alias,
             source_workstream_id,
             revision,
-        } => new_remote_workstream(&catalog, &alias, &source_workstream_id, revision),
+            provider,
+        } => new_remote_workstream(
+            &catalog,
+            &alias,
+            &source_workstream_id,
+            revision,
+            provider
+                .parse()
+                .map_err(|error| AppError::State(StateError::Domain(error)))?,
+        ),
         HostCommands::Fork {
             alias,
             source_workstream_id,
@@ -739,6 +749,7 @@ fn register_remote_checkout(
         alias,
         crate::protocol::HostAction::RegisterCheckout {
             checkout_path: checkout.to_owned(),
+            provider: crate::domain::ProviderKind::Codex,
         },
     )?;
     println!("registered workstream {workstream_id}");
@@ -888,6 +899,7 @@ fn new_remote_workstream(
     alias: &str,
     source_workstream_id: &str,
     revision: i64,
+    provider: crate::domain::ProviderKind,
 ) -> Result<(), AppError> {
     let workstream_id = create_remote_workstream(
         catalog,
@@ -896,6 +908,7 @@ fn new_remote_workstream(
             source_workstream_id: parse_workstream(source_workstream_id)?,
             expected_revision: revision,
             request_key: uuid::Uuid::new_v4().to_string(),
+            provider,
         },
     )?;
     println!("started independent workstream {workstream_id}");
@@ -1142,12 +1155,19 @@ fn new_workstream(
     source_workstream_id: WorkstreamId,
 ) -> Result<(), AppError> {
     let request_key = uuid::Uuid::new_v4().to_string();
+    let provider = registry
+        .workstream_overviews()?
+        .into_iter()
+        .find(|overview| overview.workstream_id == source_workstream_id)
+        .ok_or(StateError::UnknownOpenWorkstream(source_workstream_id))?
+        .provider;
     let workstream_id = actions::start_independent_workstream(
         root,
         registry,
         source_workstream_id,
         None,
         &request_key,
+        provider,
     )?;
     println!("started independent workstream {workstream_id}");
     Ok(())

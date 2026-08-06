@@ -21,7 +21,7 @@ use ratatui::{
 };
 use uuid::Uuid;
 use wsnav::{
-    domain::{LocationId, ProjectId, Revision, WorkstreamId},
+    domain::{LocationId, ProjectId, ProviderKind, Revision, WorkstreamId},
     navigator::{
         LocalNavigatorSnapshot, NavigatorHost, NavigatorHostOverview, NavigatorRuntimeStatus,
         NavigatorView, NavigatorWorkstream, RemoteHostReachability,
@@ -283,6 +283,7 @@ fn workstream(capture: WorkstreamCapture<'_>) -> NavigatorWorkstream {
         project_id: capture.project_id,
         location_id: LocationId::from(Uuid::from_u128(capture.value + 1_000)),
         workstream_id: WorkstreamId::from(Uuid::from_u128(capture.value + 2_000)),
+        provider: ProviderKind::Codex,
         project_label: capture.project_label.to_owned(),
         remote_identity_display: None,
         location_label: capture.project_label.to_owned(),

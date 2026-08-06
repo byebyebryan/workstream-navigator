@@ -19,9 +19,9 @@ use thiserror::Error;
 use crate::build_info::BuildInfo;
 use crate::domain::{RuntimeId, WorkstreamId};
 use crate::protocol::{
-    HelloResponse, HostAction, HostRequest, HostResponse, MAX_FRAME_BYTES, MAX_SNAPSHOT_PAGES,
-    ObserverStatus, OperationsResponse, ProjectDirectoriesResponse, RequestEnvelope,
-    ResponseEnvelope, SnapshotResponse,
+    HelloResponse, HostAction, HostRequest, HostResponse, KNOWN_PROVIDER_KINDS, MAX_FRAME_BYTES,
+    MAX_SNAPSHOT_PAGES, ObserverStatus, OperationsResponse, ProjectDirectoriesResponse,
+    RequestEnvelope, ResponseEnvelope, SnapshotResponse,
 };
 
 const MAX_STDERR_BYTES: usize = 4096;
@@ -397,7 +397,11 @@ impl<R: CommandRunner> HostClient<R> {
         endpoint: &SshEndpoint,
         action: HostAction,
     ) -> Result<WorkstreamId, TransportError> {
-        self.create(&ssh_invocation(endpoint, &apply_request(action)?))
+        let expected_provider = creation_provider(&action);
+        self.create(
+            &ssh_invocation(endpoint, &apply_request(action)?),
+            expected_provider,
+        )
     }
 
     /// Local-subprocess parity path for remote Workstream creation.
@@ -410,7 +414,11 @@ impl<R: CommandRunner> HostClient<R> {
         endpoint: &LocalEndpoint,
         action: HostAction,
     ) -> Result<WorkstreamId, TransportError> {
-        self.create(&local_invocation(endpoint, &apply_request(action)?))
+        let expected_provider = creation_provider(&action);
+        self.create(
+            &local_invocation(endpoint, &apply_request(action)?),
+            expected_provider,
+        )
     }
 
     fn hello(&self, invocation: &CommandInvocation) -> Result<HelloResponse, TransportError> {
@@ -448,8 +456,18 @@ impl<R: CommandRunner> HostClient<R> {
         let mut identities = BTreeSet::new();
         let mut unresolved_operation_count = None;
         let mut observer_status = None;
+        let mut provider_capabilities = None;
         for _ in 0..MAX_SNAPSHOT_PAGES {
             let page = fetch(cursor)?;
+            if page.provider_capabilities.len() != KNOWN_PROVIDER_KINDS.len()
+                || page
+                    .provider_capabilities
+                    .iter()
+                    .zip(KNOWN_PROVIDER_KINDS)
+                    .any(|(capability, expected)| capability.kind != expected)
+            {
+                return Err(TransportError::InconsistentSnapshotPage);
+            }
             if let Some(expected) = unresolved_operation_count {
                 if expected != page.unresolved_operation_count {
                     return Err(TransportError::InconsistentSnapshotPage);
@@ -464,6 +482,13 @@ impl<R: CommandRunner> HostClient<R> {
             } else {
                 observer_status = Some(page.observer_status);
             }
+            if let Some(expected) = &provider_capabilities {
+                if expected != &page.provider_capabilities {
+                    return Err(TransportError::InconsistentSnapshotPage);
+                }
+            } else {
+                provider_capabilities = Some(page.provider_capabilities.clone());
+            }
             for workstream in page.workstreams {
                 if !identities.insert(workstream.workstream_id) {
                     return Err(TransportError::InconsistentSnapshotPage);
@@ -475,6 +500,8 @@ impl<R: CommandRunner> HostClient<R> {
                     workstreams,
                     unresolved_operation_count: unresolved_operation_count.unwrap_or(0),
                     observer_status: observer_status.unwrap_or(ObserverStatus::NotInstalled),
+                    provider_capabilities: provider_capabilities
+                        .ok_or(TransportError::InconsistentSnapshotPage)?,
                     next_cursor: None,
                 });
             };
@@ -516,9 +543,22 @@ impl<R: CommandRunner> HostClient<R> {
         }
     }
 
-    fn create(&self, invocation: &CommandInvocation) -> Result<WorkstreamId, TransportError> {
+    fn create(
+        &self,
+        invocation: &CommandInvocation,
+        expected_provider: Option<crate::domain::ProviderKind>,
+    ) -> Result<WorkstreamId, TransportError> {
         match self.request(invocation)? {
-            HostResponse::WorkstreamCreated { workstream_id, .. } => Ok(workstream_id),
+            HostResponse::WorkstreamCreated {
+                workstream_id,
+                provider,
+                ..
+            } => {
+                if expected_provider.is_some_and(|expected| expected != provider) {
+                    return Err(TransportError::ProviderIdentityMismatch);
+                }
+                Ok(workstream_id)
+            }
             HostResponse::Rejected { diagnostic } => Err(TransportError::Rejected(diagnostic)),
             _ => Err(TransportError::UnexpectedResponse),
         }
@@ -531,6 +571,15 @@ impl<R: CommandRunner> HostClient<R> {
         }
         let response = ResponseEnvelope::decode(&result.stdout)?;
         Ok(response.response)
+    }
+}
+
+fn creation_provider(action: &HostAction) -> Option<crate::domain::ProviderKind> {
+    match action {
+        HostAction::RegisterCheckout { provider, .. }
+        | HostAction::RegisterProjectDirectory { provider, .. }
+        | HostAction::NewWorkstream { provider, .. } => Some(*provider),
+        _ => None,
     }
 }
 
@@ -814,6 +863,8 @@ pub enum TransportError {
     UnexpectedResponse,
     #[error("host returned inconsistent snapshot pages")]
     InconsistentSnapshotPage,
+    #[error("host returned a Workstream with a different provider than requested")]
+    ProviderIdentityMismatch,
     #[error("host snapshot exceeded the bounded page count")]
     SnapshotPageLimit,
     #[error("host rejected the request: {0}")]
@@ -965,12 +1016,14 @@ mod tests {
                 workstreams: vec![snapshot_workstream(first_id)],
                 unresolved_operation_count: 1,
                 observer_status: ObserverStatus::NotInstalled,
+                provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 next_cursor: Some(1),
             },
             SnapshotResponse {
                 workstreams: vec![snapshot_workstream(second_id)],
                 unresolved_operation_count: 1,
                 observer_status: ObserverStatus::NotInstalled,
+                provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 next_cursor: None,
             },
         ]);
@@ -1003,13 +1056,50 @@ mod tests {
                 workstreams: vec![snapshot_workstream(workstream_id)],
                 unresolved_operation_count: 0,
                 observer_status: ObserverStatus::NotInstalled,
+                provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 next_cursor: Some(1),
             },
             SnapshotResponse {
                 workstreams: vec![snapshot_workstream(workstream_id)],
                 unresolved_operation_count: 0,
                 observer_status: ObserverStatus::NotInstalled,
+                provider_capabilities: SnapshotResponse::default().provider_capabilities,
                 next_cursor: None,
+            },
+        ]);
+
+        assert!(matches!(
+            HostClient::<RecordingRunner>::snapshot_pages(|_| {
+                pages.pop_front().ok_or(TransportError::UnexpectedResponse)
+            }),
+            Err(TransportError::InconsistentSnapshotPage)
+        ));
+    }
+
+    #[test]
+    fn snapshot_pages_reject_inconsistent_provider_capabilities() {
+        let first_id = WorkstreamId::new();
+        let mut second = SnapshotResponse::default();
+        second
+            .workstreams
+            .push(snapshot_workstream(WorkstreamId::new()));
+        second.provider_capabilities[0].status =
+            crate::protocol::ProviderCapabilityStatus::Available;
+        second.provider_capabilities[0].reason = crate::protocol::ProviderCapabilityReason::None;
+        second.provider_capabilities[0].fresh_launch = true;
+        second.provider_capabilities[0].exact_resume = true;
+        second.provider_capabilities[0].observe = true;
+        let mut pages = std::collections::VecDeque::from([
+            SnapshotResponse {
+                workstreams: vec![snapshot_workstream(first_id)],
+                unresolved_operation_count: 0,
+                observer_status: ObserverStatus::NotInstalled,
+                provider_capabilities: SnapshotResponse::default().provider_capabilities,
+                next_cursor: Some(1),
+            },
+            SnapshotResponse {
+                next_cursor: None,
+                ..second
             },
         ]);
 
@@ -1029,6 +1119,7 @@ mod tests {
                 version: CURRENT_PROTOCOL_VERSION,
                 response: HostResponse::WorkstreamCreated {
                     workstream_id,
+                    provider: crate::domain::ProviderKind::Codex,
                     revision: 1,
                 },
             },
@@ -1047,6 +1138,7 @@ mod tests {
                         source_workstream_id: WorkstreamId::new(),
                         expected_revision: 1,
                         request_key: "request-key".to_owned(),
+                        provider: crate::domain::ProviderKind::Codex,
                     },
                 )
                 .unwrap(),
@@ -1054,10 +1146,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn creation_rejects_a_response_with_a_different_requested_provider() {
+        let runner = RecordingRunner {
+            response: ResponseEnvelope {
+                version: CURRENT_PROTOCOL_VERSION,
+                response: HostResponse::WorkstreamCreated {
+                    workstream_id: WorkstreamId::new(),
+                    provider: crate::domain::ProviderKind::OpenCode,
+                    revision: 1,
+                },
+            },
+            calls: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+        };
+        let endpoint = SshEndpoint::new(
+            SshDestination::parse("snap").unwrap(),
+            RemoteExecutable::parse("/home/bryan/.local/bin/wsnav").unwrap(),
+        );
+
+        assert!(matches!(
+            HostClient::new(runner).create_ssh(
+                &endpoint,
+                HostAction::RegisterCheckout {
+                    checkout_path: "/tmp/project".to_owned(),
+                    provider: crate::domain::ProviderKind::Codex,
+                },
+            ),
+            Err(TransportError::ProviderIdentityMismatch)
+        ));
+    }
+
     fn snapshot_workstream(workstream_id: WorkstreamId) -> crate::protocol::SnapshotWorkstream {
         crate::protocol::SnapshotWorkstream {
             workstream_id,
             location_id: crate::domain::LocationId::new(),
+            provider: crate::domain::ProviderKind::Codex,
             project_display_name: "project".to_owned(),
             repository_fingerprint: None,
             remote_identity_display: None,
@@ -1116,7 +1239,6 @@ mod tests {
                 registry_generation: "generation".to_owned(),
                 wsnav_version: "0.1.0".to_owned(),
                 capabilities: Capabilities {
-                    codex: true,
                     git: true,
                     tmux: true,
                 },

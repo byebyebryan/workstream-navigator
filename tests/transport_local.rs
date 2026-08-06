@@ -31,7 +31,7 @@ fn local_subprocess_uses_the_same_bounded_protocol_service_as_ssh() {
     assert!(hello.registry_generation.len() <= 128);
     assert!(snapshot.workstreams.is_empty());
     assert!(operations.operations.is_empty());
-    assert_eq!(CURRENT_PROTOCOL_VERSION, 16);
+    assert_eq!(CURRENT_PROTOCOL_VERSION, 17);
 }
 
 #[test]
@@ -132,6 +132,7 @@ fn local_subprocess_registers_one_existing_checkout_without_returning_its_path()
             &endpoint,
             HostAction::RegisterCheckout {
                 checkout_path: checkout.to_string_lossy().into_owned(),
+                provider: ProviderKind::Codex,
             },
         )
         .unwrap();
@@ -243,6 +244,7 @@ fn local_subprocess_browses_and_registers_a_host_private_project_directory() {
             &endpoint,
             HostAction::RegisterProjectDirectory {
                 relative_path: "picker-target".to_owned(),
+                provider: ProviderKind::Codex,
             },
         )
         .unwrap();

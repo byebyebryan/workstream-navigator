@@ -9,11 +9,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::domain::{
-    HostId, LocationId, OperationId, OperationKind, OperationPhase, Revision, RuntimeId,
-    RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
+    HostId, LocationId, OperationId, OperationKind, OperationPhase, ProviderKind, Revision,
+    RuntimeId, RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 16;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 17;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -125,11 +125,17 @@ pub enum HostAction {
     RemoveObserver,
     /// Register one existing Git project only on this host. The bounded path is
     /// request-only and is never included in a response or snapshot.
-    RegisterCheckout { checkout_path: String },
+    RegisterCheckout {
+        checkout_path: String,
+        provider: ProviderKind,
+    },
     /// Register the currently selected host-private browser directory. Unlike
     /// `RegisterCheckout`, the client supplies only a validated relative
     /// cursor; the host resolves and inspects the actual path locally.
-    RegisterProjectDirectory { relative_path: String },
+    RegisterProjectDirectory {
+        relative_path: String,
+        provider: ProviderKind,
+    },
     /// Changes only the selected host's private directory-browser root. The
     /// path is request-only and never included in a response or snapshot.
     SetProjectBrowserRoot { root_path: String },
@@ -174,6 +180,7 @@ pub enum HostAction {
         source_workstream_id: WorkstreamId,
         expected_revision: i64,
         request_key: String,
+        provider: ProviderKind,
     },
     /// Fork an active source through its last settled native Codex turn.
     ForkWorkstream {
@@ -224,10 +231,10 @@ impl HostAction {
             Revision::try_from(expected_revision).map_err(|_| ProtocolError::InvalidRevision)?;
         }
         match self {
-            Self::RegisterCheckout { checkout_path } => {
+            Self::RegisterCheckout { checkout_path, .. } => {
                 validate_bounded("checkout path", checkout_path, MAX_CHECKOUT_PATH_BYTES)?;
             }
-            Self::RegisterProjectDirectory { relative_path } => {
+            Self::RegisterProjectDirectory { relative_path, .. } => {
                 validate_relative_browser_path(relative_path)?;
             }
             Self::SetProjectBrowserRoot { root_path } => {
@@ -333,6 +340,7 @@ pub enum HostResponse {
     },
     WorkstreamCreated {
         workstream_id: WorkstreamId,
+        provider: ProviderKind,
         revision: i64,
     },
     Attach {
@@ -432,10 +440,115 @@ impl HelloResponse {
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Capabilities {
-    pub codex: bool,
     pub git: bool,
     pub tmux: bool,
+}
+
+/// Dynamic provider availability observed by one host snapshot. This is
+/// deliberately excluded from fixed client host registration identity.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCapabilityStatus {
+    Available,
+    Unavailable,
+    Unknown,
+}
+
+/// Bounded reason for a provider's dynamic availability state.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCapabilityReason {
+    None,
+    AdapterUnavailable,
+    NotInstalled,
+    UnsupportedVersion,
+    ObserverNotReady,
+    RuntimePrerequisiteMissing,
+    ProbeFailed,
+}
+
+/// One provider's bounded, read-only host capability evidence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCapability {
+    pub kind: ProviderKind,
+    pub status: ProviderCapabilityStatus,
+    pub reason: ProviderCapabilityReason,
+    pub fresh_launch: bool,
+    pub exact_resume: bool,
+    pub observe: bool,
+    pub metadata_read: bool,
+    pub rename: bool,
+    pub fork: bool,
+}
+
+impl ProviderCapability {
+    /// Returns whether this provider may be selected for a recoverable New.
+    #[must_use]
+    pub const fn is_new_eligible(self) -> bool {
+        matches!(self.status, ProviderCapabilityStatus::Available)
+            && self.fresh_launch
+            && self.exact_resume
+            && self.observe
+    }
+
+    fn validate(&self) -> Result<(), ProtocolError> {
+        match (self.status, self.reason) {
+            (ProviderCapabilityStatus::Available, ProviderCapabilityReason::None)
+            | (
+                ProviderCapabilityStatus::Unavailable | ProviderCapabilityStatus::Unknown,
+                ProviderCapabilityReason::AdapterUnavailable
+                | ProviderCapabilityReason::NotInstalled
+                | ProviderCapabilityReason::UnsupportedVersion
+                | ProviderCapabilityReason::ObserverNotReady
+                | ProviderCapabilityReason::RuntimePrerequisiteMissing
+                | ProviderCapabilityReason::ProbeFailed,
+            ) => {}
+            _ => return Err(ProtocolError::InvalidProviderCapability),
+        }
+        if !matches!(self.status, ProviderCapabilityStatus::Available)
+            && (self.fresh_launch
+                || self.exact_resume
+                || self.observe
+                || self.metadata_read
+                || self.rename
+                || self.fork)
+        {
+            return Err(ProtocolError::InvalidProviderCapability);
+        }
+        Ok(())
+    }
+}
+
+/// The fixed provider set known to this protocol version, in wire sort order.
+pub const KNOWN_PROVIDER_KINDS: [ProviderKind; 2] = [ProviderKind::Codex, ProviderKind::OpenCode];
+
+fn default_provider_capabilities() -> Vec<ProviderCapability> {
+    KNOWN_PROVIDER_KINDS
+        .into_iter()
+        .map(|kind| ProviderCapability {
+            kind,
+            status: if kind == ProviderKind::Codex {
+                ProviderCapabilityStatus::Unknown
+            } else {
+                ProviderCapabilityStatus::Unavailable
+            },
+            reason: if kind == ProviderKind::Codex {
+                ProviderCapabilityReason::ProbeFailed
+            } else {
+                ProviderCapabilityReason::AdapterUnavailable
+            },
+            fresh_launch: false,
+            exact_resume: false,
+            observe: false,
+            metadata_read: false,
+            rename: false,
+            fork: false,
+        })
+        .collect()
 }
 
 /// Bounded observer lifecycle state safe to expose to a trusted navigator.
@@ -452,13 +565,26 @@ pub enum ObserverStatus {
     Disabled,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct SnapshotResponse {
     pub workstreams: Vec<SnapshotWorkstream>,
     pub unresolved_operation_count: u16,
     pub observer_status: ObserverStatus,
+    pub provider_capabilities: Vec<ProviderCapability>,
     /// Opaque row offset for the next deterministic bounded page.
     pub next_cursor: Option<u32>,
+}
+
+impl Default for SnapshotResponse {
+    fn default() -> Self {
+        Self {
+            workstreams: Vec::new(),
+            unresolved_operation_count: 0,
+            observer_status: ObserverStatus::NotInstalled,
+            provider_capabilities: default_provider_capabilities(),
+            next_cursor: None,
+        }
+    }
 }
 
 impl SnapshotResponse {
@@ -469,6 +595,18 @@ impl SnapshotResponse {
         self.workstreams
             .iter()
             .try_for_each(SnapshotWorkstream::validate)?;
+        if self.provider_capabilities.len() != KNOWN_PROVIDER_KINDS.len()
+            || self
+                .provider_capabilities
+                .iter()
+                .zip(KNOWN_PROVIDER_KINDS)
+                .any(|(capability, expected)| capability.kind != expected)
+        {
+            return Err(ProtocolError::InvalidProviderCapabilitySet);
+        }
+        self.provider_capabilities
+            .iter()
+            .try_for_each(ProviderCapability::validate)?;
         if usize::from(self.unresolved_operation_count) > MAX_SNAPSHOT_WORKSTREAMS {
             return Err(ProtocolError::SnapshotTooLarge);
         }
@@ -520,6 +658,7 @@ impl OperationsResponse {
 pub struct SnapshotWorkstream {
     pub workstream_id: WorkstreamId,
     pub location_id: LocationId,
+    pub provider: ProviderKind,
     /// Bounded project label derived from the registered repository basename
     /// on the host. This is presentation metadata, never a repository or
     /// project path.
@@ -692,6 +831,12 @@ pub enum ProtocolError {
     InvalidRemoteIdentityDisplay,
     #[error("snapshot has too many workstreams")]
     SnapshotTooLarge,
+    #[error("provider capability is inconsistent with its status or reason")]
+    InvalidProviderCapability,
+    #[error(
+        "snapshot provider capabilities must contain each known provider exactly once in order"
+    )]
+    InvalidProviderCapabilitySet,
     #[error("protocol frame exceeds its maximum size")]
     FrameTooLarge,
     #[error("could not encode protocol frame")]
@@ -730,6 +875,135 @@ mod tests {
         assert!(matches!(
             envelope.validate(),
             Err(ProtocolError::UnsupportedVersion(_))
+        ));
+    }
+
+    #[test]
+    fn protocol_sixteen_is_refused_after_the_provider_wire_bump() {
+        let envelope = RequestEnvelope {
+            version: 16,
+            request: HostRequest::Snapshot { cursor: None },
+        };
+
+        assert!(matches!(
+            envelope.validate(),
+            Err(ProtocolError::UnsupportedVersion(16))
+        ));
+
+        let response = ResponseEnvelope {
+            version: 16,
+            response: HostResponse::Rejected {
+                diagnostic: "unsupported protocol version".to_owned(),
+            },
+        };
+        assert!(matches!(
+            response.validate(),
+            Err(ProtocolError::UnsupportedVersion(16))
+        ));
+    }
+
+    #[test]
+    fn unknown_provider_wire_values_fail_closed() {
+        let frame = format!(
+            "{{\"version\":{CURRENT_PROTOCOL_VERSION},\"request\":{{\"kind\":\"apply\",\"action\":{{\"kind\":\"register_checkout\",\"checkout_path\":\"/tmp/project\",\"provider\":\"other\"}}}}}}\n"
+        );
+
+        assert!(matches!(
+            RequestEnvelope::decode(frame.as_bytes()),
+            Err(ProtocolError::Decode(_))
+        ));
+    }
+
+    #[test]
+    fn snapshot_provider_capabilities_require_the_exact_sorted_set() {
+        let mut duplicate = SnapshotResponse::default();
+        duplicate.provider_capabilities[1] = duplicate.provider_capabilities[0];
+        assert!(matches!(
+            duplicate.validate(),
+            Err(ProtocolError::InvalidProviderCapabilitySet)
+        ));
+
+        let mut out_of_order = SnapshotResponse::default();
+        out_of_order.provider_capabilities.swap(0, 1);
+        assert!(matches!(
+            out_of_order.validate(),
+            Err(ProtocolError::InvalidProviderCapabilitySet)
+        ));
+
+        let mut missing = SnapshotResponse::default();
+        missing.provider_capabilities.pop();
+        assert!(matches!(
+            missing.validate(),
+            Err(ProtocolError::InvalidProviderCapabilitySet)
+        ));
+    }
+
+    #[test]
+    fn snapshot_default_capabilities_are_conservative_evidence() {
+        let capabilities = SnapshotResponse::default().provider_capabilities;
+
+        assert_eq!(capabilities[0].kind, ProviderKind::Codex);
+        assert_eq!(capabilities[0].status, ProviderCapabilityStatus::Unknown);
+        assert_eq!(
+            capabilities[0].reason,
+            ProviderCapabilityReason::ProbeFailed
+        );
+        assert!(!capabilities[0].is_new_eligible());
+
+        assert_eq!(capabilities[1].kind, ProviderKind::OpenCode);
+        assert_eq!(
+            capabilities[1].status,
+            ProviderCapabilityStatus::Unavailable
+        );
+        assert_eq!(
+            capabilities[1].reason,
+            ProviderCapabilityReason::AdapterUnavailable
+        );
+        assert!(!capabilities[1].is_new_eligible());
+    }
+
+    #[test]
+    fn provider_capability_status_and_reason_must_agree() {
+        let mut snapshot = SnapshotResponse::default();
+        snapshot.provider_capabilities[0].status = ProviderCapabilityStatus::Available;
+        snapshot.provider_capabilities[0].reason = ProviderCapabilityReason::NotInstalled;
+        assert!(matches!(
+            snapshot.validate(),
+            Err(ProtocolError::InvalidProviderCapability)
+        ));
+    }
+
+    #[test]
+    fn snapshot_workstream_preserves_its_provider_identity_on_the_wire() {
+        let mut snapshot = SnapshotResponse::default();
+        snapshot.workstreams.push(SnapshotWorkstream {
+            workstream_id: WorkstreamId::new(),
+            location_id: LocationId::new(),
+            provider: ProviderKind::OpenCode,
+            project_display_name: "project".to_owned(),
+            repository_fingerprint: None,
+            remote_identity_display: None,
+            display_name: "thread".to_owned(),
+            runtime_id: None,
+            runtime_status: RuntimeStatus::Stopped,
+            lifecycle: WorkstreamLifecycle::Open,
+            archived: false,
+            result_ready: false,
+            recovery_required: false,
+            attention_revision: None,
+            activity_sequence: 0,
+            last_activity_at_millis: None,
+            revision: 1,
+        });
+        let envelope = ResponseEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            response: HostResponse::Snapshot(snapshot),
+        };
+        let decoded = ResponseEnvelope::decode(&envelope.encode().unwrap()).unwrap();
+        assert!(matches!(
+            decoded.response,
+            HostResponse::Snapshot(SnapshotResponse { workstreams, .. })
+                if workstreams[0].provider == ProviderKind::OpenCode
         ));
     }
 
@@ -782,6 +1056,7 @@ mod tests {
             request: HostRequest::Apply {
                 action: HostAction::RegisterCheckout {
                     checkout_path: "/workspace/project".to_owned(),
+                    provider: ProviderKind::Codex,
                 },
             },
         };
@@ -792,6 +1067,7 @@ mod tests {
             request: HostRequest::Apply {
                 action: HostAction::RegisterCheckout {
                     checkout_path: "project\nother".to_owned(),
+                    provider: ProviderKind::Codex,
                 },
             },
         };
@@ -822,6 +1098,7 @@ mod tests {
                 request: HostRequest::Apply {
                     action: HostAction::RegisterProjectDirectory {
                         relative_path: relative_path.to_owned(),
+                        provider: ProviderKind::Codex,
                     },
                 },
             };
@@ -945,6 +1222,7 @@ mod tests {
             workstreams: vec![SnapshotWorkstream {
                 workstream_id: WorkstreamId::new(),
                 location_id: LocationId::new(),
+                provider: ProviderKind::Codex,
                 project_display_name: "x".repeat(MAX_DISPLAY_NAME_BYTES + 1),
                 repository_fingerprint: None,
                 remote_identity_display: None,
@@ -962,6 +1240,7 @@ mod tests {
             }],
             unresolved_operation_count: 0,
             observer_status: ObserverStatus::NotInstalled,
+            provider_capabilities: default_provider_capabilities(),
             next_cursor: None,
         };
 
@@ -995,6 +1274,7 @@ mod tests {
             workstreams: vec![SnapshotWorkstream {
                 workstream_id: WorkstreamId::new(),
                 location_id: LocationId::new(),
+                provider: ProviderKind::Codex,
                 project_display_name: "project".to_owned(),
                 repository_fingerprint: Some("https://example.invalid/private.git".to_owned()),
                 remote_identity_display: None,
@@ -1012,6 +1292,7 @@ mod tests {
             }],
             unresolved_operation_count: 0,
             observer_status: ObserverStatus::NotInstalled,
+            provider_capabilities: default_provider_capabilities(),
             next_cursor: None,
         };
         assert!(matches!(
@@ -1030,6 +1311,7 @@ mod tests {
             workstreams: vec![SnapshotWorkstream {
                 workstream_id: WorkstreamId::new(),
                 location_id: LocationId::new(),
+                provider: ProviderKind::Codex,
                 project_display_name: "project".to_owned(),
                 repository_fingerprint: Some(format!("git-remote-v1:{}", "a".repeat(64))),
                 remote_identity_display: Some("github.com/owner/repo".to_owned()),
@@ -1047,6 +1329,7 @@ mod tests {
             }],
             unresolved_operation_count: 0,
             observer_status: ObserverStatus::NotInstalled,
+            provider_capabilities: default_provider_capabilities(),
             next_cursor: None,
         };
         assert!(snapshot.validate().is_ok());

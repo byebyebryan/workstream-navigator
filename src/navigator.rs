@@ -37,7 +37,8 @@ use crate::{
     build_info::BuildInfoError,
     domain::{
         AttentionState, Clock, HostId, LocationId, OperationId, OperationKind, OperationPhase,
-        ProjectId, Revision, RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle,
+        ProjectId, ProviderKind, Revision, RuntimeStatus, SystemClock, WorkstreamId,
+        WorkstreamLifecycle,
     },
     presentation::{AttachmentPhase, AttachmentStatus, Presentation, PresentationError},
     process::{BoundedProcessError, output_bounded},
@@ -62,6 +63,7 @@ pub struct NavigatorWorkstream {
     /// Opaque host-owned location identity used only for Project actions.
     pub location_id: LocationId,
     pub workstream_id: WorkstreamId,
+    pub provider: ProviderKind,
     pub project_label: String,
     /// Credential-free normalized fetch-remote label for display only.
     pub remote_identity_display: Option<String>,
@@ -371,6 +373,7 @@ fn project_workstream(
         project_id: project.project_id,
         location_id: overview.location_id,
         workstream_id: overview.workstream_id,
+        provider: overview.provider,
         project_label: bounded_display(&project.display_name),
         remote_identity_display: overview
             .remote_identity_display
@@ -451,6 +454,7 @@ fn project_remote_workstream(
         project_id: project.project_id,
         location_id: workstream.location_id,
         workstream_id: workstream.workstream_id,
+        provider: workstream.provider,
         project_label: bounded_display(&project.display_name),
         remote_identity_display: workstream
             .remote_identity_display
@@ -4996,6 +5000,7 @@ fn register_project_browser_directory(
     }
     let action = crate::protocol::HostAction::RegisterProjectDirectory {
         relative_path: relative_path.to_owned(),
+        provider: crate::domain::ProviderKind::Codex,
     };
     let client = HostClient::new(SystemCommandRunner);
     let result = if host.is_remote() {
@@ -5347,6 +5352,9 @@ fn run_creation_action(
             .arg(source.host.alias())
             .arg(source.workstream_id.to_string())
             .arg(source.workstream_revision.value().to_string());
+        if action == CreationAction::Independent {
+            command.arg(source.provider.as_str());
+        }
     } else {
         command
             .arg(action.local_command())
@@ -5998,6 +6006,7 @@ mod tests {
         let remote = crate::protocol::SnapshotWorkstream {
             workstream_id: WorkstreamId::new(),
             location_id: crate::domain::LocationId::new(),
+            provider: ProviderKind::Codex,
             project_display_name: "dms-power-status".to_owned(),
             repository_fingerprint: None,
             remote_identity_display: None,
@@ -7709,6 +7718,7 @@ mod tests {
             project_id: ProjectId::new(),
             location_id: LocationId::new(),
             workstream_id,
+            provider: ProviderKind::Codex,
             project_label: "project".to_owned(),
             remote_identity_display: None,
             location_label: "project".to_owned(),

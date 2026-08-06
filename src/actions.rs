@@ -56,9 +56,10 @@ pub fn start_independent_workstream(
     source_workstream_id: WorkstreamId,
     expected_revision: Option<Revision>,
     request_key: &str,
+    provider: ProviderKind,
 ) -> Result<WorkstreamId, ActionError> {
     let source = workstream_overview(registry, source_workstream_id)?;
-    require_codex_provider(source.provider)?;
+    require_codex_provider(provider)?;
     if expected_revision.is_some_and(|expected| expected != source.revision) {
         return Err(ActionError::WorkstreamRevisionConflict);
     }
@@ -66,7 +67,7 @@ pub fn start_independent_workstream(
         request_key,
         source_workstream_id,
         source.revision,
-        source.provider,
+        provider,
     )?;
     let _ = start(
         root,

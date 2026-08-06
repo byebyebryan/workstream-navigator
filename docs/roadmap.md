@@ -1159,11 +1159,10 @@ remain fail-closed. D8.1 stays active; D8.2 remains inactive.
 
 ### D8.1 - Provider-aware New and OpenCode New/Resume vertical slice
 
-Status: Active after explicit activation on 2026-08-05. The prerequisite
-evidence checkpoint above passes on explicitly allowlisted OpenCode `1.18.11`,
-and the design records blank-session precreation as the selected fresh-binding
-mechanism. Any provider upgrade requires a fresh evidence rerun before
-eligibility.
+Status: Complete on 2026-08-06. The prerequisite evidence checkpoint passes on
+explicitly allowlisted OpenCode `1.18.11`, and the design records blank-session
+precreation as the selected fresh-binding mechanism. Any provider upgrade
+requires a fresh evidence rerun before eligibility.
 
 Scope:
 
@@ -1233,11 +1232,25 @@ the bounded results.
 That mixed run also falsified the native-workflow assumption behind the exact
 profile lifecycle: native Codex `/model` selection wrote `model` and
 `model_reasoning_effort` before the managed `wsnav-observer` declaration.
-Exact profile removal correctly refused the modified file, and the complete
-disposable Codex home was removed only after all Runtimes stopped. D8.1
-remains active pending an explicit design decision; do not widen the accepted
-profile grammar, erase native model settings, or declare the checkpoint
-complete as a workaround. D8.2 remains inactive.
+Exact profile removal correctly refused the then-unknown modification, and the
+complete disposable Codex home was removed only after all Runtimes stopped.
+
+The explicit D8.1 correction preserves a bounded provider-owned prefix
+containing only those two opaque string settings while retaining byte-exact
+WSNav declaration ownership and the existing narrow native-trust suffix.
+Update preserves the prefix; removal leaves it as a model-only foreign profile
+instead of erasing the native choice.
+
+Focused reacceptance on Codex CLI `0.146.0` selected Luna/medium through native
+`/model` in a disposable profile-selected TUI. Trust reconciliation accepted
+the exact three-region document; removal retained the provider prefix with the
+same hash and mode `0600`, removed all WSNav declaration/native-trust content,
+and a later setup refused to adopt the unowned model-only file. The TUI exited,
+no disposable process remained, and the complete provider/state root was
+removed. The final `scripts/check` gate passes 314 library tests plus 5 local
+transport tests, formatting, Clippy, package/license/advisory verification,
+disposable local and mixed-provider acceptances, and diff checks. D8.1 is
+complete; D8.2 remains inactive.
 
 ### D8.2 - OpenCode Fork, recovery, and integrated acceptance
 

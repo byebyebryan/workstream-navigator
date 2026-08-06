@@ -891,7 +891,7 @@ fn prepare_remote_observer(catalog: &ClientCatalog, alias: &str) -> Result<(), A
 
 fn remove_remote_observer(catalog: &ClientCatalog, alias: &str) -> Result<(), AppError> {
     apply_remote_action(catalog, alias, crate::protocol::HostAction::RemoveObserver)?;
-    println!("remote observer profile removed");
+    println!("remote observer integration removed; any provider model settings were preserved");
     Ok(())
 }
 
@@ -1500,12 +1500,13 @@ fn doctor(root: &StateRoot, registry: &mut HostRegistry) -> Result<(), AppError>
 
 fn remove_observer(root: &StateRoot, registry: &mut HostRegistry) -> Result<(), AppError> {
     remove_observer_exact(root, registry)?;
-    println!("observer profile removed");
+    println!("observer integration removed; any provider model settings were preserved");
     Ok(())
 }
 
-/// Removes only the exact observer declaration. The remote control service
-/// uses this silent helper so its protocol stdout remains one framed response.
+/// Removes only the exact observer declaration and native trust, preserving an
+/// accepted provider-owned model prefix. The remote control service uses this
+/// silent helper so its protocol stdout remains one framed response.
 pub(crate) fn remove_observer_exact(
     root: &StateRoot,
     registry: &mut HostRegistry,

@@ -102,9 +102,10 @@ workarounds, and the decision gates are recorded in
 - Activity and durable result attention for Workstream Navigator-started
   provider sessions.
 - Navigator-owned observer activation, native trust review, status, and exact
-  removal of one observer-only Codex profile on each managed host; OpenCode
-  uses the separate read-only per-Runtime sidecar contract in D8.1 and has no
-  generic onboarding flow.
+  removal of the observer integration from one dedicated Codex profile on each
+  managed host; an accepted provider-owned model prefix survives removal.
+  OpenCode uses the separate read-only per-Runtime sidecar contract in D8.1 and
+  has no generic onboarding flow.
 - Reconnection after local UI or SSH loss.
 - Recovery after the host tmux runtime disappears, using the provider's native
   session identity.
@@ -596,11 +597,13 @@ profile declaration and trust hash, not user or provider input.
 
 Codex loads the normal system and user configuration, overlays the selected
 profile, then applies trusted project configuration and explicit CLI
-overrides. The WSNav profile contains only the hook feature setting and the
-four observation-only lifecycle hook definitions below. It never selects or
-changes a model, provider, reasoning effort, permissions, sandbox, approval
-policy, MCP server, skill, plugin, memory, UI preference, or native history
-setting.
+overrides. The WSNav-generated declaration contains only the hook feature
+setting and the four observation-only lifecycle hook definitions below. The
+dedicated profile may additionally carry the bounded provider-owned model
+prefix described below when Codex's native `/model` UI writes it. WSNav never
+selects or changes a model, provider, reasoning effort, permissions, sandbox,
+approval policy, MCP server, skill, plugin, memory, UI preference, or native
+history setting.
 
 V1 does not compose two named Codex profiles. If a user later needs another
 selected profile for managed launches, WSNav reports that capability as
@@ -642,15 +645,28 @@ avoided.
 
 Native Codex hook review appends trust records to the selected profile itself:
 `[hooks.state]` records keyed to the exact generated hook entries and trusted
-`[projects]` entries. WSNav therefore verifies the generated declaration as a
-byte-exact prefix and accepts only that narrow, schema-checked native suffix:
-the four generated lifecycle hook keys, `sha256:` trusted hashes, and
-project records whose sole value is `trust_level = "trusted"`. A malformed
-record, an unknown event, a different hook path, another setting, or any
-change before the suffix is `modified` and fails closed. The native state is
-not independently edited; deleting an otherwise exact dedicated profile also
-removes its co-located native trust records, while all normal configuration
-and other Codex-owned state remain untouched.
+`[projects]` entries. Native `/model` instead prepends the selected `model` and
+`model_reasoning_effort` to that same profile. WSNav therefore verifies the
+document as three independently owned regions: an optional provider prefix,
+the byte-exact generated declaration beginning at the managed marker, and a
+narrow schema-checked native trust suffix.
+
+The provider prefix is at most 4096 bytes and must contain one or both of the
+top-level `model` and `model_reasoning_effort` keys as non-empty TOML strings
+of at most 256 decoded bytes each. WSNav preserves the prefix byte for byte but
+never interprets, hashes, displays, or records either value in host state. An
+unowned profile is never adopted, even when it contains only those keys. Any
+other key or table, duplicate or malformed key, wrong or oversized value,
+ambiguous managed marker, or model setting outside the prefix is `modified`
+and fails closed.
+
+The native suffix still permits only the four generated lifecycle hook keys,
+`sha256:` trusted hashes, and project records whose sole value is
+`trust_level = "trusted"`. A malformed record, unknown event, different hook
+path, changed declaration, or other suffix setting is `modified` and fails
+closed. This narrow mixed ownership preserves native model control without
+making model state WSNav metadata or giving WSNav authority over arbitrary
+profile configuration.
 
 Existing user-configured Codex hooks remain the user's integrations. Workstream
 Navigator neither disables nor rewrites them, and cannot guarantee that an
@@ -661,14 +677,18 @@ mutating the user's configuration.
 Profile update or removal requires no live WSNav-managed Codex Runtime. The
 next fresh host-local `wsnav` validates an exact legacy declaration, atomically
 replaces it, and discards its co-located native trust suffix before entering the
-same native review. A declaration-changing update returns the integration to
-`trust_pending` until native review succeeds again; an exact no-op preserves
-trust. The hidden diagnostic update command follows the same rule. Removal
-deletes only an exactly owned profile whose WSNav declaration is unchanged and
-whose only suffix is the validated native trust state, plus its WSNav ownership
-record. It leaves base configuration, other profiles, user and project hooks,
-plugins, history, credentials, and all state outside the dedicated profile
-untouched.
+same native review. A declaration-changing update preserves an accepted
+provider prefix byte for byte and returns the integration to `trust_pending`
+until native review succeeds again; an exact no-op preserves both prefix and
+trust. The hidden diagnostic update command follows the same rule.
+
+Removal validates all three regions, removes the WSNav declaration and native
+trust suffix, and then removes the ownership record. With no provider prefix it
+deletes the profile; with an accepted prefix it atomically leaves only those
+provider-owned model settings at the same path. That model-only file is foreign
+to a later setup and is never silently adopted. Base configuration, other
+profiles, user and project hooks, plugins, history, credentials, and all state
+outside the dedicated profile remain untouched.
 
 The observer consumes these native events:
 
@@ -1255,11 +1275,13 @@ The user alone approves that profile in Codex; preparation never writes trust
 state. `x` first asks whether to disconnect or offboard a selected remote Host.
 Disconnect is client-catalog-only: it removes the alias and local Project
 associations but does not contact the host, stop a Runtime, delete remote state,
-or uninstall anything. Offboard first removes only WSNav's exact observer
-profile, then performs that same client-catalog removal. It refuses while a
-managed Runtime is live or when the remote host cannot be reached. The choice
-shows retained Workstream, ProjectLocation, and unresolved-operation counts so
-the visibility effect is explicit. The protected local Host cannot be removed.
+or uninstall anything. Offboard first removes only WSNav's exact declaration
+and native trust from the dedicated observer profile, preserving an accepted
+provider-owned model prefix when present, then performs that same
+client-catalog removal. It refuses while a managed Runtime is live or when the
+remote host cannot be reached. The choice shows retained Workstream,
+ProjectLocation, and unresolved-operation counts so the visibility effect is
+explicit. The protected local Host cannot be removed.
 If an observer review is required, its native profile-selected Codex TUI runs
 in the right provider pane through the same local or SSH terminal boundary and
 leaves no Workstream behind. Remote review uses a one-shot remote endpoint that

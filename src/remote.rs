@@ -1446,7 +1446,7 @@ mod tests {
             HostResponse::Rejected { ref diagnostic }
                 if diagnostic == "observer removal is unavailable"
         ));
-        assert!(!String::from_utf8_lossy(&output).contains("observer profile removed"));
+        assert!(!String::from_utf8_lossy(&output).contains("observer integration removed"));
     }
 
     #[test]

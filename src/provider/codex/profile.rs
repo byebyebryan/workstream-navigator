@@ -13,6 +13,10 @@ use thiserror::Error;
 pub const OBSERVER_PROFILE_NAME: &str = "wsnav-observer";
 pub const OBSERVER_PROFILE_SCHEMA_VERSION: u8 = 2;
 const PROFILE_MARKER: &str = "# Managed by Workstream Navigator. Do not edit manually.\n";
+const MAX_PROVIDER_PREFIX_BYTES: usize = 4096;
+const MAX_PROVIDER_SCALAR_BYTES: usize = 256;
+
+const PROVIDER_SETTINGS: [&str; 2] = ["model", "model_reasoning_effort"];
 
 /// The immutable record retained by host state for an owned profile.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -24,7 +28,8 @@ pub struct ProfileOwnership {
     pub content_hash: String,
 }
 
-/// Creates, verifies, or removes only the exact scoped observer profile.
+/// Creates, verifies, or removes only the exact scoped observer declaration
+/// and native trust, preserving any validated provider-owned prefix.
 #[derive(Clone, Debug)]
 pub struct ObserverProfile {
     codex_home: PathBuf,
@@ -103,7 +108,8 @@ impl ObserverProfile {
         })
     }
 
-    /// Removes an exact, unchanged owned profile and nothing else.
+    /// Removes the exact, unchanged observer declaration and native trust.
+    /// A validated provider-owned prefix, when present, remains at the path.
     ///
     /// # Errors
     ///
@@ -118,8 +124,12 @@ impl ObserverProfile {
             return Err(ProfileError::MissingOwnedPath(path));
         }
         let declaration = self.declaration_for(ownership)?;
-        self.verify_owned_document(ownership, &hash(&declaration))?;
-        fs::remove_file(path).map_err(ProfileError::Io)
+        let document = self.read_owned_document(ownership, &hash(&declaration))?;
+        if document.provider_prefix.is_empty() {
+            fs::remove_file(path).map_err(ProfileError::Io)
+        } else {
+            atomic_private_write(&path, document.provider_prefix.as_bytes())
+        }
     }
 
     /// Verifies that Codex's native `/hooks` review trusted every generated
@@ -172,8 +182,10 @@ impl ObserverProfile {
             self.state_root.clone(),
         );
         let previous_declaration = previous.declaration_for(existing)?;
-        previous.verify_owned_document(existing, &hash(&previous_declaration))?;
-        atomic_private_write(&path, rendered.as_bytes())?;
+        let document = previous.read_owned_document(existing, &hash(&previous_declaration))?;
+        let mut content = document.provider_prefix;
+        content.push_str(&rendered);
+        atomic_private_write(&path, content.as_bytes())?;
         Ok(ProfileOwnership {
             canonical_path: path,
             owner_id: existing.owner_id.clone(),
@@ -183,14 +195,15 @@ impl ObserverProfile {
         })
     }
 
-    /// Verifies the byte-exact `WSNav` declaration and the narrow Codex-owned
-    /// trust suffix which native `/hooks` review appends to selected profiles.
+    /// Verifies the three-region profile contract: an optional validated
+    /// provider prefix, the byte-exact `WSNav` declaration, and the narrow
+    /// Codex-owned native trust suffix. Provider bytes remain opaque to `WSNav`.
     fn verify_owned_document(
         &self,
         ownership: &ProfileOwnership,
         expected_hash: &str,
     ) -> Result<(), ProfileError> {
-        self.owned_native_suffix(ownership, expected_hash)
+        self.read_owned_document(ownership, expected_hash)
             .map(|_| ())
     }
 
@@ -199,6 +212,15 @@ impl ObserverProfile {
         ownership: &ProfileOwnership,
         expected_hash: &str,
     ) -> Result<Option<toml::Table>, ProfileError> {
+        self.read_owned_document(ownership, expected_hash)
+            .map(|document| document.native_suffix)
+    }
+
+    fn read_owned_document(
+        &self,
+        ownership: &ProfileOwnership,
+        expected_hash: &str,
+    ) -> Result<OwnedDocument, ProfileError> {
         let path = self.path();
         if ownership.canonical_path != path || ownership.content_hash != expected_hash {
             return Err(ProfileError::OwnershipMismatch);
@@ -206,18 +228,25 @@ impl ObserverProfile {
         let content = fs::read(&path).map_err(ProfileError::Io)?;
         let content =
             std::str::from_utf8(&content).map_err(|_| ProfileError::ModifiedPath(path.clone()))?;
+        let (provider_prefix, declaration_and_suffix) = split_provider_prefix(content, &path)?;
         let declared = self.declaration_for(ownership)?;
-        let Some(native_suffix) = content.strip_prefix(&declared) else {
+        let Some(native_suffix) = declaration_and_suffix.strip_prefix(&declared) else {
             return Err(ProfileError::ModifiedPath(path));
         };
         if native_suffix.is_empty() {
-            return Ok(None);
+            return Ok(OwnedDocument {
+                provider_prefix: provider_prefix.to_owned(),
+                native_suffix: None,
+            });
         }
         let suffix = native_suffix
             .parse::<toml::Table>()
             .map_err(|_| ProfileError::ModifiedPath(self.path()))?;
         if accepts_native_trust_suffix(&suffix, &self.path()) {
-            Ok(Some(suffix))
+            Ok(OwnedDocument {
+                provider_prefix: provider_prefix.to_owned(),
+                native_suffix: Some(suffix),
+            })
         } else {
             Err(ProfileError::ModifiedPath(self.path()))
         }
@@ -235,6 +264,56 @@ impl ObserverProfile {
             _ => Err(ProfileError::OwnershipMismatch),
         }
     }
+}
+
+/// The validated three-region profile split. The provider prefix remains raw
+/// bytes; `WSNav` owns only its exact declaration and validates native trust.
+struct OwnedDocument {
+    provider_prefix: String,
+    native_suffix: Option<toml::Table>,
+}
+
+fn split_provider_prefix<'a>(
+    content: &'a str,
+    path: &Path,
+) -> Result<(&'a str, &'a str), ProfileError> {
+    let mut markers = content.match_indices(PROFILE_MARKER);
+    let Some((marker_index, _)) = markers.next() else {
+        return Err(ProfileError::ModifiedPath(path.to_owned()));
+    };
+    if markers.next().is_some() || (marker_index > 0 && !content[..marker_index].ends_with('\n')) {
+        return Err(ProfileError::ModifiedPath(path.to_owned()));
+    }
+    let provider_prefix = &content[..marker_index];
+    if provider_prefix.len() > MAX_PROVIDER_PREFIX_BYTES {
+        return Err(ProfileError::ModifiedPath(path.to_owned()));
+    }
+    validate_provider_prefix(provider_prefix, path)?;
+    Ok((provider_prefix, &content[marker_index..]))
+}
+
+fn validate_provider_prefix(prefix: &str, path: &Path) -> Result<(), ProfileError> {
+    if prefix.is_empty() {
+        return Ok(());
+    }
+    let table = prefix
+        .parse::<toml::Table>()
+        .map_err(|_| ProfileError::ModifiedPath(path.to_owned()))?;
+    if table.is_empty()
+        || table
+            .keys()
+            .any(|key| !PROVIDER_SETTINGS.contains(&key.as_str()))
+    {
+        return Err(ProfileError::ModifiedPath(path.to_owned()));
+    }
+    if table.values().any(|value| {
+        value
+            .as_str()
+            .is_none_or(|value| value.is_empty() || value.len() > MAX_PROVIDER_SCALAR_BYTES)
+    }) {
+        return Err(ProfileError::ModifiedPath(path.to_owned()));
+    }
+    Ok(())
 }
 
 fn legacy_rendered(executable: &Path) -> String {
@@ -444,6 +523,20 @@ mod tests {
         suffix
     }
 
+    fn write_owned_document(
+        manager: &ObserverProfile,
+        prefix: &str,
+        suffix: &str,
+    ) -> ProfileOwnership {
+        let ownership = manager.install("owner".to_owned(), None).unwrap();
+        fs::write(
+            manager.path(),
+            format!("{prefix}{}{suffix}", manager.rendered()),
+        )
+        .unwrap();
+        ownership
+    }
+
     #[test]
     fn profile_is_scoped_to_passive_lifecycle_hooks() {
         let temporary = tempfile::tempdir().unwrap();
@@ -543,6 +636,163 @@ mod tests {
         .unwrap();
 
         manager.verify_native_trust(&ownership).unwrap();
+    }
+
+    #[test]
+    fn provider_prefix_is_preserved_for_trust_noop_update_and_remove() {
+        let temporary = tempfile::tempdir().unwrap();
+        let manager = manager(temporary.path());
+        let prefix =
+            "# provider-owned\nmodel = \"gpt-5.6-luna\"\nmodel_reasoning_effort = \"medium\"\n";
+        let suffix = complete_native_hook_suffix(&manager);
+        let ownership = write_owned_document(&manager, prefix, &suffix);
+        let original = fs::read_to_string(manager.path()).unwrap();
+
+        assert_eq!(
+            manager
+                .install("different-owner".to_owned(), Some(&ownership))
+                .unwrap(),
+            ownership
+        );
+        manager.verify_native_trust(&ownership).unwrap();
+        assert_eq!(manager.update(&ownership).unwrap(), ownership);
+        assert_eq!(fs::read_to_string(manager.path()).unwrap(), original);
+
+        manager.remove(&ownership).unwrap();
+        assert_eq!(fs::read_to_string(manager.path()).unwrap(), prefix);
+        assert!(matches!(
+            manager.install("new-owner".to_owned(), None),
+            Err(ProfileError::ForeignPath(_))
+        ));
+    }
+
+    #[test]
+    fn reasoning_effort_only_provider_prefix_is_accepted_and_preserved() {
+        let temporary = tempfile::tempdir().unwrap();
+        let manager = manager(temporary.path());
+        let prefix = "model_reasoning_effort = \"high\"\n";
+        let suffix = complete_native_hook_suffix(&manager);
+        let ownership = write_owned_document(&manager, prefix, &suffix);
+        let original = fs::read_to_string(manager.path()).unwrap();
+
+        manager.verify_native_trust(&ownership).unwrap();
+        assert_eq!(manager.update(&ownership).unwrap(), ownership);
+        assert_eq!(fs::read_to_string(manager.path()).unwrap(), original);
+
+        manager.remove(&ownership).unwrap();
+        assert_eq!(fs::read_to_string(manager.path()).unwrap(), prefix);
+    }
+
+    #[test]
+    fn provider_prefix_is_preserved_when_declaration_changes() {
+        let temporary = tempfile::tempdir().unwrap();
+        let manager = manager(temporary.path());
+        let prefix = "model = \"gpt-5.6-luna\"\n";
+        let suffix = complete_native_hook_suffix(&manager);
+        let ownership = write_owned_document(&manager, prefix, &suffix);
+        let updated_manager = ObserverProfile::new(
+            temporary.path().join("codex-home"),
+            temporary.path().join("bin/wsnav-next"),
+            temporary.path().join("state"),
+        );
+
+        let updated = updated_manager.update(&ownership).unwrap();
+        assert_eq!(
+            fs::read_to_string(updated_manager.path()).unwrap(),
+            format!("{prefix}{}", updated_manager.rendered())
+        );
+        assert!(matches!(
+            updated_manager.verify_native_trust(&updated),
+            Err(ProfileError::NativeTrustPending)
+        ));
+    }
+
+    #[test]
+    fn provider_prefix_validation_fails_closed() {
+        let invalid_prefixes = [
+            "# provider comment\n",
+            "model = \"\"\n",
+            "model = 1\n",
+            "model = \"first\"\nmodel = \"second\"\n",
+            "temperature = \"high\"\n",
+            "[model]\nvalue = \"nested\"\n",
+            "model =\n",
+        ];
+        for prefix in invalid_prefixes {
+            let temporary = tempfile::tempdir().unwrap();
+            let profile = manager(temporary.path());
+            let ownership = write_owned_document(&profile, prefix, "");
+            assert!(matches!(
+                profile.verify_native_trust(&ownership),
+                Err(ProfileError::ModifiedPath(_))
+            ));
+        }
+
+        let temporary = tempfile::tempdir().unwrap();
+        let profile = manager(temporary.path());
+        let overlong = format!(
+            "model = \"{}\"\n",
+            "x".repeat(MAX_PROVIDER_SCALAR_BYTES + 1)
+        );
+        let ownership = write_owned_document(&profile, &overlong, "");
+        assert!(matches!(
+            profile.verify_native_trust(&ownership),
+            Err(ProfileError::ModifiedPath(_))
+        ));
+
+        let temporary = tempfile::tempdir().unwrap();
+        let profile = manager(temporary.path());
+        let oversized = format!(
+            "model = \"x\"\n#{}\n",
+            "x".repeat(MAX_PROVIDER_PREFIX_BYTES)
+        );
+        let ownership = write_owned_document(&profile, &oversized, "");
+        assert!(matches!(
+            profile.verify_native_trust(&ownership),
+            Err(ProfileError::ModifiedPath(_))
+        ));
+
+        let temporary = tempfile::tempdir().unwrap();
+        let profile = manager(temporary.path());
+        let ownership = profile.install("owner".to_owned(), None).unwrap();
+        fs::write(
+            profile.path(),
+            format!("{}model = \"misplaced\"\n", profile.rendered()),
+        )
+        .unwrap();
+        assert!(matches!(
+            profile.verify_native_trust(&ownership),
+            Err(ProfileError::ModifiedPath(_))
+        ));
+
+        let temporary = tempfile::tempdir().unwrap();
+        let profile = manager(temporary.path());
+        let ownership = profile.install("owner".to_owned(), None).unwrap();
+        fs::write(
+            profile.path(),
+            format!("{PROFILE_MARKER}{}", profile.rendered()),
+        )
+        .unwrap();
+        assert!(matches!(
+            profile.verify_native_trust(&ownership),
+            Err(ProfileError::ModifiedPath(_))
+        ));
+    }
+
+    #[test]
+    fn provider_prefix_requires_a_line_anchored_managed_marker() {
+        for prefix in [
+            "model = \"gpt-5.6-luna\"",
+            "model = \"gpt-5.6-luna\" # provider comment ",
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            let profile = manager(temporary.path());
+            let ownership = write_owned_document(&profile, prefix, "");
+            assert!(matches!(
+                profile.verify_native_trust(&ownership),
+                Err(ProfileError::ModifiedPath(_))
+            ));
+        }
     }
 
     #[test]

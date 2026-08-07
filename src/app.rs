@@ -1721,6 +1721,7 @@ fn observe_hook(state_root: Option<PathBuf>) {
             };
             let expected_birth = record.process_birth.as_deref()?;
             (cwd == record.cwd
+                && record.provider_pid == Some(pane_pid)
                 && actual_birth == expected_birth
                 && is_direct_provider_hook(pane_pid, expected_birth))
             .then_some(record)
@@ -2053,6 +2054,7 @@ mod tests {
     fn resuming_uses_the_exact_bound_native_session() {
         let binding = crate::state::ProviderBinding {
             runtime_id: RuntimeId::new(),
+            runtime_generation: "generation-a".to_owned(),
             provider: crate::domain::ProviderKind::Codex,
             native_session_id: crate::domain::ProviderSessionId::codex("exact-session").unwrap(),
             start_source: "startup".to_owned(),

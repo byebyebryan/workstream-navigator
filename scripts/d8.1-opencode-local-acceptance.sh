@@ -42,6 +42,7 @@ cat >"$fake_server" <<'PY'
 #!/usr/bin/env python3
 import json
 import os
+import signal
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -254,6 +255,10 @@ def main():
     port = int(args[args.index("--port") + 1])
     if session is not None and session not in load_db()["sessions"]:
         return 3
+    # A provider is not required to exit merely because tmux closes its PTY.
+    # Deliberately survive that boundary so the acceptance proves WSNav's
+    # persisted PID-plus-birth cleanup authority instead of tmux behavior.
+    signal.signal(signal.SIGHUP, signal.SIG_IGN)
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True
     if session is not None:
@@ -292,7 +297,8 @@ import sys
 
 connection = sqlite3.connect(sys.argv[1])
 row = connection.execute(
-    """SELECT h.observer_pid, h.observer_birth, h.observer_status,
+    """SELECT r.provider_pid, r.process_birth,
+                     h.observer_pid, h.observer_birth, h.observer_status,
                      h.endpoint_port, h.runtime_generation,
                      b.native_session_id
           FROM opencode_runtime_handles h
@@ -317,6 +323,24 @@ if stat.exists():
     state = stat.read_text(encoding="utf-8").rsplit(")", 1)[-1].strip().split()[0]
     if state != "Z":
         raise SystemExit("observer process still live")
+PY
+}
+
+assert_process_identity_gone() {
+    python3 - "$1" "$2" <<'PY'
+from pathlib import Path
+import sys
+
+pid, expected_birth = sys.argv[1:]
+try:
+    stat = Path(f"/proc/{pid}/stat").read_text()
+    current_birth = stat[stat.rfind(")") + 2:].split()[19]
+except FileNotFoundError:
+    raise SystemExit(0)
+except (IndexError, OSError) as error:
+    raise SystemExit(f"provider process identity probe was ambiguous: {pid}") from error
+if current_birth == expected_birth:
+    raise SystemExit(f"exact provider process survived cleanup: {pid}")
 PY
 }
 
@@ -366,8 +390,9 @@ first_status="$($wsnav_bin --state-root "$state_root" status "$workstream_id")"
 grep -F 'lifecycle: Attention' <<<"$first_status" >/dev/null
 grep -F 'private runtime: live' <<<"$first_status" >/dev/null
 grep -F 'provider binding: bound' <<<"$first_status" >/dev/null
-IFS='|' read -r first_observer_pid first_observer_birth first_observer_status first_port first_generation first_session <<<"$(handle_row)"
+IFS='|' read -r first_provider_pid first_provider_birth first_observer_pid first_observer_birth first_observer_status first_port first_generation first_session <<<"$(handle_row)"
 [[ "$first_observer_status" == "ready" ]]
+[[ -n "$first_provider_pid" && -n "$first_provider_birth" ]]
 [[ -n "$first_observer_birth" && -n "$first_generation" && -n "$first_session" ]]
 
 runtime_socket="$(find "$state_root/run" -type s -name tmux.sock -print -quit)"
@@ -415,20 +440,24 @@ if "$wsnav_bin" --state-root "$state_root" start "$workstream_id" \
     echo "start unexpectedly adopted a Runtime with a dead observer" >&2
     exit 1
 fi
-IFS='|' read -r dead_observer_pid dead_observer_birth dead_observer_status _dead_port _dead_generation _dead_session <<<"$(handle_row)"
+IFS='|' read -r dead_provider_pid dead_provider_birth dead_observer_pid dead_observer_birth dead_observer_status _dead_port _dead_generation _dead_session <<<"$(handle_row)"
+[[ "$dead_provider_pid" == "$first_provider_pid" ]]
+[[ "$dead_provider_birth" == "$first_provider_birth" ]]
 [[ "$dead_observer_pid" == "$first_observer_pid" ]]
 [[ "$dead_observer_birth" == "$first_observer_birth" ]]
 [[ "$dead_observer_status" == "unknown" ]]
 
 "$wsnav_bin" --state-root "$state_root" park "$workstream_id"
+assert_process_identity_gone "$first_provider_pid" "$first_provider_birth"
 assert_port_closed "$first_port"
 "$wsnav_bin" --state-root "$state_root" start "$workstream_id"
 sleep 1
 resume_status="$($wsnav_bin --state-root "$state_root" status "$workstream_id")"
 grep -F 'lifecycle: Idle' <<<"$resume_status" >/dev/null
 grep -F 'private runtime: live' <<<"$resume_status" >/dev/null
-IFS='|' read -r second_observer_pid second_observer_birth second_observer_status second_port second_generation second_session <<<"$(handle_row)"
+IFS='|' read -r second_provider_pid second_provider_birth second_observer_pid second_observer_birth second_observer_status second_port second_generation second_session <<<"$(handle_row)"
 [[ "$second_observer_status" == "ready" ]]
+[[ -n "$second_provider_pid" && -n "$second_provider_birth" ]]
 [[ "$second_session" == "$first_session" ]]
 [[ "$second_generation" != "$first_generation" && "$second_port" != "$first_port" ]]
 [[ "$second_observer_pid" != "$first_observer_pid" && "$second_observer_birth" != "$first_observer_birth" ]]
@@ -450,12 +479,14 @@ recovered_status="$($wsnav_bin --state-root "$state_root" status "$workstream_id
 grep -F 'workstream: Open' <<<"$recovered_status" >/dev/null
 grep -F 'lifecycle: Idle' <<<"$recovered_status" >/dev/null
 grep -F 'recovery attention: none' <<<"$recovered_status" >/dev/null
-IFS='|' read -r recovered_observer_pid recovered_observer_birth recovered_observer_status recovered_port recovered_generation recovered_session <<<"$(handle_row)"
+IFS='|' read -r recovered_provider_pid recovered_provider_birth recovered_observer_pid recovered_observer_birth recovered_observer_status recovered_port recovered_generation recovered_session <<<"$(handle_row)"
 [[ "$recovered_observer_status" == "ready" ]]
+[[ -n "$recovered_provider_pid" && -n "$recovered_provider_birth" ]]
 [[ -n "$recovered_observer_birth" ]]
 [[ "$recovered_session" == "$second_session" ]]
 [[ "$recovered_generation" != "$second_generation" && "$recovered_port" != "$second_port" ]]
 assert_pid_gone "$second_observer_pid"
+assert_process_identity_gone "$second_provider_pid" "$second_provider_birth"
 assert_port_closed "$second_port"
 
 # The provider fork is issued through the exact live endpoint at the observer's
@@ -464,8 +495,9 @@ assert_port_closed "$second_port"
 forked="$($wsnav_bin --state-root "$state_root" fork-workstream "$workstream_id")"
 fork_workstream_id="${forked##* }"
 sleep 1
-IFS='|' read -r fork_observer_pid fork_observer_birth fork_observer_status fork_port fork_generation fork_session <<<"$(handle_row "$fork_workstream_id")"
+IFS='|' read -r fork_provider_pid fork_provider_birth fork_observer_pid fork_observer_birth fork_observer_status fork_port fork_generation fork_session <<<"$(handle_row "$fork_workstream_id")"
 [[ "$fork_observer_status" == "ready" ]]
+[[ -n "$fork_provider_pid" && -n "$fork_provider_birth" ]]
 [[ -n "$fork_observer_birth" && -n "$fork_generation" ]]
 [[ "$fork_session" != "$recovered_session" ]]
 python3 - "$state_root/host.sqlite" "$fake_db" "$workstream_id" "$fork_workstream_id" <<'PY'
@@ -495,6 +527,7 @@ PY
 
 "$wsnav_bin" --state-root "$state_root" park "$fork_workstream_id"
 assert_pid_gone "$fork_observer_pid"
+assert_process_identity_gone "$fork_provider_pid" "$fork_provider_birth"
 assert_port_closed "$fork_port"
 fork_workstream_id=""
 
@@ -536,6 +569,7 @@ PY
 
 "$wsnav_bin" --state-root "$state_root" park "$workstream_id"
 assert_pid_gone "$recovered_observer_pid"
+assert_process_identity_gone "$recovered_provider_pid" "$recovered_provider_birth"
 assert_port_closed "$recovered_port"
 assert_final_state
 test -z "$(find "$state_root/run" -type s -name tmux.sock -print -quit 2>/dev/null)"

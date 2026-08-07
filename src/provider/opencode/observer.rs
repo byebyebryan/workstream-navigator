@@ -132,6 +132,7 @@ fn observer_target_matches(
     record.provider == crate::domain::ProviderKind::OpenCode
         && record.tmux_generation == context.generation
         && record.cwd == context.cwd
+        && record.provider_pid == Some(context.pane_pid)
         && record.process_birth.as_deref() == Some(context.provider_birth.as_str())
 }
 
@@ -193,6 +194,7 @@ fn supervise(
             return Ok(());
         };
         if current.tmux_generation != context.generation
+            || current.provider_pid != Some(context.pane_pid)
             || current.process_birth.as_deref() != Some(context.provider_birth.as_str())
             || !client
                 .health()
@@ -211,27 +213,14 @@ fn supervise(
         // keeps a Ready observer from surviving an endpoint that no longer
         // proves the exact root session identity.
         if last_status_poll.elapsed() >= STATUS_POLL_INTERVAL {
-            let evidence = ObserverEvidence {
-                context,
-                observer_pid: supervision.observer_pid,
-                observer_birth: supervision.observer_birth,
-            };
-            match poll_root_status(
+            if !poll_supervision_status(
                 registry,
-                &evidence,
+                supervision,
                 &mut candidate_message_id,
                 client,
                 &mut status_failures,
-            ) {
-                Ok(true) => {}
-                Ok(false) => {
-                    mark_unknown(registry, context);
-                    return Ok(());
-                }
-                Err(error) => {
-                    mark_unknown(registry, context);
-                    return Err(error);
-                }
+            )? {
+                return Ok(());
             }
             last_status_poll = Instant::now();
         }
@@ -252,15 +241,19 @@ fn supervise(
                                 observer_pid: supervision.observer_pid,
                                 observer_birth: supervision.observer_birth,
                             };
-                            if let Err(error) = apply_event(
+                            match apply_event(
                                 registry,
                                 &evidence,
                                 &event,
                                 &mut candidate_message_id,
                                 client,
                             ) {
-                                mark_unknown(registry, context);
-                                return Err(error);
+                                Ok(true) => {}
+                                Ok(false) => return Ok(()),
+                                Err(error) => {
+                                    mark_unknown(registry, context);
+                                    return Err(error);
+                                }
                             }
                         }
                         Ok(None) => {}
@@ -285,6 +278,38 @@ fn supervise(
         thread::sleep(Duration::from_millis(
             100_u64.saturating_mul(1_u64 << reconnect_failures),
         ));
+    }
+}
+
+fn poll_supervision_status(
+    registry: &mut HostRegistry,
+    supervision: &SupervisionEvidence<'_>,
+    candidate_message_id: &mut Option<String>,
+    client: &OpenCodeClient,
+    status_failures: &mut u8,
+) -> Result<bool, OpenCodeObserverError> {
+    let context = supervision.context;
+    let evidence = ObserverEvidence {
+        context,
+        observer_pid: supervision.observer_pid,
+        observer_birth: supervision.observer_birth,
+    };
+    match poll_root_status(
+        registry,
+        &evidence,
+        candidate_message_id,
+        client,
+        status_failures,
+    ) {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            mark_unknown(registry, context);
+            Ok(false)
+        }
+        Err(error) => {
+            mark_unknown(registry, context);
+            Err(error)
+        }
     }
 }
 
@@ -337,7 +362,7 @@ fn apply_event(
     event: &OpenCodeEvent,
     candidate_message_id: &mut Option<String>,
     client: &OpenCodeClient,
-) -> Result<(), OpenCodeObserverError> {
+) -> Result<bool, OpenCodeObserverError> {
     record_candidate(candidate_message_id, event);
     match &event.hint {
         Some(LifecycleHint::Working) => {
@@ -349,10 +374,11 @@ fn apply_event(
         Some(LifecycleHint::Started) => apply_hint(registry, evidence, LifecycleHint::Started)?,
         Some(LifecycleHint::Ended) => {
             apply_hint(registry, evidence, LifecycleHint::Ended)?;
+            return Ok(false);
         }
         Some(LifecycleHint::Settled { .. }) | None => {}
     }
-    Ok(())
+    Ok(true)
 }
 
 fn record_candidate(candidate_message_id: &mut Option<String>, event: &OpenCodeEvent) {

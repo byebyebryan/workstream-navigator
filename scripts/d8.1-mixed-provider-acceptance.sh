@@ -66,7 +66,7 @@ chmod 700 "$fake_bin/codex"
 
 cat >"$task_root/fake-opencode.py" <<'PY'
 #!/usr/bin/env python3
-import json, os, sys, time
+import json, os, signal, sys, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
@@ -109,6 +109,7 @@ session = None if args[0] == "serve" else args[args.index("--session") + 1]
 if session is not None:
     if session not in load()["sessions"]: raise SystemExit(3)
     print("MIXED_OPENCODE_NATIVE_SURFACE", flush=True)
+signal.signal(signal.SIGHUP, signal.SIG_IGN)
 ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()
 PY
 chmod 700 "$task_root/fake-opencode.py"

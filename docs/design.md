@@ -442,8 +442,11 @@ private server. A narrowly defined former short-ID form is read only for a
 Runtime record created by an older build; any other value is ambiguous and no
 tmux action is attempted.
 
-tmux owns live process persistence. SQLite owns metadata and recoverable
-Start/Fork state. The native provider owns session history.
+The private tmux server owns the terminal container, while SQLite owns bounded
+Runtime metadata, exact provider-process authority, and recoverable Start/Fork
+state. The native provider owns session history. A closed tmux server is not
+proof that its former pane process exited: a provider may survive terminal
+hangup or spin on a deleted PTY.
 
 Each live Runtime is a bounded tmux unit:
 
@@ -453,6 +456,17 @@ Runtime -> one private socket and server -> one session -> one window -> one pan
 
 No private runtime server contains a sibling Workstream. Parking or stopping a
 Runtime removes its server rather than leaving an empty session.
+
+Before releasing the launch barrier, WSNav proves that the sole pane process is
+the leader of its private process group and persists the exact leader PID plus
+process birth. Park first stops any provider-owned observer, then sends bounded
+TERM to that exact proven provider group while its leader identity is still
+corroborated. Surviving group members receive bounded KILL only after the same
+group/session ownership is revalidated. The private tmux server and artifacts
+are removed only after the complete group is gone. Observer sidecars remain a
+separate exact-PID ownership boundary and are never treated as provider-group
+leaders. Missing, changed, inaccessible, or malformed ownership evidence is
+never signaled; cleanup failure refuses the parked transition.
 The registry, not tmux's own session list, is the cross-Workstream catalog.
 This contains server failure, terminal sizing, attachment, and `tmux ls`
 visibility to one Workstream at a time.
@@ -498,8 +512,8 @@ revision.
 
 Focus, attach, snapshot, and refresh are not durable operations. Rename is a
 repeatable provider setting. Park and Resume reconcile through the authoritative
-Runtime record plus live tmux/process probes. Only Fork uses the
-CompoundOperation journal.
+Runtime record plus live tmux/process probes. Fork uses the CompoundOperation
+journal, as does OpenCode's non-idempotent blank-session creation boundary.
 
 Resume transactionally reserves one new Runtime generation before launching
 tmux or the selected native provider. The launcher must match that exact
@@ -508,10 +522,10 @@ prepared record, and another Resume is refused while the generation is
 record with the exact private tmux socket and process evidence instead of
 starting a second Runtime.
 
-The private pane initially runs a silent one-shot WSNav launch barrier. Its
-process birth is recorded against the prepared Runtime before the owning action
-releases the barrier. The barrier then `exec`s the selected provider TUI in
-place, preserving the same PID and birth token. For Codex, this prevents an
+The private pane initially runs a silent one-shot WSNav launch barrier. Its PID
+and process birth are recorded against the prepared Runtime before the owning
+action releases the barrier. The barrier then `exec`s the selected provider TUI
+in place, preserving the same PID and birth token. For Codex, this prevents an
 immediate `SessionStart` from racing ahead of its recorded hook authority;
 OpenCode additionally must satisfy the D8.1 endpoint and sidecar readiness
 barrier before attachment.
@@ -1385,9 +1399,11 @@ creation effect before a destination Workstream can safely exist.
   passive lifecycle hooks, and is selected only for WSNav launches.
 - Hook trust is a native Codex user decision. WSNav neither edits the trust
   store nor bypasses trust review.
-- Ephemeral App Server helpers use private stdio, a distinct process group,
+- Ephemeral provider helpers use private I/O, a distinct proven process group,
   bounded request and shutdown deadlines, and forced cleanup when graceful
-  shutdown fails.
+  shutdown fails. A helper that can cross a non-idempotent provider boundary
+  must also have bounded cleanup authority that survives abrupt loss of its
+  owning WSNav action; normal-return cleanup alone is insufficient.
 - Remote commands disable forwarding and use bounded fixed protocol entrypoints.
   Snapshot workstream metadata includes a bounded project display label derived
   only from the registered ProjectLocation repository basename; it never
@@ -1888,6 +1904,19 @@ postcondition checks are discarded and never enter WSNav state. A candidate
 that relies on title text, database recency, or a WSNav-supplied first prompt
 is rejected.
 
+`POST /session` is non-idempotent because OpenCode chooses the native session
+ID. After reserving an OpenCode Runtime generation, WSNav therefore persists a
+bounded `Start` operation while it is still `prepared`. The short-lived server
+must pass health first; immediately before the one POST, WSNav durably advances
+that exact Runtime/generation operation to `external_effect_started`. The
+returned blank root-session ID and ProviderBinding commit atomically with the
+operation. A failure before the durable boundary is terminally known-absent and
+may be retried in a new Runtime generation. A lost or rejected response after
+the boundary atomically records terminal `external_effect_unknown` while moving
+the exact Runtime and Workstream to recovery-required; it can never issue a
+second blank-session request. No raw response or provider content enters the
+journal.
+
 OpenCode-native creation or switching to another session inside an already
 managed TUI is unsupported unless the same evidence proves an exact active-TUI
 changed-binding claim. Ordinary global `session.created` events are not enough.
@@ -1958,13 +1987,15 @@ failure between provider and helper start, detach/reopen, and complete cleanup.
 OpenCode lost-Runtime recovery is narrower than Codex recovery. It is available
 only when WSNav already holds an exact OpenCode root-session binding and the
 recorded private tmux Runtime is conclusively missing. Recovery validates and
-stops only the recorded observer by PID plus process birth, removes only the
-matching prior-generation handle and private Runtime artifacts, reserves a new
-generation, allocates a new loopback endpoint and observer, and resumes that
-same bound session. A missing binding, live or ambiguous private Runtime,
-uncorroborated observer, or mismatched handle fails closed. WSNav never opens a
-native OpenCode picker, discovers another session, adopts an endpoint, or
-creates a blank replacement conversation during recovery.
+stops only the recorded observer and provider process by their respective PID
+plus process birth, removes only the matching prior-generation handle and
+private Runtime artifacts, reserves a new generation, allocates a new loopback
+endpoint and observer, and resumes that same bound session. The replacement is
+not launched until the exact prior provider identity is gone. A missing binding,
+live or ambiguous private Runtime, uncorroborated observer, provider-cleanup
+failure, or mismatched handle fails closed. WSNav never opens a native OpenCode
+picker, discovers another session, adopts an endpoint, or creates a blank
+replacement conversation during recovery.
 
 ### Multi-agent model
 

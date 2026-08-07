@@ -5932,7 +5932,7 @@ mod tests {
             .unwrap();
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
         registry
-            .record_runtime_process_birth(runtime.runtime_id, runtime.revision, "birth-a")
+            .record_runtime_process_identity(runtime.runtime_id, runtime.revision, 42, "birth-a")
             .unwrap();
         drop(registry);
 

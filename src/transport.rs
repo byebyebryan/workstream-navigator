@@ -180,18 +180,45 @@ impl SystemCommandRunner {
             command.process_group(0);
         }
         let mut child = command.spawn().map_err(TransportError::Launch)?;
-        let stdout = child.stdout.take().ok_or(TransportError::MissingPipe)?;
-        let stderr = child.stderr.take().ok_or(TransportError::MissingPipe)?;
+        #[cfg(unix)]
+        let process_group = match process_group_identity(child.id()) {
+            Ok(group) => group,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        let stdout = child.stdout.take().ok_or_else(|| {
+            let error = terminate_process_group(&mut child, process_group).err();
+            error.unwrap_or(TransportError::MissingPipe)
+        })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            let error = terminate_process_group(&mut child, process_group).err();
+            error.unwrap_or(TransportError::MissingPipe)
+        })?;
         let stdout_reader = thread::spawn(move || read_bounded(stdout, MAX_FRAME_BYTES));
         let stderr_reader = thread::spawn(move || read_bounded(stderr, MAX_STDERR_BYTES));
-        if let Some(mut stdin) = child.stdin.take() {
+        let write_result = if let Some(mut stdin) = child.stdin.take() {
             stdin
                 .write_all(&invocation.stdin)
-                .map_err(TransportError::Write)?;
+                .map_err(TransportError::Write)
         } else {
-            return Err(TransportError::MissingPipe);
+            Err(TransportError::MissingPipe)
+        };
+        let status = match write_result {
+            Ok(()) => wait_bounded(&mut child, timeout),
+            Err(error) => Err(error),
+        };
+        // Reap the direct child and terminate any descendants before joining
+        // readers. Every return path, including write and wait failures, owns
+        // one process group and must discharge that ownership here.
+        let cleanup = terminate_process_group(&mut child, process_group);
+        if cleanup.is_err() {
+            drop(stdout_reader);
+            drop(stderr_reader);
+            return Err(cleanup.expect_err("checked cleanup error"));
         }
-        let status = wait_bounded(&mut child, timeout);
         let stdout = stdout_reader
             .join()
             .map_err(|_| TransportError::ReaderPanicked)??;
@@ -788,7 +815,6 @@ fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<bool, TransportE
             return Ok(status.success());
         }
         if Instant::now() >= deadline {
-            terminate_process_group(child)?;
             return Err(TransportError::TimedOut);
         }
         thread::sleep(POLL_INTERVAL);
@@ -796,24 +822,171 @@ fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<bool, TransportE
 }
 
 #[cfg(unix)]
-fn terminate_process_group(child: &mut Child) -> Result<(), TransportError> {
+#[derive(Clone, Copy)]
+struct OwnedProcessGroup {
+    process_group_id: i32,
+    session_id: i32,
+}
+
+#[cfg(unix)]
+fn process_group_identity(pid: u32) -> Result<Option<OwnedProcessGroup>, TransportError> {
+    use nix::{errno::Errno, unistd::Pid};
+
+    let pid = i32::try_from(pid).map_err(|_| TransportError::InvalidPid)?;
+    let pid = Pid::from_raw(pid);
+    let process_group_id = match nix::unistd::getpgid(Some(pid)) {
+        Ok(value) => value.as_raw(),
+        Err(Errno::ESRCH) => return Ok(None),
+        Err(error) => {
+            return Err(TransportError::ProcessGroup(
+                std::io::Error::from_raw_os_error(error as i32),
+            ));
+        }
+    };
+    let session_id = nix::unistd::getsid(Some(pid)).map_err(|error| {
+        TransportError::ProcessGroup(std::io::Error::from_raw_os_error(error as i32))
+    })?;
+    Ok(Some(OwnedProcessGroup {
+        process_group_id,
+        session_id: session_id.as_raw(),
+    }))
+}
+
+#[cfg(unix)]
+fn process_group_has_member(group: OwnedProcessGroup) -> Result<bool, TransportError> {
+    let entries = std::fs::read_dir("/proc").map_err(|error| {
+        TransportError::ProcessGroup(std::io::Error::new(error.kind(), error.to_string()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            TransportError::ProcessGroup(std::io::Error::new(error.kind(), error.to_string()))
+        })?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(TransportError::ProcessGroup(std::io::Error::new(
+                    error.kind(),
+                    error.to_string(),
+                )));
+            }
+        };
+        let Some(close_paren) = stat.rfind(')') else {
+            return Err(TransportError::ProcessGroup(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "malformed process stat",
+            )));
+        };
+        let fields = stat
+            .get(close_paren + 2..)
+            .ok_or_else(|| {
+                TransportError::ProcessGroup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        let process_group_id = fields
+            .get(2)
+            .ok_or_else(|| {
+                TransportError::ProcessGroup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?
+            .parse::<i32>()
+            .map_err(|_| {
+                TransportError::ProcessGroup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?;
+        let session_id = fields
+            .get(3)
+            .ok_or_else(|| {
+                TransportError::ProcessGroup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?
+            .parse::<i32>()
+            .map_err(|_| {
+                TransportError::ProcessGroup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?;
+        if process_group_id == group.process_group_id && session_id == group.session_id {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn terminate_process_group(
+    child: &mut Child,
+    process_group: Option<OwnedProcessGroup>,
+) -> Result<(), TransportError> {
     use nix::{
         sys::signal::{Signal, killpg},
         unistd::Pid,
     };
 
-    let process_group = i32::try_from(child.id()).map_err(|_| TransportError::InvalidPid)?;
-    if killpg(Pid::from_raw(process_group), Signal::SIGKILL).is_err()
-        && child.try_wait().map_err(TransportError::Wait)?.is_none()
-    {
-        child.kill().map_err(TransportError::Kill)?;
-    }
+    let (signal_error, group_probe_error) = if let Some(group) = process_group {
+        match process_group_has_member(group) {
+            Ok(true) => (
+                Some(killpg(
+                    Pid::from_raw(group.process_group_id),
+                    Signal::SIGKILL,
+                )),
+                None,
+            ),
+            Ok(false) => (None, None),
+            Err(error) => (None, Some(error)),
+        }
+    } else {
+        (None, None)
+    };
+    let direct_error = if child.try_wait().map_err(TransportError::Wait)?.is_none() {
+        // `Child` is exact direct-process authority even when the captured
+        // group has become empty or changed unexpectedly. Keep cleanup
+        // finite instead of entering an unbounded wait on that process.
+        child.kill().err()
+    } else {
+        None
+    };
     child.wait().map_err(TransportError::Wait)?;
+    if let Some(error) = direct_error {
+        return Err(TransportError::Kill(error));
+    }
+    if let Some(error) = signal_error.and_then(Result::err) {
+        if error == nix::errno::Errno::ESRCH {
+            return group_probe_error.map_or(Ok(()), Err);
+        }
+        return Err(TransportError::Kill(std::io::Error::from_raw_os_error(
+            error as i32,
+        )));
+    }
+    if let Some(error) = group_probe_error {
+        return Err(error);
+    }
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn terminate_process_group(child: &mut Child) -> Result<(), TransportError> {
+fn terminate_process_group(
+    child: &mut Child,
+    _process_group: Option<()>,
+) -> Result<(), TransportError> {
     if child.try_wait().map_err(TransportError::Wait)?.is_none() {
         child.kill().map_err(TransportError::Kill)?;
     }
@@ -861,6 +1034,8 @@ pub enum TransportError {
     Kill(std::io::Error),
     #[error("host command exposed an invalid process ID")]
     InvalidPid,
+    #[error("could not verify host command process-group ownership")]
+    ProcessGroup(std::io::Error),
     #[error("host command did not expose an expected pipe")]
     MissingPipe,
     #[error("host output reader failed")]
@@ -1052,6 +1227,52 @@ mod tests {
 
         assert!(matches!(result, Err(TransportError::TimedOut)));
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn successful_host_command_does_not_leave_a_descendant_holding_transport_pipes() {
+        use std::{fs, path::Path, thread};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let pid_path = temporary.path().join("descendant.pid");
+        let result = SystemCommandRunner::run_with_timeout(
+            &CommandInvocation {
+                program: "sh".into(),
+                arguments: vec![
+                    "-c".into(),
+                    format!(
+                        "sleep 30 & echo $! > '{}'",
+                        pid_path.to_string_lossy().replace('\'', "'\\''")
+                    )
+                    .into(),
+                ],
+                stdin: Vec::new(),
+                timeout: CONTROL_TIMEOUT,
+            },
+            Duration::from_secs(2),
+        )
+        .unwrap();
+        assert!(result.success);
+
+        let pid = (0..100)
+            .find_map(|_| {
+                fs::read_to_string(&pid_path)
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u32>().ok())
+                    .or_else(|| {
+                        thread::sleep(Duration::from_millis(10));
+                        None
+                    })
+            })
+            .expect("fake descendant wrote its PID");
+        for _ in 0..100 {
+            if !Path::new(&format!("/proc/{pid}")).exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("owned descendant {pid} survived process-group cleanup");
     }
 
     #[test]

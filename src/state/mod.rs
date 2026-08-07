@@ -27,7 +27,7 @@ use crate::provider::names::NameState;
 /// The newest host-registry schema this build can open or create.
 ///
 /// This is safe release-probe metadata; it is not a host-state observation.
-pub const HOST_SCHEMA_VERSION: i64 = 11;
+pub const HOST_SCHEMA_VERSION: i64 = 12;
 const CLIENT_SCHEMA_VERSION: i64 = 5;
 const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
@@ -91,6 +91,7 @@ const HOST_SCHEMA_SQL: &str = "
         tmux_generation TEXT NOT NULL,
         tmux_session TEXT NOT NULL,
         cwd TEXT NOT NULL,
+        provider_pid INTEGER,
         process_birth TEXT,
         lifecycle TEXT NOT NULL,
         revision INTEGER NOT NULL CHECK (revision > 0)
@@ -350,6 +351,25 @@ pub struct ForkPreparation {
     pub newly_prepared: bool,
 }
 
+/// The durable journal for one exact, non-idempotent `OpenCode` blank-session
+/// creation. The operation is keyed by Runtime ID plus Runtime generation;
+/// it never stores the provider response beyond the bounded native session ID
+/// needed to launch and corroborate that same session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenCodeSessionCreationOperation {
+    pub operation: CompoundOperation,
+    pub runtime_id: RuntimeId,
+    pub workstream_id: WorkstreamId,
+    pub runtime_generation: String,
+    pub native_session_id: Option<ProviderSessionId>,
+}
+
+const OPENCODE_SESSION_CREATION_UNKNOWN_CODE: &str =
+    "opencode_session_creation_external_effect_unknown";
+const OPENCODE_SESSION_CREATION_CLEANUP_UNKNOWN_CODE: &str =
+    "opencode_session_creation_cleanup_unknown";
+const OPENCODE_SESSION_CREATION_PLAN_SCHEMA_VERSION: u8 = 1;
+
 /// Bounded operator-visible state for one unresolved creation operation.
 ///
 /// Request keys, project paths, provider identifiers, and raw effect evidence
@@ -485,6 +505,55 @@ impl PersistedForkPlan {
     }
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PersistedOpenCodeSessionCreationPlan {
+    schema_version: u8,
+    provider: ProviderKind,
+    runtime_id: RuntimeId,
+    workstream_id: WorkstreamId,
+    runtime_generation: String,
+    #[serde(default)]
+    native_session_id: Option<ProviderSessionId>,
+}
+
+impl PersistedOpenCodeSessionCreationPlan {
+    fn encode(&self) -> Result<String, StateError> {
+        serde_json::to_string(self).map_err(StateError::OpenCodeSessionCreationPlanEncoding)
+    }
+
+    fn decode(value: Option<&str>) -> Result<Self, StateError> {
+        let value = value.ok_or(StateError::MissingOpenCodeSessionCreationPlan)?;
+        let plan: Self =
+            serde_json::from_str(value).map_err(StateError::InvalidOpenCodeSessionCreationPlan)?;
+        if plan.schema_version != OPENCODE_SESSION_CREATION_PLAN_SCHEMA_VERSION
+            || plan.provider != ProviderKind::OpenCode
+            || plan.runtime_id.as_uuid() == Uuid::nil()
+            || plan.workstream_id.as_uuid() == Uuid::nil()
+        {
+            return Err(StateError::InvalidOpenCodeSessionCreationPlanShape);
+        }
+        validate_registry_text("runtime generation", &plan.runtime_generation)?;
+        if plan
+            .native_session_id
+            .as_ref()
+            .is_some_and(|session| session.provider() != ProviderKind::OpenCode)
+        {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+        Ok(plan)
+    }
+
+    fn public_plan(&self, operation: CompoundOperation) -> OpenCodeSessionCreationOperation {
+        OpenCodeSessionCreationOperation {
+            operation,
+            runtime_id: self.runtime_id,
+            workstream_id: self.workstream_id,
+            runtime_generation: self.runtime_generation.clone(),
+            native_session_id: self.native_session_id.clone(),
+        }
+    }
+}
+
 /// The persisted record that makes one native tmux process recoverable.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RuntimeRecord {
@@ -494,6 +563,7 @@ pub struct RuntimeRecord {
     pub tmux_generation: String,
     pub tmux_session: String,
     pub cwd: PathBuf,
+    pub provider_pid: Option<u32>,
     pub process_birth: Option<String>,
     pub status: RuntimeStatus,
     pub revision: Revision,
@@ -511,6 +581,11 @@ pub struct ProviderBinding {
     pub name_state: NameState,
     pub predecessor_native_session_id: Option<ProviderSessionId>,
     pub predecessor_effective_name: Option<String>,
+    /// The private Runtime generation in which this native session was
+    /// corroborated. A binding from an older generation is retained for
+    /// exact Codex resume, but cannot authorize lifecycle or metadata writes
+    /// until the matching `SessionStart` rotates it to the current generation.
+    pub runtime_generation: String,
     pub revision: Revision,
 }
 
@@ -1631,7 +1706,7 @@ impl HostRegistry {
         }
         let current: Option<RuntimeRecord> = transaction
             .query_row(
-                "SELECT runtime_id, provider, tmux_generation, tmux_session, cwd, process_birth, lifecycle, revision
+                "SELECT runtime_id, provider, tmux_generation, tmux_session, cwd, provider_pid, process_birth, lifecycle, revision
                  FROM runtimes WHERE workstream_id = ?1",
                 [workstream_id.to_string()],
                 |row| row_to_runtime(row, workstream_id),
@@ -1653,6 +1728,7 @@ impl HostRegistry {
                 tmux_generation: generation,
                 tmux_session: format!("wsnav-{}", current.runtime_id),
                 cwd: PathBuf::from(&project_root),
+                provider_pid: None,
                 process_birth: None,
                 status: RuntimeStatus::Starting,
                 revision: current.revision.next(),
@@ -1661,7 +1737,7 @@ impl HostRegistry {
             transaction
                 .execute(
                     "UPDATE runtimes SET tmux_generation = ?1, tmux_session = ?2, cwd = ?3,
-                     process_birth = NULL, lifecycle = 'starting', revision = ?4
+                     provider_pid = NULL, process_birth = NULL, lifecycle = 'starting', revision = ?4
                      WHERE runtime_id = ?5 AND revision = ?6",
                     params![
                         next.tmux_generation,
@@ -1683,6 +1759,7 @@ impl HostRegistry {
                 tmux_generation: generation,
                 tmux_session: format!("wsnav-{runtime_id}"),
                 cwd: PathBuf::from(project_root),
+                provider_pid: None,
                 process_birth: None,
                 status: RuntimeStatus::Starting,
                 revision: Revision::INITIAL,
@@ -1691,8 +1768,8 @@ impl HostRegistry {
                 .execute(
                     "INSERT INTO runtimes (
                     runtime_id, workstream_id, provider, tmux_generation, tmux_session,
-                    cwd, process_birth, lifecycle, revision
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 'starting', 1)",
+                    cwd, provider_pid, process_birth, lifecycle, revision
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, 'starting', 1)",
                     params![
                         record.runtime_id.to_string(),
                         workstream_id.to_string(),
@@ -1766,7 +1843,7 @@ impl HostRegistry {
         }
         let current: RuntimeRecord = transaction
             .query_row(
-                "SELECT runtime_id, provider, tmux_generation, tmux_session, cwd, process_birth, lifecycle, revision
+                "SELECT runtime_id, provider, tmux_generation, tmux_session, cwd, provider_pid, process_birth, lifecycle, revision
                  FROM runtimes WHERE workstream_id = ?1 AND lifecycle = 'unknown'",
                 [workstream_id.to_string()],
                 |row| row_to_runtime(row, workstream_id),
@@ -1781,6 +1858,7 @@ impl HostRegistry {
             tmux_generation: Uuid::new_v4().to_string(),
             tmux_session: format!("wsnav-{}", current.runtime_id),
             cwd: PathBuf::from(project_root),
+            provider_pid: None,
             process_birth: None,
             status: RuntimeStatus::Starting,
             revision: current.revision.next(),
@@ -1789,7 +1867,7 @@ impl HostRegistry {
         let changed = transaction
             .execute(
                 "UPDATE runtimes SET tmux_generation = ?1, tmux_session = ?2, cwd = ?3,
-                 process_birth = NULL, lifecycle = 'starting', revision = ?4
+                 provider_pid = NULL, process_birth = NULL, lifecycle = 'starting', revision = ?4
                  WHERE runtime_id = ?5 AND revision = ?6 AND lifecycle = 'unknown'",
                 params![
                     next.tmux_generation,
@@ -1832,7 +1910,7 @@ impl HostRegistry {
         let runtime = self
             .connection
             .query_row(
-            "SELECT runtime_id, provider, tmux_generation, tmux_session, cwd, process_birth, lifecycle, revision
+            "SELECT runtime_id, provider, tmux_generation, tmux_session, cwd, provider_pid, process_birth, lifecycle, revision
                  FROM runtimes WHERE workstream_id = ?1",
                 [workstream_id.to_string()],
                 |row| row_to_runtime(row, workstream_id),
@@ -1877,7 +1955,7 @@ impl HostRegistry {
             .connection
             .query_row(
                 "SELECT workstream_id, provider, tmux_generation, tmux_session, cwd,
-                        process_birth, lifecycle, revision
+                        provider_pid, process_birth, lifecycle, revision
                  FROM runtimes WHERE runtime_id = ?1",
                 [runtime_id.to_string()],
                 |row| {
@@ -1912,10 +1990,10 @@ impl HostRegistry {
             .connection
             .prepare(
                 "SELECT runtime_id, workstream_id, tmux_generation, tmux_session,
-                        provider, cwd, process_birth, lifecycle, revision
+                        provider, cwd, provider_pid, process_birth, lifecycle, revision
                  FROM runtimes
                  WHERE lifecycle IN ('starting', 'idle', 'working', 'attention')
-                   AND process_birth IS NOT NULL",
+                   AND provider_pid IS NOT NULL AND process_birth IS NOT NULL",
             )
             .map_err(StateError::Sqlite)?;
         statement
@@ -1926,9 +2004,10 @@ impl HostRegistry {
                 let tmux_session: String = row.get(3)?;
                 let provider: String = row.get(4)?;
                 let cwd: String = row.get(5)?;
-                let process_birth: Option<String> = row.get(6)?;
-                let lifecycle: String = row.get(7)?;
-                let revision: i64 = row.get(8)?;
+                let provider_pid: Option<i64> = row.get(6)?;
+                let process_birth: Option<String> = row.get(7)?;
+                let lifecycle: String = row.get(8)?;
+                let revision: i64 = row.get(9)?;
                 Ok((
                     runtime_id,
                     workstream_id,
@@ -1936,6 +2015,7 @@ impl HostRegistry {
                     tmux_session,
                     provider,
                     cwd,
+                    provider_pid,
                     process_birth,
                     lifecycle,
                     revision,
@@ -1950,6 +2030,7 @@ impl HostRegistry {
                     tmux_session,
                     provider,
                     cwd,
+                    provider_pid,
                     process_birth,
                     lifecycle,
                     revision,
@@ -1965,6 +2046,13 @@ impl HostRegistry {
                     tmux_generation,
                     tmux_session,
                     cwd: PathBuf::from(cwd),
+                    provider_pid: provider_pid
+                        .map(|pid| {
+                            u32::try_from(pid).map_err(|_| {
+                                StateError::InvalidPersistedValue("provider PID".to_owned())
+                            })
+                        })
+                        .transpose()?,
                     process_birth,
                     status: runtime_status_from_text(&lifecycle)?,
                     revision: Revision::try_from(revision)?,
@@ -2216,11 +2304,22 @@ impl HostRegistry {
         let provider = provider_kind_from_text(&base.provider)?;
         let revision = Revision::try_from(base.revision)?;
         let runtime = self.runtime_for_workstream(workstream_id)?;
-        let binding = runtime
-            .as_ref()
-            .map(|runtime| self.binding_for_runtime(runtime.runtime_id))
-            .transpose()?
-            .flatten();
+        let binding = match runtime.as_ref() {
+            None => None,
+            Some(runtime) => match self.binding_for_runtime(runtime.runtime_id) {
+                Ok(binding) => binding,
+                // A resumed Runtime deliberately retains its old exact
+                // binding until the matching SessionStart corroborates the
+                // new generation. Do not project that stale binding into a
+                // snapshot while the Runtime is still starting.
+                Err(StateError::HookEvidenceMismatch)
+                    if runtime.status == RuntimeStatus::Starting =>
+                {
+                    None
+                }
+                Err(error) => return Err(error),
+            },
+        };
         let attention = self.attention(workstream_id)?;
         if attention
             .as_ref()
@@ -2352,7 +2451,7 @@ impl HostRegistry {
             .connection
             .unchecked_transaction()
             .map_err(StateError::Sqlite)?;
-        let binding = load_binding(&transaction, runtime_id)?;
+        let binding = load_current_binding(&transaction, runtime_id)?;
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(binding)
     }
@@ -2395,61 +2494,13 @@ impl HostRegistry {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
-        let (provider, generation, lifecycle): (String, String, String) = transaction
-            .query_row(
-                "SELECT provider, tmux_generation, lifecycle FROM runtimes WHERE runtime_id = ?1",
-                [runtime_id.to_string()],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(StateError::Sqlite)?
-            .ok_or(StateError::UnknownRuntime(runtime_id))?;
-        if provider_kind_from_text(&provider)? != ProviderKind::OpenCode
-            || generation != expected_generation
-            || lifecycle != "starting"
-        {
-            return Err(StateError::HookEvidenceMismatch);
-        }
-        let existing = load_binding(&transaction, runtime_id)?;
-        let binding = if let Some(existing) = existing {
-            if existing.provider != ProviderKind::OpenCode || existing.native_session_id != *session
-            {
-                return Err(StateError::ProviderIdentityMismatch);
-            }
-            let changed = transaction
-                .execute(
-                    "UPDATE provider_bindings SET runtime_generation = ?1,
-                        start_source = ?2, revision = revision + 1
-                     WHERE runtime_id = ?3 AND runtime_generation != ?1",
-                    params![expected_generation, start_source, runtime_id.to_string()],
-                )
-                .map_err(StateError::Sqlite)?;
-            if changed == 0 {
-                existing
-            } else {
-                load_binding(&transaction, runtime_id)?.ok_or(StateError::ConcurrentWrite)?
-            }
-        } else {
-            transaction
-                .execute(
-                    "INSERT INTO provider_bindings (
-                        binding_id, runtime_id, provider, native_session_id, start_source,
-                        last_settled_turn_id, observed_thread_name, name_state,
-                        name_observed_at, predecessor_native_session_id,
-                        predecessor_effective_name, runtime_generation, revision
-                     ) VALUES (?1, ?2, 'opencode', ?3, ?4, NULL, NULL,
-                        'unavailable', NULL, NULL, NULL, ?5, 1)",
-                    params![
-                        Uuid::new_v4().to_string(),
-                        runtime_id.to_string(),
-                        session.native_id(),
-                        start_source,
-                        expected_generation,
-                    ],
-                )
-                .map_err(StateError::Sqlite)?;
-            load_binding(&transaction, runtime_id)?.ok_or(StateError::ConcurrentWrite)?
-        };
+        let binding = bind_opencode_session_in_transaction(
+            &transaction,
+            runtime_id,
+            expected_generation,
+            session,
+            start_source,
+        )?;
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(binding)
     }
@@ -2492,6 +2543,9 @@ impl HostRegistry {
             load_binding(&transaction, runtime_id)?.ok_or(StateError::HookEvidenceMismatch)?;
         if binding.provider != ProviderKind::OpenCode || binding.native_session_id != *session {
             return Err(StateError::ProviderIdentityMismatch);
+        }
+        if binding.runtime_generation != expected_generation {
+            return Err(StateError::HookEvidenceMismatch);
         }
         transaction
             .execute(
@@ -2724,26 +2778,79 @@ impl HostRegistry {
         }
     }
 
-    /// Persists the exact private-pane process birth only while the Runtime is
-    /// prepared for its initial native lifecycle binding.
+    /// Persists the exact private-pane process identity while the Runtime is
+    /// prepared for its initial native lifecycle binding.  The PID and birth
+    /// token are one identity pair: callers must provide both, and a later
+    /// generation reservation clears both before launching again.
     ///
     /// # Errors
     ///
-    /// Returns an error when the runtime is stale, not starting, or the birth
-    /// token is invalid.
-    pub fn record_runtime_process_birth(
+    /// Returns an error when the PID or birth token is invalid, or when the
+    /// Runtime is stale or no longer in its prepared `starting` state.
+    pub fn record_runtime_process_identity(
         &mut self,
         runtime_id: RuntimeId,
         expected: Revision,
+        provider_pid: u32,
         process_birth: &str,
     ) -> Result<(), StateError> {
+        if provider_pid == 0 {
+            return Err(StateError::InvalidRegistryField("provider PID"));
+        }
         validate_registry_text("process birth", process_birth)?;
         let changed = self
             .connection
             .execute(
-                "UPDATE runtimes SET process_birth = ?1, revision = revision + 1
-                 WHERE runtime_id = ?2 AND lifecycle = 'starting' AND revision = ?3",
-                params![process_birth, runtime_id.to_string(), expected.value()],
+                "UPDATE runtimes SET provider_pid = ?1, process_birth = ?2,
+                    revision = revision + 1
+                 WHERE runtime_id = ?3 AND lifecycle = 'starting' AND revision = ?4",
+                params![
+                    i64::from(provider_pid),
+                    process_birth,
+                    runtime_id.to_string(),
+                    expected.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(StateError::ConcurrentWrite)
+        }
+    }
+
+    /// Repairs a schema-11 Runtime that has a persisted birth token but no
+    /// provider PID. The caller must have freshly probed the exact private
+    /// pane: the supplied birth must still match the durable record, the
+    /// Runtime must not be stopped, and the optimistic revision must be exact.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the identity is invalid, the Runtime is stale, or
+    /// the durable birth/lifecycle boundary is ambiguous.
+    pub fn backfill_runtime_provider_pid(
+        &mut self,
+        runtime_id: RuntimeId,
+        expected: Revision,
+        provider_pid: u32,
+        process_birth: &str,
+    ) -> Result<(), StateError> {
+        if provider_pid == 0 {
+            return Err(StateError::InvalidRegistryField("provider PID"));
+        }
+        validate_registry_text("process birth", process_birth)?;
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE runtimes SET provider_pid = ?1, revision = revision + 1
+                 WHERE runtime_id = ?2 AND provider_pid IS NULL
+                   AND process_birth = ?3 AND lifecycle != 'stopped' AND revision = ?4",
+                params![
+                    i64::from(provider_pid),
+                    runtime_id.to_string(),
+                    process_birth,
+                    expected.value(),
+                ],
             )
             .map_err(StateError::Sqlite)?;
         if changed == 1 {
@@ -2820,23 +2927,36 @@ impl HostRegistry {
             }
             None => (None, "known_empty"),
         };
-        let changed = self
+        let transaction = self
             .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let generation: String = transaction
+            .query_row(
+                "SELECT tmux_generation FROM runtimes WHERE runtime_id = ?1",
+                [runtime_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::UnknownRuntime(runtime_id))?;
+        let changed = transaction
             .execute(
                 "UPDATE provider_bindings SET observed_thread_name = ?1, name_state = ?2,
              revision = revision + 1 WHERE runtime_id = ?3 AND provider = ?4
-             AND native_session_id = ?5",
+             AND native_session_id = ?5 AND runtime_generation = ?6",
                 params![
                     name,
                     name_state,
                     runtime_id.to_string(),
                     native_session_id.provider().as_str(),
                     native_session_id.native_id(),
+                    generation,
                 ],
             )
             .map_err(StateError::Sqlite)?;
         if changed == 1 {
-            Ok(())
+            transaction.commit().map_err(StateError::Sqlite)
         } else {
             Err(StateError::HookEvidenceMismatch)
         }
@@ -3054,53 +3174,25 @@ impl HostRegistry {
         }
         let observed_session =
             ProviderSessionId::new(provider, observation.native_session_id.clone())?;
-        match observation.event {
-            LifecycleEvent::SessionStart => apply_session_start(
-                &transaction,
-                &SessionStartContext {
-                    runtime_id,
-                    provider,
-                    runtime_status: &runtime.4,
-                    runtime_revision: revision,
-                    generation,
-                    workstream_id,
-                    workstream_lifecycle: workstream_lifecycle_from_text(&runtime.7)?,
-                },
+        apply_lifecycle_event(
+            LifecycleEventContext {
+                transaction: &transaction,
+                runtime_id,
+                provider,
+                runtime_status: &runtime.4,
+                runtime_revision: revision,
+                generation,
+                workstream_id,
+                workstream_lifecycle: workstream_lifecycle_from_text(&runtime.7)?,
                 existing,
-                observed_session.native_id(),
-                observation.source.as_deref(),
-            )?,
-            LifecycleEvent::UserPromptSubmit => {
-                require_matching_binding(existing.as_ref(), &observation.native_session_id)?;
-                update_runtime_lifecycle(&transaction, runtime_id, revision, "working")?;
-            }
-            LifecycleEvent::Stop => {
-                let turn_id = observation
-                    .turn_id
-                    .ok_or(StateError::HookEvidenceMismatch)?;
-                require_matching_binding(existing.as_ref(), &observation.native_session_id)?;
-                let changed = transaction.execute(
-                    "UPDATE provider_bindings SET last_settled_turn_id = ?1, revision = revision + 1
-                     WHERE runtime_id = ?2", params![turn_id, runtime_id.to_string()]
-                ).map_err(StateError::Sqlite)?;
-                if changed != 1 {
-                    return Err(StateError::ConcurrentWrite);
-                }
-                update_runtime_lifecycle(&transaction, runtime_id, revision, "attention")?;
-                mark_result_attention_in_transaction(
-                    &transaction,
-                    workstream_id,
-                    observed_session,
-                    turn_id,
-                )?;
-            }
-            LifecycleEvent::SessionEnd => {
-                require_matching_binding(existing.as_ref(), &observation.native_session_id)?;
-                update_runtime_lifecycle(&transaction, runtime_id, revision, "stopped")?;
-            }
-        }
+                observed_session,
+            },
+            &observation,
+        )?;
         touch_workstream(&transaction, &runtime.0, activity_at_millis)?;
-        transaction.commit().map_err(StateError::Sqlite)
+        let result = transaction.commit().map_err(StateError::Sqlite);
+        drop(observation);
+        result
     }
 
     /// Creates a durable operation or returns the operation for the request key.
@@ -3177,6 +3269,365 @@ impl HostRegistry {
         };
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok((operation, inserted == 1))
+    }
+
+    /// Journals one exact `OpenCode` blank-session creation before any
+    /// provider request is made. Reusing the same Runtime generation returns
+    /// the original operation and never creates a second journal entry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Runtime is unknown, not an `OpenCode`
+    /// `starting` Runtime, stale for the supplied generation, or state cannot
+    /// be committed.
+    pub fn prepare_opencode_session_creation(
+        &mut self,
+        runtime_id: RuntimeId,
+        expected_generation: &str,
+    ) -> Result<OpenCodeSessionCreationOperation, StateError> {
+        validate_registry_text("runtime generation", expected_generation)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let (workstream_id, provider, generation, lifecycle): (String, String, String, String) =
+            transaction
+                .query_row(
+                    "SELECT workstream_id, provider, tmux_generation, lifecycle
+                     FROM runtimes WHERE runtime_id = ?1",
+                    [runtime_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()
+                .map_err(StateError::Sqlite)?
+                .ok_or(StateError::UnknownRuntime(runtime_id))?;
+        if provider_kind_from_text(&provider)? != ProviderKind::OpenCode
+            || generation != expected_generation
+            || lifecycle != "starting"
+        {
+            return Err(StateError::HookEvidenceMismatch);
+        }
+        let workstream_id = Uuid::parse_str(&workstream_id)
+            .map(WorkstreamId::from)
+            .map_err(StateError::InvalidPersistedUuid)?;
+        let request_key = opencode_session_creation_request_key(runtime_id, expected_generation);
+        if let Some(operation) = load_operation_by_request_key(&transaction, &request_key)? {
+            let plan = PersistedOpenCodeSessionCreationPlan::decode(
+                operation.effect_watermark.as_deref(),
+            )?;
+            validate_opencode_session_creation_operation_identity(
+                &operation,
+                &plan,
+                runtime_id,
+                workstream_id,
+                expected_generation,
+            )?;
+            transaction.commit().map_err(StateError::Sqlite)?;
+            return Ok(plan.public_plan(operation));
+        }
+        let plan = PersistedOpenCodeSessionCreationPlan {
+            schema_version: OPENCODE_SESSION_CREATION_PLAN_SCHEMA_VERSION,
+            provider: ProviderKind::OpenCode,
+            runtime_id,
+            workstream_id,
+            runtime_generation: expected_generation.to_owned(),
+            native_session_id: None,
+        };
+        let mut operation = CompoundOperation::new(
+            request_key,
+            OperationKind::Start,
+            serde_json::json!({
+                "runtime_id": runtime_id,
+                "runtime_generation": expected_generation,
+            })
+            .to_string(),
+        )?;
+        operation.effect_watermark = Some(plan.encode()?);
+        transaction
+            .execute(
+                "INSERT INTO compound_operations (
+                    operation_id, request_key, kind, phase, expected_revisions_json,
+                    effect_watermark, outcome_json, revision
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7)",
+                params![
+                    operation.id.to_string(),
+                    operation.request_key,
+                    operation_kind_text(operation.kind),
+                    operation_phase_text(operation.phase),
+                    operation.expected_revisions_json,
+                    operation.effect_watermark,
+                    operation.revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(plan.public_plan(operation))
+    }
+
+    /// Atomically marks the exact prepared operation immediately before the
+    /// provider's non-idempotent `POST /session` boundary.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation is stale, already crossed the
+    /// provider boundary, or the exact Runtime generation cannot be validated.
+    pub fn begin_opencode_session_creation(
+        &mut self,
+        prepared: &OpenCodeSessionCreationOperation,
+    ) -> Result<OpenCodeSessionCreationOperation, StateError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let (mut operation, plan) = load_exact_opencode_session_creation(&transaction, prepared)?;
+        if operation.phase != OperationPhase::Prepared || plan.native_session_id.is_some() {
+            return Err(StateError::OpenCodeSessionCreationUnavailable);
+        }
+        validate_opencode_session_creation_runtime(&transaction, &plan)?;
+        let effect_watermark = Some(plan.encode()?);
+        operation.transition(
+            OperationPhase::ExternalEffectStarted,
+            effect_watermark,
+            None,
+        )?;
+        update_operation_in_transaction(&transaction, &operation, prepared.operation.revision)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(plan.public_plan(operation))
+    }
+
+    /// Atomically commits the verified native session ID and the journal's
+    /// terminal `Committed` phase. The Runtime generation and operation
+    /// revision are checked in the same transaction as the binding insert.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session provider, operation, Runtime
+    /// generation, or optimistic revision does not match the prepared plan.
+    pub fn commit_opencode_session_creation(
+        &mut self,
+        prepared: &OpenCodeSessionCreationOperation,
+        session: &ProviderSessionId,
+    ) -> Result<OpenCodeSessionCreationOperation, StateError> {
+        if session.provider() != ProviderKind::OpenCode {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let (mut operation, mut plan) =
+            load_exact_opencode_session_creation(&transaction, prepared)?;
+        if operation.phase != OperationPhase::ExternalEffectStarted
+            || plan.native_session_id.is_some()
+        {
+            return Err(StateError::OpenCodeSessionCreationUnavailable);
+        }
+        validate_opencode_session_creation_runtime(&transaction, &plan)?;
+        bind_opencode_session_in_transaction(
+            &transaction,
+            plan.runtime_id,
+            &plan.runtime_generation,
+            session,
+            "new",
+        )?;
+        plan.native_session_id = Some(session.clone());
+        operation.transition(OperationPhase::Committed, Some(plan.encode()?), None)?;
+        update_operation_in_transaction(&transaction, &operation, prepared.operation.revision)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(plan.public_plan(operation))
+    }
+
+    /// Terminally fails an exact prepared operation before the provider
+    /// boundary. The bounded outcome code is diagnostic metadata only; it
+    /// never stores a provider error payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the outcome code is invalid, the operation is
+    /// stale or already crossed the boundary, or state cannot be committed.
+    pub fn fail_opencode_session_creation(
+        &mut self,
+        prepared: &OpenCodeSessionCreationOperation,
+        outcome_code: &str,
+    ) -> Result<OpenCodeSessionCreationOperation, StateError> {
+        validate_operation_outcome_code(outcome_code)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let (mut operation, plan) = load_exact_opencode_session_creation(&transaction, prepared)?;
+        if operation.phase != OperationPhase::Prepared {
+            return Err(StateError::OpenCodeSessionCreationUnavailable);
+        }
+        validate_opencode_session_creation_runtime(&transaction, &plan)?;
+        let outcome = serde_json::json!({"code": outcome_code}).to_string();
+        operation.transition(OperationPhase::Failed, Some(plan.encode()?), Some(outcome))?;
+        update_operation_in_transaction(&transaction, &operation, prepared.operation.revision)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(plan.public_plan(operation))
+    }
+
+    /// Terminally records that the crossed provider boundary is unknown. The
+    /// exact Starting Runtime is moved to `unknown`, its Workstream and
+    /// attention become recovery-required, and the operation is no longer
+    /// eligible for retry. All state changes commit in one `SQLite` transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation is stale, has not crossed the
+    /// provider boundary, or the exact Runtime transition cannot be committed.
+    pub fn mark_opencode_session_creation_unknown(
+        &mut self,
+        prepared: &OpenCodeSessionCreationOperation,
+    ) -> Result<OpenCodeSessionCreationOperation, StateError> {
+        self.mark_opencode_session_creation_recovery(
+            prepared,
+            OperationPhase::ExternalEffectStarted,
+            OPENCODE_SESSION_CREATION_UNKNOWN_CODE,
+        )
+    }
+
+    /// Terminally records that the short-lived provider helper could not be
+    /// cleaned up before the non-idempotent boundary. The exact Starting
+    /// Runtime is moved to `unknown` so cleanup ambiguity is never retryable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the prepared operation is stale or the exact
+    /// Runtime transition cannot be committed.
+    pub fn mark_opencode_session_creation_cleanup_unknown(
+        &mut self,
+        prepared: &OpenCodeSessionCreationOperation,
+    ) -> Result<OpenCodeSessionCreationOperation, StateError> {
+        self.mark_opencode_session_creation_recovery(
+            prepared,
+            OperationPhase::Prepared,
+            OPENCODE_SESSION_CREATION_CLEANUP_UNKNOWN_CODE,
+        )
+    }
+
+    fn mark_opencode_session_creation_recovery(
+        &mut self,
+        prepared: &OpenCodeSessionCreationOperation,
+        expected_phase: OperationPhase,
+        outcome_code: &str,
+    ) -> Result<OpenCodeSessionCreationOperation, StateError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let (mut operation, plan) = load_exact_opencode_session_creation(&transaction, prepared)?;
+        if operation.phase != expected_phase {
+            return Err(StateError::OpenCodeSessionCreationUnavailable);
+        }
+        validate_opencode_session_creation_runtime(&transaction, &plan)?;
+        let runtime_changed = transaction
+            .execute(
+                "UPDATE runtimes SET lifecycle = 'unknown', revision = revision + 1
+                 WHERE runtime_id = ?1 AND tmux_generation = ?2 AND lifecycle = 'starting'",
+                params![plan.runtime_id.to_string(), &plan.runtime_generation],
+            )
+            .map_err(StateError::Sqlite)?;
+        if runtime_changed != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        let activity_sequence = next_activity_sequence(&transaction)?;
+        let workstream_changed = transaction
+            .execute(
+                "UPDATE workstreams SET lifecycle = 'recovery_required',
+                 last_activity_sequence = ?1, revision = revision + 1
+                 WHERE workstream_id = ?2 AND lifecycle IN ('open', 'parked')",
+                params![activity_sequence, plan.workstream_id.to_string()],
+            )
+            .map_err(StateError::Sqlite)?;
+        if workstream_changed == 0 {
+            let lifecycle: String = transaction
+                .query_row(
+                    "SELECT lifecycle FROM workstreams WHERE workstream_id = ?1",
+                    [plan.workstream_id.to_string()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(StateError::Sqlite)?
+                .ok_or(StateError::UnknownOpenWorkstream(plan.workstream_id))?;
+            if lifecycle != "recovery_required" {
+                return Err(StateError::ConcurrentWrite);
+            }
+        }
+        ensure_recovery_attention_in_transaction(&transaction, plan.workstream_id)?;
+        operation.transition(
+            OperationPhase::Failed,
+            Some(plan.encode()?),
+            Some(serde_json::json!({"code": outcome_code}).to_string()),
+        )?;
+        update_operation_in_transaction(&transaction, &operation, prepared.operation.revision)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(plan.public_plan(operation))
+    }
+
+    /// Reads the exact journal for one Runtime generation without adopting a
+    /// different operation or provider session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generation is invalid, journal identity is
+    /// inconsistent, or state cannot be read.
+    pub fn opencode_session_creation_for_runtime(
+        &self,
+        runtime_id: RuntimeId,
+        expected_generation: &str,
+    ) -> Result<Option<OpenCodeSessionCreationOperation>, StateError> {
+        validate_registry_text("runtime generation", expected_generation)?;
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(StateError::Sqlite)?;
+        let request_key = opencode_session_creation_request_key(runtime_id, expected_generation);
+        let operation = load_operation_by_request_key(&transaction, &request_key)?;
+        let result = operation
+            .map(
+                |operation| -> Result<OpenCodeSessionCreationOperation, StateError> {
+                    let plan = PersistedOpenCodeSessionCreationPlan::decode(
+                        operation.effect_watermark.as_deref(),
+                    )?;
+                    validate_opencode_session_creation_operation_identity(
+                        &operation,
+                        &plan,
+                        runtime_id,
+                        runtime_workstream_id(&transaction, runtime_id)?,
+                        expected_generation,
+                    )?;
+                    Ok(plan.public_plan(operation))
+                },
+            )
+            .transpose()?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(result)
+    }
+
+    /// Returns whether an exact Runtime generation has crossed the blank
+    /// session provider boundary and still needs resolution. A `Prepared`
+    /// operation has not crossed the boundary and is safe to fail/retry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the generation is invalid, journal identity is
+    /// inconsistent, or state cannot be read.
+    pub fn has_unresolved_opencode_session_creation_effect(
+        &self,
+        runtime_id: RuntimeId,
+        expected_generation: &str,
+    ) -> Result<bool, StateError> {
+        Ok(self
+            .opencode_session_creation_for_runtime(runtime_id, expected_generation)?
+            .is_some_and(|operation| {
+                matches!(
+                    operation.operation.phase,
+                    OperationPhase::ExternalEffectStarted
+                        | OperationPhase::AwaitingReconciliation
+                        | OperationPhase::RecoveryRequired
+                )
+            }))
     }
 
     /// Advances an operation with an optimistic revision guard.
@@ -3499,7 +3950,9 @@ fn load_fork_source(
                     project_locations.repository_path,
                     workstreams.archived_at_millis,
                     runtimes.runtime_id, runtimes.provider, runtimes.lifecycle,
+                    runtimes.tmux_generation,
                     provider_bindings.provider, provider_bindings.native_session_id,
+                    provider_bindings.runtime_generation,
                     provider_bindings.last_settled_turn_id,
                     provider_bindings.observed_thread_name
              FROM workstreams
@@ -3522,6 +3975,8 @@ fn load_fork_source(
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, Option<String>>(10)?,
                     row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
+                    row.get::<_, Option<String>>(13)?,
                 ))
             },
         )
@@ -3538,10 +3993,19 @@ fn load_fork_source(
         .map(provider_kind_from_text)
         .transpose()?;
     let binding_provider = source
-        .8
+        .9
         .as_deref()
         .map(provider_kind_from_text)
         .transpose()?;
+    if let (Some(runtime_generation), Some(binding_generation)) =
+        (source.8.as_deref(), source.11.as_deref())
+    {
+        validate_registry_text("runtime generation", runtime_generation)?;
+        validate_registry_text("runtime generation", binding_generation)?;
+        if runtime_generation != binding_generation {
+            return Err(StateError::HookEvidenceMismatch);
+        }
+    }
     if runtime_provider.is_some_and(|value| value != provider)
         || binding_provider.is_some_and(|value| value != provider)
     {
@@ -3562,9 +4026,9 @@ fn load_fork_source(
             .map_err(StateError::InvalidPersistedUuid)?
             .map(RuntimeId::from),
         runtime_lifecycle: source.7,
-        native_session_id: source.9,
-        last_settled_turn_id: source.10,
-        native_name: source.11,
+        native_session_id: source.10,
+        last_settled_turn_id: source.12,
+        native_name: source.13,
     })
 }
 
@@ -3632,8 +4096,8 @@ fn insert_pending_fork_runtime(
         .execute(
             "INSERT INTO runtimes (
                 runtime_id, workstream_id, provider, tmux_generation, tmux_session,
-                cwd, process_birth, lifecycle, revision
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, 'stopped', 1)",
+                cwd, provider_pid, process_birth, lifecycle, revision
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, 'stopped', 1)",
             params![
                 runtime_id.to_string(),
                 plan.workstream_id.to_string(),
@@ -4393,14 +4857,20 @@ fn migrate_host_schema(connection: &mut Connection, _state_root: &Path) -> Resul
         transaction.commit().map_err(StateError::Sqlite)?;
         migrate_host_schema_9_to_10(connection)?;
         migrate_host_schema_10_to_11(connection)?;
+        migrate_host_schema_11_to_12(connection)?;
         return Ok(());
     }
     if current == 9 {
         migrate_host_schema_9_to_10(connection)?;
-        return migrate_host_schema_10_to_11(connection);
+        migrate_host_schema_10_to_11(connection)?;
+        return migrate_host_schema_11_to_12(connection);
     }
     if current == 10 {
-        return migrate_host_schema_10_to_11(connection);
+        migrate_host_schema_10_to_11(connection)?;
+        return migrate_host_schema_11_to_12(connection);
+    }
+    if current == 11 {
+        return migrate_host_schema_11_to_12(connection);
     }
     if current != 0 {
         return Err(StateError::HostStateResetRequired(current));
@@ -4575,6 +5045,31 @@ fn migrate_host_schema_10_to_11(connection: &mut Connection) -> Result<(), State
     transaction.commit().map_err(StateError::Sqlite)
 }
 
+fn migrate_host_schema_11_to_12(connection: &mut Connection) -> Result<(), StateError> {
+    let transaction = connection.transaction().map_err(StateError::Sqlite)?;
+    if let Some(existing_type) = table_column_type(&transaction, "runtimes", "provider_pid")? {
+        if !existing_type.eq_ignore_ascii_case("INTEGER") {
+            return Err(StateError::InvalidPersistedValue(
+                "Runtime provider PID column type".to_owned(),
+            ));
+        }
+    } else {
+        transaction
+            .execute("ALTER TABLE runtimes ADD COLUMN provider_pid INTEGER", [])
+            .map_err(StateError::Sqlite)?;
+    }
+    transaction
+        .execute("PRAGMA user_version = 12", [])
+        .map_err(StateError::Sqlite)?;
+    transaction
+        .execute(
+            "UPDATE host_identity SET schema_version = 12 WHERE singleton = 1",
+            [],
+        )
+        .map_err(StateError::Sqlite)?;
+    transaction.commit().map_err(StateError::Sqlite)
+}
+
 fn table_has_column(
     transaction: &rusqlite::Transaction<'_>,
     table: &str,
@@ -4589,6 +5084,27 @@ fn table_has_column(
         .collect::<Result<Vec<_>, _>>()
         .map_err(StateError::Sqlite)?;
     Ok(columns.iter().any(|value| value == column))
+}
+
+fn table_column_type(
+    transaction: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+) -> Result<Option<String>, StateError> {
+    let mut statement = transaction
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .map_err(StateError::Sqlite)?;
+    let mut rows = statement.query([]).map_err(StateError::Sqlite)?;
+    while let Some(row) = rows.next().map_err(StateError::Sqlite)? {
+        let name: String = row.get(1).map_err(StateError::Sqlite)?;
+        if name == column {
+            return row
+                .get::<_, String>(2)
+                .map(Some)
+                .map_err(StateError::Sqlite);
+        }
+    }
+    Ok(None)
 }
 
 fn migrate_client_schema(connection: &mut Connection) -> Result<(), StateError> {
@@ -4882,6 +5398,203 @@ fn load_operation_by_id(
     Ok(operation)
 }
 
+fn opencode_session_creation_request_key(runtime_id: RuntimeId, generation: &str) -> String {
+    format!("opencode-session:{runtime_id}:{generation}")
+}
+
+fn validate_opencode_session_creation_operation_identity(
+    operation: &CompoundOperation,
+    plan: &PersistedOpenCodeSessionCreationPlan,
+    runtime_id: RuntimeId,
+    workstream_id: WorkstreamId,
+    generation: &str,
+) -> Result<(), StateError> {
+    if operation.kind != OperationKind::Start
+        || operation.request_key != opencode_session_creation_request_key(runtime_id, generation)
+        || plan.runtime_id != runtime_id
+        || plan.workstream_id != workstream_id
+        || plan.runtime_generation != generation
+    {
+        return Err(StateError::OpenCodeSessionCreationUnavailable);
+    }
+    Ok(())
+}
+
+fn runtime_workstream_id(
+    transaction: &rusqlite::Transaction<'_>,
+    runtime_id: RuntimeId,
+) -> Result<WorkstreamId, StateError> {
+    let value: String = transaction
+        .query_row(
+            "SELECT workstream_id FROM runtimes WHERE runtime_id = ?1",
+            [runtime_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)?;
+    Uuid::parse_str(&value)
+        .map(WorkstreamId::from)
+        .map_err(StateError::InvalidPersistedUuid)
+}
+
+fn load_exact_opencode_session_creation(
+    transaction: &rusqlite::Transaction<'_>,
+    expected: &OpenCodeSessionCreationOperation,
+) -> Result<(CompoundOperation, PersistedOpenCodeSessionCreationPlan), StateError> {
+    let operation = load_operation_by_id(transaction, expected.operation.id)?
+        .ok_or(StateError::UnknownOperation(expected.operation.id))?;
+    if operation.revision != expected.operation.revision {
+        return Err(StateError::Domain(DomainError::RevisionConflict {
+            expected: expected.operation.revision,
+            current: operation.revision,
+        }));
+    }
+    let plan = PersistedOpenCodeSessionCreationPlan::decode(operation.effect_watermark.as_deref())?;
+    if operation != expected.operation
+        || plan.public_plan(operation.clone()) != *expected
+        || operation.kind != OperationKind::Start
+    {
+        return Err(StateError::OpenCodeSessionCreationUnavailable);
+    }
+    validate_opencode_session_creation_operation_identity(
+        &operation,
+        &plan,
+        expected.runtime_id,
+        expected.workstream_id,
+        &expected.runtime_generation,
+    )?;
+    Ok((operation, plan))
+}
+
+fn validate_opencode_session_creation_runtime(
+    transaction: &rusqlite::Transaction<'_>,
+    plan: &PersistedOpenCodeSessionCreationPlan,
+) -> Result<(), StateError> {
+    let (workstream_id, provider, generation, lifecycle): (String, String, String, String) =
+        transaction
+            .query_row(
+                "SELECT workstream_id, provider, tmux_generation, lifecycle
+                 FROM runtimes WHERE runtime_id = ?1",
+                [plan.runtime_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::UnknownRuntime(plan.runtime_id))?;
+    if provider_kind_from_text(&provider)? != ProviderKind::OpenCode
+        || generation != plan.runtime_generation
+        || lifecycle != "starting"
+    {
+        return Err(StateError::HookEvidenceMismatch);
+    }
+    let workstream_id = Uuid::parse_str(&workstream_id)
+        .map(WorkstreamId::from)
+        .map_err(StateError::InvalidPersistedUuid)?;
+    if workstream_id != plan.workstream_id {
+        return Err(StateError::ProviderIdentityMismatch);
+    }
+    Ok(())
+}
+
+fn update_operation_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    operation: &CompoundOperation,
+    expected_revision: Revision,
+) -> Result<(), StateError> {
+    let updated = transaction
+        .execute(
+            "UPDATE compound_operations
+             SET phase = ?1, effect_watermark = ?2, outcome_json = ?3, revision = ?4
+             WHERE operation_id = ?5 AND revision = ?6",
+            params![
+                operation_phase_text(operation.phase),
+                operation.effect_watermark,
+                operation.outcome_json,
+                operation.revision.value(),
+                operation.id.to_string(),
+                expected_revision.value(),
+            ],
+        )
+        .map_err(StateError::Sqlite)?;
+    if updated == 1 {
+        Ok(())
+    } else {
+        Err(StateError::ConcurrentWrite)
+    }
+}
+
+fn validate_operation_outcome_code(value: &str) -> Result<(), StateError> {
+    validate_registry_text("operation outcome", value)
+}
+
+fn bind_opencode_session_in_transaction(
+    transaction: &rusqlite::Transaction<'_>,
+    runtime_id: RuntimeId,
+    expected_generation: &str,
+    session: &ProviderSessionId,
+    start_source: &str,
+) -> Result<ProviderBinding, StateError> {
+    if session.provider() != ProviderKind::OpenCode || !matches!(start_source, "new" | "resume") {
+        return Err(StateError::ProviderIdentityMismatch);
+    }
+    validate_registry_text("runtime generation", expected_generation)?;
+    validate_registry_text("start source", start_source)?;
+    let (provider, generation, lifecycle): (String, String, String) = transaction
+        .query_row(
+            "SELECT provider, tmux_generation, lifecycle FROM runtimes WHERE runtime_id = ?1",
+            [runtime_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?
+        .ok_or(StateError::UnknownRuntime(runtime_id))?;
+    if provider_kind_from_text(&provider)? != ProviderKind::OpenCode
+        || generation != expected_generation
+        || lifecycle != "starting"
+    {
+        return Err(StateError::HookEvidenceMismatch);
+    }
+    let existing = load_binding(transaction, runtime_id)?;
+    let binding = if let Some(existing) = existing {
+        if existing.provider != ProviderKind::OpenCode || existing.native_session_id != *session {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+        let changed = transaction
+            .execute(
+                "UPDATE provider_bindings SET runtime_generation = ?1,
+                    start_source = ?2, revision = revision + 1
+                 WHERE runtime_id = ?3 AND runtime_generation != ?1",
+                params![expected_generation, start_source, runtime_id.to_string()],
+            )
+            .map_err(StateError::Sqlite)?;
+        if changed == 0 {
+            existing
+        } else {
+            load_binding(transaction, runtime_id)?.ok_or(StateError::ConcurrentWrite)?
+        }
+    } else {
+        transaction
+            .execute(
+                "INSERT INTO provider_bindings (
+                    binding_id, runtime_id, provider, native_session_id, start_source,
+                    last_settled_turn_id, observed_thread_name, name_state,
+                    name_observed_at, predecessor_native_session_id,
+                    predecessor_effective_name, runtime_generation, revision
+                 ) VALUES (?1, ?2, 'opencode', ?3, ?4, NULL, NULL,
+                    'unavailable', NULL, NULL, NULL, ?5, 1)",
+                params![
+                    Uuid::new_v4().to_string(),
+                    runtime_id.to_string(),
+                    session.native_id(),
+                    start_source,
+                    expected_generation,
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        load_binding(transaction, runtime_id)?.ok_or(StateError::ConcurrentWrite)?
+    };
+    Ok(binding)
+}
+
 #[derive(Deserialize)]
 struct ForkOutcome {
     workstream_id: WorkstreamId,
@@ -4944,9 +5657,10 @@ fn row_to_runtime(
     let generation: String = row.get(2)?;
     let session: String = row.get(3)?;
     let cwd: String = row.get(4)?;
-    let process_birth: Option<String> = row.get(5)?;
-    let lifecycle: String = row.get(6)?;
-    let revision: i64 = row.get(7)?;
+    let provider_pid: Option<i64> = row.get(5)?;
+    let process_birth: Option<String> = row.get(6)?;
+    let lifecycle: String = row.get(7)?;
+    let revision: i64 = row.get(8)?;
     Ok(RuntimeRecord {
         runtime_id: Uuid::parse_str(&runtime_id)
             .map(RuntimeId::from)
@@ -4956,6 +5670,23 @@ fn row_to_runtime(
         tmux_generation: generation,
         tmux_session: session,
         cwd: PathBuf::from(cwd),
+        provider_pid: provider_pid
+            .map(|pid| {
+                u32::try_from(pid)
+                    .map_err(|_| {
+                        to_from_sql_error(StateError::InvalidPersistedValue(
+                            "provider PID".to_owned(),
+                        ))
+                    })
+                    .and_then(|pid| {
+                        (pid != 0).then_some(pid).ok_or_else(|| {
+                            to_from_sql_error(StateError::InvalidPersistedValue(
+                                "provider PID".to_owned(),
+                            ))
+                        })
+                    })
+            })
+            .transpose()?,
         process_birth,
         status: runtime_status_from_text(&lifecycle).map_err(to_from_sql_error)?,
         revision: Revision::try_from(revision).map_err(to_from_sql_error)?,
@@ -4971,9 +5702,10 @@ fn row_to_runtime_with_id(
     let generation: String = row.get(2)?;
     let session: String = row.get(3)?;
     let cwd: String = row.get(4)?;
-    let process_birth: Option<String> = row.get(5)?;
-    let lifecycle: String = row.get(6)?;
-    let revision: i64 = row.get(7)?;
+    let provider_pid: Option<i64> = row.get(5)?;
+    let process_birth: Option<String> = row.get(6)?;
+    let lifecycle: String = row.get(7)?;
+    let revision: i64 = row.get(8)?;
     Ok(RuntimeRecord {
         runtime_id,
         workstream_id,
@@ -4981,6 +5713,23 @@ fn row_to_runtime_with_id(
         tmux_generation: generation,
         tmux_session: session,
         cwd: PathBuf::from(cwd),
+        provider_pid: provider_pid
+            .map(|pid| {
+                u32::try_from(pid)
+                    .map_err(|_| {
+                        to_from_sql_error(StateError::InvalidPersistedValue(
+                            "provider PID".to_owned(),
+                        ))
+                    })
+                    .and_then(|pid| {
+                        (pid != 0).then_some(pid).ok_or_else(|| {
+                            to_from_sql_error(StateError::InvalidPersistedValue(
+                                "provider PID".to_owned(),
+                            ))
+                        })
+                    })
+            })
+            .transpose()?,
         process_birth,
         status: runtime_status_from_text(&lifecycle).map_err(to_from_sql_error)?,
         revision: Revision::try_from(revision).map_err(to_from_sql_error)?,
@@ -5012,7 +5761,7 @@ fn load_binding(
         .query_row(
             "SELECT provider, native_session_id, start_source, last_settled_turn_id,
                     observed_thread_name, name_state, predecessor_native_session_id,
-                    predecessor_effective_name, revision
+                    predecessor_effective_name, runtime_generation, revision
              FROM provider_bindings WHERE runtime_id = ?1",
             [runtime_id.to_string()],
             |row| {
@@ -5036,7 +5785,13 @@ fn load_binding(
                         .map_err(to_from_sql_error)?,
                     predecessor_native_session_id,
                     predecessor_effective_name: row.get(7)?,
-                    revision: Revision::try_from(row.get::<_, i64>(8)?)
+                    runtime_generation: {
+                        let generation: String = row.get(8)?;
+                        validate_registry_text("runtime generation", &generation)
+                            .map_err(to_from_sql_error)?;
+                        generation
+                    },
+                    revision: Revision::try_from(row.get::<_, i64>(9)?)
                         .map_err(to_from_sql_error)?,
                 })
             },
@@ -5062,6 +5817,31 @@ fn load_binding(
         }
     }
     Ok(binding)
+}
+
+/// Loads a binding only when its corroborated generation is the Runtime's
+/// current generation. A stale binding is intentionally still readable by
+/// the exact `SessionStart` recovery path, but never by ordinary provider
+/// actions.
+fn load_current_binding(
+    transaction: &rusqlite::Transaction<'_>,
+    runtime_id: RuntimeId,
+) -> Result<Option<ProviderBinding>, StateError> {
+    let binding = load_binding(transaction, runtime_id)?;
+    let Some(binding) = binding else {
+        return Ok(None);
+    };
+    let generation: String = transaction
+        .query_row(
+            "SELECT tmux_generation FROM runtimes WHERE runtime_id = ?1",
+            [runtime_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)?;
+    if binding.runtime_generation != generation {
+        return Err(StateError::HookEvidenceMismatch);
+    }
+    Ok(Some(binding))
 }
 
 fn validate_opencode_observation(
@@ -5124,6 +5904,9 @@ fn validate_opencode_observation(
     {
         return Err(StateError::ProviderIdentityMismatch);
     }
+    if binding.runtime_generation != observation.generation {
+        return Err(StateError::HookEvidenceMismatch);
+    }
     let workstream_id = Uuid::parse_str(&runtime.5)
         .map(WorkstreamId::from)
         .map_err(StateError::InvalidPersistedUuid)?;
@@ -5183,11 +5966,12 @@ fn apply_opencode_lifecycle_transition(
                     "UPDATE provider_bindings SET last_settled_turn_id = ?1,
                         revision = revision + 1
                      WHERE runtime_id = ?2 AND provider = 'opencode'
-                       AND native_session_id = ?3",
+                       AND native_session_id = ?3 AND runtime_generation = ?4",
                     params![
                         message_id,
                         runtime_id.to_string(),
-                        observation.session.native_id()
+                        observation.session.native_id(),
+                        observation.generation,
                     ],
                 )
                 .map_err(StateError::Sqlite)?;
@@ -5311,14 +6095,7 @@ fn validate_opencode_handle(
     {
         return Err(StateError::ProviderIdentityMismatch);
     }
-    let binding_generation: String = transaction
-        .query_row(
-            "SELECT runtime_generation FROM provider_bindings WHERE runtime_id = ?1",
-            [runtime_id.to_string()],
-            |row| row.get(0),
-        )
-        .map_err(StateError::Sqlite)?;
-    if binding_generation != parts.generation {
+    if binding.runtime_generation != parts.generation {
         return Err(StateError::ProviderIdentityMismatch);
     }
     let observer_status = match parts.status.as_str() {
@@ -5338,6 +6115,98 @@ fn validate_opencode_handle(
         ));
     }
     Ok(observer_status)
+}
+
+struct LifecycleEventContext<'tx, 'db> {
+    transaction: &'tx rusqlite::Transaction<'db>,
+    runtime_id: RuntimeId,
+    provider: ProviderKind,
+    runtime_status: &'tx str,
+    runtime_revision: Revision,
+    generation: &'tx str,
+    workstream_id: WorkstreamId,
+    workstream_lifecycle: WorkstreamLifecycle,
+    existing: Option<ProviderBinding>,
+    observed_session: ProviderSessionId,
+}
+
+fn apply_lifecycle_event(
+    context: LifecycleEventContext<'_, '_>,
+    observation: &LifecycleObservation,
+) -> Result<(), StateError> {
+    let LifecycleEventContext {
+        transaction,
+        runtime_id,
+        provider,
+        runtime_status,
+        runtime_revision,
+        generation,
+        workstream_id,
+        workstream_lifecycle,
+        existing,
+        observed_session,
+    } = context;
+    match observation.event {
+        LifecycleEvent::SessionStart => apply_session_start(
+            transaction,
+            &SessionStartContext {
+                runtime_id,
+                provider,
+                runtime_status,
+                runtime_revision,
+                generation,
+                workstream_id,
+                workstream_lifecycle,
+            },
+            existing,
+            observed_session.native_id(),
+            observation.source.as_deref(),
+        ),
+        LifecycleEvent::UserPromptSubmit => {
+            require_matching_binding(
+                existing.as_ref(),
+                &observation.native_session_id,
+                generation,
+            )?;
+            update_runtime_lifecycle(transaction, runtime_id, runtime_revision, "working")
+        }
+        LifecycleEvent::Stop => {
+            let turn_id = observation
+                .turn_id
+                .clone()
+                .ok_or(StateError::HookEvidenceMismatch)?;
+            require_matching_binding(
+                existing.as_ref(),
+                &observation.native_session_id,
+                generation,
+            )?;
+            let changed = transaction
+                .execute(
+                    "UPDATE provider_bindings SET last_settled_turn_id = ?1, revision = revision + 1
+                     WHERE runtime_id = ?2 AND runtime_generation = ?3",
+                    params![turn_id, runtime_id.to_string(), generation],
+                )
+                .map_err(StateError::Sqlite)?;
+            if changed != 1 {
+                return Err(StateError::ConcurrentWrite);
+            }
+            update_runtime_lifecycle(transaction, runtime_id, runtime_revision, "attention")?;
+            mark_result_attention_in_transaction(
+                transaction,
+                workstream_id,
+                observed_session,
+                turn_id,
+            )
+        }
+        LifecycleEvent::SessionEnd => {
+            require_matching_binding(
+                existing.as_ref(),
+                &observation.native_session_id,
+                generation,
+            )?;
+            update_runtime_lifecycle(transaction, runtime_id, runtime_revision, "stopped")
+        }
+    }
 }
 
 struct SessionStartContext<'a> {
@@ -5377,6 +6246,9 @@ fn apply_session_start(
             return Err(StateError::HookEvidenceMismatch);
         }
         return complete_session_start(transaction, context);
+    }
+    if binding.runtime_generation != context.generation {
+        return Err(StateError::HookEvidenceMismatch);
     }
     if source != Some("clear") || !matches!(context.runtime_status, "idle" | "attention") {
         return Err(StateError::HookEvidenceMismatch);
@@ -5455,6 +6327,34 @@ fn complete_session_start(
     transaction: &rusqlite::Transaction<'_>,
     context: &SessionStartContext<'_>,
 ) -> Result<(), StateError> {
+    let binding = transaction
+        .query_row(
+            "SELECT runtime_generation, revision FROM provider_bindings
+             WHERE runtime_id = ?1",
+            [context.runtime_id.to_string()],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?
+        .ok_or(StateError::HookEvidenceMismatch)?;
+    if binding.0 != context.generation {
+        let changed = transaction
+            .execute(
+                "UPDATE provider_bindings SET runtime_generation = ?1,
+                    revision = revision + 1
+                 WHERE runtime_id = ?2 AND runtime_generation = ?3 AND revision = ?4",
+                params![
+                    context.generation,
+                    context.runtime_id.to_string(),
+                    binding.0,
+                    binding.1,
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if changed != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+    }
     update_runtime_lifecycle(
         transaction,
         context.runtime_id,
@@ -5471,10 +6371,13 @@ fn complete_session_start(
 fn require_matching_binding(
     binding: Option<&ProviderBinding>,
     session_id: &str,
+    generation: &str,
 ) -> Result<(), StateError> {
     let session_id = ProviderSessionId::codex(session_id)?;
     if binding.is_some_and(|binding| {
-        binding.provider == ProviderKind::Codex && binding.native_session_id == session_id
+        binding.provider == ProviderKind::Codex
+            && binding.native_session_id == session_id
+            && binding.runtime_generation == generation
     }) {
         Ok(())
     } else {
@@ -6075,6 +6978,16 @@ pub enum StateError {
     MissingForkOutcome,
     #[error("provider fork operation outcome is invalid")]
     InvalidForkOutcome(serde_json::Error),
+    #[error("could not encode the OpenCode session-creation plan")]
+    OpenCodeSessionCreationPlanEncoding(serde_json::Error),
+    #[error("OpenCode session-creation plan is missing from its operation")]
+    MissingOpenCodeSessionCreationPlan,
+    #[error("OpenCode session-creation plan is invalid")]
+    InvalidOpenCodeSessionCreationPlan(serde_json::Error),
+    #[error("OpenCode session-creation plan has an invalid shape")]
+    InvalidOpenCodeSessionCreationPlanShape,
+    #[error("OpenCode session-creation operation is not available")]
+    OpenCodeSessionCreationUnavailable,
     #[error("request key was reused with different workstream intent")]
     OperationRequestMismatch,
     #[error("the source Workstream has no live exact settled conversation boundary")]
@@ -6220,7 +7133,7 @@ mod tests {
         let initial = registry.reserve_runtime(workstream_id).unwrap();
         let cwd = initial.cwd.to_string_lossy().into_owned();
         registry
-            .record_runtime_process_birth(initial.runtime_id, initial.revision, "birth-a")
+            .record_runtime_process_identity(initial.runtime_id, initial.revision, 101, "birth-a")
             .unwrap();
         for event in [
             LifecycleObservation {
@@ -6260,6 +7173,163 @@ mod tests {
     }
 
     #[test]
+    fn codex_resume_rotates_binding_generation_only_after_exact_session_start() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let initial = settled_runtime(&mut registry, registered.workstream_id);
+        let old_generation = initial.tmux_generation.clone();
+        let old_binding = registry
+            .binding_for_runtime(initial.runtime_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(old_binding.runtime_generation, old_generation);
+
+        registry
+            .park_runtime(initial.runtime_id, initial.revision)
+            .unwrap();
+        let replacement = registry.reserve_runtime(registered.workstream_id).unwrap();
+        assert_ne!(replacement.tmux_generation, old_generation);
+        assert!(matches!(
+            registry.binding_for_runtime(replacement.runtime_id),
+            Err(StateError::HookEvidenceMismatch)
+        ));
+
+        registry
+            .apply_lifecycle_observation(
+                replacement.runtime_id,
+                &replacement.tmux_generation,
+                LifecycleObservation {
+                    event: LifecycleEvent::SessionStart,
+                    cwd: replacement.cwd.to_string_lossy().into_owned(),
+                    native_session_id: "session-a".to_owned(),
+                    turn_id: None,
+                    source: Some("resume".to_owned()),
+                },
+            )
+            .unwrap();
+        let rebound = registry
+            .binding_for_runtime(replacement.runtime_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rebound.native_session_id.native_id(), "session-a");
+        assert_eq!(rebound.runtime_generation, replacement.tmux_generation);
+        assert!(rebound.revision > old_binding.revision);
+    }
+
+    #[test]
+    fn codex_recovery_session_start_rebinds_generation_and_reopens_workstream() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let initial = settled_runtime(&mut registry, registered.workstream_id);
+        let old_generation = initial.tmux_generation.clone();
+        registry
+            .mark_runtime_recovery_required(initial.runtime_id, initial.revision)
+            .unwrap();
+        let replacement = registry
+            .reserve_runtime_recovery(registered.workstream_id)
+            .unwrap();
+        assert_ne!(replacement.tmux_generation, old_generation);
+
+        registry
+            .apply_lifecycle_observation(
+                replacement.runtime_id,
+                &replacement.tmux_generation,
+                LifecycleObservation {
+                    event: LifecycleEvent::SessionStart,
+                    cwd: replacement.cwd.to_string_lossy().into_owned(),
+                    native_session_id: "session-a".to_owned(),
+                    turn_id: None,
+                    source: Some("resume".to_owned()),
+                },
+            )
+            .unwrap();
+        let overview = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == registered.workstream_id)
+            .unwrap();
+        assert_eq!(overview.lifecycle, WorkstreamLifecycle::Open);
+        assert_eq!(overview.runtime.unwrap().status, RuntimeStatus::Idle);
+        assert_eq!(
+            overview.binding.unwrap().runtime_generation,
+            replacement.tmux_generation
+        );
+        assert_eq!(
+            overview.attention.unwrap().recovery_unseen_since_revision,
+            None
+        );
+    }
+
+    #[test]
+    fn stale_codex_generation_cannot_update_lifecycle_or_settle_a_turn() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let initial = settled_runtime(&mut registry, registered.workstream_id);
+        let old_generation = initial.tmux_generation.clone();
+        registry
+            .park_runtime(initial.runtime_id, initial.revision)
+            .unwrap();
+        let replacement = registry.reserve_runtime(registered.workstream_id).unwrap();
+
+        let cwd = replacement.cwd.to_string_lossy().into_owned();
+        let prompt = LifecycleObservation {
+            event: LifecycleEvent::UserPromptSubmit,
+            cwd: cwd.clone(),
+            native_session_id: "session-a".to_owned(),
+            turn_id: None,
+            source: None,
+        };
+        assert!(matches!(
+            registry.apply_lifecycle_observation(
+                replacement.runtime_id,
+                &replacement.tmux_generation,
+                prompt
+            ),
+            Err(StateError::HookEvidenceMismatch)
+        ));
+        let stop = LifecycleObservation {
+            event: LifecycleEvent::Stop,
+            cwd,
+            native_session_id: "session-a".to_owned(),
+            turn_id: Some("stale-turn".to_owned()),
+            source: None,
+        };
+        assert!(matches!(
+            registry.apply_lifecycle_observation(replacement.runtime_id, &old_generation, stop),
+            Err(StateError::HookEvidenceMismatch)
+        ));
+        let current = registry
+            .runtime_by_id(replacement.runtime_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.status, RuntimeStatus::Starting);
+        assert!(
+            registry
+                .binding_for_runtime(replacement.runtime_id)
+                .is_err()
+        );
+    }
+
+    #[test]
     fn newly_reserved_runtime_records_the_complete_private_session_identity() {
         let (_temporary, mut registry) = registry();
         let registered = registry
@@ -6276,6 +7346,72 @@ mod tests {
             runtime.tmux_session,
             format!("wsnav-{}", runtime.runtime_id)
         );
+        assert_eq!(runtime.provider_pid, None);
+    }
+
+    #[test]
+    fn provider_process_identity_persists_as_a_pair_and_reservation_clears_it() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+
+        registry
+            .record_runtime_process_identity(runtime.runtime_id, runtime.revision, 4321, "birth-a")
+            .unwrap();
+        let persisted = registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap();
+        assert_eq!(persisted.provider_pid, Some(4321));
+        assert_eq!(persisted.process_birth.as_deref(), Some("birth-a"));
+        registry
+            .mark_runtime_recovery_required(runtime.runtime_id, persisted.revision)
+            .unwrap();
+        let replacement = registry
+            .reserve_runtime_recovery(registered.workstream_id)
+            .unwrap();
+        assert_eq!(replacement.provider_pid, None);
+        assert_eq!(replacement.process_birth, None);
+    }
+
+    #[test]
+    fn provider_pid_backfill_requires_the_exact_live_birth_and_revision() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        registry
+            .connection
+            .execute(
+                "UPDATE runtimes SET process_birth = 'birth-a' WHERE runtime_id = ?1",
+                [runtime.runtime_id.to_string()],
+            )
+            .unwrap();
+
+        registry
+            .backfill_runtime_provider_pid(runtime.runtime_id, runtime.revision, 4321, "birth-a")
+            .unwrap();
+        let persisted = registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap();
+        assert_eq!(persisted.provider_pid, Some(4321));
+        assert_eq!(persisted.revision, runtime.revision.next());
+
+        assert!(matches!(
+            registry.backfill_runtime_provider_pid(
+                runtime.runtime_id,
+                runtime.revision,
+                4322,
+                "birth-a",
+            ),
+            Err(StateError::ConcurrentWrite)
+        ));
     }
 
     #[test]
@@ -6298,9 +7434,10 @@ mod tests {
         let first_runtime = registry.reserve_runtime(first.workstream_id).unwrap();
         let second_runtime = registry.reserve_runtime(second.workstream_id).unwrap();
         registry
-            .record_runtime_process_birth(
+            .record_runtime_process_identity(
                 first_runtime.runtime_id,
                 first_runtime.revision,
+                101,
                 "first-birth",
             )
             .unwrap();
@@ -6364,6 +7501,237 @@ mod tests {
             Err(StateError::Domain(DomainError::RevisionConflict { .. }))
         ));
         assert_eq!(transitioned.phase, OperationPhase::ExternalEffectStarted);
+    }
+
+    #[test]
+    fn opencode_session_creation_journals_boundary_and_commits_exact_binding() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        let prepared = registry
+            .prepare_opencode_session_creation(runtime.runtime_id, &runtime.tmux_generation)
+            .unwrap();
+        assert_eq!(prepared.operation.kind, OperationKind::Start);
+        assert_eq!(prepared.operation.phase, OperationPhase::Prepared);
+        assert!(
+            !registry
+                .has_unresolved_opencode_session_creation_effect(
+                    runtime.runtime_id,
+                    &runtime.tmux_generation
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            registry
+                .opencode_session_creation_for_runtime(runtime.runtime_id, &runtime.tmux_generation)
+                .unwrap(),
+            Some(prepared.clone())
+        );
+
+        let started = registry.begin_opencode_session_creation(&prepared).unwrap();
+        assert_eq!(
+            started.operation.phase,
+            OperationPhase::ExternalEffectStarted
+        );
+        assert!(
+            registry
+                .has_unresolved_opencode_session_creation_effect(
+                    runtime.runtime_id,
+                    &runtime.tmux_generation
+                )
+                .unwrap()
+        );
+
+        let session = ProviderSessionId::new(ProviderKind::OpenCode, "created-session").unwrap();
+        let committed = registry
+            .commit_opencode_session_creation(&started, &session)
+            .unwrap();
+        assert_eq!(committed.operation.phase, OperationPhase::Committed);
+        assert_eq!(committed.native_session_id, Some(session.clone()));
+        assert!(
+            !registry
+                .has_unresolved_opencode_session_creation_effect(
+                    runtime.runtime_id,
+                    &runtime.tmux_generation
+                )
+                .unwrap()
+        );
+        let binding = registry
+            .binding_for_runtime(runtime.runtime_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(binding.native_session_id, session);
+        assert_eq!(binding.runtime_generation, runtime.tmux_generation);
+    }
+
+    #[test]
+    fn opencode_session_creation_pre_effect_failure_is_terminal_and_bounded() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        let prepared = registry
+            .prepare_opencode_session_creation(runtime.runtime_id, &runtime.tmux_generation)
+            .unwrap();
+        let failed = registry
+            .fail_opencode_session_creation(&prepared, "serve_timeout")
+            .unwrap();
+        assert_eq!(failed.operation.phase, OperationPhase::Failed);
+        assert!(
+            !registry
+                .has_unresolved_opencode_session_creation_effect(
+                    runtime.runtime_id,
+                    &runtime.tmux_generation
+                )
+                .unwrap()
+        );
+        let replay = registry
+            .prepare_opencode_session_creation(runtime.runtime_id, &runtime.tmux_generation)
+            .unwrap();
+        assert_eq!(replay, failed);
+        assert!(
+            failed
+                .operation
+                .outcome_json
+                .as_deref()
+                .is_some_and(|value| value.contains("serve_timeout"))
+        );
+    }
+
+    #[test]
+    fn opencode_session_creation_cleanup_failure_is_recovery_required_and_not_retryable() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        let prepared = registry
+            .prepare_opencode_session_creation(runtime.runtime_id, &runtime.tmux_generation)
+            .unwrap();
+        let unknown = registry
+            .mark_opencode_session_creation_cleanup_unknown(&prepared)
+            .unwrap();
+        assert_eq!(unknown.operation.phase, OperationPhase::Failed);
+        assert!(
+            unknown.operation.outcome_json.as_deref().is_some_and(
+                |outcome| outcome.contains(OPENCODE_SESSION_CREATION_CLEANUP_UNKNOWN_CODE)
+            )
+        );
+        let current_runtime = registry
+            .runtime_for_workstream(registered.workstream_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current_runtime.status, RuntimeStatus::Unknown);
+        let overview = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == registered.workstream_id)
+            .unwrap();
+        assert_eq!(overview.lifecycle, WorkstreamLifecycle::RecoveryRequired);
+        assert!(matches!(
+            registry
+                .prepare_opencode_session_creation(runtime.runtime_id, &runtime.tmux_generation),
+            Err(StateError::HookEvidenceMismatch)
+        ));
+    }
+
+    #[test]
+    fn opencode_session_creation_unknown_effect_is_recovery_required_and_not_retryable() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        let prepared = registry
+            .prepare_opencode_session_creation(runtime.runtime_id, &runtime.tmux_generation)
+            .unwrap();
+        let started = registry.begin_opencode_session_creation(&prepared).unwrap();
+        let unknown = registry
+            .mark_opencode_session_creation_unknown(&started)
+            .unwrap();
+        assert_eq!(
+            unknown.operation.phase,
+            OperationPhase::Failed,
+            "an unknown provider effect is terminal and cannot be retried"
+        );
+        assert!(
+            unknown
+                .operation
+                .outcome_json
+                .as_deref()
+                .is_some_and(|outcome| outcome.contains(OPENCODE_SESSION_CREATION_UNKNOWN_CODE))
+        );
+        assert!(
+            !registry
+                .has_unresolved_opencode_session_creation_effect(
+                    runtime.runtime_id,
+                    &runtime.tmux_generation
+                )
+                .unwrap()
+        );
+        let current_runtime = registry
+            .runtime_for_workstream(registered.workstream_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current_runtime.status, RuntimeStatus::Unknown);
+        let overview = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == registered.workstream_id)
+            .unwrap();
+        assert_eq!(overview.lifecycle, WorkstreamLifecycle::RecoveryRequired);
+        assert!(
+            overview
+                .attention
+                .as_ref()
+                .and_then(|attention| attention.recovery_unseen_since_revision)
+                .is_some()
+        );
+        assert!(matches!(
+            registry.mark_opencode_session_creation_unknown(&started),
+            Err(StateError::Domain(DomainError::RevisionConflict { .. }))
+        ));
+        assert_eq!(
+            registry
+                .opencode_session_creation_for_runtime(runtime.runtime_id, &runtime.tmux_generation)
+                .unwrap(),
+            Some(unknown)
+        );
+    }
+
+    #[test]
+    fn opencode_session_creation_rejects_stale_generation_and_operation_revision() {
+        let (_temporary, mut registry) = registry();
+        let registered = registry
+            .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        assert!(matches!(
+            registry.prepare_opencode_session_creation(runtime.runtime_id, "stale-generation"),
+            Err(StateError::HookEvidenceMismatch)
+        ));
+        let prepared = registry
+            .prepare_opencode_session_creation(runtime.runtime_id, &runtime.tmux_generation)
+            .unwrap();
+        let started = registry.begin_opencode_session_creation(&prepared).unwrap();
+        assert!(matches!(
+            registry.begin_opencode_session_creation(&prepared),
+            Err(StateError::Domain(DomainError::RevisionConflict { .. }))
+        ));
+        let mut forged = started.clone();
+        forged.runtime_generation = "forged-generation".to_owned();
+        assert!(matches!(
+            registry.commit_opencode_session_creation(
+                &forged,
+                &ProviderSessionId::new(ProviderKind::OpenCode, "created-session").unwrap(),
+            ),
+            Err(StateError::OpenCodeSessionCreationUnavailable)
+        ));
     }
 
     #[test]
@@ -6771,6 +8139,15 @@ mod tests {
         let mut registry = HostRegistry::open(&root).unwrap();
 
         assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
+        let provider_pid_column: String = registry
+            .connection
+            .query_row(
+                "SELECT type FROM pragma_table_info('runtimes') WHERE name = 'provider_pid'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(provider_pid_column, "INTEGER");
         registry
             .set_project_browser_root(&temporary.path().to_string_lossy())
             .unwrap();
@@ -6778,6 +8155,41 @@ mod tests {
             registry.project_browser_root().unwrap(),
             fs::canonicalize(temporary.path()).unwrap()
         );
+    }
+
+    #[test]
+    fn host_schema_eleven_preserves_birth_for_exact_live_pid_backfill() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path()).unwrap();
+        let mut registry = HostRegistry::open(&root).unwrap();
+        let registered = registry
+            .register_external_workstream(
+                PathBuf::from("/disposable/repository"),
+                "common-dir-identity".to_owned(),
+                "deadbeef".to_owned(),
+            )
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        registry
+            .record_runtime_process_identity(runtime.runtime_id, runtime.revision, 4321, "birth-a")
+            .unwrap();
+        drop(registry);
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        connection
+            .execute_batch(
+                "ALTER TABLE runtimes DROP COLUMN provider_pid;
+                 PRAGMA user_version = 11;
+                 UPDATE host_identity SET schema_version = 11 WHERE singleton = 1;",
+            )
+            .unwrap();
+        drop(connection);
+
+        let registry = HostRegistry::open(&root).unwrap();
+        let migrated = registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap();
+
+        assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
+        assert_eq!(migrated.provider_pid, None);
+        assert_eq!(migrated.process_birth.as_deref(), Some("birth-a"));
     }
 
     fn legacy_host_schema_sql() -> String {
@@ -6793,6 +8205,7 @@ mod tests {
             &HOST_SCHEMA_SQL[..table_start],
             &HOST_SCHEMA_SQL[table_end..]
         )
+            .replace("        provider_pid INTEGER,\n", "")
             .replace(
                 "        location_id TEXT NOT NULL REFERENCES project_locations(location_id),\n        provider TEXT NOT NULL,\n        origin",
                 "        location_id TEXT NOT NULL REFERENCES project_locations(location_id),\n        origin",
@@ -8608,7 +10021,7 @@ mod tests {
             .unwrap();
         let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
         registry
-            .record_runtime_process_birth(runtime.runtime_id, runtime.revision, "birth-a")
+            .record_runtime_process_identity(runtime.runtime_id, runtime.revision, 102, "birth-a")
             .unwrap();
         let launched = registry
             .runtime_for_workstream(registered.workstream_id)
@@ -8765,7 +10178,7 @@ mod tests {
             Err(StateError::HookEvidenceMismatch)
         ));
         registry
-            .record_runtime_process_birth(runtime.runtime_id, runtime.revision, "birth-1")
+            .record_runtime_process_identity(runtime.runtime_id, runtime.revision, 103, "birth-1")
             .unwrap();
         assert_eq!(
             registry

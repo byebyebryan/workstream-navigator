@@ -15,6 +15,7 @@ import json
 import os
 import shlex
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -22,6 +23,7 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,7 @@ from opencode_support import environment_for_directory, isolated_environment
 
 MODEL = "opencode-go/deepseek-v4-flash"
 MARKER = "WSNAV_D82_ACCEPTANCE_RESULT"
+MAX_GROUP_MEMBERS = 128
 PROMPT = (
     f"Reply with the exact token {MARKER} and nothing else. "
     "Do not use tools, inspect files, or make changes."
@@ -129,6 +132,7 @@ def runtime_info(state_root: Path, workstream_id: str) -> dict[str, Any] | None:
         row = connection.execute(
             """SELECT w.revision, w.lifecycle, w.provider, w.source_workstream_id,
                       r.runtime_id, r.lifecycle, r.tmux_generation,
+                      r.tmux_session, r.provider_pid, r.process_birth,
                       b.native_session_id, b.last_settled_turn_id,
                       h.runtime_generation, h.endpoint_port, h.observer_pid,
                       h.observer_birth, h.observer_status
@@ -149,6 +153,9 @@ def runtime_info(state_root: Path, workstream_id: str) -> dict[str, Any] | None:
         "runtime_id",
         "runtime_lifecycle",
         "tmux_generation",
+        "tmux_session",
+        "provider_pid",
+        "provider_birth",
         "session_id",
         "settled_id",
         "handle_generation",
@@ -165,6 +172,8 @@ def ready_runtime(state_root: Path, workstream_id: str) -> dict[str, Any] | None
     if (
         info is not None
         and info["provider"] == "opencode"
+        and info["provider_pid"]
+        and info["provider_birth"]
         and info["session_id"]
         and info["observer_status"] == "ready"
         and info["port"]
@@ -203,6 +212,267 @@ def private_socket(state_root: Path, runtime_id: str) -> Path:
     return state_root / "run" / f"runtime-{runtime_id}" / "tmux.sock"
 
 
+def private_pane_identity(state_root: Path, runtime: dict[str, Any]) -> ProcessIdentity:
+    socket_path = private_socket(state_root, str(runtime["runtime_id"]))
+    session = str(runtime.get("tmux_session") or "")
+    if not socket_path.exists() or not session:
+        raise AcceptanceFailure("cleanup-session-corroboration-missing")
+    environment = os.environ.copy()
+    environment.pop("TMUX", None)
+    result = run(
+        [
+            "tmux",
+            "-S",
+            str(socket_path),
+            "display-message",
+            "-p",
+            "-t",
+            f"{session}:0.0",
+            "#{pane_pid}",
+        ],
+        env=environment,
+        timeout=5,
+        check=False,
+    )
+    value = result.stdout.strip()
+    if result.returncode != 0 or not value.isdecimal() or "\n" in value:
+        raise AcceptanceFailure("cleanup-session-corroboration-missing")
+    pane = read_process_identity(int(value))
+    if pane is None:
+        raise AcceptanceFailure("cleanup-session-corroboration-missing")
+    return pane
+
+
+def capture_provider_evidence(
+    state_root: Path, runtime: dict[str, Any]
+) -> ProviderEvidence | None:
+    raw_pid = runtime.get("provider_pid")
+    raw_birth = runtime.get("provider_birth")
+    if raw_pid is None and raw_birth is None:
+        return None
+    if raw_pid is None or not raw_birth:
+        raise AcceptanceFailure("cleanup-provider-identity-ambiguous")
+    try:
+        pid = int(raw_pid)
+    except (TypeError, ValueError) as error:
+        raise AcceptanceFailure("cleanup-provider-identity-ambiguous") from error
+    current = read_process_identity(pid)
+    if current is None:
+        # A live private pane with a missing recorded PID is an ownership
+        # ambiguity, not evidence that the process tree is clean.
+        if private_socket(state_root, str(runtime["runtime_id"])).exists():
+            private_pane_identity(state_root, runtime)
+            raise AcceptanceFailure("cleanup-provider-identity-lost")
+        return None
+    expected_birth = str(raw_birth)
+    if current.birth != expected_birth:
+        raise AcceptanceFailure("cleanup-provider-identity-reused")
+    if current.process_group != pid:
+        raise AcceptanceFailure("cleanup-provider-group-ambiguous")
+    pane = private_pane_identity(state_root, runtime)
+    if (
+        pane.pid != pid
+        or pane.birth != expected_birth
+        or pane.session != current.session
+    ):
+        raise AcceptanceFailure("cleanup-session-corroboration-mismatch")
+    members = process_group_members(current.process_group)
+    if not any(
+        member.pid == pid and member.birth == expected_birth for member in members
+    ) or any(member.session != current.session for member in members):
+        raise AcceptanceFailure("cleanup-session-corroboration-mismatch")
+    return ProviderEvidence(
+        pid=pid,
+        birth=expected_birth,
+        process_group=current.process_group,
+        session=current.session,
+        pane_pid=pane.pid,
+        pane_birth=pane.birth,
+        pane_session=pane.session,
+        members=members,
+    )
+
+
+def process_group_members(process_group: int) -> tuple[ProcessIdentity, ...]:
+    if process_group <= 0:
+        raise AcceptanceFailure("cleanup-provider-group-ambiguous")
+    try:
+        processes = tuple(Path("/proc").iterdir())
+    except OSError as error:
+        raise AcceptanceFailure("cleanup-provider-group-ambiguous") from error
+    members: list[ProcessIdentity] = []
+    for process in processes:
+        if not process.name.isdecimal():
+            continue
+        identity = read_process_identity(int(process.name))
+        if identity is not None and identity.process_group == process_group:
+            members.append(identity)
+            if len(members) > MAX_GROUP_MEMBERS:
+                raise AcceptanceFailure("cleanup-provider-group-unbounded")
+    return tuple(members)
+
+
+def prove_provider_group(
+    evidence: ProviderEvidence,
+) -> tuple[ProcessIdentity, tuple[ProcessIdentity, ...]] | None:
+    """Re-prove the recorded leader before any group signal is sent."""
+
+    current = read_process_identity(evidence.pid)
+    if current is None:
+        return None
+    if (
+        current.birth != evidence.birth
+        or current.process_group != evidence.pid
+        or current.process_group != evidence.process_group
+        or current.session != evidence.session
+        or current.state == "Z"
+        or evidence.pane_pid != evidence.pid
+        or evidence.pane_birth != evidence.birth
+        or evidence.pane_session != evidence.session
+    ):
+        return None
+    members = process_group_members(evidence.process_group)
+    if any(member.session != evidence.session for member in members):
+        return None
+    if not any(member.pid == evidence.pid for member in members):
+        return None
+    return current, members
+
+
+def _group_is_quiet(evidence: ProviderEvidence) -> bool:
+    members = process_group_members(evidence.process_group)
+    return not any(member.state != "Z" for member in members)
+
+
+def signal_provider_members(
+    evidence: ProviderEvidence,
+    members: tuple[ProcessIdentity, ...],
+    kind: signal.Signals,
+    *,
+    require_leader: bool,
+) -> None:
+    """Signal an already-proven member snapshot through pidfds.
+
+    The KILL phase may run after a TERM-exiting group leader is gone. Every
+    remaining member must still match the original PID birth, PGID, and
+    session; an unknown or reused member aborts before any descriptor is
+    signalled.
+    """
+
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        raise AcceptanceFailure("cleanup-pidfd-unavailable")
+    if require_leader and prove_provider_group(evidence) is None:
+        raise AcceptanceFailure("cleanup-provider-group-identity-lost")
+    current_members = process_group_members(evidence.process_group)
+    snapshot = {member.pid: member for member in members}
+    current_live = {
+        member.pid: member for member in current_members if member.state != "Z"
+    }
+    unknown = set(current_live) - set(snapshot)
+    if unknown:
+        raise AcceptanceFailure("cleanup-provider-group-identity-lost")
+    descriptors: list[int] = []
+    try:
+        for member in current_live.values():
+            expected = snapshot[member.pid]
+            if member.birth != expected.birth:
+                raise AcceptanceFailure("cleanup-provider-group-identity-lost")
+            if member.state == "Z":
+                continue
+            try:
+                descriptor = os.pidfd_open(member.pid)
+            except OSError as error:
+                raise AcceptanceFailure(
+                    "cleanup-provider-group-signal-failed"
+                ) from error
+            current = read_process_identity(member.pid)
+            if (
+                current is None
+                or current.birth != expected.birth
+                or current.process_group != evidence.process_group
+                or current.session != evidence.session
+            ):
+                os.close(descriptor)
+                raise AcceptanceFailure("cleanup-provider-group-identity-lost")
+            descriptors.append(descriptor)
+        if not descriptors:
+            return
+        for descriptor in descriptors:
+            try:
+                signal.pidfd_send_signal(descriptor, kind)
+            except ProcessLookupError:
+                continue
+            except OSError as error:
+                raise AcceptanceFailure(
+                    "cleanup-provider-group-signal-failed"
+                ) from error
+    finally:
+        for descriptor in descriptors:
+            os.close(descriptor)
+
+
+def signal_proven_provider_group(
+    evidence: ProviderEvidence,
+    members: tuple[ProcessIdentity, ...],
+    kind: signal.Signals,
+) -> None:
+    """Signal an exact leader-backed group snapshot through pidfds."""
+
+    signal_provider_members(evidence, members, kind, require_leader=True)
+
+
+def cleanup_provider_group(
+    evidence: ProviderEvidence | None,
+    reference_root: Path,
+) -> None:
+    """Terminate only a currently re-proven provider process group.
+
+    A missing or reused leader is never signalled. If descendants survive
+    after the leader disappears, cleanup is falsified and the root is kept for
+    operator inspection.
+    """
+
+    if evidence is None:
+        if process_references_root(reference_root):
+            raise AcceptanceFailure("cleanup-root-reference-present")
+        return
+    if evidence.process_group != evidence.pid:
+        raise AcceptanceFailure("cleanup-provider-group-ambiguous")
+    proven = prove_provider_group(evidence)
+    if proven is None:
+        if _group_is_quiet(evidence):
+            return
+        raise AcceptanceFailure("cleanup-provider-group-identity-lost")
+    _, original_members = proven
+    if not _group_is_quiet(evidence):
+        signal_proven_provider_group(evidence, original_members, signal.SIGTERM)
+        try:
+            wait_for(
+                lambda: _group_is_quiet(evidence),
+                "cleanup-provider-group-quiet",
+                timeout=5,
+            )
+        except AcceptanceFailure:
+            # The leader may have exited while an exact child ignored TERM.
+            # KILL is still bounded to the original member birth/PGID/session
+            # snapshot and uses pidfds, so it does not need a live leader.
+            signal_provider_members(
+                evidence,
+                original_members,
+                signal.SIGKILL,
+                require_leader=False,
+            )
+            wait_for(
+                lambda: _group_is_quiet(evidence),
+                "cleanup-provider-group-quiet-after-kill",
+                timeout=5,
+            )
+    if not _group_is_quiet(evidence):
+        raise AcceptanceFailure("cleanup-provider-group-survived")
+    if process_references_root(reference_root):
+        raise AcceptanceFailure("cleanup-root-reference-present")
+
+
 def kill_private_runtime(state_root: Path, runtime_id: str) -> None:
     environment = os.environ.copy()
     environment.pop("TMUX", None)
@@ -212,15 +482,168 @@ def kill_private_runtime(state_root: Path, runtime_id: str) -> None:
     )
 
 
-def pid_is_gone(pid: int) -> bool:
-    stat = Path(f"/proc/{pid}/stat")
-    if not stat.exists():
-        return True
+@dataclass(frozen=True)
+class ProcessIdentity:
+    """Small, disposable /proc identity used only by harness cleanup."""
+
+    pid: int
+    birth: str
+    parent: int
+    process_group: int
+    session: int
+    state: str
+
+
+@dataclass(frozen=True)
+class ProviderEvidence:
+    """Provider identity plus private-pane/session corroboration."""
+
+    pid: int
+    birth: str
+    process_group: int
+    session: int
+    pane_pid: int
+    pane_birth: str
+    pane_session: int
+    members: tuple[ProcessIdentity, ...]
+
+
+def read_process_identity(pid: int) -> ProcessIdentity | None:
+    if pid <= 0:
+        raise AcceptanceFailure("provider-process-probe-ambiguous")
     try:
-        state = stat.read_text(encoding="utf-8").rsplit(")", 1)[-1].split()[0]
-    except (OSError, IndexError):
+        stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise AcceptanceFailure("provider-process-probe-ambiguous") from error
+    close_paren = stat.rfind(")")
+    if close_paren < 0:
+        raise AcceptanceFailure("provider-process-probe-ambiguous")
+    fields = stat[close_paren + 2 :].split()
+    if len(fields) <= 19:
+        raise AcceptanceFailure("provider-process-probe-ambiguous")
+    try:
+        return ProcessIdentity(
+            pid=pid,
+            state=fields[0],
+            parent=int(fields[1]),
+            process_group=int(fields[2]),
+            session=int(fields[3]),
+            birth=fields[19],
+        )
+    except ValueError as error:
+        raise AcceptanceFailure("provider-process-probe-ambiguous") from error
+
+
+def pid_is_gone(pid: int) -> bool:
+    identity = read_process_identity(pid)
+    return identity is None or identity.state == "Z"
+
+
+def process_birth(pid: int) -> str | None:
+    identity = read_process_identity(pid)
+    return identity.birth if identity is not None else None
+
+
+def process_identity_is_gone(pid: int, expected_birth: str) -> bool:
+    identity = read_process_identity(pid)
+    return identity is None or identity.birth != expected_birth or identity.state == "Z"
+
+
+def _path_is_under(path: str, root: str) -> bool:
+    path = path.removesuffix(" (deleted)")
+    return path == root or path.startswith(f"{root}{os.sep}")
+
+
+def _bytes_contain_root(value: bytes, root: bytes) -> bool:
+    """Find a root argument without treating a similarly-prefixed path as ours."""
+
+    start = 0
+    while (offset := value.find(root, start)) >= 0:
+        before = value[offset - 1] if offset else None
+        after_offset = offset + len(root)
+        after = value[after_offset] if after_offset < len(value) else None
+        boundary_before = before is None or before in b"\x00 \t\n=:'\""
+        boundary_after = after is None or after in b"\x00 /\\:'\""
+        if boundary_before and boundary_after:
+            return True
+        start = offset + 1
+    return False
+
+
+def _read_bounded(path: Path, limit: int) -> bytes:
+    with path.open("rb") as stream:
+        return stream.read(limit)
+
+
+def process_references_root(root: Path) -> bool:
+    """Scan command, cwd, environment, maps, and descriptors before removal.
+
+    A disappearing or permission-limited process is not evidence that it owns
+    this user-owned disposable root. Readable command, cwd, environment, map,
+    and descriptor references are all checked; an unreadable process is left
+    for the explicit group-identity proof to reject if it is our provider.
+    """
+
+    root_text = str(root.absolute())
+    root_bytes = os.fsencode(root_text)
+    try:
+        processes = tuple(Path("/proc").iterdir())
+    except OSError:
         return True
-    return state == "Z"
+    for process in processes:
+        if not process.name.isdecimal():
+            continue
+        proc_root = process
+        try:
+            if _bytes_contain_root(
+                _read_bounded(proc_root / "cmdline", 256 * 1024), root_bytes
+            ):
+                return True
+            if _bytes_contain_root(
+                _read_bounded(proc_root / "environ", 256 * 1024), root_bytes
+            ):
+                return True
+            if _bytes_contain_root(
+                _read_bounded(proc_root / "maps", 4 * 1024 * 1024), root_bytes
+            ):
+                return True
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            continue
+        except OSError:
+            continue
+        for name in ("cwd", "root", "exe"):
+            try:
+                if _path_is_under(os.readlink(proc_root / name), root_text):
+                    return True
+            except FileNotFoundError:
+                break
+            except PermissionError:
+                continue
+            except OSError:
+                continue
+        descriptors = proc_root / "fd"
+        try:
+            for descriptor in descriptors.iterdir():
+                try:
+                    if _path_is_under(os.readlink(descriptor), root_text):
+                        return True
+                except FileNotFoundError:
+                    continue
+                except PermissionError:
+                    continue
+                except OSError:
+                    continue
+        except FileNotFoundError:
+            continue
+        except PermissionError:
+            continue
+        except OSError:
+            continue
+    return False
 
 
 def port_is_closed(port: int) -> bool:
@@ -241,13 +664,95 @@ def assert_state_has_no_marker(*roots: Path) -> None:
                 raise AcceptanceFailure("provider-content-entered-wsnav-state")
 
 
+def assert_provider_group_stopped(
+    evidence: ProviderEvidence | None,
+    reference_root: Path,
+    *,
+    check_root: bool = True,
+) -> None:
+    """Read-only post-action check for every captured provider member."""
+
+    if evidence is None:
+        if check_root and process_references_root(reference_root):
+            raise AcceptanceFailure("cleanup-root-reference-present")
+        return
+    for member in evidence.members:
+        current = read_process_identity(member.pid)
+        if current is None or current.state == "Z":
+            continue
+        if current.birth != member.birth:
+            raise AcceptanceFailure("cleanup-provider-identity-reused")
+        raise AcceptanceFailure("cleanup-provider-member-survived")
+    remaining = process_group_members(evidence.process_group)
+    if any(
+        member.state != "Z" and member.session == evidence.session
+        for member in remaining
+    ):
+        raise AcceptanceFailure("cleanup-provider-group-survived")
+    if check_root and process_references_root(reference_root):
+        raise AcceptanceFailure("cleanup-root-reference-present")
+
+
+def park_with_observation(
+    state_root: Path,
+    runtime: dict[str, Any],
+    action: Callable[[], subprocess.CompletedProcess[str]],
+    reference_root: Path,
+    *,
+    on_capture: Callable[[ProviderEvidence | None], None] | None = None,
+    check_root: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    """Run the product park/recovery action, then validate without signalling."""
+
+    evidence = capture_provider_evidence(state_root, runtime)
+    if on_capture is not None:
+        on_capture(evidence)
+    result = action()
+    assert_provider_group_stopped(evidence, reference_root, check_root=check_root)
+    return result
+
+
 def park_direct(
     binary: Path,
     state_root: Path,
     workstream_id: str,
     env: dict[str, str],
+    *,
+    reference_root: Path | None = None,
+    fallback_evidence: ProviderEvidence | None = None,
 ) -> None:
-    wsnav(binary, state_root, "park", workstream_id, env=env, check=False)
+    before = runtime_info(state_root, workstream_id)
+    if before is None:
+        return
+    cleanup_root = reference_root or state_root.parent
+    fallback_matches = (
+        fallback_evidence is not None
+        and before.get("provider_pid") is not None
+        and before.get("provider_birth") is not None
+        and int(before["provider_pid"]) == fallback_evidence.pid
+        and str(before["provider_birth"]) == fallback_evidence.birth
+    )
+    evidence = (
+        fallback_evidence
+        if fallback_matches
+        else capture_provider_evidence(state_root, before)
+    )
+    # Provider cleanup precedes tmux/root removal. This is deliberately done
+    # even for a Runtime already marked stopped: lifecycle is state evidence,
+    # not proof that an escaped native process exited.
+    cleanup_provider_group(evidence, cleanup_root)
+    socket_path = private_socket(state_root, str(before["runtime_id"]))
+    runtime_directory = socket_path.parent
+    if (
+        before["runtime_lifecycle"] != "stopped"
+        or socket_path.exists()
+        or runtime_directory.exists()
+    ):
+        wsnav(binary, state_root, "park", workstream_id, env=env)
+    if socket_path.exists() or runtime_directory.exists():
+        raise AcceptanceFailure("cleanup-private-runtime-artifacts-present")
+    if process_references_root(cleanup_root):
+        raise AcceptanceFailure("cleanup-root-reference-present")
 
 
 def accept_host_path(
@@ -261,6 +766,7 @@ def accept_host_path(
     reconcile: Callable[[str], None],
     assertions: dict[str, bool],
     prefix: str,
+    remember: Callable[[Path, str, ProviderEvidence | None], None] | None = None,
 ) -> tuple[str, str]:
     source_id = output_id(register().stdout)
     info = runtime_info(host_state, source_id)
@@ -301,17 +807,38 @@ def accept_host_path(
         raise AcceptanceFailure(f"{prefix}-fork-not-committed")
     assertions[f"{prefix}_fork_exact_session"] = True
 
-    invoke(["park", destination_id, str(destination["revision"])])
+    park_with_observation(
+        host_state,
+        destination,
+        lambda: invoke(["park", destination_id, str(destination["revision"])]),
+        host_state.parent,
+        on_capture=(
+            (lambda evidence: remember(host_state, destination_id, evidence))
+            if remember is not None
+            else None
+        ),
+        check_root=False,
+    )
     wait_for(
         lambda: (
             runtime_info(host_state, destination_id)["runtime_lifecycle"] == "stopped"
         ),
         f"{prefix}-destination-parked",
     )
+    wait_for(
+        lambda: process_identity_is_gone(
+            int(destination["provider_pid"]), str(destination["provider_birth"])
+        ),
+        f"{prefix}-destination-provider-stopped",
+        timeout=10,
+    )
 
     before = ready_runtime(host_state, source_id)
     if before is None:
         raise AcceptanceFailure(f"{prefix}-source-not-ready-before-loss")
+    loss_evidence = capture_provider_evidence(host_state, before)
+    if remember is not None:
+        remember(host_state, source_id, loss_evidence)
     kill_private_runtime(host_state, str(before["runtime_id"]))
     reconcile(source_id)
     lost = wait_for(
@@ -349,6 +876,18 @@ def accept_host_path(
         lambda: port_is_closed(int(before["port"])), f"{prefix}-old-port-closed"
     ):
         raise AcceptanceFailure(f"{prefix}-prior-runtime-not-clean")
+    wait_for(
+        lambda: process_identity_is_gone(
+            int(before["provider_pid"]), str(before["provider_birth"])
+        ),
+        f"{prefix}-old-provider-stopped",
+        timeout=10,
+    )
+    assert_provider_group_stopped(
+        loss_evidence,
+        host_state.parent,
+        check_root=False,
+    )
     assertions[f"{prefix}_recovery_exact_session"] = True
     assertions[f"{prefix}_generation_replaced"] = True
     return source_id, destination_id
@@ -487,7 +1026,26 @@ def main() -> int:
     root: Path | None = None
     sshd: subprocess.Popen[str] | None = None
     version: str | None = None
-    cleanup_targets: list[tuple[Path, str, dict[str, str]]] = []
+    cleanup_targets: list[
+        tuple[Path, str, dict[str, str], Path, ProviderEvidence | None]
+    ] = []
+
+    def remember_cleanup_evidence(
+        state_root: Path,
+        workstream_id: str,
+        evidence: ProviderEvidence | None,
+    ) -> None:
+        for index, target in enumerate(cleanup_targets):
+            if target[0] == state_root and target[1] == workstream_id:
+                cleanup_targets[index] = (
+                    target[0],
+                    target[1],
+                    target[2],
+                    target[3],
+                    evidence,
+                )
+                return
+
     ordinary_before = tmux_snapshot()
     try:
         if not args.confirm_live_opencode:
@@ -522,7 +1080,9 @@ def main() -> int:
                 env=local_env,
             )
             source_id = output_id(registered.stdout)
-            cleanup_targets.append((local_state, source_id, local_env))
+            cleanup_targets.append(
+                (local_state, source_id, local_env, local_root, None)
+            )
             return registered
 
         def local_invoke(arguments: list[str]) -> subprocess.CompletedProcess[str]:
@@ -536,14 +1096,20 @@ def main() -> int:
             result = wsnav(binary, local_state, *command, env=local_env)
             if action == "fork":
                 cleanup_targets.append(
-                    (local_state, output_id(result.stdout), local_env)
+                    (
+                        local_state,
+                        output_id(result.stdout),
+                        local_env,
+                        local_root,
+                        None,
+                    )
                 )
             return result
 
         def local_reconcile(workstream_id: str) -> None:
             wsnav(binary, local_state, "status", workstream_id, env=local_env)
 
-        local_source, local_destination = accept_host_path(
+        local_source, _local_destination = accept_host_path(
             binary=binary,
             provider_env=local_env,
             project=local_project,
@@ -553,9 +1119,20 @@ def main() -> int:
             reconcile=local_reconcile,
             assertions=assertions,
             prefix="local",
+            remember=remember_cleanup_evidence,
         )
-        park_direct(binary, local_state, local_source, local_env)
-        park_direct(binary, local_state, local_destination, local_env)
+        local_source_info = runtime_info(local_state, local_source)
+        if local_source_info is None:
+            raise AcceptanceFailure("local-source-cleanup-state-missing")
+        park_with_observation(
+            local_state,
+            local_source_info,
+            lambda: wsnav(binary, local_state, "park", local_source, env=local_env),
+            local_root,
+            on_capture=lambda evidence: remember_cleanup_evidence(
+                local_state, local_source, evidence
+            ),
+        )
         wait_for(
             lambda: not list((local_state / "run").rglob("tmux.sock")),
             "local-private-sockets-clean",
@@ -614,7 +1191,9 @@ def main() -> int:
                 env=client_env,
             )
             source_id = output_id(registered.stdout)
-            cleanup_targets.append((remote_state, source_id, remote_env))
+            cleanup_targets.append(
+                (remote_state, source_id, remote_env, remote_root, None)
+            )
             return registered
 
         def remote_invoke(arguments: list[str]) -> subprocess.CompletedProcess[str]:
@@ -635,7 +1214,13 @@ def main() -> int:
                 raise AcceptanceFailure(f"wsnav-command-failed:host-{action}")
             if action == "fork":
                 cleanup_targets.append(
-                    (remote_state, output_id(result.stdout), remote_env)
+                    (
+                        remote_state,
+                        output_id(result.stdout),
+                        remote_env,
+                        remote_root,
+                        None,
+                    )
                 )
             return result
 
@@ -667,12 +1252,32 @@ def main() -> int:
             reconcile=remote_reconcile,
             assertions=assertions,
             prefix="ssh",
+            remember=remember_cleanup_evidence,
         )
         remote_source_info = runtime_info(remote_state, remote_source)
         remote_destination_info = runtime_info(remote_state, remote_destination)
         if remote_source_info is None or remote_destination_info is None:
             raise AcceptanceFailure("ssh-cleanup-state-missing")
-        remote_invoke(["park", remote_source, str(remote_source_info["revision"])])
+        park_with_observation(
+            remote_state,
+            remote_source_info,
+            lambda: remote_invoke(
+                ["park", remote_source, str(remote_source_info["revision"])]
+            ),
+            remote_root,
+            on_capture=lambda evidence: remember_cleanup_evidence(
+                remote_state, remote_source, evidence
+            ),
+            check_root=False,
+        )
+        wait_for(
+            lambda: process_identity_is_gone(
+                int(remote_source_info["provider_pid"]),
+                str(remote_source_info["provider_birth"]),
+            ),
+            "ssh-source-provider-stopped",
+            timeout=10,
+        )
         wait_for(
             lambda: not list((remote_state / "run").rglob("tmux.sock")),
             "ssh-private-sockets-clean",
@@ -690,28 +1295,61 @@ def main() -> int:
     except (OSError, sqlite3.Error, subprocess.TimeoutExpired) as error:
         status, reason = "blocked", f"harness-error:{type(error).__name__}"
     finally:
-        if root is not None:
-            binary = Path(__file__).resolve().parents[1] / "target" / "debug" / "wsnav"
-            for state_root, workstream_id, environment in reversed(cleanup_targets):
-                park_direct(binary, state_root, workstream_id, environment)
-            for socket_path in root.rglob("tmux.sock"):
-                environment = os.environ.copy()
-                environment.pop("TMUX", None)
-                run(
-                    ["tmux", "-S", str(socket_path), "kill-server"],
-                    env=environment,
-                    check=False,
-                )
+        cleanup_failed = False
+        # Stop the disposable loopback daemon before any broad root scan. Its
+        # command/config paths intentionally live under the same temp root.
         if sshd is not None and sshd.poll() is None:
-            sshd.terminate()
             try:
+                sshd.terminate()
                 sshd.wait(timeout=10)
             except subprocess.TimeoutExpired:
-                sshd.kill()
-                sshd.wait(timeout=10)
+                try:
+                    sshd.kill()
+                    sshd.wait(timeout=10)
+                except (OSError, subprocess.TimeoutExpired):
+                    cleanup_failed = True
+            except OSError:
+                cleanup_failed = True
         if root is not None:
-            shutil.rmtree(root, ignore_errors=True)
-            assertions["cleanup_complete"] = not root.exists()
+            binary = Path(__file__).resolve().parents[1] / "target" / "debug" / "wsnav"
+            for (
+                state_root,
+                workstream_id,
+                environment,
+                reference_root,
+                fallback_evidence,
+            ) in reversed(cleanup_targets):
+                try:
+                    park_direct(
+                        binary,
+                        state_root,
+                        workstream_id,
+                        environment,
+                        reference_root=reference_root,
+                        fallback_evidence=fallback_evidence,
+                    )
+                except (AcceptanceFailure, OSError, sqlite3.Error):
+                    cleanup_failed = True
+        if root is not None:
+            # Any socket left here was not removed by a successful, ordered
+            # Runtime cleanup. Never raw-kill it: an untracked provider may
+            # still own the server and the disposable root must be preserved.
+            if list(root.rglob("tmux.sock")):
+                cleanup_failed = True
+            if not cleanup_failed and process_references_root(root):
+                cleanup_failed = True
+            if not cleanup_failed:
+                try:
+                    shutil.rmtree(root)
+                except OSError:
+                    cleanup_failed = True
+            if not cleanup_failed:
+                time.sleep(1)
+                if root.exists() or process_references_root(root):
+                    cleanup_failed = True
+            assertions["cleanup_complete"] = not cleanup_failed and not root.exists()
+            if cleanup_failed:
+                status, reason = "falsified", "cleanup-incomplete"
         assertions["ordinary_tmux_unchanged"] = tmux_snapshot() == ordinary_before
 
     result = {

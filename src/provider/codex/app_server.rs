@@ -225,66 +225,305 @@ impl EphemeralAppServer {
         params: &Value,
         response_timeout: Duration,
     ) -> Result<Value, AppServerError> {
-        let mut child = Command::new(&self.executable)
+        let mut command = Command::new(&self.executable);
+        command
             .args(["app-server", "--listen", "stdio://"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(AppServerError::Launch)?;
-        let mut stdin = child.stdin.take().ok_or(AppServerError::PipesUnavailable)?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or(AppServerError::PipesUnavailable)?;
+            .stderr(Stdio::null());
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command.spawn().map_err(AppServerError::Launch)?;
+        #[cfg(unix)]
+        let process_group = match process_group_identity(child.id()) {
+            Ok(group) => group,
+            Err(error) => {
+                let _ = kill_and_reap(&mut child, None);
+                return Err(error);
+            }
+        };
+        #[cfg(not(unix))]
+        let process_group = None;
+        let Some(mut stdin) = child.stdin.take() else {
+            return cleanup_error(&mut child, process_group, AppServerError::PipesUnavailable);
+        };
+        let Some(stdout) = child.stdout.take() else {
+            return cleanup_error(&mut child, process_group, AppServerError::PipesUnavailable);
+        };
         let initialize = json!({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "wsnav", "version": env!("CARGO_PKG_VERSION")}, "capabilities": {}}});
         let initialized = json!({"method": "initialized", "params": {}});
         let action = json!({"id": 2, "method": method, "params": params});
         let (sender, receiver) = mpsc::sync_channel(1);
-        thread::spawn(move || {
+        let reader = thread::spawn(move || {
             let _ = sender.send(read_action_result(stdout));
         });
         for message in [initialize, initialized, action] {
             if let Err(error) = serde_json::to_writer(&mut stdin, &message) {
-                kill_and_reap(&mut child);
-                return Err(AppServerError::Encode(error));
+                return cleanup_with_reader(
+                    &mut child,
+                    process_group,
+                    reader,
+                    AppServerError::Encode(error),
+                );
             }
             if let Err(error) = stdin.write_all(b"\n") {
-                kill_and_reap(&mut child);
-                return Err(AppServerError::Write(error));
+                return cleanup_with_reader(
+                    &mut child,
+                    process_group,
+                    reader,
+                    AppServerError::Write(error),
+                );
             }
         }
         let action_result = match receiver.recv_timeout(response_timeout) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                kill_and_reap(&mut child);
-                return Err(AppServerError::Timeout);
+                return cleanup_with_reader(
+                    &mut child,
+                    process_group,
+                    reader,
+                    AppServerError::Timeout,
+                );
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                kill_and_reap(&mut child);
-                return Err(AppServerError::Closed);
+                return cleanup_with_reader(
+                    &mut child,
+                    process_group,
+                    reader,
+                    AppServerError::Closed,
+                );
             }
         };
         // Keep stdin open until the action result arrives. Current Codex can
         // observe EOF before dispatching a queued request if the client closes
         // it immediately after writing JSONL.
         drop(stdin);
-        let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
-        while child.try_wait().map_err(AppServerError::Launch)?.is_none()
-            && Instant::now() < deadline
-        {
-            thread::sleep(Duration::from_millis(10));
+        let wait_error = wait_for_child(&mut child);
+        let cleanup = kill_and_reap(&mut child, process_group);
+        if let Err(error) = cleanup {
+            drop(reader);
+            return Err(error);
         }
-        if child.try_wait().map_err(AppServerError::Launch)?.is_none() {
-            kill_and_reap(&mut child);
+        reader.join().map_err(|_| AppServerError::Closed)?;
+        if let Some(error) = wait_error {
+            return Err(error);
         }
         action_result
     }
 }
 
-fn kill_and_reap(child: &mut Child) {
-    let _ = child.kill();
-    let _ = child.wait();
+fn wait_for_child(child: &mut Child) -> Option<AppServerError> {
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return None,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(error) => return Some(AppServerError::Launch(error)),
+        }
+    }
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy)]
+struct OwnedProcessGroup {
+    process_group_id: i32,
+    session_id: i32,
+}
+
+#[cfg(unix)]
+fn process_group_identity(pid: u32) -> Result<Option<OwnedProcessGroup>, AppServerError> {
+    use nix::{errno::Errno, unistd::Pid};
+
+    let pid = i32::try_from(pid)
+        .map_err(|_| AppServerError::Cleanup(std::io::Error::other("invalid process ID")))?;
+    let pid = Pid::from_raw(pid);
+    let process_group_id = match nix::unistd::getpgid(Some(pid)) {
+        Ok(value) => value.as_raw(),
+        Err(Errno::ESRCH) => return Ok(None),
+        Err(error) => {
+            return Err(AppServerError::Cleanup(std::io::Error::from_raw_os_error(
+                error as i32,
+            )));
+        }
+    };
+    let session_id = nix::unistd::getsid(Some(pid)).map_err(|error| {
+        AppServerError::Cleanup(std::io::Error::from_raw_os_error(error as i32))
+    })?;
+    Ok(Some(OwnedProcessGroup {
+        process_group_id,
+        session_id: session_id.as_raw(),
+    }))
+}
+
+#[cfg(unix)]
+fn process_group_has_member(group: OwnedProcessGroup) -> Result<bool, AppServerError> {
+    let entries = std::fs::read_dir("/proc").map_err(|error| {
+        AppServerError::Cleanup(std::io::Error::new(error.kind(), error.to_string()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            AppServerError::Cleanup(std::io::Error::new(error.kind(), error.to_string()))
+        })?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(AppServerError::Cleanup(std::io::Error::new(
+                    error.kind(),
+                    error.to_string(),
+                )));
+            }
+        };
+        let Some(close_paren) = stat.rfind(')') else {
+            return Err(AppServerError::Cleanup(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "malformed process stat",
+            )));
+        };
+        let fields = stat
+            .get(close_paren + 2..)
+            .ok_or_else(|| {
+                AppServerError::Cleanup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        let process_group_id = fields
+            .get(2)
+            .ok_or_else(|| {
+                AppServerError::Cleanup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?
+            .parse::<i32>()
+            .map_err(|_| {
+                AppServerError::Cleanup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?;
+        let session_id = fields
+            .get(3)
+            .ok_or_else(|| {
+                AppServerError::Cleanup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?
+            .parse::<i32>()
+            .map_err(|_| {
+                AppServerError::Cleanup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?;
+        if process_group_id == group.process_group_id && session_id == group.session_id {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn cleanup_error(
+    child: &mut Child,
+    process_group: Option<OwnedProcessGroup>,
+    original: AppServerError,
+) -> Result<Value, AppServerError> {
+    kill_and_reap(child, process_group)?;
+    Err(original)
+}
+
+fn cleanup_with_reader(
+    child: &mut Child,
+    process_group: Option<OwnedProcessGroup>,
+    reader: thread::JoinHandle<()>,
+    original: AppServerError,
+) -> Result<Value, AppServerError> {
+    let cleanup = kill_and_reap(child, process_group);
+    if let Err(error) = cleanup {
+        drop(reader);
+        return Err(error);
+    }
+    reader.join().map_err(|_| AppServerError::Closed)?;
+    Err(original)
+}
+
+fn kill_and_reap(
+    child: &mut Child,
+    #[cfg(unix)] process_group: Option<OwnedProcessGroup>,
+    #[cfg(not(unix))] _process_group: Option<()>,
+) -> Result<(), AppServerError> {
+    #[cfg(unix)]
+    {
+        use nix::{
+            errno::Errno,
+            sys::signal::{Signal, killpg},
+            unistd::Pid,
+        };
+
+        let mut group_probe_error = None;
+        let signal_error = if let Some(group) = process_group {
+            match process_group_has_member(group) {
+                Ok(true) => Some(killpg(
+                    Pid::from_raw(group.process_group_id),
+                    Signal::SIGKILL,
+                )),
+                Ok(false) => None,
+                Err(error) => {
+                    group_probe_error = Some(error);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let direct_error = if child.try_wait().map_err(AppServerError::Cleanup)?.is_none() {
+            child.kill().err()
+        } else {
+            None
+        };
+        let wait_error = child.wait().err().map(AppServerError::Cleanup);
+        if let Some(error) = direct_error {
+            return Err(AppServerError::Cleanup(error));
+        }
+        if let Some(error) = wait_error {
+            return Err(error);
+        }
+        if let Some(error) = group_probe_error {
+            return Err(error);
+        }
+        if let Some(error) = signal_error.and_then(Result::err)
+            && error != Errno::ESRCH
+        {
+            return Err(AppServerError::Cleanup(std::io::Error::from_raw_os_error(
+                error as i32,
+            )));
+        }
+    }
+    #[cfg(not(unix))]
+    if child.try_wait().map_err(AppServerError::Cleanup)?.is_none() {
+        child.kill().map_err(AppServerError::Cleanup)?;
+    }
+    child.wait().map_err(AppServerError::Cleanup)?;
+    Ok(())
 }
 
 fn thread_metadata_from_result(
@@ -461,6 +700,8 @@ pub enum AppServerError {
     Read(std::io::Error),
     #[error("could not write App Server input")]
     Write(std::io::Error),
+    #[error("could not clean up App Server process group")]
+    Cleanup(std::io::Error),
 }
 
 #[cfg(test)]
@@ -582,5 +823,44 @@ mod tests {
         assert!(recovered_fork_matches(&result, "source", "settled", "destination").unwrap());
         assert!(!recovered_fork_matches(&result, "other", "settled", "destination").unwrap());
         assert!(!recovered_fork_matches(&result, "source", "older", "destination").unwrap());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn app_server_cleanup_terminates_descendants_in_its_private_group() {
+        use std::os::unix::process::CommandExt;
+        use std::{fs, path::Path, thread};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let pid_path = temporary.path().join("descendant.pid");
+        let mut command = Command::new("sh");
+        command
+            .arg("-c")
+            .arg(format!(
+                "sleep 30 & echo $! > '{}'",
+                pid_path.to_string_lossy().replace('\'', "'\\''")
+            ))
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let process_group = process_group_identity(child.id()).unwrap();
+        let pid = (0..100)
+            .find_map(|_| {
+                fs::read_to_string(&pid_path)
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u32>().ok())
+                    .or_else(|| {
+                        thread::sleep(Duration::from_millis(10));
+                        None
+                    })
+            })
+            .expect("fake descendant wrote its PID");
+        assert!(kill_and_reap(&mut child, process_group).is_ok());
+        for _ in 0..100 {
+            if !Path::new(&format!("/proc/{pid}")).exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("owned App Server descendant {pid} survived cleanup");
     }
 }

@@ -54,22 +54,40 @@ fn output_bounded_with_timeout(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(BoundedProcessError::Launch)?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or(BoundedProcessError::MissingPipe)?;
-    let stderr = child
-        .stderr
-        .take()
-        .ok_or(BoundedProcessError::MissingPipe)?;
+    #[cfg(unix)]
+    let process_group = match process_group_identity(child.id()) {
+        Ok(group) => group,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+    };
+    let stdout = child.stdout.take().ok_or_else(|| {
+        let error = terminate_process_group(&mut child, process_group).err();
+        error.unwrap_or(BoundedProcessError::MissingPipe)
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        let error = terminate_process_group(&mut child, process_group).err();
+        error.unwrap_or(BoundedProcessError::MissingPipe)
+    })?;
     let stdout_reader = thread::spawn(move || read_capped(stdout, max_stdout_bytes));
     let stderr_reader = thread::spawn(move || read_capped(stderr, max_stderr_bytes));
     let status = wait_bounded(&mut child, timeout);
-    if matches!(status, Err(BoundedProcessError::TimedOut)) {
-        terminate_process_group(&mut child)?;
+    // Always stop and reap the whole owned process group before joining either
+    // reader. This applies to timeout, wait failure, and successful direct
+    // child exit: a successful parent can still leave a descendant retaining a
+    // pipe open.
+    let cleanup = terminate_process_group(&mut child, process_group);
+    if cleanup.is_err() {
+        // A failed cleanup is already a fail-closed result. Do not join a
+        // reader that could be held open by an unkillable descendant.
+        drop(stdout_reader);
+        drop(stderr_reader);
+        return Err(cleanup.expect_err("checked cleanup error"));
     }
-    // Always collect both readers after the whole process group has exited, so
-    // a child cannot keep a pipe full or retain an unbounded background task.
+    // The process group has exited, so collecting both readers is bounded and
+    // cannot leave an unbounded background task holding either pipe.
     let stdout = stdout_reader
         .join()
         .map_err(|_| BoundedProcessError::ReaderPanicked)??;
@@ -98,32 +116,184 @@ fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<ExitStatus, Boun
 }
 
 #[cfg(unix)]
-fn terminate_process_group(child: &mut Child) -> Result<(), BoundedProcessError> {
+#[derive(Clone, Copy)]
+struct OwnedProcessGroup {
+    process_group_id: i32,
+    session_id: i32,
+}
+
+#[cfg(unix)]
+fn process_group_identity(pid: u32) -> Result<Option<OwnedProcessGroup>, BoundedProcessError> {
+    use nix::{errno::Errno, unistd::Pid};
+
+    let pid = i32::try_from(pid).map_err(|_| BoundedProcessError::InvalidPid)?;
+    let pid = Pid::from_raw(pid);
+    let process_group_id = match nix::unistd::getpgid(Some(pid)) {
+        Ok(value) => value.as_raw(),
+        Err(Errno::ESRCH) => return Ok(None),
+        Err(error) => {
+            return Err(BoundedProcessError::ProcessGroup(
+                std::io::Error::from_raw_os_error(error as i32),
+            ));
+        }
+    };
+    let session_id = nix::unistd::getsid(Some(pid)).map_err(|error| {
+        BoundedProcessError::ProcessGroup(std::io::Error::from_raw_os_error(error as i32))
+    })?;
+    Ok(Some(OwnedProcessGroup {
+        process_group_id,
+        session_id: session_id.as_raw(),
+    }))
+}
+
+#[cfg(unix)]
+fn process_group_has_member(group: OwnedProcessGroup) -> Result<bool, BoundedProcessError> {
+    let entries = std::fs::read_dir("/proc").map_err(|error| {
+        BoundedProcessError::ProcessGroup(std::io::Error::new(error.kind(), error.to_string()))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            BoundedProcessError::ProcessGroup(std::io::Error::new(error.kind(), error.to_string()))
+        })?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(BoundedProcessError::ProcessGroup(std::io::Error::new(
+                    error.kind(),
+                    error.to_string(),
+                )));
+            }
+        };
+        let Some(close_paren) = stat.rfind(')') else {
+            return Err(BoundedProcessError::ProcessGroup(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "malformed process stat",
+            )));
+        };
+        let fields = stat
+            .get(close_paren + 2..)
+            .ok_or_else(|| {
+                BoundedProcessError::ProcessGroup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        let process_group_id = fields
+            .get(2)
+            .ok_or_else(|| {
+                BoundedProcessError::ProcessGroup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?
+            .parse::<i32>()
+            .map_err(|_| {
+                BoundedProcessError::ProcessGroup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?;
+        let session_id = fields
+            .get(3)
+            .ok_or_else(|| {
+                BoundedProcessError::ProcessGroup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?
+            .parse::<i32>()
+            .map_err(|_| {
+                BoundedProcessError::ProcessGroup(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "malformed process stat",
+                ))
+            })?;
+        if process_group_id == group.process_group_id && session_id == group.session_id {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(unix)]
+fn terminate_process_group(
+    child: &mut Child,
+    process_group: Option<OwnedProcessGroup>,
+) -> Result<(), BoundedProcessError> {
     use nix::{
         sys::signal::{Signal, killpg},
         unistd::Pid,
     };
 
-    let process_group = i32::try_from(child.id()).map_err(|_| BoundedProcessError::InvalidPid)?;
-    if killpg(Pid::from_raw(process_group), Signal::SIGKILL).is_err()
-        && child
-            .try_wait()
-            .map_err(BoundedProcessError::Wait)?
-            .is_none()
-    {
-        child.kill().map_err(BoundedProcessError::Kill)?;
-    }
-    child.wait().map_err(BoundedProcessError::Wait)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn terminate_process_group(child: &mut Child) -> Result<(), BoundedProcessError> {
-    if child
+    // The child may already have exited and been reaped by try_wait. Only
+    // signal the numeric PGID when proc evidence still proves a member in the
+    // original session; this avoids targeting a newly reused group ID.
+    let (signal_error, group_probe_error) = if let Some(group) = process_group {
+        match process_group_has_member(group) {
+            Ok(true) => (
+                Some(killpg(
+                    Pid::from_raw(group.process_group_id),
+                    Signal::SIGKILL,
+                )),
+                None,
+            ),
+            Ok(false) => (None, None),
+            Err(error) => (None, Some(error)),
+        }
+    } else {
+        (None, None)
+    };
+    let direct_error = if child
         .try_wait()
         .map_err(BoundedProcessError::Wait)?
         .is_none()
     {
+        // `Child` remains exact authority for the direct process even when
+        // the captured group has become empty or changed unexpectedly. Never
+        // enter an unbounded wait merely because the group scan found no
+        // member.
+        child.kill().err()
+    } else {
+        None
+    };
+    child.wait().map_err(BoundedProcessError::Wait)?;
+    if let Some(error) = direct_error {
+        return Err(BoundedProcessError::Kill(error));
+    }
+    if let Some(error) = signal_error.and_then(Result::err) {
+        if error == nix::errno::Errno::ESRCH {
+            return group_probe_error.map_or(Ok(()), Err);
+        }
+        return Err(BoundedProcessError::Kill(
+            std::io::Error::from_raw_os_error(error as i32),
+        ));
+    }
+    if let Some(error) = group_probe_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn terminate_process_group(
+    child: &mut Child,
+    _process_group: Option<()>,
+) -> Result<(), BoundedProcessError> {
+    let still_live = child
+        .try_wait()
+        .map_err(BoundedProcessError::Wait)?
+        .is_none();
+    if still_live {
         child.kill().map_err(BoundedProcessError::Kill)?;
     }
     child.wait().map_err(BoundedProcessError::Wait)?;
@@ -163,6 +333,8 @@ pub enum BoundedProcessError {
     Wait(io::Error),
     #[error("could not stop timed-out bounded child command")]
     Kill(io::Error),
+    #[error("could not verify bounded child process-group ownership")]
+    ProcessGroup(io::Error),
     #[error("bounded child command exposed an invalid process ID")]
     InvalidPid,
     #[error("could not read bounded child output")]
@@ -203,5 +375,43 @@ mod tests {
             Err(BoundedProcessError::TimedOut)
         ));
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn successful_parent_does_not_leave_a_descendant_holding_control_pipes() {
+        use std::{fs, path::Path, thread};
+
+        let temporary = tempfile::tempdir().unwrap();
+        let pid_path = temporary.path().join("descendant.pid");
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            &format!(
+                "sleep 30 & echo $! > '{}'",
+                pid_path.to_string_lossy().replace('\'', "'\\''")
+            ),
+        ]);
+        let output = output_bounded(&mut command, 1024, 1024).unwrap();
+        assert!(output.status.success());
+
+        let pid = (0..100)
+            .find_map(|_| {
+                fs::read_to_string(&pid_path)
+                    .ok()
+                    .and_then(|value| value.trim().parse::<u32>().ok())
+                    .or_else(|| {
+                        thread::sleep(Duration::from_millis(10));
+                        None
+                    })
+            })
+            .expect("fake descendant wrote its PID");
+        for _ in 0..100 {
+            if !Path::new(&format!("/proc/{pid}")).exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("owned descendant {pid} survived process-group cleanup");
     }
 }

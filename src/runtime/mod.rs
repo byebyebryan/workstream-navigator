@@ -23,6 +23,7 @@ const MAX_TMUX_OUTPUT_BYTES: usize = 16 * 1024;
 const LAUNCH_BARRIER_FILE: &str = "launch.ready";
 const LAUNCH_BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
 const LAUNCH_BARRIER_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const PROVIDER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const RUNTIME_TMUX_CONFIG: &str = concat!(
     "set -g status off\n",
     "set -g mouse on\n",
@@ -207,10 +208,769 @@ impl TmuxClient for SystemTmux {
     }
 }
 
+/// Errors from an exact process-identity probe.
+#[derive(Debug, Error)]
+pub enum ProcessProbeError {
+    #[error("process metadata is inaccessible")]
+    Inaccessible,
+    #[error("process metadata read failed: {0}")]
+    Io(String),
+    #[error("process metadata is malformed")]
+    Malformed,
+}
+
 /// Platform process metadata used only to corroborate a private tmux pane.
 pub trait ProcessProbe {
     /// Returns a stable process-birth token for a live process.
     fn process_birth(&self, pid: u32) -> Option<String>;
+
+    /// Returns a stable process-birth token while distinguishing an absent
+    /// process from an ambiguous metadata probe. Existing probe fakes and
+    /// callers may implement only [`Self::process_birth`]; the default adapter
+    /// preserves that API while the exact shutdown path uses this richer form.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when process metadata cannot be read or parsed with
+    /// enough certainty to authorize an external signal.
+    fn process_birth_checked(&self, pid: u32) -> Result<Option<String>, ProcessProbeError> {
+        Ok(self.process_birth(pid))
+    }
+}
+
+/// Exact process-group metadata corroborated from the host process table.
+///
+/// The group ID is the only value used for a group signal. The session ID is
+/// retained as an additional ownership fact so a same-numbered group from a
+/// different terminal session is never accepted as equivalent evidence.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessGroupInfo {
+    pub process_group_id: u32,
+    pub session_id: u32,
+}
+
+/// Injectable process-group evidence used by native Runtime cleanup.
+pub trait ProcessGroupProbe {
+    /// Reads one process's process-group and session identity.
+    ///
+    /// `None` means the process is absent. Ambiguous or inaccessible metadata
+    /// is an error and must never authorize a group signal.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when process metadata cannot be read or parsed with
+    /// enough certainty to authorize a group signal.
+    fn process_group_checked(
+        &self,
+        pid: u32,
+    ) -> Result<Option<ProcessGroupInfo>, ProcessProbeError>;
+
+    /// Lists every currently visible member of one process group.
+    ///
+    /// Implementations must fail closed when the process table cannot be
+    /// enumerated with enough certainty to prove that the group is empty.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when process-group membership cannot be enumerated
+    /// with enough certainty to authorize cleanup.
+    fn process_group_members_checked(
+        &self,
+        group: &ProcessGroupInfo,
+    ) -> Result<Vec<u32>, ProcessProbeError>;
+
+    /// Lists members by numeric process-group ID when the original leader is
+    /// already absent and therefore no session token can be read from it.
+    /// A non-empty result is evidence that cleanup cannot safely infer which
+    /// historical group owns the surviving processes; callers must fail
+    /// closed rather than signal this numeric ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when process-group membership cannot be enumerated
+    /// with enough certainty to authorize cleanup.
+    fn process_group_members_by_id_checked(
+        &self,
+        process_group_id: u32,
+    ) -> Result<Vec<u32>, ProcessProbeError>;
+}
+
+/// Exact process-group ownership captured while the provider leader is live.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OwnedProcessGroup {
+    pub leader_pid: u32,
+    pub leader_birth: String,
+    pub process_group_id: u32,
+    pub session_id: u32,
+}
+
+/// Signals supported by the exact owned-provider shutdown boundary.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OwnedProcessSignal {
+    Term,
+    Kill,
+}
+
+/// The result of bounded shutdown for one exact provider PID/birth pair.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OwnedProcessTermination {
+    /// The PID was already absent or had a different birth token. No signal
+    /// was sent because the persisted identity was no longer exact.
+    AlreadyGone,
+    /// The exact process exited after SIGTERM.
+    TerminatedByTerm,
+    /// The exact process required SIGKILL and then exited.
+    TerminatedByKill,
+}
+
+/// A narrow signal boundary so shutdown tests never touch ordinary processes.
+pub trait ProcessSignaler {
+    /// Sends one signal to the exact process identified by `pid` and its
+    /// recorded birth token.
+    ///
+    /// On Linux the production implementation opens a pidfd after the
+    /// identity check and sends through that stable descriptor. The birth
+    /// token is checked again after opening the descriptor, so a PID reuse
+    /// between the initial probe and the signal cannot redirect the signal to
+    /// an unrelated process.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the process is already gone or the signal cannot
+    /// be delivered by the host boundary.
+    fn signal(
+        &self,
+        pid: u32,
+        expected_birth: &str,
+        signal: OwnedProcessSignal,
+    ) -> Result<(), ProcessSignalError>;
+}
+
+/// A narrow signal boundary for one previously-proven native process group.
+pub trait ProcessGroupSignaler {
+    /// Signals the exact process group. `allow_leader_gone` is only used for
+    /// bounded KILL escalation after the original leader has exited while
+    /// process-table evidence still proves that members retain the original
+    /// group ID. Initial TERM always requires the leader identity to be live.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the process-group identity is invalid, ownership
+    /// cannot be corroborated, or the signal cannot be delivered safely.
+    fn signal_group(
+        &self,
+        group: &OwnedProcessGroup,
+        signal: OwnedProcessSignal,
+        allow_leader_gone: bool,
+    ) -> Result<(), ProcessSignalError>;
+}
+
+/// Errors returned by an injected or system process signaler.
+#[derive(Debug, Error)]
+pub enum ProcessSignalError {
+    #[error("process already gone")]
+    AlreadyGone,
+    #[error("process signal failed: {0}")]
+    Failed(String),
+}
+
+/// The host process-signal adapter. It never chooses a PID; callers must first
+/// prove the persisted PID/birth identity through [`ProcessProbe`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemProcessSignaler;
+
+impl ProcessSignaler for SystemProcessSignaler {
+    fn signal(
+        &self,
+        pid: u32,
+        expected_birth: &str,
+        signal: OwnedProcessSignal,
+    ) -> Result<(), ProcessSignalError> {
+        #[cfg(target_os = "linux")]
+        {
+            // pidfd_open binds this operation to the process instance rather
+            // than a reusable numeric PID. The second birth check closes the
+            // race between the caller's preflight probe and pidfd_open.
+            let pid_number = pid;
+            let pid = i32::try_from(pid)
+                .map_err(|_| ProcessSignalError::Failed("PID is out of range".to_owned()))?;
+            let pid = rustix::process::Pid::from_raw(pid)
+                .ok_or_else(|| ProcessSignalError::Failed("PID is zero".to_owned()))?;
+            let pidfd = match rustix::process::pidfd_open(pid, rustix::process::PidfdFlags::empty())
+            {
+                Ok(pidfd) => pidfd,
+                Err(error) => {
+                    return if error == rustix::io::Errno::SRCH {
+                        Err(ProcessSignalError::AlreadyGone)
+                    } else {
+                        Err(ProcessSignalError::Failed(format!(
+                            "pidfd_open failed: {error}"
+                        )))
+                    };
+                }
+            };
+            match LinuxProcessProbe.process_birth_checked(pid_number) {
+                Ok(Some(actual)) if actual == expected_birth => {}
+                Ok(_) => return Err(ProcessSignalError::AlreadyGone),
+                Err(error) => {
+                    return Err(ProcessSignalError::Failed(format!(
+                        "could not corroborate pidfd target: {error}"
+                    )));
+                }
+            }
+            let signal_kind = match signal {
+                OwnedProcessSignal::Term => rustix::process::Signal::TERM,
+                OwnedProcessSignal::Kill => rustix::process::Signal::KILL,
+            };
+            if let Err(error) = rustix::process::pidfd_send_signal(&pidfd, signal_kind) {
+                if error == rustix::io::Errno::SRCH {
+                    Err(ProcessSignalError::AlreadyGone)
+                } else {
+                    Err(ProcessSignalError::Failed(format!(
+                        "pidfd_send_signal failed: {error}"
+                    )))
+                }
+            } else {
+                Ok(())
+            }
+        }
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            use nix::{errno::Errno, sys::signal, unistd::Pid};
+
+            let pid = i32::try_from(pid)
+                .map_err(|_| ProcessSignalError::Failed("PID is out of range".to_owned()))?;
+            let signal_kind = match signal {
+                OwnedProcessSignal::Term => signal::Signal::SIGTERM,
+                OwnedProcessSignal::Kill => signal::Signal::SIGKILL,
+            };
+            signal::kill(Pid::from_raw(pid), signal_kind).map_err(|error| {
+                if error == Errno::ESRCH {
+                    ProcessSignalError::AlreadyGone
+                } else {
+                    ProcessSignalError::Failed(error.to_string())
+                }
+            })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (pid, expected_birth, signal);
+            Err(ProcessSignalError::Failed(
+                "process signalling is unsupported on this platform".to_owned(),
+            ))
+        }
+    }
+}
+
+/// The host process-group signal adapter. It reopens a pidfd for the original
+/// leader and corroborates its birth plus group/session identity immediately
+/// before each group signal. KILL escalation may proceed after that leader has
+/// exited only when the caller has separately observed members retaining the
+/// original group ID.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct SystemProcessGroupSignaler;
+
+impl ProcessGroupSignaler for SystemProcessGroupSignaler {
+    fn signal_group(
+        &self,
+        group: &OwnedProcessGroup,
+        signal: OwnedProcessSignal,
+        allow_leader_gone: bool,
+    ) -> Result<(), ProcessSignalError> {
+        if group.leader_pid == 0
+            || group.process_group_id == 0
+            || group.process_group_id != group.leader_pid
+            || group.session_id == 0
+            || group.leader_birth.is_empty()
+        {
+            return Err(ProcessSignalError::Failed(
+                "owned process-group identity was invalid".to_owned(),
+            ));
+        }
+
+        #[cfg(target_os = "linux")]
+        {
+            let leader_pid = i32::try_from(group.leader_pid)
+                .map_err(|_| ProcessSignalError::Failed("PID is out of range".to_owned()))?;
+            let leader_pid = rustix::process::Pid::from_raw(leader_pid)
+                .ok_or_else(|| ProcessSignalError::Failed("PID is zero".to_owned()))?;
+            let leader_pidfd =
+                match rustix::process::pidfd_open(leader_pid, rustix::process::PidfdFlags::empty())
+                {
+                    Ok(pidfd) => Some(pidfd),
+                    Err(error) if error == rustix::io::Errno::SRCH && allow_leader_gone => None,
+                    Err(error) if error == rustix::io::Errno::SRCH => {
+                        return Err(ProcessSignalError::AlreadyGone);
+                    }
+                    Err(error) => {
+                        return Err(ProcessSignalError::Failed(format!(
+                            "pidfd_open failed: {error}"
+                        )));
+                    }
+                };
+
+            let leader_stopped = leader_pidfd.as_ref().map_or(Ok(false), |pidfd| {
+                stop_and_verify_linux_group_leader(pidfd, group, allow_leader_gone)
+            })?;
+            send_linux_group_signal(group, signal, leader_pidfd.as_ref(), leader_stopped)?;
+            Ok(())
+        }
+        #[cfg(all(unix, not(target_os = "linux")))]
+        {
+            let process_group_id = i32::try_from(group.process_group_id).map_err(|_| {
+                ProcessSignalError::Failed("process-group ID is out of range".to_owned())
+            })?;
+            let signal_kind = match signal {
+                OwnedProcessSignal::Term => nix::sys::signal::Signal::SIGTERM,
+                OwnedProcessSignal::Kill => nix::sys::signal::Signal::SIGKILL,
+            };
+            nix::sys::signal::killpg(nix::unistd::Pid::from_raw(process_group_id), signal_kind)
+                .map_err(|error| {
+                    if error == nix::errno::Errno::ESRCH {
+                        ProcessSignalError::AlreadyGone
+                    } else {
+                        ProcessSignalError::Failed(error.to_string())
+                    }
+                })
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (group, signal, allow_leader_gone);
+            Err(ProcessSignalError::Failed(
+                "process-group signalling is unsupported on this platform".to_owned(),
+            ))
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn verify_linux_group_leader(group: &OwnedProcessGroup) -> Result<(), ProcessSignalError> {
+    match LinuxProcessProbe.process_birth_checked(group.leader_pid) {
+        Ok(Some(actual)) if actual == group.leader_birth => {}
+        Ok(Some(_)) => {
+            return Err(ProcessSignalError::Failed(
+                "process-group leader birth changed".to_owned(),
+            ));
+        }
+        Ok(None) => return Err(ProcessSignalError::AlreadyGone),
+        Err(error) => {
+            return Err(ProcessSignalError::Failed(format!(
+                "could not corroborate process-group leader: {error}"
+            )));
+        }
+    }
+    match LinuxProcessProbe.process_group_checked(group.leader_pid) {
+        Ok(Some(actual))
+            if actual.process_group_id == group.process_group_id
+                && actual.session_id == group.session_id =>
+        {
+            Ok(())
+        }
+        Ok(Some(_)) => Err(ProcessSignalError::Failed(
+            "process-group leader changed groups".to_owned(),
+        )),
+        Ok(None) => Err(ProcessSignalError::AlreadyGone),
+        Err(error) => Err(ProcessSignalError::Failed(format!(
+            "could not corroborate process-group membership: {error}"
+        ))),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn stop_and_verify_linux_group_leader(
+    pidfd: &rustix::fd::OwnedFd,
+    group: &OwnedProcessGroup,
+    allow_leader_gone: bool,
+) -> Result<bool, ProcessSignalError> {
+    if let Err(error) = verify_linux_group_leader(group) {
+        if allow_leader_gone && matches!(error, ProcessSignalError::AlreadyGone) {
+            // The member scan performed by the caller is the only remaining
+            // ownership evidence for KILL escalation.
+            return Ok(false);
+        }
+        return Err(error);
+    }
+    match rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::STOP) {
+        Ok(()) => {}
+        Err(error) if error == rustix::io::Errno::SRCH && allow_leader_gone => return Ok(false),
+        Err(error) if error == rustix::io::Errno::SRCH => {
+            return Err(ProcessSignalError::AlreadyGone);
+        }
+        Err(error) => {
+            return Err(ProcessSignalError::Failed(format!(
+                "pidfd_stop failed: {error}"
+            )));
+        }
+    }
+    if let Err(error) = verify_linux_group_leader(group) {
+        let _ = rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::CONT);
+        return Err(error);
+    }
+    Ok(true)
+}
+
+#[cfg(target_os = "linux")]
+fn send_linux_group_signal(
+    group: &OwnedProcessGroup,
+    owned_signal: OwnedProcessSignal,
+    pidfd: Option<&rustix::fd::OwnedFd>,
+    leader_stopped: bool,
+) -> Result<(), ProcessSignalError> {
+    let process_group_id = i32::try_from(group.process_group_id)
+        .map_err(|_| ProcessSignalError::Failed("process-group ID is out of range".to_owned()))?;
+    let process_group_id = rustix::process::Pid::from_raw(process_group_id)
+        .ok_or_else(|| ProcessSignalError::Failed("process-group ID is zero".to_owned()))?;
+    let signal = match owned_signal {
+        OwnedProcessSignal::Term => rustix::process::Signal::TERM,
+        OwnedProcessSignal::Kill => rustix::process::Signal::KILL,
+    };
+    let group_result =
+        rustix::process::kill_process_group(process_group_id, signal).map_err(|error| {
+            if error == rustix::io::Errno::SRCH {
+                ProcessSignalError::AlreadyGone
+            } else {
+                ProcessSignalError::Failed(format!("process-group signal failed: {error}"))
+            }
+        });
+    if leader_stopped {
+        let pidfd = pidfd.expect("stopped leader always has a pidfd");
+        let continue_result =
+            rustix::process::pidfd_send_signal(pidfd, rustix::process::Signal::CONT).map_err(
+                |error| {
+                    if error == rustix::io::Errno::SRCH {
+                        ProcessSignalError::AlreadyGone
+                    } else {
+                        ProcessSignalError::Failed(format!("pidfd_continue failed: {error}"))
+                    }
+                },
+            );
+        if let Err(ProcessSignalError::Failed(message)) = continue_result {
+            return Err(ProcessSignalError::Failed(message));
+        }
+    }
+    group_result
+}
+
+/// Terminates one exact helper process after its owner has stopped exposing
+/// it to user-facing work. The process birth token is checked before every
+/// signal and before the KILL fallback, so a reused PID is never signalled.
+///
+/// A missing or changed birth token is safe evidence that the recorded helper
+/// is already gone; signal failures and a process that survives both bounded
+/// phases remain errors for the caller to reconcile. Native provider Runtime
+/// groups are stopped before their private tmux server through
+/// [`terminate_owned_provider_process`].
+///
+/// # Errors
+///
+/// Returns an error when the persisted identity is invalid, signalling fails,
+/// or the exact process survives both bounded shutdown phases.
+pub fn terminate_owned_process(
+    provider_pid: u32,
+    expected_birth: &str,
+    process_probe: &dyn ProcessProbe,
+    process_signaler: &dyn ProcessSignaler,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<OwnedProcessTermination, RuntimeError> {
+    if provider_pid == 0 || expected_birth.is_empty() {
+        return Err(RuntimeError::InvalidProcessIdentity);
+    }
+    if !exact_process_identity(process_probe, provider_pid, expected_birth)? {
+        return Ok(OwnedProcessTermination::AlreadyGone);
+    }
+
+    match process_signaler.signal(provider_pid, expected_birth, OwnedProcessSignal::Term) {
+        Ok(()) => {}
+        Err(ProcessSignalError::AlreadyGone) => {
+            return Ok(OwnedProcessTermination::AlreadyGone);
+        }
+        Err(error) => return Err(RuntimeError::ProcessSignal(error)),
+    }
+    if wait_for_process_exit(
+        provider_pid,
+        expected_birth,
+        process_probe,
+        timeout,
+        poll_interval,
+    )? {
+        return Ok(OwnedProcessTermination::TerminatedByTerm);
+    }
+
+    // Re-check the exact identity at the escalation boundary. If the PID was
+    // reused, treating it as gone is the only safe action; never send KILL.
+    if !exact_process_identity(process_probe, provider_pid, expected_birth)? {
+        return Ok(OwnedProcessTermination::AlreadyGone);
+    }
+    match process_signaler.signal(provider_pid, expected_birth, OwnedProcessSignal::Kill) {
+        Ok(()) | Err(ProcessSignalError::AlreadyGone) => {}
+        Err(error) => return Err(RuntimeError::ProcessSignal(error)),
+    }
+    if wait_for_process_exit(
+        provider_pid,
+        expected_birth,
+        process_probe,
+        timeout,
+        poll_interval,
+    )? {
+        Ok(OwnedProcessTermination::TerminatedByKill)
+    } else {
+        Err(RuntimeError::ProcessShutdownTimedOut)
+    }
+}
+
+/// Proves that the exact live provider process is the leader of its own
+/// process group. The returned evidence is captured before the Runtime's
+/// private tmux server is stopped, while the leader PID plus birth token can
+/// still corroborate the group ownership.
+///
+/// # Errors
+///
+/// Returns an error when process metadata is absent, ambiguous, malformed, or
+/// does not show `provider_pid == process_group_id` with a visible group
+/// member for that leader.
+pub fn prove_owned_process_group(
+    provider_pid: u32,
+    expected_birth: &str,
+    process_probe: &dyn ProcessProbe,
+    process_group_probe: &dyn ProcessGroupProbe,
+) -> Result<OwnedProcessGroup, RuntimeError> {
+    if provider_pid == 0 || expected_birth.is_empty() {
+        return Err(RuntimeError::InvalidProcessIdentity);
+    }
+    if !exact_process_identity(process_probe, provider_pid, expected_birth)? {
+        return Err(RuntimeError::ProcessIdentityChanged);
+    }
+    prove_owned_process_group_after_identity(provider_pid, expected_birth, process_group_probe)
+}
+
+fn prove_owned_process_group_after_identity(
+    provider_pid: u32,
+    expected_birth: &str,
+    process_group_probe: &dyn ProcessGroupProbe,
+) -> Result<OwnedProcessGroup, RuntimeError> {
+    let Some(group) = process_group_probe
+        .process_group_checked(provider_pid)
+        .map_err(RuntimeError::ProcessGroupProbe)?
+    else {
+        return Err(RuntimeError::ProcessGroupIdentityMismatch);
+    };
+    if group.process_group_id != provider_pid || group.session_id == 0 {
+        return Err(RuntimeError::ProcessGroupIdentityMismatch);
+    }
+    let members = process_group_probe
+        .process_group_members_checked(&ProcessGroupInfo {
+            process_group_id: group.process_group_id,
+            session_id: group.session_id,
+        })
+        .map_err(RuntimeError::ProcessGroupProbe)?;
+    if !members.contains(&provider_pid) {
+        return Err(RuntimeError::ProcessGroupIdentityMismatch);
+    }
+    Ok(OwnedProcessGroup {
+        leader_pid: provider_pid,
+        leader_birth: expected_birth.to_owned(),
+        process_group_id: group.process_group_id,
+        session_id: group.session_id,
+    })
+}
+
+/// Terminates the complete process group owned by one exact provider leader.
+/// TERM and KILL each retain bounded deadlines. KILL may proceed after the
+/// leader exits only when a process-table scan still proves members retain the
+/// group ID captured while the leader was exact; an empty group is treated as
+/// already gone. A changed/reused leader PID never authorizes a group signal.
+///
+/// # Errors
+///
+/// Returns an error when the persisted process identity or group ownership is
+/// invalid, signalling fails, or the group survives both bounded shutdown
+/// phases.
+pub fn terminate_owned_process_group(
+    provider_pid: u32,
+    expected_birth: &str,
+    process_probe: &dyn ProcessProbe,
+    process_group_probe: &dyn ProcessGroupProbe,
+    process_group_signaler: &dyn ProcessGroupSignaler,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<OwnedProcessTermination, RuntimeError> {
+    if provider_pid == 0 || expected_birth.is_empty() {
+        return Err(RuntimeError::InvalidProcessIdentity);
+    }
+    let group = match process_probe
+        .process_birth_checked(provider_pid)
+        .map_err(RuntimeError::ProcessProbe)?
+    {
+        Some(actual) if actual == expected_birth => prove_owned_process_group_after_identity(
+            provider_pid,
+            expected_birth,
+            process_group_probe,
+        )?,
+        Some(_) => return Err(RuntimeError::ProcessIdentityChanged),
+        None => {
+            let members = process_group_probe
+                .process_group_members_by_id_checked(provider_pid)
+                .map_err(RuntimeError::ProcessGroupProbe)?;
+            if members.is_empty() {
+                return Ok(OwnedProcessTermination::AlreadyGone);
+            }
+            return Err(RuntimeError::ProcessGroupIdentityMismatch);
+        }
+    };
+
+    match process_group_signaler.signal_group(&group, OwnedProcessSignal::Term, false) {
+        Ok(()) | Err(ProcessSignalError::AlreadyGone) => {}
+        Err(error) => return Err(RuntimeError::ProcessGroupSignal(error)),
+    }
+    if wait_for_process_group_exit(&group, process_group_probe, timeout, poll_interval)? {
+        return Ok(OwnedProcessTermination::TerminatedByTerm);
+    }
+
+    // Revalidate the provider leader before KILL. A changed birth token is a
+    // PID-reuse event and therefore fails closed even if the numeric group ID
+    // happens to match. A missing leader is allowed only because the group
+    // member scan below still proves that this previously captured group has
+    // surviving members.
+    let leader_gone = match process_probe
+        .process_birth_checked(group.leader_pid)
+        .map_err(RuntimeError::ProcessProbe)?
+    {
+        Some(actual) if actual == group.leader_birth => {
+            let actual_group = process_group_probe
+                .process_group_checked(group.leader_pid)
+                .map_err(RuntimeError::ProcessGroupProbe)?
+                .ok_or(RuntimeError::ProcessGroupIdentityMismatch)?;
+            if actual_group.process_group_id != group.process_group_id
+                || actual_group.session_id != group.session_id
+            {
+                return Err(RuntimeError::ProcessGroupIdentityMismatch);
+            }
+            false
+        }
+        Some(_) => return Err(RuntimeError::ProcessIdentityChanged),
+        None => true,
+    };
+    if leader_gone
+        && process_group_probe
+            .process_group_members_checked(&ProcessGroupInfo {
+                process_group_id: group.process_group_id,
+                session_id: group.session_id,
+            })
+            .map_err(RuntimeError::ProcessGroupProbe)?
+            .is_empty()
+    {
+        return Ok(OwnedProcessTermination::TerminatedByTerm);
+    }
+    match process_group_signaler.signal_group(&group, OwnedProcessSignal::Kill, leader_gone) {
+        Ok(()) | Err(ProcessSignalError::AlreadyGone) => {}
+        Err(error) => return Err(RuntimeError::ProcessGroupSignal(error)),
+    }
+    if wait_for_process_group_exit(&group, process_group_probe, timeout, poll_interval)? {
+        Ok(OwnedProcessTermination::TerminatedByKill)
+    } else {
+        Err(RuntimeError::ProcessShutdownTimedOut)
+    }
+}
+
+fn wait_for_process_group_exit(
+    group: &OwnedProcessGroup,
+    process_group_probe: &dyn ProcessGroupProbe,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<bool, RuntimeError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if process_group_probe
+            .process_group_members_checked(&ProcessGroupInfo {
+                process_group_id: group.process_group_id,
+                session_id: group.session_id,
+            })
+            .map_err(RuntimeError::ProcessGroupProbe)?
+            .is_empty()
+        {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(poll_interval.max(Duration::from_millis(1)));
+    }
+}
+
+/// Production wrapper using the host's process identity and signal adapters.
+///
+/// # Errors
+///
+/// Returns an error when the persisted identity is invalid, signalling fails,
+/// or the exact process survives both bounded shutdown phases.
+pub fn terminate_owned_provider_process(
+    provider_pid: u32,
+    expected_birth: &str,
+    timeout: Duration,
+) -> Result<OwnedProcessTermination, RuntimeError> {
+    terminate_owned_process_group(
+        provider_pid,
+        expected_birth,
+        &LinuxProcessProbe,
+        &LinuxProcessProbe,
+        &SystemProcessGroupSignaler,
+        timeout,
+        PROVIDER_SHUTDOWN_POLL_INTERVAL,
+    )
+}
+
+/// Production wrapper for helper processes that are not guaranteed to own a
+/// process group (for example the `OpenCode` observer sidecar). Native provider
+/// Runtime cleanup uses [`terminate_owned_provider_process`] instead.
+///
+/// # Errors
+///
+/// Returns an error when the persisted helper identity is invalid, signalling
+/// fails, or the helper survives both bounded shutdown phases.
+pub fn terminate_owned_observer_process(
+    observer_pid: u32,
+    expected_birth: &str,
+    timeout: Duration,
+) -> Result<OwnedProcessTermination, RuntimeError> {
+    terminate_owned_process(
+        observer_pid,
+        expected_birth,
+        &LinuxProcessProbe,
+        &SystemProcessSignaler,
+        timeout,
+        PROVIDER_SHUTDOWN_POLL_INTERVAL,
+    )
+}
+
+fn exact_process_identity(
+    probe: &dyn ProcessProbe,
+    pid: u32,
+    expected_birth: &str,
+) -> Result<bool, RuntimeError> {
+    probe
+        .process_birth_checked(pid)
+        .map(|birth| birth.as_deref() == Some(expected_birth))
+        .map_err(RuntimeError::ProcessProbe)
+}
+
+fn wait_for_process_exit(
+    pid: u32,
+    expected_birth: &str,
+    process_probe: &dyn ProcessProbe,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<bool, RuntimeError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !exact_process_identity(process_probe, pid, expected_birth)? {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(poll_interval.max(Duration::from_millis(1)));
+    }
 }
 
 /// Linux process-birth probe backed by the process stat file.
@@ -219,11 +979,122 @@ pub struct LinuxProcessProbe;
 
 impl ProcessProbe for LinuxProcessProbe {
     fn process_birth(&self, pid: u32) -> Option<String> {
-        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-        let close_paren = stat.rfind(')')?;
-        let start_time = stat.get(close_paren + 2..)?.split_whitespace().nth(19)?;
-        Some(start_time.to_owned())
+        self.process_birth_checked(pid).ok().flatten()
     }
+
+    fn process_birth_checked(&self, pid: u32) -> Result<Option<String>, ProcessProbeError> {
+        Ok(read_linux_process_stat(pid)?.map(|stat| stat.birth))
+    }
+}
+
+impl ProcessGroupProbe for LinuxProcessProbe {
+    fn process_group_checked(
+        &self,
+        pid: u32,
+    ) -> Result<Option<ProcessGroupInfo>, ProcessProbeError> {
+        Ok(read_linux_process_stat(pid)?.map(|stat| ProcessGroupInfo {
+            process_group_id: stat.process_group_id,
+            session_id: stat.session_id,
+        }))
+    }
+
+    fn process_group_members_checked(
+        &self,
+        group: &ProcessGroupInfo,
+    ) -> Result<Vec<u32>, ProcessProbeError> {
+        if group.process_group_id == 0 || group.session_id == 0 {
+            return Err(ProcessProbeError::Malformed);
+        }
+        linux_process_group_members(group.process_group_id, Some(group.session_id))
+    }
+
+    fn process_group_members_by_id_checked(
+        &self,
+        process_group_id: u32,
+    ) -> Result<Vec<u32>, ProcessProbeError> {
+        if process_group_id == 0 {
+            return Err(ProcessProbeError::Malformed);
+        }
+        linux_process_group_members(process_group_id, None)
+    }
+}
+
+fn linux_process_group_members(
+    process_group_id: u32,
+    session_id: Option<u32>,
+) -> Result<Vec<u32>, ProcessProbeError> {
+    if process_group_id == 0 {
+        return Err(ProcessProbeError::Malformed);
+    }
+    let entries = fs::read_dir("/proc").map_err(|error| match error.kind() {
+        std::io::ErrorKind::PermissionDenied => ProcessProbeError::Inaccessible,
+        _ => ProcessProbeError::Io(error.to_string()),
+    })?;
+    let mut members = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| ProcessProbeError::Io(error.to_string()))?;
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse().ok())
+        else {
+            continue;
+        };
+        match read_linux_process_stat(pid)? {
+            Some(stat)
+                if stat.process_group_id == process_group_id
+                    && session_id.is_none_or(|session| stat.session_id == session) =>
+            {
+                members.push(pid);
+            }
+            Some(_) | None => {}
+        }
+    }
+    members.sort_unstable();
+    Ok(members)
+}
+
+#[derive(Debug)]
+struct LinuxProcessStat {
+    birth: String,
+    process_group_id: u32,
+    session_id: u32,
+}
+
+fn read_linux_process_stat(pid: u32) -> Result<Option<LinuxProcessStat>, ProcessProbeError> {
+    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => stat,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(ProcessProbeError::Inaccessible);
+        }
+        Err(error) => return Err(ProcessProbeError::Io(error.to_string())),
+    };
+    let close_paren = stat.rfind(')').ok_or(ProcessProbeError::Malformed)?;
+    let fields = stat
+        .get(close_paren + 2..)
+        .ok_or(ProcessProbeError::Malformed)?
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    let birth = fields
+        .get(19)
+        .ok_or(ProcessProbeError::Malformed)?
+        .to_string();
+    let process_group_id = fields
+        .get(2)
+        .ok_or(ProcessProbeError::Malformed)?
+        .parse()
+        .map_err(|_| ProcessProbeError::Malformed)?;
+    let session_id = fields
+        .get(3)
+        .ok_or(ProcessProbeError::Malformed)?
+        .parse()
+        .map_err(|_| ProcessProbeError::Malformed)?;
+    Ok(Some(LinuxProcessStat {
+        birth,
+        process_group_id,
+        session_id,
+    }))
 }
 
 /// Confirms that this hook process is a direct child of the current provider.
@@ -658,6 +1529,22 @@ pub enum RuntimeError {
     TmuxRejected(String),
     #[error("could not execute bounded private tmux control command")]
     TmuxOutput(#[source] BoundedProcessError),
+    #[error("provider process identity is invalid")]
+    InvalidProcessIdentity,
+    #[error("provider process shutdown timed out")]
+    ProcessShutdownTimedOut,
+    #[error("could not verify provider process identity: {0}")]
+    ProcessProbe(#[source] ProcessProbeError),
+    #[error("could not verify provider process-group ownership: {0}")]
+    ProcessGroupProbe(#[source] ProcessProbeError),
+    #[error("provider process was not proven to lead its private process group")]
+    ProcessGroupIdentityMismatch,
+    #[error("provider process identity changed during process-group shutdown")]
+    ProcessIdentityChanged,
+    #[error("could not signal the exact provider process: {0}")]
+    ProcessSignal(#[source] ProcessSignalError),
+    #[error("could not signal the exact provider process group: {0}")]
+    ProcessGroupSignal(#[source] ProcessSignalError),
 }
 
 impl RuntimeError {
@@ -711,12 +1598,511 @@ mod tests {
         }
     }
 
+    struct SequenceProcessProbe {
+        births: RefCell<VecDeque<Option<String>>>,
+    }
+
+    impl SequenceProcessProbe {
+        fn new(births: impl IntoIterator<Item = Option<&'static str>>) -> Self {
+            Self {
+                births: RefCell::new(
+                    births
+                        .into_iter()
+                        .map(|birth| birth.map(str::to_owned))
+                        .collect(),
+                ),
+            }
+        }
+    }
+
+    impl ProcessProbe for SequenceProcessProbe {
+        fn process_birth(&self, _pid: u32) -> Option<String> {
+            self.births.borrow_mut().pop_front().unwrap_or(None)
+        }
+    }
+
+    struct AmbiguousProcessProbe;
+
+    impl ProcessProbe for AmbiguousProcessProbe {
+        fn process_birth(&self, _pid: u32) -> Option<String> {
+            Some("birth-expected".to_owned())
+        }
+
+        fn process_birth_checked(&self, _pid: u32) -> Result<Option<String>, ProcessProbeError> {
+            Err(ProcessProbeError::Inaccessible)
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingSignaler {
+        signals: RefCell<Vec<(u32, String, OwnedProcessSignal)>>,
+        failure: Option<ProcessSignalError>,
+    }
+
+    impl ProcessSignaler for RecordingSignaler {
+        fn signal(
+            &self,
+            pid: u32,
+            expected_birth: &str,
+            signal: OwnedProcessSignal,
+        ) -> Result<(), ProcessSignalError> {
+            self.signals
+                .borrow_mut()
+                .push((pid, expected_birth.to_owned(), signal));
+            if let Some(error) = &self.failure {
+                return Err(match error {
+                    ProcessSignalError::AlreadyGone => ProcessSignalError::AlreadyGone,
+                    ProcessSignalError::Failed(message) => {
+                        ProcessSignalError::Failed(message.clone())
+                    }
+                });
+            }
+            Ok(())
+        }
+    }
+
+    struct FakeGroupProbe {
+        group: Option<ProcessGroupInfo>,
+        group_error: bool,
+        members: RefCell<VecDeque<Vec<u32>>>,
+        members_error: bool,
+    }
+
+    impl FakeGroupProbe {
+        fn new(
+            group: Option<ProcessGroupInfo>,
+            members: impl IntoIterator<Item = Vec<u32>>,
+        ) -> Self {
+            Self {
+                group,
+                group_error: false,
+                members: RefCell::new(members.into_iter().collect()),
+                members_error: false,
+            }
+        }
+
+        fn group_error() -> Self {
+            Self {
+                group: None,
+                group_error: true,
+                members: RefCell::default(),
+                members_error: false,
+            }
+        }
+    }
+
+    impl ProcessGroupProbe for FakeGroupProbe {
+        fn process_group_checked(
+            &self,
+            _pid: u32,
+        ) -> Result<Option<ProcessGroupInfo>, ProcessProbeError> {
+            if self.group_error {
+                Err(ProcessProbeError::Inaccessible)
+            } else {
+                Ok(self.group)
+            }
+        }
+
+        fn process_group_members_checked(
+            &self,
+            _group: &ProcessGroupInfo,
+        ) -> Result<Vec<u32>, ProcessProbeError> {
+            if self.members_error {
+                return Err(ProcessProbeError::Malformed);
+            }
+            Ok(self.members.borrow_mut().pop_front().unwrap_or_default())
+        }
+
+        fn process_group_members_by_id_checked(
+            &self,
+            _process_group_id: u32,
+        ) -> Result<Vec<u32>, ProcessProbeError> {
+            self.process_group_members_checked(&ProcessGroupInfo {
+                process_group_id: 1,
+                session_id: 1,
+            })
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingGroupSignaler {
+        signals: RefCell<Vec<(u32, OwnedProcessSignal, bool)>>,
+        failure: Option<ProcessSignalError>,
+    }
+
+    impl ProcessGroupSignaler for RecordingGroupSignaler {
+        fn signal_group(
+            &self,
+            group: &OwnedProcessGroup,
+            signal: OwnedProcessSignal,
+            allow_leader_gone: bool,
+        ) -> Result<(), ProcessSignalError> {
+            self.signals
+                .borrow_mut()
+                .push((group.process_group_id, signal, allow_leader_gone));
+            if let Some(error) = &self.failure {
+                return Err(match error {
+                    ProcessSignalError::AlreadyGone => ProcessSignalError::AlreadyGone,
+                    ProcessSignalError::Failed(message) => {
+                        ProcessSignalError::Failed(message.clone())
+                    }
+                });
+            }
+            Ok(())
+        }
+    }
+
     fn successful() -> TmuxResponse {
         TmuxResponse {
             success: true,
             stdout: String::new(),
             stderr: String::new(),
         }
+    }
+
+    #[test]
+    fn owned_process_shutdown_does_not_signal_an_absent_or_reused_pid() {
+        for probe in [
+            SequenceProcessProbe::new([None]),
+            SequenceProcessProbe::new([Some("birth-other")]),
+        ] {
+            let signaler = RecordingSignaler::default();
+            assert_eq!(
+                terminate_owned_process(
+                    77,
+                    "birth-expected",
+                    &probe,
+                    &signaler,
+                    Duration::ZERO,
+                    Duration::ZERO,
+                )
+                .unwrap(),
+                OwnedProcessTermination::AlreadyGone
+            );
+            assert!(signaler.signals.borrow().is_empty());
+        }
+    }
+
+    #[test]
+    fn owned_process_shutdown_refuses_ambiguous_probe_without_signalling() {
+        let probe = AmbiguousProcessProbe;
+        let signaler = RecordingSignaler::default();
+
+        assert!(matches!(
+            terminate_owned_process(
+                77,
+                "birth-expected",
+                &probe,
+                &signaler,
+                Duration::ZERO,
+                Duration::ZERO,
+            ),
+            Err(RuntimeError::ProcessProbe(ProcessProbeError::Inaccessible))
+        ));
+        assert!(signaler.signals.borrow().is_empty());
+    }
+
+    #[test]
+    fn owned_process_shutdown_accepts_term_exit_without_kill() {
+        let probe = SequenceProcessProbe::new([Some("birth-expected"), None]);
+        let signaler = RecordingSignaler::default();
+
+        assert_eq!(
+            terminate_owned_process(
+                77,
+                "birth-expected",
+                &probe,
+                &signaler,
+                Duration::from_millis(20),
+                Duration::from_millis(1),
+            )
+            .unwrap(),
+            OwnedProcessTermination::TerminatedByTerm
+        );
+        assert_eq!(
+            &*signaler.signals.borrow(),
+            &[(77, "birth-expected".to_owned(), OwnedProcessSignal::Term)]
+        );
+    }
+
+    #[test]
+    fn owned_process_shutdown_escalates_to_kill_only_while_identity_matches() {
+        let probe = SequenceProcessProbe::new([
+            Some("birth-expected"),
+            Some("birth-expected"),
+            Some("birth-expected"),
+            None,
+        ]);
+        let signaler = RecordingSignaler::default();
+
+        assert_eq!(
+            terminate_owned_process(
+                77,
+                "birth-expected",
+                &probe,
+                &signaler,
+                Duration::ZERO,
+                Duration::ZERO,
+            )
+            .unwrap(),
+            OwnedProcessTermination::TerminatedByKill
+        );
+        assert_eq!(
+            &*signaler.signals.borrow(),
+            &[
+                (77, "birth-expected".to_owned(), OwnedProcessSignal::Term),
+                (77, "birth-expected".to_owned(), OwnedProcessSignal::Kill),
+            ]
+        );
+    }
+
+    #[test]
+    fn owned_process_shutdown_refuses_kill_after_pid_reuse() {
+        let probe = SequenceProcessProbe::new([
+            Some("birth-expected"),
+            Some("birth-expected"),
+            Some("birth-reused"),
+        ]);
+        let signaler = RecordingSignaler::default();
+
+        assert_eq!(
+            terminate_owned_process(
+                77,
+                "birth-expected",
+                &probe,
+                &signaler,
+                Duration::ZERO,
+                Duration::ZERO,
+            )
+            .unwrap(),
+            OwnedProcessTermination::AlreadyGone
+        );
+        assert_eq!(
+            &*signaler.signals.borrow(),
+            &[(77, "birth-expected".to_owned(), OwnedProcessSignal::Term)]
+        );
+    }
+
+    #[test]
+    fn owned_group_requires_the_exact_provider_to_lead_the_group() {
+        let process_probe = SequenceProcessProbe::new([Some("birth-expected")]);
+        let group_probe = FakeGroupProbe::new(
+            Some(ProcessGroupInfo {
+                process_group_id: 88,
+                session_id: 11,
+            }),
+            [vec![88]],
+        );
+        let signaler = RecordingGroupSignaler::default();
+
+        assert!(matches!(
+            terminate_owned_process_group(
+                77,
+                "birth-expected",
+                &process_probe,
+                &group_probe,
+                &signaler,
+                Duration::ZERO,
+                Duration::ZERO,
+            ),
+            Err(RuntimeError::ProcessGroupIdentityMismatch)
+        ));
+        assert!(signaler.signals.borrow().is_empty());
+    }
+
+    #[test]
+    fn owned_group_refuses_ambiguous_group_metadata() {
+        let process_probe = SequenceProcessProbe::new([Some("birth-expected")]);
+        let group_probe = FakeGroupProbe::group_error();
+        let signaler = RecordingGroupSignaler::default();
+
+        assert!(matches!(
+            terminate_owned_process_group(
+                77,
+                "birth-expected",
+                &process_probe,
+                &group_probe,
+                &signaler,
+                Duration::ZERO,
+                Duration::ZERO,
+            ),
+            Err(RuntimeError::ProcessGroupProbe(
+                ProcessProbeError::Inaccessible
+            ))
+        ));
+        assert!(signaler.signals.borrow().is_empty());
+    }
+
+    #[test]
+    fn owned_group_recovery_accepts_an_absent_leader_and_empty_group() {
+        let process_probe = SequenceProcessProbe::new([None]);
+        let group_probe = FakeGroupProbe::new(None, [vec![]]);
+        let signaler = RecordingGroupSignaler::default();
+
+        assert_eq!(
+            terminate_owned_process_group(
+                77,
+                "birth-expected",
+                &process_probe,
+                &group_probe,
+                &signaler,
+                Duration::ZERO,
+                Duration::ZERO,
+            )
+            .unwrap(),
+            OwnedProcessTermination::AlreadyGone
+        );
+        assert!(signaler.signals.borrow().is_empty());
+    }
+
+    #[test]
+    fn owned_group_recovery_fails_closed_when_absent_leader_has_members() {
+        let process_probe = SequenceProcessProbe::new([None]);
+        let group_probe = FakeGroupProbe::new(None, [vec![88]]);
+        let signaler = RecordingGroupSignaler::default();
+
+        assert!(matches!(
+            terminate_owned_process_group(
+                77,
+                "birth-expected",
+                &process_probe,
+                &group_probe,
+                &signaler,
+                Duration::ZERO,
+                Duration::ZERO,
+            ),
+            Err(RuntimeError::ProcessGroupIdentityMismatch)
+        ));
+        assert!(signaler.signals.borrow().is_empty());
+    }
+
+    #[test]
+    fn owned_group_escalates_to_kill_for_surviving_descendants() {
+        let process_probe =
+            SequenceProcessProbe::new([Some("birth-expected"), Some("birth-expected")]);
+        let group_probe = FakeGroupProbe::new(
+            Some(ProcessGroupInfo {
+                process_group_id: 77,
+                session_id: 11,
+            }),
+            [vec![77, 88], vec![77, 88], vec![]],
+        );
+        let signaler = RecordingGroupSignaler::default();
+
+        assert_eq!(
+            terminate_owned_process_group(
+                77,
+                "birth-expected",
+                &process_probe,
+                &group_probe,
+                &signaler,
+                Duration::ZERO,
+                Duration::ZERO,
+            )
+            .unwrap(),
+            OwnedProcessTermination::TerminatedByKill
+        );
+        assert_eq!(
+            &*signaler.signals.borrow(),
+            &[
+                (77, OwnedProcessSignal::Term, false),
+                (77, OwnedProcessSignal::Kill, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn owned_group_escalates_after_leader_exit_when_members_retain_group() {
+        let process_probe = SequenceProcessProbe::new([Some("birth-expected"), None]);
+        let group_probe = FakeGroupProbe::new(
+            Some(ProcessGroupInfo {
+                process_group_id: 77,
+                session_id: 11,
+            }),
+            [vec![77, 88], vec![77, 88], vec![88], vec![]],
+        );
+        let signaler = RecordingGroupSignaler::default();
+
+        assert_eq!(
+            terminate_owned_process_group(
+                77,
+                "birth-expected",
+                &process_probe,
+                &group_probe,
+                &signaler,
+                Duration::ZERO,
+                Duration::ZERO,
+            )
+            .unwrap(),
+            OwnedProcessTermination::TerminatedByKill
+        );
+        assert_eq!(
+            &*signaler.signals.borrow(),
+            &[
+                (77, OwnedProcessSignal::Term, false),
+                (77, OwnedProcessSignal::Kill, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn owned_group_refuses_pid_birth_change_before_kill() {
+        let process_probe =
+            SequenceProcessProbe::new([Some("birth-expected"), Some("birth-reused")]);
+        let group_probe = FakeGroupProbe::new(
+            Some(ProcessGroupInfo {
+                process_group_id: 77,
+                session_id: 11,
+            }),
+            [vec![77, 88], vec![77, 88]],
+        );
+        let signaler = RecordingGroupSignaler::default();
+
+        assert!(matches!(
+            terminate_owned_process_group(
+                77,
+                "birth-expected",
+                &process_probe,
+                &group_probe,
+                &signaler,
+                Duration::ZERO,
+                Duration::ZERO,
+            ),
+            Err(RuntimeError::ProcessIdentityChanged)
+        ));
+        assert_eq!(
+            &*signaler.signals.borrow(),
+            &[(77, OwnedProcessSignal::Term, false)]
+        );
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn system_group_signaler_refuses_a_live_reused_birth_before_group_signal() {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = Command::new("sleep");
+        command.arg("30").process_group(0);
+        let mut child = command.spawn().unwrap();
+        let pid = child.id();
+        let probe = LinuxProcessProbe;
+        let group_info = probe
+            .process_group_checked(pid)
+            .unwrap()
+            .expect("spawned leader group evidence");
+        let group = OwnedProcessGroup {
+            leader_pid: pid,
+            leader_birth: "birth-reused".to_owned(),
+            process_group_id: group_info.process_group_id,
+            session_id: group_info.session_id,
+        };
+
+        assert!(matches!(
+            SystemProcessGroupSignaler.signal_group(&group, OwnedProcessSignal::Term, false),
+            Err(ProcessSignalError::Failed(_))
+        ));
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]

@@ -30,9 +30,12 @@ D8.0 completed on 2026-08-05. It introduced the provider identity and dispatch
 foundation, preserved Codex behavior, and made provider kind visible without
 adding OpenCode production launch. D8.1 completed on 2026-08-06 with the
 contract-validated OpenCode New/Resume vertical slice, acceptance-tested on
-`1.18.11`, and provider-aware creation flow. D8.2 completed on 2026-08-06 with
-exact-session lost-Runtime recovery, same-provider Fork, conservative
-lost-response handling, and real local/SSH acceptance. There is no generic
+`1.18.11`, and provider-aware creation flow. D8.2's original functional
+acceptance completed on 2026-08-06, but later process inspection reopened its
+cleanup gate. The corrective implementation now covers exact-session
+lost-Runtime recovery, same-provider Fork, conservative lost-response handling,
+durable blank-session creation, and exact provider-process-group cleanup;
+operator-gated production reacceptance remains pending. There is no generic
 provider onboarding, provider view
 or filter, model selector, role/preset system, or remembered per-Project
 provider policy in D8. Availability is dynamic host-owned snapshot state
@@ -148,8 +151,9 @@ an automatic migration from the retired schema.
 
 Date: 2026-08-06
 
-Status: D0 through D8.2 are complete. V1 remains a source-installed operator
-beta.
+Status: D0 through D8.1 are complete. D8.2 corrective implementation and
+production reacceptance remain in progress. V1 remains a source-installed
+operator beta.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -197,7 +201,7 @@ This document owns sequencing, exit gates, and progress.
 | D7.6 | Host-private Project directory browser | Complete |
 | D8.0 | Provider identity foundation and Codex parity | Complete (2026-08-05) |
 | D8.1 | Provider-aware New and OpenCode New/Resume vertical slice | Complete (2026-08-06) |
-| D8.2 | OpenCode Fork, recovery, and integrated acceptance | Complete (2026-08-06) |
+| D8.2 | OpenCode Fork, recovery, and integrated acceptance | Corrective implementation; production reacceptance pending |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -997,10 +1001,11 @@ Exit gate:
 
 ## D8 - Multi-provider Workstreams
 
-Implementation status: D8.0 completed on 2026-08-05, D8.1 completed on
+Implementation status: D8.0 completed on 2026-08-05 and D8.1 completed on
 2026-08-06 after its fresh-session, observer, mixed-provider, and real-provider
-acceptance passed on OpenCode `1.18.11`, and D8.2 completed on 2026-08-06 with
-exact lost-Runtime recovery, same-provider Fork, and integrated acceptance. The
+acceptance passed on OpenCode `1.18.11`. D8.2's original functional acceptance
+completed on 2026-08-06, but its cleanup gate was later falsified; corrective
+implementation and production reacceptance remain in progress. The
 [multi-provider design](design.md#multi-provider-and-multi-agent-design) is
 authoritative for the shared provider boundary and privacy invariants.
 
@@ -1261,8 +1266,10 @@ complete; D8.2 was activated on 2026-08-06.
 
 ### D8.2 - OpenCode Fork, recovery, and integrated acceptance
 
-Status: Complete on 2026-08-06; real acceptance used OpenCode `1.18.11` while
-production compatibility is contract-based.
+Status: Corrective implementation in progress after the 2026-08-06 cleanup
+falsification; the original real acceptance used OpenCode `1.18.11`, production
+compatibility remains contract-based, and a corrective operator-gated rerun is
+still required.
 
 Scope:
 
@@ -1318,10 +1325,51 @@ contained no provider marker or content, every disposable process, port,
 socket, provider root, repository, and SSH artifact was removed, and the
 ordinary tmux inventory was unchanged. The sanitized
 [D8.2 acceptance record](evidence/acceptance/d8.2-opencode-fork-recovery.md)
-contains the bounded results. The final `scripts/check` gate passes 330
-all-target Rust tests plus formatting, Clippy, package/license/advisory,
-shell/Python/fixture, disposable fake-provider, mixed-provider, and diff
-checks.
+contains the bounded original results. Corrective closure now requires the
+expanded `scripts/check` gate: all-target Rust plus formatting, Clippy,
+package/license/advisory, shell/Python/fixture, disposable
+hangup-surviving-provider, mixed-provider, and diff checks.
+
+Cleanup falsification and corrective closure (2026-08-06): later live process
+inspection found 13 OpenCode TUIs from the recorded D8.2 acceptance runs still
+using roughly one CPU core each. Their private tmux servers, listeners, PTYs,
+and temporary roots had been removed, but the provider processes had survived
+terminal hangup, been reparented to the user service manager, and recreated
+parts of their deleted roots. This falsified only the recorded process/root
+cleanup claim and reopened the D8.2 exit gate.
+
+The corrective implementation expands the design's existing
+`Runtime.provider_pid` contract in host schema 12. Before releasing the launch
+barrier it persists PID plus process birth and proves that the pane/provider is
+the leader of its own process group. Park terminates that exact group before
+removing tmux, using bounded TERM/KILL and a revalidated group/session boundary;
+the observer remains exact-PID cleanup. Missing, reused, inaccessible,
+malformed, or otherwise ambiguous process evidence is never signaled. A
+schema-11 live Runtime may backfill only the PID from a freshly corroborated
+private pane whose cwd and durable birth already match; a missing legacy
+Runtime remains fail-closed.
+
+The same closure journals OpenCode blank-session creation as a bounded `Start`
+operation. Only a failure proven to precede `POST /session` may retry; any
+crossed or unknown provider boundary leaves the exact Runtime generation
+recovery-required and cannot create a second unmanaged session.
+
+The new disposable lifecycle harness makes a provider and descendant ignore
+terminal hangup/TERM and fails if either member of the owned group survives
+Park, recovery, or Archive. The real production harness now treats park errors,
+surviving recorded providers, process references to its disposable root, or a
+root that reappears after removal as falsification. `scripts/check` and the
+operator-gated local/real-loopback-SSH rerun must both pass before this status
+returns to Complete.
+
+One corrective gate remains open: the short-lived OpenCode server used for
+blank-session creation receives bounded exact cleanup on every returned action
+path, and inconclusive cleanup is terminally recovery-required rather than
+retryable. Its PID, birth, and process-group cleanup authority is not yet
+durable or supervised across abrupt loss of the owning WSNav action. D8.2
+cannot return to Complete until a crash-surviving guardian or equivalent
+durable exact-process authority is implemented and a kill-at-the-session-
+creation-boundary acceptance proves that no server or descendant survives.
 
 Post-completion contract correction (2026-08-06): the initial adapter promoted
 the spike's observed `1.18.11` release into an exact production allowlist. That

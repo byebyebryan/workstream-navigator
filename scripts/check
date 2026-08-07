@@ -57,6 +57,7 @@ scripts/d5-fresh-install-acceptance.sh
 scripts/d5.1-operational-closure-acceptance.sh
 scripts/d8.1-opencode-local-acceptance.sh
 scripts/d8.1-mixed-provider-acceptance.sh
+scripts/d8.2-lifecycle-correctness-acceptance.sh
 
 git diff --check
 git diff --cached --check

@@ -1368,6 +1368,7 @@ dependencies = [
  "nix",
  "ratatui",
  "rusqlite",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",

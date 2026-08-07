@@ -3605,15 +3605,18 @@ impl HostRegistry {
         Ok(result)
     }
 
-    /// Returns whether an exact Runtime generation has crossed the blank
-    /// session provider boundary and still needs resolution. A `Prepared`
-    /// operation has not crossed the boundary and is safe to fail/retry.
+    /// Returns whether an exact Runtime generation has an unresolved blank
+    /// session creation operation. `Prepared` is unresolved here even though
+    /// it has not crossed the provider boundary: if the action disappears
+    /// before its normal cleanup path, the host has no proof that the
+    /// short-lived provider helper is gone. Only terminal `Failed` and
+    /// `Committed` operations are settled and eligible for a fresh Runtime.
     ///
     /// # Errors
     ///
     /// Returns an error when the generation is invalid, journal identity is
     /// inconsistent, or state cannot be read.
-    pub fn has_unresolved_opencode_session_creation_effect(
+    pub fn has_unresolved_opencode_session_creation(
         &self,
         runtime_id: RuntimeId,
         expected_generation: &str,
@@ -3623,7 +3626,8 @@ impl HostRegistry {
             .is_some_and(|operation| {
                 matches!(
                     operation.operation.phase,
-                    OperationPhase::ExternalEffectStarted
+                    OperationPhase::Prepared
+                        | OperationPhase::ExternalEffectStarted
                         | OperationPhase::AwaitingReconciliation
                         | OperationPhase::RecoveryRequired
                 )
@@ -7516,12 +7520,13 @@ mod tests {
         assert_eq!(prepared.operation.kind, OperationKind::Start);
         assert_eq!(prepared.operation.phase, OperationPhase::Prepared);
         assert!(
-            !registry
-                .has_unresolved_opencode_session_creation_effect(
+            registry
+                .has_unresolved_opencode_session_creation(
                     runtime.runtime_id,
                     &runtime.tmux_generation
                 )
-                .unwrap()
+                .unwrap(),
+            "an uncommitted Prepared operation still needs cleanup evidence"
         );
         assert_eq!(
             registry
@@ -7537,7 +7542,7 @@ mod tests {
         );
         assert!(
             registry
-                .has_unresolved_opencode_session_creation_effect(
+                .has_unresolved_opencode_session_creation(
                     runtime.runtime_id,
                     &runtime.tmux_generation
                 )
@@ -7552,7 +7557,7 @@ mod tests {
         assert_eq!(committed.native_session_id, Some(session.clone()));
         assert!(
             !registry
-                .has_unresolved_opencode_session_creation_effect(
+                .has_unresolved_opencode_session_creation(
                     runtime.runtime_id,
                     &runtime.tmux_generation
                 )
@@ -7582,7 +7587,7 @@ mod tests {
         assert_eq!(failed.operation.phase, OperationPhase::Failed);
         assert!(
             !registry
-                .has_unresolved_opencode_session_creation_effect(
+                .has_unresolved_opencode_session_creation(
                     runtime.runtime_id,
                     &runtime.tmux_generation
                 )
@@ -7667,7 +7672,7 @@ mod tests {
         );
         assert!(
             !registry
-                .has_unresolved_opencode_session_creation_effect(
+                .has_unresolved_opencode_session_creation(
                     runtime.runtime_id,
                     &runtime.tmux_generation
                 )

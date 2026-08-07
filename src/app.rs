@@ -236,6 +236,21 @@ enum Commands {
         cwd: PathBuf,
         provider_birth: String,
     },
+    /// Internal state-free launch barrier for one short-lived `OpenCode`
+    /// serve helper.
+    #[command(name = "_opencode_serve_barrier", hide = true)]
+    OpenCodeServeBarrier {
+        executable: PathBuf,
+        project_root: PathBuf,
+        port: u16,
+    },
+    /// Internal state-free guardian for one short-lived `OpenCode` serve helper.
+    #[command(name = "_opencode_serve_guardian", hide = true)]
+    OpenCodeServeGuardian {
+        executable: PathBuf,
+        project_root: PathBuf,
+        port: u16,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -366,6 +381,26 @@ fn execute(cli: Cli) -> Result<(), AppError> {
     if matches!(&command, Commands::Probe) {
         return crate::build_info::write_probe(&mut std::io::stdout().lock())
             .map_err(AppError::BuildInfo);
+    }
+    if let Commands::OpenCodeServeBarrier {
+        executable,
+        project_root,
+        port,
+    } = command
+    {
+        let endpoint = crate::provider::opencode::OpenCodeEndpoint::loopback(port)?;
+        return crate::provider::opencode::run_barrier(&executable, &project_root, &endpoint)
+            .map_err(AppError::OpenCode);
+    }
+    if let Commands::OpenCodeServeGuardian {
+        executable,
+        project_root,
+        port,
+    } = command
+    {
+        let endpoint = crate::provider::opencode::OpenCodeEndpoint::loopback(port)?;
+        return crate::provider::opencode::run_guardian(&executable, &project_root, &endpoint)
+            .map_err(AppError::OpenCode);
     }
     let root = StateRoot::create(state_root.unwrap_or_else(default_state_root))?;
     execute_root_command(&root, command)
@@ -2142,6 +2177,37 @@ mod tests {
             Some(Commands::OpenCodeObserver { port: 4321, .. })
         ));
         assert!(Cli::try_parse_from(["wsnav", "opencode-observer"]).is_err());
+    }
+
+    #[test]
+    fn opencode_guardian_is_state_free_hidden_and_not_provider_surface() {
+        let parsed = Cli::try_parse_from([
+            "wsnav",
+            "_opencode_serve_guardian",
+            "opencode",
+            "/project",
+            "4321",
+        ])
+        .unwrap();
+        assert!(matches!(
+            parsed.command.as_ref(),
+            Some(Commands::OpenCodeServeGuardian { port: 4321, .. })
+        ));
+        assert!(!is_provider_surface_command(parsed.command.as_ref()));
+        assert!(Cli::try_parse_from(["wsnav", "opencode_serve_guardian"]).is_err());
+        let barrier = Cli::try_parse_from([
+            "wsnav",
+            "_opencode_serve_barrier",
+            "opencode",
+            "/project",
+            "4321",
+        ])
+        .unwrap();
+        assert!(matches!(
+            barrier.command.as_ref(),
+            Some(Commands::OpenCodeServeBarrier { port: 4321, .. })
+        ));
+        assert!(!is_provider_surface_command(barrier.command.as_ref()));
     }
 
     #[test]

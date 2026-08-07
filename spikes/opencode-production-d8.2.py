@@ -24,6 +24,7 @@ import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +33,12 @@ from opencode_support import environment_for_directory, isolated_environment
 MODEL = "opencode-go/deepseek-v4-flash"
 MARKER = "WSNAV_D82_ACCEPTANCE_RESULT"
 MAX_GROUP_MEMBERS = 128
+MAX_CLEANUP_DIAGNOSTICS = 8
+MAX_DIAGNOSTIC_LENGTH = 192
+MAX_REASON_LENGTH = 512
+FINAL_CLEANUP_RETRY_SECONDS = 5
+ROOT_REFERENCE_WAIT_SECONDS = 5
+ROOT_REMOVAL_WAIT_SECONDS = 5
 PROMPT = (
     f"Reply with the exact token {MARKER} and nothing else. "
     "Do not use tools, inspect files, or make changes."
@@ -44,6 +51,23 @@ class AcceptanceFailure(RuntimeError):
 
 class AcceptanceBlocked(RuntimeError):
     """A required local acceptance prerequisite was unavailable."""
+
+
+@dataclass(frozen=True)
+class RootReference:
+    """Sanitized evidence that a process still references a disposable root.
+
+    The acceptance result must never include command lines, environments,
+    mapped paths, descriptor targets, or provider payloads.  Numeric process
+    identity plus a small fixed category is enough for an operator to
+    distinguish a surviving culprit without disclosing that content.
+    """
+
+    pid: int | None
+    birth: str | None
+    process_group: int | None
+    session: int | None
+    category: str
 
 
 def run(
@@ -115,6 +139,28 @@ def wsnav(
             label = f"host-{arguments[1]}"
         raise AcceptanceFailure(f"wsnav-command-failed:{label}")
     return result
+
+
+def bounded_wsnav_failure(result: subprocess.CompletedProcess[str], label: str) -> str:
+    """Classify one command failure without copying raw remote diagnostics."""
+
+    categories = (
+        ("revision conflict; refresh this host", "revision-conflict"),
+        ("workstream outcome needs recovery", "recovery-required"),
+        ("OpenCode Fork response was lost", "external-effect-unknown"),
+        ("fork source is no longer available", "source-unavailable"),
+        ("workstream creation is unavailable", "creation-unavailable"),
+        ("host command timed out", "timeout"),
+        (
+            "host command failed without a usable protocol response",
+            "protocol-unavailable",
+        ),
+    )
+    category = next(
+        (category for fragment, category in categories if fragment in result.stderr),
+        "other",
+    )
+    return f"wsnav-command-failed:{label}:{category}"
 
 
 def output_id(output: str) -> str:
@@ -424,6 +470,8 @@ def signal_proven_provider_group(
 def cleanup_provider_group(
     evidence: ProviderEvidence | None,
     reference_root: Path,
+    *,
+    check_root: bool = True,
 ) -> None:
     """Terminate only a currently re-proven provider process group.
 
@@ -433,8 +481,10 @@ def cleanup_provider_group(
     """
 
     if evidence is None:
-        if process_references_root(reference_root):
-            raise AcceptanceFailure("cleanup-root-reference-present")
+        if check_root:
+            reference = process_references_root(reference_root)
+            if reference is not None:
+                raise AcceptanceFailure(format_root_reference(reference))
         return
     if evidence.process_group != evidence.pid:
         raise AcceptanceFailure("cleanup-provider-group-ambiguous")
@@ -469,8 +519,10 @@ def cleanup_provider_group(
             )
     if not _group_is_quiet(evidence):
         raise AcceptanceFailure("cleanup-provider-group-survived")
-    if process_references_root(reference_root):
-        raise AcceptanceFailure("cleanup-root-reference-present")
+    if check_root:
+        reference = process_references_root(reference_root)
+        if reference is not None:
+            raise AcceptanceFailure(format_root_reference(reference))
 
 
 def kill_private_runtime(state_root: Path, runtime_id: str) -> None:
@@ -577,13 +629,68 @@ def _read_bounded(path: Path, limit: int) -> bytes:
         return stream.read(limit)
 
 
-def process_references_root(root: Path) -> bool:
+def _root_reference(
+    process: Path,
+    category: str,
+    before: ProcessIdentity | None,
+) -> RootReference:
+    """Build bounded process identity for a root-reference diagnostic."""
+
+    try:
+        pid = int(process.name)
+    except ValueError:
+        return RootReference(None, None, None, None, "proc-scan-ambiguous")
+    try:
+        identity = read_process_identity(pid)
+    except AcceptanceFailure:
+        # The reference itself is enough to fail closed.  Do not copy any
+        # malformed /proc content into the operator result.
+        return RootReference(pid, None, None, None, "identity-ambiguous")
+    if identity is None:
+        return RootReference(pid, None, None, None, "identity-ambiguous")
+    if (
+        before is None
+        or identity.birth != before.birth
+        or identity.process_group != before.process_group
+        or identity.session != before.session
+    ):
+        return RootReference(pid, None, None, None, "identity-ambiguous")
+    return RootReference(
+        identity.pid,
+        identity.birth,
+        identity.process_group,
+        identity.session,
+        category,
+    )
+
+
+def format_root_reference(reference: RootReference) -> str:
+    """Render only bounded, sanitized identity/category cleanup evidence."""
+
+    category = reference.category
+    if len(category) > 48 or not category.replace("-", "").isalnum():
+        category = "unknown"
+    fields = [f"cleanup-root-reference-present:{category}"]
+    if reference.pid is not None and reference.pid > 0:
+        fields.append(f"pid={reference.pid}")
+    if reference.birth is not None and reference.birth.isdecimal():
+        fields.append(f"birth={reference.birth[:32]}")
+    if reference.process_group is not None and reference.process_group > 0:
+        fields.append(f"pgrp={reference.process_group}")
+    if reference.session is not None and reference.session > 0:
+        fields.append(f"session={reference.session}")
+    return ":".join(fields)[:MAX_DIAGNOSTIC_LENGTH]
+
+
+def process_references_root(root: Path) -> RootReference | None:
     """Scan command, cwd, environment, maps, and descriptors before removal.
 
     A disappearing or permission-limited process is not evidence that it owns
     this user-owned disposable root. Readable command, cwd, environment, map,
     and descriptor references are all checked; an unreadable process is left
     for the explicit group-identity proof to reject if it is our provider.
+    Return only sanitized process identity and a fixed reference category;
+    never return the matching content or target path.
     """
 
     root_text = str(root.absolute())
@@ -591,24 +698,34 @@ def process_references_root(root: Path) -> bool:
     try:
         processes = tuple(Path("/proc").iterdir())
     except OSError:
-        return True
+        return RootReference(None, None, None, None, "proc-scan-unavailable")
     for process in processes:
         if not process.name.isdecimal():
             continue
+        # The cleanup authority may legitimately hold its own disposable
+        # SQLite/file descriptors while proving that external effects are
+        # gone.  Exclude only this exact PID; a parent, sibling, or shared
+        # process group remains evidence and is never implicitly trusted.
+        if int(process.name) == os.getpid():
+            continue
         proc_root = process
+        try:
+            before = read_process_identity(int(process.name))
+        except AcceptanceFailure:
+            before = None
         try:
             if _bytes_contain_root(
                 _read_bounded(proc_root / "cmdline", 256 * 1024), root_bytes
             ):
-                return True
+                return _root_reference(proc_root, "cmdline", before)
             if _bytes_contain_root(
                 _read_bounded(proc_root / "environ", 256 * 1024), root_bytes
             ):
-                return True
+                return _root_reference(proc_root, "environment", before)
             if _bytes_contain_root(
                 _read_bounded(proc_root / "maps", 4 * 1024 * 1024), root_bytes
             ):
-                return True
+                return _root_reference(proc_root, "maps", before)
         except FileNotFoundError:
             continue
         except PermissionError:
@@ -618,7 +735,7 @@ def process_references_root(root: Path) -> bool:
         for name in ("cwd", "root", "exe"):
             try:
                 if _path_is_under(os.readlink(proc_root / name), root_text):
-                    return True
+                    return _root_reference(proc_root, name, before)
             except FileNotFoundError:
                 break
             except PermissionError:
@@ -630,7 +747,7 @@ def process_references_root(root: Path) -> bool:
             for descriptor in descriptors.iterdir():
                 try:
                     if _path_is_under(os.readlink(descriptor), root_text):
-                        return True
+                        return _root_reference(proc_root, "fd", before)
                 except FileNotFoundError:
                     continue
                 except PermissionError:
@@ -643,7 +760,77 @@ def process_references_root(root: Path) -> bool:
             continue
         except OSError:
             continue
-    return False
+    return None
+
+
+def wait_for_root_quiet(
+    root: Path, *, timeout: float = ROOT_REFERENCE_WAIT_SECONDS
+) -> RootReference | None:
+    """Bound the final teardown wait without changing Park's strict check.
+
+    This is intentionally used only after every registered cleanup target has
+    run.  A provider that survived an individual Park assertion remains a
+    cleanup diagnostic even if it exits during this final bounded wait.
+    """
+
+    deadline = time.monotonic() + timeout
+    reference = process_references_root(root)
+    while reference is not None and time.monotonic() < deadline:
+        time.sleep(0.25)
+        reference = process_references_root(root)
+    return reference
+
+
+def wait_for_root_removed(
+    root: Path, *, timeout: float = ROOT_REMOVAL_WAIT_SECONDS
+) -> RootReference | None:
+    """Check that final root removal remains stable for a bounded interval."""
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        reference = process_references_root(root)
+        if root.exists():
+            return RootReference(None, None, None, None, "root-remains")
+        if reference is not None:
+            return reference
+        time.sleep(0.25)
+    if root.exists():
+        return RootReference(None, None, None, None, "root-remains")
+    return process_references_root(root)
+
+
+def bounded_cleanup_reason(error: BaseException) -> str:
+    """Keep cleanup diagnostics bounded and free of paths/payloads."""
+
+    if isinstance(error, AcceptanceFailure):
+        value = str(error)
+        if (
+            value
+            and len(value) <= MAX_DIAGNOSTIC_LENGTH
+            and all(character.isalnum() or character in ":_=-" for character in value)
+        ):
+            return value
+    if isinstance(error, subprocess.TimeoutExpired):
+        return "cleanup-error:TimeoutExpired"
+    if isinstance(error, sqlite3.Error):
+        return "cleanup-error:sqlite"
+    if isinstance(error, OSError):
+        return "cleanup-error:OSError"
+    return f"cleanup-error:{type(error).__name__}"[:MAX_DIAGNOSTIC_LENGTH]
+
+
+def record_cleanup_diagnostic(diagnostics: list[str], value: str) -> None:
+    """Append one deduplicated bounded cleanup diagnostic."""
+
+    if value not in diagnostics and len(diagnostics) < MAX_CLEANUP_DIAGNOSTICS:
+        diagnostics.append(value[:MAX_DIAGNOSTIC_LENGTH])
+
+
+def compose_cleanup_reason(primary_reason: str, diagnostics: list[str]) -> str:
+    """Retain the primary outcome while appending bounded cleanup evidence."""
+
+    details = ",".join(diagnostics) or "unknown"
+    return f"{primary_reason};cleanup-incomplete={details}"[:MAX_REASON_LENGTH]
 
 
 def port_is_closed(port: int) -> bool:
@@ -673,8 +860,10 @@ def assert_provider_group_stopped(
     """Read-only post-action check for every captured provider member."""
 
     if evidence is None:
-        if check_root and process_references_root(reference_root):
-            raise AcceptanceFailure("cleanup-root-reference-present")
+        if check_root:
+            reference = process_references_root(reference_root)
+            if reference is not None:
+                raise AcceptanceFailure(format_root_reference(reference))
         return
     for member in evidence.members:
         current = read_process_identity(member.pid)
@@ -689,8 +878,10 @@ def assert_provider_group_stopped(
         for member in remaining
     ):
         raise AcceptanceFailure("cleanup-provider-group-survived")
-    if check_root and process_references_root(reference_root):
-        raise AcceptanceFailure("cleanup-root-reference-present")
+    if check_root:
+        reference = process_references_root(reference_root)
+        if reference is not None:
+            raise AcceptanceFailure(format_root_reference(reference))
 
 
 def park_with_observation(
@@ -720,6 +911,7 @@ def park_direct(
     *,
     reference_root: Path | None = None,
     fallback_evidence: ProviderEvidence | None = None,
+    check_root: bool = True,
 ) -> None:
     before = runtime_info(state_root, workstream_id)
     if before is None:
@@ -740,7 +932,7 @@ def park_direct(
     # Provider cleanup precedes tmux/root removal. This is deliberately done
     # even for a Runtime already marked stopped: lifecycle is state evidence,
     # not proof that an escaped native process exited.
-    cleanup_provider_group(evidence, cleanup_root)
+    cleanup_provider_group(evidence, cleanup_root, check_root=check_root)
     socket_path = private_socket(state_root, str(before["runtime_id"]))
     runtime_directory = socket_path.parent
     if (
@@ -751,8 +943,34 @@ def park_direct(
         wsnav(binary, state_root, "park", workstream_id, env=env)
     if socket_path.exists() or runtime_directory.exists():
         raise AcceptanceFailure("cleanup-private-runtime-artifacts-present")
-    if process_references_root(cleanup_root):
-        raise AcceptanceFailure("cleanup-root-reference-present")
+    if check_root:
+        reference = process_references_root(cleanup_root)
+        if reference is not None:
+            raise AcceptanceFailure(format_root_reference(reference))
+
+
+def retry_cleanup_action(
+    action: Callable[[], None],
+    *,
+    timeout: float = FINAL_CLEANUP_RETRY_SECONDS,
+    poll_interval: float = 0.25,
+) -> None:
+    """Retry only final disposable cleanup across transient Runtime races."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            action()
+            return
+        except (
+            AcceptanceFailure,
+            OSError,
+            sqlite3.Error,
+            subprocess.TimeoutExpired,
+        ) as error:
+            if time.monotonic() >= deadline:
+                raise AcceptanceFailure(bounded_cleanup_reason(error)) from error
+            time.sleep(poll_interval)
 
 
 def accept_host_path(
@@ -1029,6 +1247,7 @@ def main() -> int:
     cleanup_targets: list[
         tuple[Path, str, dict[str, str], Path, ProviderEvidence | None]
     ] = []
+    cleanup_diagnostics: list[str] = []
 
     def remember_cleanup_evidence(
         state_root: Path,
@@ -1208,10 +1427,17 @@ def main() -> int:
                 current = runtime_info(remote_state, workstream_id)
                 if current is None:
                     raise AcceptanceFailure("ssh-fork-refresh-state-missing")
-                command[-1] = str(current["revision"])
-                result = wsnav(binary, client_state, *command, env=client_env)
+                current_revision = str(current["revision"])
+                if command[-1] == current_revision:
+                    raise AcceptanceFailure("ssh-fork-revision-conflict-on-current")
+                command[-1] = current_revision
+                result = wsnav(
+                    binary, client_state, *command, env=client_env, check=False
+                )
+                if result.returncode != 0:
+                    raise AcceptanceFailure(bounded_wsnav_failure(result, "host-fork"))
             elif result.returncode != 0:
-                raise AcceptanceFailure(f"wsnav-command-failed:host-{action}")
+                raise AcceptanceFailure(bounded_wsnav_failure(result, f"host-{action}"))
             if action == "fork":
                 cleanup_targets.append(
                     (
@@ -1295,6 +1521,7 @@ def main() -> int:
     except (OSError, sqlite3.Error, subprocess.TimeoutExpired) as error:
         status, reason = "blocked", f"harness-error:{type(error).__name__}"
     finally:
+        primary_status, primary_reason = status, reason
         cleanup_failed = False
         # Stop the disposable loopback daemon before any broad root scan. Its
         # command/config paths intentionally live under the same temp root.
@@ -1308,8 +1535,14 @@ def main() -> int:
                     sshd.wait(timeout=10)
                 except (OSError, subprocess.TimeoutExpired):
                     cleanup_failed = True
+                    record_cleanup_diagnostic(
+                        cleanup_diagnostics, "cleanup-error:sshd-termination"
+                    )
             except OSError:
                 cleanup_failed = True
+                record_cleanup_diagnostic(
+                    cleanup_diagnostics, "cleanup-error:sshd-termination"
+                )
         if root is not None:
             binary = Path(__file__).resolve().parents[1] / "target" / "debug" / "wsnav"
             for (
@@ -1320,42 +1553,86 @@ def main() -> int:
                 fallback_evidence,
             ) in reversed(cleanup_targets):
                 try:
-                    park_direct(
-                        binary,
-                        state_root,
-                        workstream_id,
-                        environment,
-                        reference_root=reference_root,
-                        fallback_evidence=fallback_evidence,
+                    retry_cleanup_action(
+                        partial(
+                            park_direct,
+                            binary,
+                            state_root,
+                            workstream_id,
+                            environment,
+                            reference_root=reference_root,
+                            fallback_evidence=fallback_evidence,
+                            # A sibling target may still own the same disposable
+                            # root. Defer that broad scan until every exact target
+                            # has had its cleanup attempt.
+                            check_root=False,
+                        )
                     )
-                except (AcceptanceFailure, OSError, sqlite3.Error):
+                except (
+                    AcceptanceFailure,
+                    OSError,
+                    sqlite3.Error,
+                    subprocess.TimeoutExpired,
+                ) as error:
                     cleanup_failed = True
+                    record_cleanup_diagnostic(
+                        cleanup_diagnostics, bounded_cleanup_reason(error)
+                    )
         if root is not None:
             # Any socket left here was not removed by a successful, ordered
             # Runtime cleanup. Never raw-kill it: an untracked provider may
             # still own the server and the disposable root must be preserved.
-            if list(root.rglob("tmux.sock")):
+            try:
+                sockets = list(root.rglob("tmux.sock"))
+            except OSError as error:
+                sockets = []
                 cleanup_failed = True
-            if not cleanup_failed and process_references_root(root):
+                record_cleanup_diagnostic(
+                    cleanup_diagnostics, bounded_cleanup_reason(error)
+                )
+            if sockets:
                 cleanup_failed = True
+                record_cleanup_diagnostic(
+                    cleanup_diagnostics, "cleanup-private-runtime-artifacts-present"
+                )
+            # Root-wide process inspection is intentionally after every
+            # registered target.  A bounded wait here only covers final
+            # teardown/reaping; it cannot erase a strict post-Park failure
+            # already recorded above.
+            reference = wait_for_root_quiet(root)
+            if reference is not None:
+                cleanup_failed = True
+                record_cleanup_diagnostic(
+                    cleanup_diagnostics, format_root_reference(reference)
+                )
             if not cleanup_failed:
                 try:
                     shutil.rmtree(root)
-                except OSError:
+                except OSError as error:
                     cleanup_failed = True
+                    record_cleanup_diagnostic(
+                        cleanup_diagnostics, bounded_cleanup_reason(error)
+                    )
             if not cleanup_failed:
-                time.sleep(1)
-                if root.exists() or process_references_root(root):
+                reference = wait_for_root_removed(root)
+                if reference is not None:
                     cleanup_failed = True
+                    record_cleanup_diagnostic(
+                        cleanup_diagnostics, format_root_reference(reference)
+                    )
             assertions["cleanup_complete"] = not cleanup_failed and not root.exists()
             if cleanup_failed:
-                status, reason = "falsified", "cleanup-incomplete"
+                status = "falsified"
+                reason = compose_cleanup_reason(primary_reason, cleanup_diagnostics)
         assertions["ordinary_tmux_unchanged"] = tmux_snapshot() == ordinary_before
 
     result = {
         "study": "opencode-production-d8.2",
         "status": status,
         "reason": reason,
+        "primary_status": primary_status,
+        "primary_reason": primary_reason,
+        "cleanup_diagnostics": cleanup_diagnostics,
         "versions": {"opencode": version},
         "assertions": assertions,
     }

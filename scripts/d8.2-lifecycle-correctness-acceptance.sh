@@ -170,7 +170,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-rtk cargo build --quiet
+cargo build --quiet
 wsnav_bin="$workspace_root/target/debug/wsnav"
 fake_bin="$task_root/bin"
 state_root="$task_root/state"

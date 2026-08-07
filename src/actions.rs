@@ -1001,7 +1001,7 @@ fn inspect_opencode_prior_runtime(
     }
     match prior_probe {
         RuntimeProbe::Missing => {
-            if registry.has_unresolved_opencode_session_creation_effect(
+            if registry.has_unresolved_opencode_session_creation(
                 prior_runtime.runtime_id,
                 &prior_runtime.tmux_generation,
             )? {
@@ -2685,6 +2685,78 @@ mod tests {
                 .unwrap()
                 .status,
             crate::domain::RuntimeStatus::Unknown
+        );
+    }
+
+    #[test]
+    fn abandoned_prepared_opencode_creation_on_missing_runtime_requires_recovery() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = crate::state::StateRoot::create(temporary.path()).unwrap();
+        let mut registry = crate::state::HostRegistry::open(&root).unwrap();
+        let registered = registry
+            .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
+            .unwrap();
+        let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+        let prepared = registry
+            .prepare_opencode_session_creation(runtime.runtime_id, &runtime.tmux_generation)
+            .unwrap();
+
+        assert!(matches!(
+            inspect_opencode_prior_runtime(&root, &mut registry, registered.workstream_id),
+            Err(ActionError::ProviderRecoveryUnavailable(
+                ProviderKind::OpenCode
+            ))
+        ));
+
+        let current_runtime = registry
+            .runtime_for_workstream(registered.workstream_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            current_runtime.status,
+            crate::domain::RuntimeStatus::Unknown
+        );
+        let overview = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == registered.workstream_id)
+            .unwrap();
+        assert_eq!(overview.lifecycle, WorkstreamLifecycle::RecoveryRequired);
+
+        let current_operation = registry
+            .opencode_session_creation_for_runtime(runtime.runtime_id, &runtime.tmux_generation)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current_operation, prepared);
+        assert!(
+            registry
+                .binding_for_runtime(runtime.runtime_id)
+                .unwrap()
+                .is_none()
+        );
+
+        assert!(matches!(
+            start(
+                &root,
+                &mut registry,
+                registered.workstream_id,
+                Some(overview.revision),
+            ),
+            Err(ActionError::ProviderRecoveryUnavailable(
+                ProviderKind::OpenCode
+            ))
+        ));
+        assert_eq!(
+            registry
+                .opencode_session_creation_for_runtime(
+                    runtime.runtime_id,
+                    &runtime.tmux_generation,
+                )
+                .unwrap()
+                .unwrap(),
+            prepared,
+            "recovery must not attempt another native session creation"
         );
     }
 

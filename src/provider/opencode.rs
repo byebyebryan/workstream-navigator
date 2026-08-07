@@ -9,7 +9,7 @@ use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::Path,
-    process::{Child, Command, Stdio},
+    process::Command,
     time::{Duration, Instant},
 };
 
@@ -17,12 +17,17 @@ use serde_json::Value;
 use thiserror::Error;
 
 use crate::domain::ProviderSessionId;
+
 pub use crate::provider::lifecycle::LifecycleHint;
+#[cfg(test)]
+use std::process::{Child, Stdio};
 
 mod observer;
 pub use observer::{
     OpenCodeObserverContext, OpenCodeObserverError, mark_unknown_handle, run_observer,
 };
+mod guardian;
+pub use guardian::{run as run_guardian, run_barrier};
 mod events;
 pub use events::{
     OpenCodeEvent, OpenCodeEventParseError, parse_event_for_project, parse_event_hint,
@@ -812,61 +817,109 @@ where
     E: From<OpenCodeError>,
     F: FnOnce() -> Result<(), E>,
 {
-    let mut child = Command::new(executable);
-    child
-        .arg("serve")
-        .arg("--hostname")
-        .arg(LOOPBACK_HOST)
-        .arg("--port")
-        .arg(endpoint.port.to_string())
-        .current_dir(project_root)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        child.process_group(0);
+    create_blank_session_with_lease(
+        executable,
+        project_root,
+        endpoint,
+        before_create,
+        |executable, project_root, endpoint| {
+            guardian::Lease::spawn(executable, project_root, endpoint).map_err(E::from)
+        },
+    )
+}
+
+trait ServeLease: Sized {
+    fn wait_ready(
+        &mut self,
+        endpoint: &OpenCodeEndpoint,
+        timeout: Duration,
+    ) -> Result<(), OpenCodeError>;
+    fn ensure_alive(&mut self) -> Result<(), OpenCodeError>;
+    fn ensure_endpoint_owned(&self, endpoint: &OpenCodeEndpoint) -> Result<(), OpenCodeError>;
+    fn close_and_wait(self) -> Result<(), OpenCodeError>;
+}
+
+impl ServeLease for guardian::Lease {
+    fn wait_ready(
+        &mut self,
+        endpoint: &OpenCodeEndpoint,
+        timeout: Duration,
+    ) -> Result<(), OpenCodeError> {
+        Self::wait_ready(self, endpoint, timeout)
     }
-    let mut child = child.spawn().map_err(OpenCodeError::Io).map_err(E::from)?;
-    #[cfg(unix)]
-    let captured_identity = process_group_identity(child.id());
+
+    fn ensure_alive(&mut self) -> Result<(), OpenCodeError> {
+        Self::ensure_alive(self)
+    }
+
+    fn ensure_endpoint_owned(&self, endpoint: &OpenCodeEndpoint) -> Result<(), OpenCodeError> {
+        Self::ensure_endpoint_owned(self, endpoint)
+    }
+
+    fn close_and_wait(self) -> Result<(), OpenCodeError> {
+        Self::close_and_wait(self)
+    }
+}
+
+fn create_blank_session_with_lease<E, F, L, S>(
+    executable: impl AsRef<OsStr>,
+    project_root: &Path,
+    endpoint: OpenCodeEndpoint,
+    before_create: F,
+    spawn: S,
+) -> Result<ProviderSessionId, E>
+where
+    E: From<OpenCodeError>,
+    F: FnOnce() -> Result<(), E>,
+    L: ServeLease,
+    S: FnOnce(&OsStr, &Path, &OpenCodeEndpoint) -> Result<L, E>,
+{
+    let mut lease = spawn(executable.as_ref(), project_root, &endpoint)?;
     let client = OpenCodeClient::new(endpoint);
-    let result = wait_for_blank_session(&mut child, &client, before_create);
-    #[cfg(unix)]
-    let stop_result = stop_child(&mut child, captured_identity)
-        .map_err(|_| E::from(OpenCodeError::ServeCleanupFailed));
-    #[cfg(not(unix))]
-    let stop_result =
-        stop_child(&mut child).map_err(|_| E::from(OpenCodeError::ServeCleanupFailed));
+    let result = wait_for_blank_session(&mut lease, &client, before_create);
+    let stop_result = lease.close_and_wait().map_err(E::from);
     match (result, stop_result) {
         (Ok(session), Ok(())) => Ok(session),
         (Err(error), Ok(())) | (Ok(_) | Err(_), Err(error)) => Err(error),
     }
 }
 
-fn wait_for_blank_session<E, F>(
-    child: &mut Child,
+fn wait_for_blank_session<E, F, L>(
+    lease: &mut L,
     client: &OpenCodeClient,
     before_create: F,
 ) -> Result<ProviderSessionId, E>
 where
     E: From<OpenCodeError>,
     F: FnOnce() -> Result<(), E>,
+    L: ServeLease,
 {
+    lease
+        .wait_ready(client.endpoint(), SERVE_READY_TIMEOUT)
+        .map_err(E::from)?;
     let deadline = Instant::now() + SERVE_READY_TIMEOUT;
     loop {
-        if let Some(status) = child
-            .try_wait()
-            .map_err(OpenCodeError::Io)
-            .map_err(E::from)?
-        {
-            return Err(E::from(OpenCodeError::ServeExited(status.code())));
-        }
+        lease.ensure_alive().map_err(E::from)?;
         if client.health().is_ok() {
+            lease.ensure_alive().map_err(E::from)?;
+            lease
+                .ensure_endpoint_owned(client.endpoint())
+                .map_err(E::from)?;
             before_create()?;
+            lease.ensure_alive().map_err(E::from)?;
+            lease
+                .ensure_endpoint_owned(client.endpoint())
+                .map_err(E::from)?;
             let session = client.create_session().map_err(E::from)?;
+            lease.ensure_alive().map_err(E::from)?;
+            lease
+                .ensure_endpoint_owned(client.endpoint())
+                .map_err(E::from)?;
             client.verify_blank_session(&session).map_err(E::from)?;
+            lease.ensure_alive().map_err(E::from)?;
+            lease
+                .ensure_endpoint_owned(client.endpoint())
+                .map_err(E::from)?;
             return Ok(session);
         }
         if Instant::now() >= deadline {
@@ -874,235 +927,6 @@ where
         }
         std::thread::sleep(SERVE_POLL_INTERVAL);
     }
-}
-
-#[cfg(unix)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ProcessGroupIdentity {
-    pgid: i32,
-    session: i32,
-}
-
-#[cfg(unix)]
-fn stop_child(
-    child: &mut Child,
-    captured_identity: Result<Option<ProcessGroupIdentity>, OpenCodeError>,
-) -> Result<(), OpenCodeError> {
-    use nix::{errno::Errno, sys::signal, unistd::Pid};
-
-    let leader_alive = match child.try_wait() {
-        Ok(status) => status.is_none(),
-        Err(error) => {
-            return cleanup_child_with_error(child, OpenCodeError::Io(error));
-        }
-    };
-    let (mut captured_identity, mut identity_error) = match captured_identity {
-        Ok(identity) => (identity, None),
-        Err(error) => (None, Some(error)),
-    };
-    if captured_identity.is_none() && leader_alive && identity_error.is_none() {
-        match process_group_identity(child.id()) {
-            Ok(identity) => captured_identity = identity,
-            Err(error) => identity_error = Some(error),
-        }
-    }
-    if let Some(error) = identity_error {
-        return cleanup_child_with_error(child, error);
-    }
-    let Some(identity) = captured_identity else {
-        return cleanup_child_with_error(child, OpenCodeError::ProcessIdentityUnavailable);
-    };
-    let group_alive = if leader_alive {
-        true
-    } else {
-        match process_group_has_member(identity) {
-            Ok(alive) => alive,
-            Err(error) => return cleanup_child_with_error(child, error),
-        }
-    };
-    let mut group_error = None;
-    let mut group_survived = false;
-    if leader_alive || group_alive {
-        if let Err(error) = signal::kill(Pid::from_raw(-identity.pgid), signal::Signal::SIGTERM)
-            && error != Errno::ESRCH
-        {
-            group_error = Some(OpenCodeError::ServeShutdownTimedOut);
-        }
-        match wait_for_process_group(child, identity, SERVE_SHUTDOWN_TIMEOUT) {
-            Ok(true) => {}
-            Ok(false) => match process_group_has_member(identity) {
-                Ok(true) => {
-                    if let Err(error) =
-                        signal::kill(Pid::from_raw(-identity.pgid), signal::Signal::SIGKILL)
-                        && error != Errno::ESRCH
-                    {
-                        group_error.get_or_insert(OpenCodeError::ServeShutdownTimedOut);
-                    }
-                    match wait_for_process_group(child, identity, SERVE_SHUTDOWN_TIMEOUT) {
-                        Ok(true) => {}
-                        Ok(false) => match process_group_has_member(identity) {
-                            Ok(true) => group_survived = true,
-                            Ok(false) => {}
-                            Err(error) => {
-                                group_error.get_or_insert(error);
-                            }
-                        },
-                        Err(error) => {
-                            group_error.get_or_insert(error);
-                        }
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    group_error.get_or_insert(error);
-                }
-            },
-            Err(error) => {
-                group_error.get_or_insert(error);
-            }
-        }
-    }
-    cleanup_child(child)?;
-    if let Some(error) = group_error {
-        return Err(error);
-    }
-    if group_survived {
-        return Err(OpenCodeError::ServeShutdownTimedOut);
-    }
-    Ok(())
-}
-
-fn cleanup_child_with_error(
-    child: &mut Child,
-    original: OpenCodeError,
-) -> Result<(), OpenCodeError> {
-    match cleanup_child(child) {
-        Ok(()) => Err(original),
-        Err(error) => Err(error),
-    }
-}
-
-#[cfg(unix)]
-fn cleanup_child(child: &mut Child) -> Result<(), OpenCodeError> {
-    let mut probe_error = None;
-    let kill_error = match child.try_wait() {
-        Ok(Some(_)) => None,
-        Ok(None) => child.kill().err().map(OpenCodeError::Io),
-        Err(error) => {
-            probe_error = Some(OpenCodeError::Io(error));
-            child.kill().err().map(OpenCodeError::Io)
-        }
-    };
-    let wait_result = child.wait().map_err(OpenCodeError::Io).map(|_| ());
-    if let Some(error) = kill_error {
-        return Err(error);
-    }
-    if let Some(error) = probe_error {
-        return Err(error);
-    }
-    wait_result
-}
-
-#[cfg(not(unix))]
-fn cleanup_child(child: &mut Child) -> Result<(), OpenCodeError> {
-    let mut probe_error = None;
-    let kill_error = match child.try_wait() {
-        Ok(Some(_)) => None,
-        Ok(None) => child.kill().err().map(OpenCodeError::Io),
-        Err(error) => {
-            probe_error = Some(OpenCodeError::Io(error));
-            child.kill().err().map(OpenCodeError::Io)
-        }
-    };
-    let wait_result = child.wait().map_err(OpenCodeError::Io).map(|_| ());
-    if let Some(error) = kill_error {
-        return Err(error);
-    }
-    if let Some(error) = probe_error {
-        return Err(error);
-    }
-    wait_result
-}
-
-#[cfg(not(unix))]
-fn stop_child(child: &mut Child) -> Result<(), OpenCodeError> {
-    cleanup_child(child)
-}
-
-#[cfg(unix)]
-fn wait_for_process_group(
-    child: &mut Child,
-    identity: ProcessGroupIdentity,
-    timeout: Duration,
-) -> Result<bool, OpenCodeError> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let child_alive = child.try_wait().map_err(OpenCodeError::Io)?.is_none();
-        let group_alive = process_group_has_member(identity)?;
-        if !child_alive && !group_alive {
-            return Ok(true);
-        }
-        if Instant::now() >= deadline {
-            return Ok(false);
-        }
-        std::thread::sleep(SERVE_POLL_INTERVAL);
-    }
-}
-
-#[cfg(unix)]
-fn process_group_has_member(identity: ProcessGroupIdentity) -> Result<bool, OpenCodeError> {
-    let entries = std::fs::read_dir("/proc").map_err(OpenCodeError::Io)?;
-    for entry in entries {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => return Err(OpenCodeError::Io(error)),
-        };
-        let name = entry.file_name();
-        let Some(candidate_pid) = name.to_str().and_then(|value| value.parse::<u32>().ok()) else {
-            continue;
-        };
-        if process_group_identity(candidate_pid)?.is_some_and(|candidate| candidate == identity) {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-#[cfg(unix)]
-fn process_group_identity(pid: u32) -> Result<Option<ProcessGroupIdentity>, OpenCodeError> {
-    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-        Ok(stat) => stat,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(OpenCodeError::Io(error)),
-    };
-    let close = stat
-        .rfind(')')
-        .ok_or(OpenCodeError::ProcessIdentityUnavailable)?;
-    let mut fields = stat
-        .get(close + 2..)
-        .ok_or(OpenCodeError::ProcessIdentityUnavailable)?
-        .split_whitespace();
-    fields
-        .next()
-        .ok_or(OpenCodeError::ProcessIdentityUnavailable)?;
-    fields
-        .next()
-        .ok_or(OpenCodeError::ProcessIdentityUnavailable)?;
-    let process_group_id = fields
-        .next()
-        .ok_or(OpenCodeError::ProcessIdentityUnavailable)?
-        .parse()
-        .map_err(|_| OpenCodeError::ProcessIdentityUnavailable)?;
-    let session = fields
-        .next()
-        .ok_or(OpenCodeError::ProcessIdentityUnavailable)?
-        .parse()
-        .map_err(|_| OpenCodeError::ProcessIdentityUnavailable)?;
-    Ok(Some(ProcessGroupIdentity {
-        pgid: process_group_id,
-        session,
-    }))
 }
 
 fn url_segment(value: &str) -> Result<String, OpenCodeError> {
@@ -1383,6 +1207,79 @@ pub enum OpenCodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::{ProcessGroupProbe, ProcessProbe};
+
+    #[cfg(unix)]
+    struct DirectLease {
+        child: Child,
+        group: crate::runtime::OwnedProcessGroup,
+    }
+
+    #[cfg(unix)]
+    impl ServeLease for DirectLease {
+        fn wait_ready(
+            &mut self,
+            _endpoint: &OpenCodeEndpoint,
+            _timeout: Duration,
+        ) -> Result<(), OpenCodeError> {
+            Ok(())
+        }
+
+        fn ensure_alive(&mut self) -> Result<(), OpenCodeError> {
+            self.child
+                .try_wait()
+                .map_err(OpenCodeError::Io)
+                .and_then(|status| {
+                    status
+                        .is_none()
+                        .then_some(())
+                        .ok_or(OpenCodeError::ServeExited(None))
+                })
+        }
+
+        fn ensure_endpoint_owned(&self, _endpoint: &OpenCodeEndpoint) -> Result<(), OpenCodeError> {
+            Ok(())
+        }
+
+        fn close_and_wait(mut self) -> Result<(), OpenCodeError> {
+            crate::runtime::terminate_preproven_process_group(
+                &self.group,
+                &crate::runtime::LinuxProcessProbe,
+                &crate::runtime::LinuxProcessProbe,
+                &crate::runtime::SystemProcessGroupSignaler,
+                SERVE_SHUTDOWN_TIMEOUT,
+                SERVE_POLL_INTERVAL,
+            )
+            .map_err(|_| OpenCodeError::ServeCleanupFailed)?;
+            self.child.wait().map_err(OpenCodeError::Io).map(|_| ())
+        }
+    }
+
+    #[cfg(unix)]
+    fn direct_lease_spawn(
+        executable: &OsStr,
+        project_root: &Path,
+        _endpoint: &OpenCodeEndpoint,
+    ) -> Result<DirectLease, OpenCodeError> {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = Command::new(executable);
+        command
+            .arg("serve")
+            .current_dir(project_root)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0);
+        let child = command.spawn().map_err(OpenCodeError::Io)?;
+        let probe = crate::runtime::LinuxProcessProbe;
+        let birth = probe
+            .process_birth(child.id())
+            .ok_or(OpenCodeError::ProcessIdentityUnavailable)?;
+        let group = crate::runtime::prove_owned_process_group(child.id(), &birth, &probe, &probe)
+            .map_err(|_| OpenCodeError::ProcessIdentityUnavailable)?;
+        Ok(DirectLease { child, group })
+    }
 
     #[test]
     fn installation_probe_is_version_independent_strict_and_bounded() {
@@ -1569,7 +1466,7 @@ mod tests {
         });
         let callback_events = Arc::clone(&events);
         let endpoint = OpenCodeEndpoint::loopback(port).unwrap();
-        let session = create_blank_session_with_before_create(
+        let session = create_blank_session_with_lease(
             &executable,
             temporary.path(),
             endpoint,
@@ -1577,6 +1474,7 @@ mod tests {
                 callback_events.lock().unwrap().push("callback".to_owned());
                 Ok::<(), OpenCodeError>(())
             },
+            direct_lease_spawn,
         )
         .unwrap();
         worker.join().unwrap();
@@ -1630,33 +1528,48 @@ mod tests {
             stream.write_all(body).unwrap();
         });
         let callback_identity = Arc::clone(&observed_identity);
-        let result: Result<ProviderSessionId, OpenCodeError> =
-            create_blank_session_with_before_create(
-                &executable,
-                temporary.path(),
-                OpenCodeEndpoint::loopback(port).unwrap(),
-                move || {
-                    let identity = (0..100).find_map(|_| {
-                        let identity = std::fs::read_to_string(&pid_path)
-                            .ok()
-                            .and_then(|value| value.parse::<u32>().ok())
-                            .and_then(|pid| process_group_identity(pid).ok().flatten());
-                        identity.or_else(|| {
-                            std::thread::sleep(Duration::from_millis(10));
-                            None
-                        })
-                    });
-                    *callback_identity.lock().unwrap() = identity;
-                    Err(OpenCodeError::InvalidRequest)
-                },
-            );
+        let result: Result<ProviderSessionId, OpenCodeError> = create_blank_session_with_lease(
+            &executable,
+            temporary.path(),
+            OpenCodeEndpoint::loopback(port).unwrap(),
+            move || {
+                let identity = (0..100).find_map(|_| {
+                    let identity = std::fs::read_to_string(&pid_path)
+                        .ok()
+                        .and_then(|value| value.parse::<u32>().ok())
+                        .and_then(|pid| {
+                            let probe = crate::runtime::LinuxProcessProbe;
+                            let birth = probe.process_birth(pid)?;
+                            crate::runtime::prove_owned_process_group(pid, &birth, &probe, &probe)
+                                .ok()
+                        });
+                    identity.or_else(|| {
+                        std::thread::sleep(Duration::from_millis(10));
+                        None
+                    })
+                });
+                *callback_identity.lock().unwrap() = identity;
+                Err(OpenCodeError::InvalidRequest)
+            },
+            direct_lease_spawn,
+        );
         assert!(matches!(result, Err(OpenCodeError::InvalidRequest)));
         worker.join().unwrap();
         let identity = observed_identity
             .lock()
             .unwrap()
+            .clone()
             .expect("serve script recorded its process-group identity");
-        assert!(!process_group_has_member(identity).unwrap());
+        let probe = crate::runtime::LinuxProcessProbe;
+        assert!(
+            probe
+                .process_group_members_checked(&crate::runtime::ProcessGroupInfo {
+                    process_group_id: identity.process_group_id,
+                    session_id: identity.session_id,
+                })
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -2009,7 +1922,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn stop_child_terminates_and_reaps_the_private_process_group() {
+    fn preproven_group_terminates_and_reaps_the_private_process_group() {
         use std::os::unix::process::CommandExt;
 
         let mut command = Command::new("sh");
@@ -2020,22 +1933,66 @@ mod tests {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let mut child = command.spawn().unwrap();
-        let identity = process_group_identity(child.id()).unwrap().unwrap();
+        let probe = crate::runtime::LinuxProcessProbe;
+        let birth = probe.process_birth(child.id()).unwrap();
+        let identity =
+            crate::runtime::prove_owned_process_group(child.id(), &birth, &probe, &probe).unwrap();
         std::thread::sleep(Duration::from_millis(50));
-        stop_child(&mut child, Ok(Some(identity))).unwrap();
-        assert!(!process_group_has_member(identity).unwrap());
+        crate::runtime::terminate_preproven_process_group(
+            &identity,
+            &probe,
+            &probe,
+            &crate::runtime::SystemProcessGroupSignaler,
+            SERVE_SHUTDOWN_TIMEOUT,
+            SERVE_POLL_INTERVAL,
+        )
+        .unwrap();
+        child.wait().unwrap();
+        assert!(
+            probe
+                .process_group_members_checked(&crate::runtime::ProcessGroupInfo {
+                    process_group_id: identity.process_group_id,
+                    session_id: identity.session_id,
+                })
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[cfg(unix)]
     #[test]
     fn process_group_membership_requires_the_captured_session() {
-        let identity = process_group_identity(std::process::id()).unwrap().unwrap();
-        assert!(process_group_has_member(identity).unwrap());
-        let different_session = ProcessGroupIdentity {
-            session: identity.session.wrapping_add(1),
-            ..identity
+        use std::os::unix::process::CommandExt;
+
+        let mut command = Command::new("sleep");
+        command.arg("30").process_group(0);
+        let mut child = command.spawn().unwrap();
+        let probe = crate::runtime::LinuxProcessProbe;
+        let pid = child.id();
+        let birth = probe.process_birth(pid).unwrap();
+        let identity =
+            crate::runtime::prove_owned_process_group(pid, &birth, &probe, &probe).unwrap();
+        assert!(
+            !probe
+                .process_group_members_checked(&crate::runtime::ProcessGroupInfo {
+                    process_group_id: identity.process_group_id,
+                    session_id: identity.session_id,
+                })
+                .unwrap()
+                .is_empty()
+        );
+        let different_session = crate::runtime::ProcessGroupInfo {
+            process_group_id: identity.process_group_id,
+            session_id: identity.session_id.wrapping_add(1),
         };
-        assert!(!process_group_has_member(different_session).unwrap());
+        assert!(
+            probe
+                .process_group_members_checked(&different_session)
+                .unwrap()
+                .is_empty()
+        );
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]

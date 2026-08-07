@@ -819,11 +819,116 @@ pub fn terminate_owned_process_group(
         }
     };
 
-    match process_group_signaler.signal_group(&group, OwnedProcessSignal::Term, false) {
+    terminate_live_proven_process_group(
+        &group,
+        process_probe,
+        process_group_probe,
+        process_group_signaler,
+        timeout,
+        poll_interval,
+    )
+}
+
+/// Terminates a process group whose leader PID/birth/group/session identity
+/// was already proven by the caller.  This is used by crash-surviving
+/// guardians which retain the exact group authority after their action owner
+/// has disappeared.  A live leader is revalidated before TERM/KILL.  If the
+/// leader has exited, KILL is allowed only while an exact captured
+/// group/session member scan still proves that the original group is occupied;
+/// an empty group is treated as already gone.
+///
+/// # Errors
+///
+/// Returns an error when the captured identity no longer corroborates, group
+/// probing/signalling is unavailable, or surviving members ignore both
+/// bounded shutdown phases.
+pub fn terminate_preproven_process_group(
+    group: &OwnedProcessGroup,
+    process_probe: &dyn ProcessProbe,
+    process_group_probe: &dyn ProcessGroupProbe,
+    process_group_signaler: &dyn ProcessGroupSignaler,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<OwnedProcessTermination, RuntimeError> {
+    if group.leader_pid == 0
+        || group.leader_birth.is_empty()
+        || group.process_group_id == 0
+        || group.process_group_id != group.leader_pid
+        || group.session_id == 0
+    {
+        return Err(RuntimeError::InvalidProcessIdentity);
+    }
+
+    let leader_gone = match process_probe
+        .process_birth_checked(group.leader_pid)
+        .map_err(RuntimeError::ProcessProbe)?
+    {
+        Some(actual) if actual == group.leader_birth => {
+            let actual_group = process_group_probe
+                .process_group_checked(group.leader_pid)
+                .map_err(RuntimeError::ProcessGroupProbe)?
+                .ok_or(RuntimeError::ProcessGroupIdentityMismatch)?;
+            if actual_group.process_group_id != group.process_group_id
+                || actual_group.session_id != group.session_id
+            {
+                return Err(RuntimeError::ProcessGroupIdentityMismatch);
+            }
+            false
+        }
+        Some(_) => return Err(RuntimeError::ProcessIdentityChanged),
+        None => {
+            let members = process_group_probe
+                .process_group_members_checked(&ProcessGroupInfo {
+                    process_group_id: group.process_group_id,
+                    session_id: group.session_id,
+                })
+                .map_err(RuntimeError::ProcessGroupProbe)?;
+            if members.is_empty() {
+                return Ok(OwnedProcessTermination::AlreadyGone);
+            }
+            true
+        }
+    };
+
+    if leader_gone {
+        match process_group_signaler.signal_group(group, OwnedProcessSignal::Kill, true) {
+            Ok(()) | Err(ProcessSignalError::AlreadyGone) => {}
+            Err(error) => return Err(RuntimeError::ProcessGroupSignal(error)),
+        }
+        return if wait_for_process_group_exit(group, process_group_probe, timeout, poll_interval)? {
+            Ok(OwnedProcessTermination::TerminatedByKill)
+        } else {
+            Err(RuntimeError::ProcessShutdownTimedOut)
+        };
+    }
+
+    terminate_live_proven_process_group(
+        group,
+        process_probe,
+        process_group_probe,
+        process_group_signaler,
+        timeout,
+        poll_interval,
+    )
+}
+
+/// Terminates a group whose leader was just proven live and exact by the
+/// caller. The initial identity proof is intentionally outside this helper so
+/// callers that already performed it do not consume a second probe sample
+/// before the first TERM signal.
+fn terminate_live_proven_process_group(
+    group: &OwnedProcessGroup,
+    process_probe: &dyn ProcessProbe,
+    process_group_probe: &dyn ProcessGroupProbe,
+    process_group_signaler: &dyn ProcessGroupSignaler,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<OwnedProcessTermination, RuntimeError> {
+    match process_group_signaler.signal_group(group, OwnedProcessSignal::Term, false) {
         Ok(()) | Err(ProcessSignalError::AlreadyGone) => {}
         Err(error) => return Err(RuntimeError::ProcessGroupSignal(error)),
     }
-    if wait_for_process_group_exit(&group, process_group_probe, timeout, poll_interval)? {
+    if wait_for_process_group_exit(group, process_group_probe, timeout, poll_interval)? {
         return Ok(OwnedProcessTermination::TerminatedByTerm);
     }
 
@@ -862,11 +967,11 @@ pub fn terminate_owned_process_group(
     {
         return Ok(OwnedProcessTermination::TerminatedByTerm);
     }
-    match process_group_signaler.signal_group(&group, OwnedProcessSignal::Kill, leader_gone) {
+    match process_group_signaler.signal_group(group, OwnedProcessSignal::Kill, leader_gone) {
         Ok(()) | Err(ProcessSignalError::AlreadyGone) => {}
         Err(error) => return Err(RuntimeError::ProcessGroupSignal(error)),
     }
-    if wait_for_process_group_exit(&group, process_group_probe, timeout, poll_interval)? {
+    if wait_for_process_group_exit(group, process_group_probe, timeout, poll_interval)? {
         Ok(OwnedProcessTermination::TerminatedByKill)
     } else {
         Err(RuntimeError::ProcessShutdownTimedOut)
@@ -1043,7 +1148,8 @@ fn linux_process_group_members(
         match read_linux_process_stat(pid)? {
             Some(stat)
                 if stat.process_group_id == process_group_id
-                    && session_id.is_none_or(|session| stat.session_id == session) =>
+                    && session_id.is_none_or(|session| stat.session_id == session)
+                    && stat.state != 'Z' =>
             {
                 members.push(pid);
             }
@@ -1056,6 +1162,7 @@ fn linux_process_group_members(
 
 #[derive(Debug)]
 struct LinuxProcessStat {
+    state: char,
     birth: String,
     process_group_id: u32,
     session_id: u32,
@@ -1080,6 +1187,10 @@ fn read_linux_process_stat(pid: u32) -> Result<Option<LinuxProcessStat>, Process
         .get(19)
         .ok_or(ProcessProbeError::Malformed)?
         .to_string();
+    let state = fields
+        .first()
+        .and_then(|field| field.chars().next())
+        .ok_or(ProcessProbeError::Malformed)?;
     let process_group_id = fields
         .get(2)
         .ok_or(ProcessProbeError::Malformed)?
@@ -1091,6 +1202,7 @@ fn read_linux_process_stat(pid: u32) -> Result<Option<LinuxProcessStat>, Process
         .parse()
         .map_err(|_| ProcessProbeError::Malformed)?;
     Ok(Some(LinuxProcessStat {
+        state,
         birth,
         process_group_id,
         session_id,
@@ -1974,6 +2086,36 @@ mod tests {
             Err(RuntimeError::ProcessGroupIdentityMismatch)
         ));
         assert!(signaler.signals.borrow().is_empty());
+    }
+
+    #[test]
+    fn preproven_group_kills_captured_members_after_leader_exit() {
+        let process_probe = SequenceProcessProbe::new([None]);
+        let group_probe = FakeGroupProbe::new(None, [vec![88], vec![]]);
+        let signaler = RecordingGroupSignaler::default();
+        let group = OwnedProcessGroup {
+            leader_pid: 77,
+            leader_birth: "birth-expected".to_owned(),
+            process_group_id: 77,
+            session_id: 11,
+        };
+
+        assert_eq!(
+            terminate_preproven_process_group(
+                &group,
+                &process_probe,
+                &group_probe,
+                &signaler,
+                Duration::ZERO,
+                Duration::ZERO,
+            )
+            .unwrap(),
+            OwnedProcessTermination::TerminatedByKill
+        );
+        assert_eq!(
+            &*signaler.signals.borrow(),
+            &[(77, OwnedProcessSignal::Kill, true)]
+        );
     }
 
     #[test]

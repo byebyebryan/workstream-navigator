@@ -1917,6 +1917,33 @@ the exact Runtime and Workstream to recovery-required; it can never issue a
 second blank-session request. No raw response or provider content enters the
 journal.
 
+The short-lived server is owned by a state-free WSNav guardian rather than the
+mutating action process. The guardian and server use separate private process
+groups, and an anonymous pipe held only by the action is their lifetime lease.
+A second state-free launch barrier blocks before provider execution while the
+guardian captures and proves the future server leader's PID, birth token,
+process group, and session; releasing the barrier `exec`s `opencode serve` in
+place so that authority cannot race an early provider fork. Before reporting
+readiness, the guardian proves that the selected loopback listener belongs to
+that exact process tree. The action revalidates guardian liveness, listener
+ownership, and the same process-group/session authority after health and again
+after journaling, immediately before `POST /session`.
+
+Normal completion closes the lease only after the provider request has
+returned; abrupt loss of the action closes it in the kernel. In either case the
+guardian performs bounded, revalidated process-group termination, reaps the
+leader, and corroborates that the private loopback endpoint is no longer
+occupied. A malformed handshake, early server exit, ambiguous identity,
+inconclusive cleanup, or surviving listener fails closed. A `prepared` Start
+operation abandoned by abrupt action loss is also unresolved because cleanup
+was not synchronously observed; unlike a normally returned and terminally
+known-absent failure, it cannot automatically retry. The guardian never opens
+the state registry or stores provider payloads; the durable `Start` operation
+remains the sole authority for whether the non-idempotent boundary may have
+been crossed. Independent loss of both the action and guardian is outside this
+V1 in-process ownership boundary and would require a stronger external
+supervisor or cgroup authority.
+
 OpenCode-native creation or switching to another session inside an already
 managed TUI is unsupported unless the same evidence proves an exact active-TUI
 changed-binding claim. Ordinary global `session.created` events are not enough.

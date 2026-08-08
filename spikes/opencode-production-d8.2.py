@@ -39,6 +39,13 @@ MAX_REASON_LENGTH = 512
 FINAL_CLEANUP_RETRY_SECONDS = 5
 ROOT_REFERENCE_WAIT_SECONDS = 5
 ROOT_REMOVAL_WAIT_SECONDS = 5
+FORK_STABILITY_TIMEOUT_SECONDS = 5
+FORK_STABLE_WINDOW_SECONDS = 0.75
+FORK_STABILITY_POLL_SECONDS = 0.1
+MAX_FORK_REVISION_RETRIES = 1
+REVISION_CONFLICT_DIAGNOSTIC = (
+    "error: host rejected the request: revision conflict; refresh this host"
+)
 PROMPT = (
     f"Reply with the exact token {MARKER} and nothing else. "
     "Do not use tools, inspect files, or make changes."
@@ -68,6 +75,14 @@ class RootReference:
     process_group: int | None
     session: int | None
     category: str
+
+
+@dataclass(frozen=True)
+class ForkEffectBaseline:
+    """Counts used to prove a rejected Fork created no durable effect."""
+
+    compound_operation_count: int
+    destination_workstream_count: int
 
 
 def run(
@@ -109,6 +124,105 @@ def wait_for(predicate: Callable[[], Any], label: str, timeout: int = 45) -> Any
             pass
         time.sleep(0.25)
     raise AcceptanceFailure(f"timeout:{label}")
+
+
+_SOURCE_RUNTIME_IDENTITY_FIELDS = (
+    "provider",
+    "runtime_id",
+    "session_id",
+    "handle_generation",
+    "tmux_generation",
+)
+
+
+def _settled_source_sample(
+    info: dict[str, Any] | None,
+) -> tuple[int, str, tuple[str, ...]] | None:
+    """Return the bounded source boundary used by a Fork attempt."""
+
+    if info is None or info.get("provider") != "opencode":
+        return None
+    try:
+        raw_revision = info["revision"]
+    except KeyError:
+        return None
+    if type(raw_revision) is not int:
+        return None
+    revision = raw_revision
+    if revision <= 0:
+        return None
+    raw_settled_id = info.get("settled_id")
+    if not isinstance(raw_settled_id, str) or not raw_settled_id.strip():
+        return None
+    identity: list[str] = []
+    for field in _SOURCE_RUNTIME_IDENTITY_FIELDS:
+        value = info.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return None
+        identity.append(value)
+    return (
+        revision,
+        raw_settled_id,
+        tuple(identity),
+    )
+
+
+def wait_for_stable_settled_source(
+    state_root: Path,
+    workstream_id: str,
+    *,
+    baseline: dict[str, Any] | None = None,
+    timeout: float = FORK_STABILITY_TIMEOUT_SECONDS,
+    stable_window: float = FORK_STABLE_WINDOW_SECONDS,
+    poll_interval: float = FORK_STABILITY_POLL_SECONDS,
+    read: Callable[[Path, str], dict[str, Any] | None] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Wait for a settled revision/boundary tuple to stop changing.
+
+    ``baseline`` binds the observation to the Runtime and settled provider
+    boundary that the caller already displayed. A newer revision on that same
+    boundary is safe to use after it settles; a new boundary or Runtime is
+    not, because it could silently Fork a later turn or replacement Runtime.
+    """
+
+    reader = runtime_info if read is None else read
+    initial = baseline if baseline is not None else reader(state_root, workstream_id)
+    expected = _settled_source_sample(initial)
+    if expected is None:
+        raise AcceptanceFailure("observer-settled-boundary-unavailable")
+    expected_revision = expected[0]
+    expected_boundary = expected[1]
+    expected_runtime = expected[2]
+    deadline = clock() + timeout
+    candidate: tuple[int, str] | None = None
+    stable_since: float | None = None
+    while True:
+        current = reader(state_root, workstream_id)
+        sample = _settled_source_sample(current)
+        now = clock()
+        if sample is not None:
+            revision, settled_id, runtime_identity = sample
+            if revision < expected_revision:
+                raise AcceptanceFailure("observer-revision-regressed")
+            if settled_id != expected_boundary:
+                raise AcceptanceFailure("observer-settled-boundary-changed")
+            if runtime_identity != expected_runtime:
+                raise AcceptanceFailure("observer-runtime-changed")
+            current_tuple = (revision, settled_id)
+            if candidate != current_tuple:
+                candidate = current_tuple
+                stable_since = now
+            elif stable_since is not None and now - stable_since >= stable_window:
+                # ``current`` is known non-None whenever ``sample`` is set.
+                return current  # type: ignore[return-value]
+        else:
+            candidate = None
+            stable_since = None
+        if now >= deadline:
+            raise AcceptanceFailure("observer-revision-churn")
+        sleep(min(poll_interval, max(0.0, deadline - now)))
 
 
 def create_repository(path: Path) -> None:
@@ -163,6 +277,60 @@ def bounded_wsnav_failure(result: subprocess.CompletedProcess[str], label: str) 
     return f"wsnav-command-failed:{label}:{category}"
 
 
+def is_pre_effect_revision_conflict(
+    result: subprocess.CompletedProcess[str],
+) -> bool:
+    """Recognize only the host rejection that precedes Fork creation."""
+
+    return (
+        result.returncode != 0
+        and not (result.stdout or "").strip()
+        and (result.stderr or "").strip() == REVISION_CONFLICT_DIAGNOSTIC
+    )
+
+
+def invoke_fork_with_revision_retry(
+    source_id: str,
+    source: dict[str, Any],
+    *,
+    invoke: Callable[[str, str], subprocess.CompletedProcess[str]],
+    refresh: Callable[[dict[str, Any]], dict[str, Any]],
+    assert_no_effect: Callable[[], None],
+    label: str = "host-fork",
+    max_retries: int = MAX_FORK_REVISION_RETRIES,
+) -> subprocess.CompletedProcess[str]:
+    """Retry one pre-effect revision rejection against the same boundary."""
+
+    baseline = _settled_source_sample(source)
+    if baseline is None:
+        raise AcceptanceFailure("observer-settled-boundary-unavailable")
+    expected_revision = str(baseline[0])
+    retry_budget = min(max(max_retries, 0), MAX_FORK_REVISION_RETRIES)
+    for attempt in range(retry_budget + 1):
+        result = invoke(source_id, expected_revision)
+        if result.returncode == 0:
+            return result
+        if not is_pre_effect_revision_conflict(result):
+            raise AcceptanceFailure(bounded_wsnav_failure(result, label))
+        if attempt >= retry_budget:
+            raise AcceptanceFailure("observer-revision-churn")
+        assert_no_effect()
+        refreshed = refresh(source)
+        current = _settled_source_sample(refreshed)
+        if current is None:
+            raise AcceptanceFailure("observer-settled-boundary-unavailable")
+        if current[1] != baseline[1]:
+            raise AcceptanceFailure("observer-settled-boundary-changed")
+        if current[2] != baseline[2]:
+            raise AcceptanceFailure("observer-runtime-changed")
+        if current[0] < baseline[0]:
+            raise AcceptanceFailure("observer-revision-regressed")
+        if current[0] == int(expected_revision):
+            raise AcceptanceFailure("observer-revision-churn")
+        expected_revision = str(current[0])
+    raise AcceptanceFailure(f"wsnav-command-failed:{label}:revision-conflict")
+
+
 def output_id(output: str) -> str:
     value = output.strip().rsplit(" ", 1)[-1]
     if not value or any(character.isspace() for character in value):
@@ -211,6 +379,53 @@ def runtime_info(state_root: Path, workstream_id: str) -> dict[str, Any] | None:
         "observer_status",
     )
     return dict(zip(keys, row, strict=True))
+
+
+def fork_effect_baseline(
+    state_root: Path, source_workstream_id: str
+) -> ForkEffectBaseline:
+    """Read only row counts needed to prove a rejected Fork had no effect."""
+
+    database = state_root / "host.sqlite"
+    if not database.exists():
+        raise AcceptanceFailure("fork-effect-baseline-unavailable")
+    try:
+        with sqlite3.connect(database) as connection:
+            row = connection.execute(
+                """SELECT
+                       (SELECT COUNT(*) FROM compound_operations),
+                       (SELECT COUNT(*) FROM workstreams
+                          WHERE source_workstream_id = ?)""",
+                (source_workstream_id,),
+            ).fetchone()
+    except sqlite3.Error as error:
+        raise AcceptanceFailure("fork-effect-baseline-unavailable") from error
+    if row is None or len(row) != 2:
+        raise AcceptanceFailure("fork-effect-baseline-unavailable")
+    operation_count, destination_count = row
+    if (
+        not isinstance(operation_count, int)
+        or not isinstance(destination_count, int)
+        or operation_count < 0
+        or destination_count < 0
+    ):
+        raise AcceptanceFailure("fork-effect-baseline-unavailable")
+    return ForkEffectBaseline(operation_count, destination_count)
+
+
+def assert_fork_effect_unchanged(
+    state_root: Path,
+    source_workstream_id: str,
+    baseline: ForkEffectBaseline,
+) -> None:
+    """Reject a retry if the rejected command changed durable Fork state."""
+
+    current = fork_effect_baseline(state_root, source_workstream_id)
+    if (
+        current.compound_operation_count != baseline.compound_operation_count
+        or current.destination_workstream_count != baseline.destination_workstream_count
+    ):
+        raise AcceptanceFailure("fork-effect-observed")
 
 
 def ready_runtime(state_root: Path, workstream_id: str) -> dict[str, Any] | None:
@@ -985,6 +1200,8 @@ def accept_host_path(
     assertions: dict[str, bool],
     prefix: str,
     remember: Callable[[Path, str, ProviderEvidence | None], None] | None = None,
+    fork_invoke: Callable[[str, dict[str, Any]], subprocess.CompletedProcess[str]]
+    | None = None,
 ) -> tuple[str, str]:
     source_id = output_id(register().stdout)
     info = runtime_info(host_state, source_id)
@@ -1004,8 +1221,18 @@ def accept_host_path(
         ),
         f"{prefix}-settled-boundary",
     )
+    if fork_invoke is not None:
+        source = wait_for_stable_settled_source(
+            host_state,
+            source_id,
+            baseline=source,
+        )
 
-    forked = invoke(["fork", source_id, str(source["revision"])])
+    forked = (
+        fork_invoke(source_id, source)
+        if fork_invoke is not None
+        else invoke(["fork", source_id, str(source["revision"])])
+    )
     destination_id = output_id(forked.stdout)
     destination = wait_for(
         lambda: ready_runtime(host_state, destination_id),
@@ -1415,39 +1642,54 @@ def main() -> int:
             )
             return registered
 
+        def remote_fork(
+            workstream_id: str, source: dict[str, Any]
+        ) -> subprocess.CompletedProcess[str]:
+            """Fork one exact settled boundary, with one safe refresh retry."""
+
+            effect_baseline = fork_effect_baseline(remote_state, workstream_id)
+            result = invoke_fork_with_revision_retry(
+                workstream_id,
+                source,
+                invoke=lambda source_id, revision: wsnav(
+                    binary,
+                    client_state,
+                    "host",
+                    "fork",
+                    "remote",
+                    source_id,
+                    revision,
+                    env=client_env,
+                    check=False,
+                ),
+                refresh=lambda baseline: wait_for_stable_settled_source(
+                    remote_state,
+                    workstream_id,
+                    baseline=baseline,
+                ),
+                assert_no_effect=lambda: assert_fork_effect_unchanged(
+                    remote_state,
+                    workstream_id,
+                    effect_baseline,
+                ),
+            )
+            cleanup_targets.append(
+                (
+                    remote_state,
+                    output_id(result.stdout),
+                    remote_env,
+                    remote_root,
+                    None,
+                )
+            )
+            return result
+
         def remote_invoke(arguments: list[str]) -> subprocess.CompletedProcess[str]:
             action, workstream_id, revision = arguments
             command = ["host", action, "remote", workstream_id, revision]
             result = wsnav(binary, client_state, *command, env=client_env, check=False)
-            if (
-                result.returncode != 0
-                and action == "fork"
-                and "revision conflict; refresh this host" in result.stderr
-            ):
-                current = runtime_info(remote_state, workstream_id)
-                if current is None:
-                    raise AcceptanceFailure("ssh-fork-refresh-state-missing")
-                current_revision = str(current["revision"])
-                if command[-1] == current_revision:
-                    raise AcceptanceFailure("ssh-fork-revision-conflict-on-current")
-                command[-1] = current_revision
-                result = wsnav(
-                    binary, client_state, *command, env=client_env, check=False
-                )
-                if result.returncode != 0:
-                    raise AcceptanceFailure(bounded_wsnav_failure(result, "host-fork"))
-            elif result.returncode != 0:
+            if result.returncode != 0:
                 raise AcceptanceFailure(bounded_wsnav_failure(result, f"host-{action}"))
-            if action == "fork":
-                cleanup_targets.append(
-                    (
-                        remote_state,
-                        output_id(result.stdout),
-                        remote_env,
-                        remote_root,
-                        None,
-                    )
-                )
             return result
 
         def remote_reconcile(workstream_id: str) -> None:
@@ -1479,6 +1721,7 @@ def main() -> int:
             assertions=assertions,
             prefix="ssh",
             remember=remember_cleanup_evidence,
+            fork_invoke=remote_fork,
         )
         remote_source_info = runtime_info(remote_state, remote_source)
         remote_destination_info = runtime_info(remote_state, remote_destination)

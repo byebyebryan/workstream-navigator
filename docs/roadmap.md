@@ -38,8 +38,11 @@ durable blank-session creation, and exact provider-process-group cleanup;
 an operator-gated local and real-loopback-SSH production reacceptance passed on
 2026-08-07. A later review confirmation reopened only the current-harness
 production confirmation after an unclassified SSH Fork rejection and two
-provider-driver timeouts; the automated corrective gates remain passing. There
-is no generic
+provider-driver timeouts. The hardened harness now requires a stable exact
+Fork boundary, permits one proven pre-effect revision refresh without changing
+that boundary or Runtime identity, and fails closed on churn or any durable
+effect. Its final local and real-loopback-SSH confirmation passed with complete
+cleanup, closing D8.2. There is no generic
 provider onboarding, provider view
 or filter, model selector, role/preset system, or remembered per-Project
 provider policy in D8. Availability is dynamic host-owned snapshot state
@@ -155,9 +158,8 @@ an automatic migration from the retired schema.
 
 Date: 2026-08-07
 
-Status: D0 through D8.1 are complete. D8.2 corrective implementation is
-complete, with one recorded production pass and a follow-up production
-confirmation pending. V1 remains a source-installed operator beta.
+Status: D0 through D8.2 are complete. V1 remains a source-installed operator
+beta.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -205,7 +207,7 @@ This document owns sequencing, exit gates, and progress.
 | D7.6 | Host-private Project directory browser | Complete |
 | D8.0 | Provider identity foundation and Codex parity | Complete (2026-08-05) |
 | D8.1 | Provider-aware New and OpenCode New/Resume vertical slice | Complete (2026-08-06) |
-| D8.2 | OpenCode Fork, recovery, and integrated acceptance | Corrective implementation complete; follow-up production confirmation pending |
+| D8.2 | OpenCode Fork, recovery, and integrated acceptance | Complete (2026-08-07) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -1005,12 +1007,11 @@ Exit gate:
 
 ## D8 - Multi-provider Workstreams
 
-Implementation status: D8.0 completed on 2026-08-05 and D8.1 completed on
-2026-08-06. D8.2 corrective cleanup, crash-guardian, and deterministic lifecycle
-implementation is complete, and one real local/loopback-SSH acceptance passed;
-a follow-up current-harness production confirmation remains pending. The
-installed OpenCode release reported `1.18.11`; compatibility remains
-contract-based rather than version-gated. The
+Implementation status: D8.0 completed on 2026-08-05, D8.1 completed on
+2026-08-06, and D8.2 completed on 2026-08-07 after its corrective cleanup,
+crash-guardian, deterministic lifecycle, and hardened real
+local/loopback-SSH acceptance passed. The installed OpenCode release reported
+`1.18.11`; compatibility remains contract-based rather than version-gated. The
 [multi-provider design](design.md#multi-provider-and-multi-agent-design) is
 authoritative for the shared provider boundary and privacy invariants.
 
@@ -1271,11 +1272,10 @@ complete; D8.2 was activated on 2026-08-06.
 
 ### D8.2 - OpenCode Fork, recovery, and integrated acceptance
 
-Status: Corrective implementation and deterministic cleanup/crash-guardian
-gates complete on 2026-08-07. One operator-gated real local/loopback-SSH rerun
-passed; a follow-up current-harness production confirmation remains pending.
-The installed OpenCode release reported `1.18.11`; production compatibility
-remains contract-based.
+Status: Complete on 2026-08-07 after corrective implementation, deterministic
+cleanup/crash-guardian gates, and a final hardened operator-gated real
+local/loopback-SSH confirmation. The installed OpenCode release reported
+`1.18.11`; production compatibility remains contract-based.
 
 Scope:
 
@@ -1365,8 +1365,8 @@ terminal hangup/TERM and fails if either member of the owned group survives
 Park, recovery, or Archive. The real production harness now treats park errors,
 surviving recorded providers, process references to its disposable root, or a
 root that reappears after removal as falsification. `scripts/check` passes, and
-the operator-gated local/real-loopback-SSH harness produced one complete
-passing run. A later review confirmation did not complete, as recorded below.
+the operator-gated local/real-loopback-SSH harness produced complete passing
+runs before and after its review-driven revision-stability hardening.
 
 Crash-guardian corrective closure (2026-08-07): the short-lived OpenCode server
 now starts behind a state-free pre-exec barrier. Its guardian proves the future
@@ -1389,15 +1389,20 @@ session, no retry, recovery attention, ordinary-tmux preservation, and survival
 of an unrelated exact-identity sentinel. The complete `scripts/check` gate
 passes 362 library tests plus 5 local transport tests, formatting, strict
 Clippy, package/license/advisory policy, every disposable acceptance, and diff
-checks. The automated corrective gate is closed, and one explicit
-operator-gated real local/loopback-SSH rerun passed. During review, a later
+checks. The automated corrective gate is closed. During review, a later
 confirmation completed the local path but received an unclassified SSH Fork
 rejection; two subsequent attempts timed out in the external provider driver
 before Fork. Sanitized failure categorization and bounded final-cleanup retry
-coverage were added, so a follow-up current-harness production confirmation
-remains pending. Independent simultaneous loss of both action and guardian
-would require a deferred external supervisor or cgroup authority and is not
-claimed by this V1 in-process boundary.
+coverage were added. A subsequent exact SSH revision conflict showed that one
+immediate refresh was insufficient while observer tail events were still
+advancing the optimistic revision. The harness now waits for a stable exact
+revision/settled-boundary tuple, permits at most one retry only after the exact
+pre-effect rejection and proof that no operation or destination was created,
+and refuses boundary/Runtime changes or sustained churn. The final real local
+and loopback-SSH run passed every assertion with complete cleanup, closing the
+production confirmation. Independent simultaneous loss of both action and
+guardian would require a deferred external supervisor or cgroup authority and
+is not claimed by this V1 in-process boundary.
 
 Post-completion contract correction (2026-08-06): the initial adapter promoted
 the spike's observed `1.18.11` release into an exact production allowlist. That

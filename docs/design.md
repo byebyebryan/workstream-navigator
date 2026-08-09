@@ -1659,11 +1659,13 @@ ownership, and per-Runtime observer sidecar lifecycle on OpenCode `1.18.11`.
 
 ### Framing
 
-The current code has no provider abstraction: `src/provider/` is a namespace,
-and Codex adapter types are imported directly across the state, action, app,
-navigator, and remote layers. Generalizing to a second provider therefore
-requires inventing a real boundary, not extending one. The tmux runtime and
-SSH transport layers are already provider-agnostic and stay that way.
+The current code uses a concrete provider-kind boundary rather than a generic
+plugin abstraction. `ProviderKind` and provider-neutral lifecycle, capability,
+name, session, state, and wire types cross the shared layers; one explicit
+dispatch at the action boundary selects the concrete Codex or OpenCode
+adapter. Provider-owned profile, App Server, HTTP, SSE, and process contracts
+remain inside their concrete adapters. The tmux runtime and SSH transport
+layers remain provider-agnostic.
 
 The design treats this as a **provider-kind generalization**, not "add
 opencode". Codex and opencode become two instances of the same provider

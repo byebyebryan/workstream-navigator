@@ -156,9 +156,9 @@ historical only; it is not a current product commitment. Host schema 8 is a
 clean breaking boundary and requires explicit reset/re-registration instead of
 an automatic migration from the retired schema.
 
-Date: 2026-08-07
+Date: 2026-08-08
 
-Status: D0 through D8.2 are complete. V1 remains a source-installed operator
+Status: D0 through D8.3 are complete. V1 remains a source-installed operator
 beta.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
@@ -208,6 +208,7 @@ This document owns sequencing, exit gates, and progress.
 | D8.0 | Provider identity foundation and Codex parity | Complete (2026-08-05) |
 | D8.1 | Provider-aware New and OpenCode New/Resume vertical slice | Complete (2026-08-06) |
 | D8.2 | OpenCode Fork, recovery, and integrated acceptance | Complete (2026-08-07) |
+| D8.3 | Behavior-neutral internal architecture consolidation | Complete (2026-08-08) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -1416,6 +1417,81 @@ within that generation, while a recovered generation may record a newer value.
 Disposable acceptance advertises deliberately non-accepted future/development
 version strings and still passes the unchanged API contract. Malformed health
 metadata and mid-generation mismatches remain fail-closed.
+
+## D8.3 - Internal architecture consolidation
+
+Status: Complete on 2026-08-08.
+
+This checkpoint reduces implementation concentration before further product
+work. It is a behavior-neutral source-organization change, not a new provider,
+runtime, lifecycle, presentation, or persistence design.
+
+Scope:
+
+- split the host/client persistence, schema, model, operation, Runtime, and
+  observation responsibilities currently concentrated in `src/state/mod.rs`
+  into cohesive modules while preserving the existing `wsnav::state` public
+  paths and transactional boundaries;
+- split navigator snapshot projection, asynchronous remote monitoring, view
+  state, rendering, controller/action handling, and inline tests into cohesive
+  modules while preserving the existing `wsnav::navigator` public paths;
+- move the large inline state and navigator test modules beside their new
+  implementation modules without renaming, weakening, or deleting coverage;
+- correct present-tense documentation that still describes the pre-D8 provider
+  boundary or D8.2 as incomplete; and
+- keep commits independently reviewable, with the full repository gate before
+  each checkpoint commit.
+
+Non-goals and hard boundaries:
+
+- no protocol, host/client schema, control ABI, dependency, CLI, shortcut,
+  diagnostic, provider command, provider capability, or persisted-state change;
+- no UI layout, styling, polling, redraw, attachment, tmux configuration,
+  timeout, retry, process-signal, cleanup, or recovery-semantic change;
+- no generic provider trait, plugin framework, process-supervision
+  consolidation, or action/runtime redesign; and
+- no work from the deferred product scope below.
+
+Exit gate:
+
+- public state and navigator paths remain source-compatible at their existing
+  `wsnav::state` and `wsnav::navigator` locations, and every existing test
+  retains its meaning and passes;
+- protocol 17, host schema 12, client schema 5, control ABI 1, Cargo manifests,
+  native provider command vectors, and both private tmux configurations remain
+  unchanged;
+- state migrations, transactional operation recovery, lifecycle observation,
+  provider selection, snapshot projection, remote-unreachable caching,
+  navigator input/rendering, attachment, and visible-working spinner regressions
+  remain covered by the existing deterministic suites;
+- no production implementation file remains an avoidable multi-responsibility
+  monolith; any retained large file has one reviewable ownership boundary; and
+- `scripts/check` and staged/unstaged `git diff --check` pass. Live provider or
+  SSH acceptance remains operator-gated and is not implied by structural source
+  movement.
+
+Completion evidence (2026-08-08):
+
+- `src/state/mod.rs` is a 24-line explicit facade over ten production modules
+  plus the unchanged 74-test `state::tests` surface. Cross-module helpers are
+  confined to `crate::state`; transactional compound operations and Runtime
+  persistence retain cohesive ownership boundaries.
+- `src/navigator.rs` is a 23-line explicit facade over model, snapshot/remote
+  monitoring, view, rendering, and controller modules plus the unchanged
+  72-test `navigator::tests` surface. Cross-module helpers are confined to
+  `crate::navigator`.
+- the combined Rust suite passes 367 tests. Formatting, Clippy with warnings
+  denied, Cargo packaging and dependency policy, shell/Python/fixture checks,
+  all disposable D4 through D8.2 acceptance harnesses, and staged/unstaged diff
+  checks pass through one uninterrupted ordinary-host `scripts/check` run.
+- protocol 17, host schema 12, client schema 5, control ABI 1, `Cargo.toml`,
+  `Cargo.lock`, command help, provider command ownership, and private tmux
+  configuration remain unchanged. No live provider or SSH acceptance was run.
+- candidate validation exposed an intermittent fail-closed Linux process-group
+  probe under heavy unrelated host process churn. The affected unchanged
+  harnesses also passed independently and in the final uninterrupted gate.
+  D8.3 does not weaken the probe or add retry behavior; any reliability change
+  remains separate correctness work.
 
 ## Deferred beyond V1
 

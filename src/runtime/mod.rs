@@ -34,7 +34,9 @@ const RUNTIME_TMUX_CONFIG: &str = concat!(
     // A Runtime is commonly attached through the presentation tmux server.
     // Preserve RGB prompt styling and modified keys through that nested hop.
     "set -g extended-keys always\n",
-    "set -g extended-keys-format csi-u\n",
+    // tmux 3.4 already emits extended keys as CSI-u but predates the
+    // selectable format option; tmux 3.5+ applies the explicit selection.
+    "set -q -g extended-keys-format csi-u\n",
     "set -as terminal-features ',xterm-ghostty:RGB:extkeys'\n",
     "set -as terminal-features ',tmux-256color:RGB:extkeys'\n",
 );
@@ -2558,7 +2560,7 @@ mod tests {
         assert!(RUNTIME_TMUX_CONFIG.contains("set -g default-terminal tmux-256color"));
         assert!(RUNTIME_TMUX_CONFIG.contains("set-environment -g COLORTERM truecolor"));
         assert!(RUNTIME_TMUX_CONFIG.contains("set -g extended-keys always"));
-        assert!(RUNTIME_TMUX_CONFIG.contains("set -g extended-keys-format csi-u"));
+        assert!(RUNTIME_TMUX_CONFIG.contains("set -q -g extended-keys-format csi-u"));
         assert!(
             RUNTIME_TMUX_CONFIG.contains("set -as terminal-features ',xterm-ghostty:RGB:extkeys'")
         );

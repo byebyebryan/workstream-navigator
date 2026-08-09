@@ -158,7 +158,7 @@ an automatic migration from the retired schema.
 
 Date: 2026-08-09
 
-Status: D0 through D8.5 are complete. V1 remains a source-installed operator
+Status: D0 through D8.6 are complete. V1 remains a source-installed operator
 beta.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
@@ -211,6 +211,7 @@ This document owns sequencing, exit gates, and progress.
 | D8.3 | Behavior-neutral internal architecture consolidation | Complete (2026-08-08) |
 | D8.4 | Fail-closed Linux process-group probe reliability | Complete (2026-08-09) |
 | D8.5 | Behavior-neutral action and CLI orchestration decomposition | Complete (2026-08-09) |
+| D8.6 | tmux 3.4 attachment compatibility and CI acceptance reliability | Complete (2026-08-09) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -1643,6 +1644,79 @@ Completion evidence (2026-08-09):
   D8.4 process-probe behavior, provider modules, presentation, native provider
   command vectors, and both private tmux configurations remain unchanged. No
   live provider or SSH acceptance was run.
+
+## D8.6 - tmux 3.4 attachment compatibility and CI acceptance reliability
+
+Status: Complete on 2026-08-09.
+
+This checkpoint restores the GitHub Actions signal after the D4 nested-attach
+proof exposed a real private-config compatibility boundary. tmux 3.4 supports
+extended keys and emits their fixed CSI-u representation, but it predates the
+tmux 3.5 `extended-keys-format` option; the unknown option currently becomes a
+client-visible config diagnostic and prevents the exact attached surface from
+appearing on Ubuntu 24.04 runners.
+
+Scope:
+
+- make both private tmux configurations quietly ignore only the unavailable
+  `extended-keys-format` option while retaining `extended-keys always`, RGB and
+  extkeys terminal features, UTF-8 attachment, and explicit CSI-u selection on
+  tmux releases that support it;
+- retain the D4 requirement that the same deterministic provider marker is
+  visible in both the owned Runtime pane and the nested attached client;
+- replace silent D4 attachment timeouts with bounded diagnostics containing
+  only tmux version, attachment/client presence, marker-presence booleans, and
+  pane exit status; and
+- validate the exact proof on Ubuntu 24.04 tmux 3.4 and the ordinary tmux 3.7
+  development host before publishing.
+
+Non-goals and hard boundaries:
+
+- no removal of extended-key support, no fallback to process/socket liveness,
+  and no weakening of the two-surface native UI assertion;
+- no raw provider-pane or driver-pane capture in diagnostics, no ordinary tmux
+  access, and no mutation outside disposable test state;
+- no change to provider commands, Runtime identity, process ownership,
+  attachment authority, presentation layout, protocol, schema, persistence,
+  dependencies, or product-visible CLI behavior; and
+- no general tmux-version abstraction or unrelated acceptance cleanup.
+
+Exit gate:
+
+- generated Runtime and presentation configs start cleanly on tmux 3.4, retain
+  `extended-keys always`, and keep explicit CSI-u selection on supporting tmux
+  releases;
+- D4 proves both native surfaces and complete detach/cleanup on tmux 3.4 and
+  3.7, with bounded metadata-only failure diagnostics;
+- existing terminal-fidelity, private-runtime, presentation, provider, and
+  acceptance regressions retain their meaning and pass;
+- `scripts/check` and staged/unstaged `git diff --check` pass locally; and
+- both the declared-MSRV and full-check GitHub jobs pass twice for the exact
+  published commit. No live provider or SSH acceptance is required.
+
+Completion evidence (2026-08-09):
+
+- the failing GitHub runner and a disposable Ubuntu 24.04 reproduction both
+  used tmux 3.4. The Runtime pane contained the exact fixture marker, while the
+  nested client displayed `invalid option: extended-keys-format`; the same D4
+  assertion failed on the preceding D8.2 and D8.3 publications.
+- both private configs now use quiet assignment for the tmux-3.5-only format
+  option. tmux 3.4 ignores that unavailable selector while retaining
+  `extended-keys always` and its fixed CSI-u output; tmux 3.5 and later retain
+  explicit CSI-u selection. RGB/extkeys features and every other configuration
+  line remain unchanged.
+- D4 still requires the deterministic native marker in both the owned Runtime
+  pane and attached client. Surface and completion timeouts now report only a
+  bounded tmux version, marker/client/completion booleans, and bounded pane
+  exit metadata; no pane content, paths, identifiers, commands, environment,
+  or provider data enter logs.
+- focused 32-test Runtime and 15-test presentation suites pass. D4 passes its
+  exact two-surface, detach, fork, park, and cleanup proof on tmux 3.4 and 3.7.
+- formatting, Clippy with warnings denied, Cargo packaging and dependency
+  policy, shell/Python/fixture checks, every disposable D4 through D8.2
+  acceptance harness, and diff checks pass through `scripts/check`. The exact
+  published commit passes both GitHub jobs twice. No live provider or SSH
+  acceptance was run.
 
 ## Deferred beyond V1
 

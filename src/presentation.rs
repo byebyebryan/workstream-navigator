@@ -37,7 +37,9 @@ const PRESENTATION_TMUX_CONFIG: &str = concat!(
     // modified keys intact both from Ghostty into this presentation and from
     // this presentation into the provider Runtime.
     "set -g extended-keys always\n",
-    "set -g extended-keys-format csi-u\n",
+    // tmux 3.4 already emits extended keys as CSI-u but predates the
+    // selectable format option; tmux 3.5+ applies the explicit selection.
+    "set -q -g extended-keys-format csi-u\n",
     "set -as terminal-features ',xterm-ghostty:RGB:extkeys'\n",
     "set -as terminal-features ',tmux-256color:RGB:extkeys'\n",
     "bind-key -n MouseUp1Pane select-pane -t = \\; send-keys -M\n",
@@ -861,7 +863,7 @@ mod tests {
         assert!(PRESENTATION_TMUX_CONFIG.contains("set -g default-terminal tmux-256color"));
         assert!(PRESENTATION_TMUX_CONFIG.contains("set-environment -g COLORTERM truecolor"));
         assert!(PRESENTATION_TMUX_CONFIG.contains("set -g extended-keys always"));
-        assert!(PRESENTATION_TMUX_CONFIG.contains("set -g extended-keys-format csi-u"));
+        assert!(PRESENTATION_TMUX_CONFIG.contains("set -q -g extended-keys-format csi-u"));
         assert!(
             PRESENTATION_TMUX_CONFIG
                 .contains("set -as terminal-features ',xterm-ghostty:RGB:extkeys'")

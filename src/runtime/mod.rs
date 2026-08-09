@@ -24,6 +24,8 @@ const LAUNCH_BARRIER_FILE: &str = "launch.ready";
 const LAUNCH_BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
 const LAUNCH_BARRIER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const PROVIDER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const PROCESS_GROUP_STAT_READ_ATTEMPTS: usize = 3;
+const PROCESS_GROUP_STAT_RETRY_DELAY: Duration = Duration::from_millis(1);
 const RUNTIME_TMUX_CONFIG: &str = concat!(
     "set -g status off\n",
     "set -g mouse on\n",
@@ -1145,7 +1147,7 @@ fn linux_process_group_members(
         else {
             continue;
         };
-        match read_linux_process_stat(pid)? {
+        match read_linux_process_stat_for_group(pid)? {
             Some(stat)
                 if stat.process_group_id == process_group_id
                     && session_id.is_none_or(|session| stat.session_id == session)
@@ -1158,6 +1160,38 @@ fn linux_process_group_members(
     }
     members.sort_unstable();
     Ok(members)
+}
+
+fn read_linux_process_stat_for_group(
+    pid: u32,
+) -> Result<Option<LinuxProcessStat>, ProcessProbeError> {
+    // Enumeration may observe a transient malformed stat while an unrelated
+    // process is exiting. Direct identity reads remain strict and never use
+    // this retry boundary.
+    read_linux_process_stat_for_group_with(pid, read_linux_process_stat, || {
+        thread::sleep(PROCESS_GROUP_STAT_RETRY_DELAY);
+    })
+}
+
+fn read_linux_process_stat_for_group_with<R, W>(
+    pid: u32,
+    mut read: R,
+    mut wait: W,
+) -> Result<Option<LinuxProcessStat>, ProcessProbeError>
+where
+    R: FnMut(u32) -> Result<Option<LinuxProcessStat>, ProcessProbeError>,
+    W: FnMut(),
+{
+    let mut attempts = 0;
+    loop {
+        attempts += 1;
+        match read(pid) {
+            Err(ProcessProbeError::Malformed) if attempts < PROCESS_GROUP_STAT_READ_ATTEMPTS => {
+                wait();
+            }
+            result => return result,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1801,6 +1835,18 @@ mod tests {
                 members_error: false,
             }
         }
+
+        fn members_error() -> Self {
+            Self {
+                group: Some(ProcessGroupInfo {
+                    process_group_id: 77,
+                    session_id: 11,
+                }),
+                group_error: false,
+                members: RefCell::default(),
+                members_error: true,
+            }
+        }
     }
 
     impl ProcessGroupProbe for FakeGroupProbe {
@@ -1869,6 +1915,104 @@ mod tests {
             success: true,
             stdout: String::new(),
             stderr: String::new(),
+        }
+    }
+
+    fn parsed_process_stat(process_group_id: u32, session_id: u32) -> LinuxProcessStat {
+        LinuxProcessStat {
+            state: 'S',
+            birth: "birth".to_owned(),
+            process_group_id,
+            session_id,
+        }
+    }
+
+    #[test]
+    fn process_group_stat_retry_accepts_a_later_parsed_record() {
+        let reads = RefCell::new(VecDeque::from([
+            Err(ProcessProbeError::Malformed),
+            Ok(Some(parsed_process_stat(77, 11))),
+        ]));
+        let waits = RefCell::new(0);
+
+        let result = read_linux_process_stat_for_group_with(
+            77,
+            |pid| {
+                assert_eq!(pid, 77);
+                reads.borrow_mut().pop_front().unwrap()
+            },
+            || *waits.borrow_mut() += 1,
+        )
+        .unwrap();
+
+        let result = result.expect("later parsed process metadata");
+        assert_eq!(result.process_group_id, 77);
+        assert_eq!(result.session_id, 11);
+        assert!(reads.borrow().is_empty());
+        assert_eq!(*waits.borrow(), 1);
+    }
+
+    #[test]
+    fn process_group_stat_retry_accepts_a_later_vanished_record() {
+        let reads = RefCell::new(VecDeque::from([
+            Err(ProcessProbeError::Malformed),
+            Ok(None),
+        ]));
+        let waits = RefCell::new(0);
+
+        let result = read_linux_process_stat_for_group_with(
+            77,
+            |_pid| reads.borrow_mut().pop_front().unwrap(),
+            || *waits.borrow_mut() += 1,
+        )
+        .unwrap();
+
+        assert!(result.is_none());
+        assert!(reads.borrow().is_empty());
+        assert_eq!(*waits.borrow(), 1);
+    }
+
+    #[test]
+    fn process_group_stat_retry_propagates_persistent_malformed_metadata() {
+        let reads = RefCell::new(VecDeque::from([
+            Err(ProcessProbeError::Malformed),
+            Err(ProcessProbeError::Malformed),
+            Err(ProcessProbeError::Malformed),
+        ]));
+        let waits = RefCell::new(0);
+
+        let result = read_linux_process_stat_for_group_with(
+            77,
+            |_pid| reads.borrow_mut().pop_front().unwrap(),
+            || *waits.borrow_mut() += 1,
+        );
+
+        assert!(matches!(result, Err(ProcessProbeError::Malformed)));
+        assert!(reads.borrow().is_empty());
+        assert_eq!(*waits.borrow(), 2);
+    }
+
+    #[test]
+    fn process_group_stat_retry_does_not_retry_inaccessible_or_io() {
+        for error in [
+            ProcessProbeError::Inaccessible,
+            ProcessProbeError::Io("read failed".to_owned()),
+        ] {
+            let reads = RefCell::new(VecDeque::from([Err(error)]));
+            let waits = RefCell::new(0);
+
+            let result = read_linux_process_stat_for_group_with(
+                77,
+                |_pid| reads.borrow_mut().pop_front().unwrap(),
+                || *waits.borrow_mut() += 1,
+            );
+
+            assert!(matches!(
+                result,
+                Err(ProcessProbeError::Inaccessible | ProcessProbeError::Io(_))
+            ));
+            assert!(reads.borrow().is_empty());
+            assert_eq!(*waits.borrow(), 0);
         }
     }
 
@@ -2040,6 +2184,29 @@ mod tests {
             ),
             Err(RuntimeError::ProcessGroupProbe(
                 ProcessProbeError::Inaccessible
+            ))
+        ));
+        assert!(signaler.signals.borrow().is_empty());
+    }
+
+    #[test]
+    fn owned_group_refuses_ambiguous_membership_without_signalling() {
+        let process_probe = SequenceProcessProbe::new([Some("birth-expected")]);
+        let group_probe = FakeGroupProbe::members_error();
+        let signaler = RecordingGroupSignaler::default();
+
+        assert!(matches!(
+            terminate_owned_process_group(
+                77,
+                "birth-expected",
+                &process_probe,
+                &group_probe,
+                &signaler,
+                Duration::ZERO,
+                Duration::ZERO,
+            ),
+            Err(RuntimeError::ProcessGroupProbe(
+                ProcessProbeError::Malformed
             ))
         ));
         assert!(signaler.signals.borrow().is_empty());

@@ -156,9 +156,9 @@ historical only; it is not a current product commitment. Host schema 8 is a
 clean breaking boundary and requires explicit reset/re-registration instead of
 an automatic migration from the retired schema.
 
-Date: 2026-08-08
+Date: 2026-08-09
 
-Status: D0 through D8.3 are complete. V1 remains a source-installed operator
+Status: D0 through D8.5 are complete. V1 remains a source-installed operator
 beta.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
@@ -209,6 +209,8 @@ This document owns sequencing, exit gates, and progress.
 | D8.1 | Provider-aware New and OpenCode New/Resume vertical slice | Complete (2026-08-06) |
 | D8.2 | OpenCode Fork, recovery, and integrated acceptance | Complete (2026-08-07) |
 | D8.3 | Behavior-neutral internal architecture consolidation | Complete (2026-08-08) |
+| D8.4 | Fail-closed Linux process-group probe reliability | Complete (2026-08-09) |
+| D8.5 | Behavior-neutral action and CLI orchestration decomposition | Complete (2026-08-09) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -1492,6 +1494,155 @@ Completion evidence (2026-08-08):
   harnesses also passed independently and in the final uninterrupted gate.
   D8.3 does not weaken the probe or add retry behavior; any reliability change
   remains separate correctness work.
+
+## D8.4 - Fail-closed Linux process-group probe reliability
+
+Status: Complete on 2026-08-09.
+
+This checkpoint corrects the intermittent ordinary-host process-group probe
+failure exposed during D8.3 validation. It preserves the existing ownership
+and signal-authority boundary: retry may turn a transient read into exact
+evidence, but it may never turn ambiguous evidence into absence, ownership, or
+permission to signal.
+
+Scope:
+
+- add a small fixed retry budget when a numeric process-table candidate's
+  `/proc/<pid>/stat` record is transiently malformed during Linux group-member
+  enumeration;
+- accept a reread only when it returns a fully parsed exact record, or omit the
+  candidate when that exact proc entry has conclusively disappeared;
+- keep direct provider identity, birth-token, process-group, and session reads
+  strict, and propagate persistent malformed, inaccessible, or I/O evidence;
+- retain exact leader and group/session revalidation before every TERM or KILL
+  authority boundary; and
+- cover transient recovery and persistent ambiguity with deterministic tests,
+  plus the existing disposable lifecycle acceptance harnesses.
+
+Non-goals and hard boundaries:
+
+- no best-effort parsing, silent skipping of persistent ambiguity, broader
+  process discovery, PID-only ownership, or signal fallback;
+- no retry around provider commands, tmux operations, state transactions,
+  network I/O, lifecycle observation, or signal delivery;
+- no protocol, schema, control ABI, persistence, CLI, UI, provider command,
+  dependency, or private tmux configuration change; and
+- no structural cleanup from the subsequent orchestration-decomposition work.
+
+Exit gate:
+
+- a transient malformed candidate followed by exact disappearance or a valid
+  record completes enumeration without weakening member filtering;
+- persistent malformed, inaccessible, and I/O evidence still fails closed,
+  and no failing proof authorizes a group signal or parked transition;
+- exact provider birth, group-leader, session, zombie, TERM, KILL, and
+  post-signal revalidation regressions retain their existing meaning and pass;
+- protocol 17, host schema 12, client schema 5, control ABI 1, Cargo manifests,
+  public APIs, CLI help, native provider command vectors, and both private tmux
+  configurations remain unchanged; and
+- focused runtime tests, the applicable disposable lifecycle harnesses,
+  `scripts/check`, and staged/unstaged `git diff --check` pass. Live provider or
+  SSH acceptance remains operator-gated and is not required by this correction.
+
+Completion evidence (2026-08-09):
+
+- Linux group-member enumeration retries only a malformed numeric candidate's
+  stat record, with three total reads and a one-millisecond wait between
+  malformed attempts. A later exact record is filtered normally and a later
+  missing proc entry is omitted; persistent malformed, inaccessible, and I/O
+  evidence still propagates as a probe failure.
+- direct provider birth, process-group, and session reads remain strict and
+  single-read. Existing pidfd-backed birth/group/session revalidation remains
+  unchanged at every signal boundary, and a new proof-level regression confirms
+  ambiguous membership authorizes no group signal.
+- five deterministic regressions cover malformed-to-valid,
+  malformed-to-disappeared, persistent malformed, immediate inaccessible/I/O
+  failure, and no-signal ambiguity. The 367-test library suite, five integration
+  tests, focused 32-test runtime surface, disposable lifecycle-correctness, and
+  OpenCode creation-guardian acceptance all pass.
+- formatting, Clippy with warnings denied, Cargo packaging and dependency
+  policy, shell/Python/fixture checks, every disposable D4 through D8.2
+  acceptance harness, and staged/unstaged diff checks pass through
+  `scripts/check`. No live provider or SSH acceptance was run.
+
+## D8.5 - Behavior-neutral action and CLI orchestration decomposition
+
+Status: Complete on 2026-08-09.
+
+This checkpoint completes the bounded source-organization pass begun in D8.3.
+It separates action orchestration and CLI dispatch responsibilities without
+changing product behavior, command surfaces, or the runtime/process boundary
+corrected in D8.4.
+
+Scope:
+
+- make `src/actions.rs` a small explicit facade over cohesive creation,
+  start/recovery, attachment, lifecycle, launch-program, cleanup/identity, and
+  error/model modules while preserving every existing `wsnav::actions` path;
+- make `src/app.rs` a small explicit facade over CLI definitions, local and
+  host dispatch, observer management, lifecycle command handling, output, and
+  error modules while preserving `wsnav::app::run`;
+- move the existing inline action and app tests beside the decomposed modules
+  without renaming, weakening, or deleting their coverage; and
+- keep cross-module helpers private to their owning `actions` or `app` module
+  tree and retain the current concrete Codex/OpenCode orchestration.
+
+Non-goals and hard boundaries:
+
+- no action-flow, recovery, cleanup, attachment, signal, timeout, retry,
+  transactional revision, or external-effect semantic change;
+- no CLI command, option, alias, hidden-command, help, stdout/stderr, exit-code,
+  diagnostic, navigator shortcut, or presentation change;
+- no protocol, host/client schema, control ABI, persistence, dependency,
+  provider capability, provider command vector, or private tmux configuration
+  change;
+- no new trait, generalized provider/action framework, deduplication rewrite,
+  or error-taxonomy redesign; and
+- no structural split of `runtime` or the OpenCode adapter. Their remaining
+  size follows cohesive process-supervision/provider boundaries and requires a
+  separate future contract if those boundaries prove too broad.
+
+Exit gate:
+
+- `src/actions.rs` and `src/app.rs` are small readable facades, responsibility
+  ownership is apparent from module names, and helpers do not leak into the
+  crate-wide public surface;
+- every existing `wsnav::actions` path, `wsnav::app::run`, `ActionError` and
+  application-error behavior, CLI parse/help surface, hidden command, exact
+  provider command vector, and test meaning remains unchanged;
+- protocol 17, host schema 12, client schema 5, control ABI 1, Cargo manifests,
+  runtime process-probe logic, provider modules, presentation, and both private
+  tmux configurations remain unchanged;
+- focused action and app suites, exact pre/post CLI help hashes,
+  `scripts/check`, and staged/unstaged `git diff --check` pass. Live provider or
+  SSH acceptance remains operator-gated and is not implied by structural source
+  movement.
+
+Completion evidence (2026-08-09):
+
+- `src/actions.rs` is a 58-line explicit facade over seven production modules
+  plus the unchanged 17-test `actions::tests` surface. Creation, attachment,
+  lifecycle, start/recovery, provider-program, cleanup/identity, and model/error
+  ownership are separated; all prior public and crate-visible action paths are
+  reexported at their original locations.
+- `src/app.rs` is a 72-line facade over eight production modules plus the
+  unchanged 17-test `app::tests` surface. Clap definitions, top-level dispatch,
+  local lifecycle handling, SSH operations, observer management, launch
+  helpers, and application errors retain explicit module ownership while
+  `wsnav::app::run` remains the public entrypoint.
+- the root, `host`, `start`, `fork-workstream`, and `recover` help output hashes
+  match their pre-move values exactly. `ActionError`, `AppError`, hidden command
+  parsing, provider-surface diagnostic suppression, and existing test names and
+  meanings remain unchanged.
+- the 367-test library suite and five integration tests pass. Formatting,
+  Clippy with warnings denied, Cargo packaging and dependency policy,
+  shell/Python/fixture checks, every disposable D4 through D8.2 acceptance
+  harness, and staged/unstaged diff checks pass through one uninterrupted
+  `scripts/check` run.
+- protocol 17, host schema 12, client schema 5, control ABI 1, Cargo manifests,
+  D8.4 process-probe behavior, provider modules, presentation, native provider
+  command vectors, and both private tmux configurations remain unchanged. No
+  live provider or SSH acceptance was run.
 
 ## Deferred beyond V1
 

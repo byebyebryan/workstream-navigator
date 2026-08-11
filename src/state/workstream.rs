@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
-use crate::domain::{DomainError, LocationId, Revision, RuntimeStatus, WorkstreamId};
+use crate::domain::{DomainError, LocationId, ProviderKind, Revision, RuntimeStatus, WorkstreamId};
 
 use super::models::{
     HostRegistry, PersistedWorkstreamOverview, StateError, WorkstreamOverview,
@@ -220,6 +220,15 @@ impl HostRegistry {
         let runtime = self.runtime_for_workstream(workstream_id)?;
         let binding = match runtime.as_ref() {
             None => None,
+            Some(runtime)
+                if runtime.provider == ProviderKind::Codex
+                    && matches!(
+                        runtime.status,
+                        RuntimeStatus::Stopped | RuntimeStatus::Unknown
+                    ) =>
+            {
+                self.retained_codex_binding_for_runtime(runtime.runtime_id)?
+            }
             Some(runtime) => match self.binding_for_runtime(runtime.runtime_id) {
                 Ok(binding) => binding,
                 // A resumed Runtime deliberately retains its old exact

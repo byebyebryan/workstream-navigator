@@ -14,6 +14,7 @@ use thiserror::Error;
 
 use crate::{
     domain::RuntimeId,
+    private_tmux::TERMINAL_CAPABILITY_CONFIG,
     process::{BoundedProcessError, output_bounded},
 };
 
@@ -26,20 +27,11 @@ const LAUNCH_BARRIER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const PROVIDER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const PROCESS_GROUP_STAT_READ_ATTEMPTS: usize = 3;
 const PROCESS_GROUP_STAT_RETRY_DELAY: Duration = Duration::from_millis(1);
-const RUNTIME_TMUX_CONFIG: &str = concat!(
-    "set -g status off\n",
-    "set -g mouse on\n",
-    "set -g default-terminal tmux-256color\n",
-    "set-environment -g COLORTERM truecolor\n",
-    // A Runtime is commonly attached through the presentation tmux server.
-    // Preserve RGB prompt styling and modified keys through that nested hop.
-    "set -g extended-keys always\n",
-    // tmux 3.4 already emits extended keys as CSI-u but predates the
-    // selectable format option; tmux 3.5+ applies the explicit selection.
-    "set -q -g extended-keys-format csi-u\n",
-    "set -as terminal-features ',xterm-ghostty:RGB:extkeys'\n",
-    "set -as terminal-features ',tmux-256color:RGB:extkeys'\n",
-);
+const RUNTIME_TMUX_CONFIG_PREFIX: &str = concat!("set -g status off\n", "set -g mouse on\n",);
+
+fn runtime_tmux_config() -> String {
+    [RUNTIME_TMUX_CONFIG_PREFIX, TERMINAL_CAPABILITY_CONFIG].concat()
+}
 
 /// A private runtime server's owned paths and stable tmux session name.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1560,7 +1552,7 @@ fn create_private_runtime_directory(path: &Path) -> Result<(), RuntimeError> {
 }
 
 fn write_tmux_config(path: &Path) -> Result<(), RuntimeError> {
-    fs::write(path, RUNTIME_TMUX_CONFIG).map_err(|source| RuntimeError::Io {
+    fs::write(path, runtime_tmux_config()).map_err(|source| RuntimeError::Io {
         path: path.to_path_buf(),
         source,
     })?;
@@ -2556,16 +2548,19 @@ mod tests {
     }
 
     #[test]
-    fn runtime_config_preserves_ghostty_rgb_and_extended_keys() {
-        assert!(RUNTIME_TMUX_CONFIG.contains("set -g default-terminal tmux-256color"));
-        assert!(RUNTIME_TMUX_CONFIG.contains("set-environment -g COLORTERM truecolor"));
-        assert!(RUNTIME_TMUX_CONFIG.contains("set -g extended-keys always"));
-        assert!(RUNTIME_TMUX_CONFIG.contains("set -q -g extended-keys-format csi-u"));
-        assert!(
-            RUNTIME_TMUX_CONFIG.contains("set -as terminal-features ',xterm-ghostty:RGB:extkeys'")
-        );
-        assert!(
-            RUNTIME_TMUX_CONFIG.contains("set -as terminal-features ',tmux-256color:RGB:extkeys'")
+    fn runtime_config_matches_the_d8_6_baseline() {
+        assert_eq!(
+            runtime_tmux_config(),
+            concat!(
+                "set -g status off\n",
+                "set -g mouse on\n",
+                "set -g default-terminal tmux-256color\n",
+                "set-environment -g COLORTERM truecolor\n",
+                "set -g extended-keys always\n",
+                "set -q -g extended-keys-format csi-u\n",
+                "set -as terminal-features ',xterm-ghostty:RGB:extkeys'\n",
+                "set -as terminal-features ',tmux-256color:RGB:extkeys'\n",
+            )
         );
     }
 

@@ -145,6 +145,12 @@ fn codex_resume_rotates_binding_generation_only_after_exact_session_start() {
         .unwrap()
         .unwrap();
     assert_eq!(old_binding.runtime_generation, old_generation);
+    assert_eq!(
+        registry
+            .retained_codex_binding_for_runtime(initial.runtime_id)
+            .unwrap(),
+        Some(old_binding.clone())
+    );
 
     registry
         .park_runtime(initial.runtime_id, initial.revision)
@@ -153,6 +159,10 @@ fn codex_resume_rotates_binding_generation_only_after_exact_session_start() {
     assert_ne!(replacement.tmux_generation, old_generation);
     assert!(matches!(
         registry.binding_for_runtime(replacement.runtime_id),
+        Err(StateError::HookEvidenceMismatch)
+    ));
+    assert!(matches!(
+        registry.retained_codex_binding_for_runtime(replacement.runtime_id),
         Err(StateError::HookEvidenceMismatch)
     ));
 
@@ -176,6 +186,129 @@ fn codex_resume_rotates_binding_generation_only_after_exact_session_start() {
     assert_eq!(rebound.native_session_id.native_id(), "session-a");
     assert_eq!(rebound.runtime_generation, replacement.tmux_generation);
     assert!(rebound.revision > old_binding.revision);
+}
+
+#[test]
+fn parked_unstarted_codex_replacement_keeps_exact_resume_history_visible() {
+    let (_temporary, mut registry) = registry();
+    let registered = registry
+        .register_external_workstream(
+            PathBuf::from("/disposable/repository"),
+            "common-dir-identity".to_owned(),
+            "deadbeef".to_owned(),
+        )
+        .unwrap();
+    let initial = settled_runtime(&mut registry, registered.workstream_id);
+    let old_generation = initial.tmux_generation.clone();
+    let old_binding = registry
+        .binding_for_runtime(initial.runtime_id)
+        .unwrap()
+        .unwrap();
+
+    registry
+        .park_runtime(initial.runtime_id, initial.revision)
+        .unwrap();
+    let replacement = registry.reserve_runtime(registered.workstream_id).unwrap();
+    registry
+        .park_runtime(replacement.runtime_id, replacement.revision)
+        .unwrap();
+
+    assert!(matches!(
+        registry.binding_for_runtime(replacement.runtime_id),
+        Err(StateError::HookEvidenceMismatch)
+    ));
+    assert_eq!(
+        registry
+            .retained_codex_binding_for_runtime(replacement.runtime_id)
+            .unwrap()
+            .unwrap(),
+        old_binding
+    );
+
+    let overview = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == registered.workstream_id)
+        .unwrap();
+    assert_eq!(overview.lifecycle, WorkstreamLifecycle::Parked);
+    assert_eq!(overview.runtime.unwrap().status, RuntimeStatus::Stopped);
+    let binding = overview.binding.unwrap();
+    assert_eq!(binding.native_session_id, old_binding.native_session_id);
+    assert_eq!(binding.runtime_generation, old_generation);
+
+    let stale = LifecycleObservation {
+        event: LifecycleEvent::UserPromptSubmit,
+        cwd: PathBuf::from("/disposable/repository")
+            .to_string_lossy()
+            .into_owned(),
+        native_session_id: "session-a".to_owned(),
+        turn_id: None,
+        source: None,
+    };
+    assert!(matches!(
+        registry.apply_lifecycle_observation(replacement.runtime_id, &old_generation, stale,),
+        Err(StateError::HookEvidenceMismatch)
+    ));
+}
+
+#[test]
+fn recovery_required_unknown_codex_replacement_keeps_exact_resume_history_visible() {
+    let (_temporary, mut registry) = registry();
+    let registered = registry
+        .register_external_workstream(
+            PathBuf::from("/disposable/repository"),
+            "common-dir-identity".to_owned(),
+            "deadbeef".to_owned(),
+        )
+        .unwrap();
+    let initial = settled_runtime(&mut registry, registered.workstream_id);
+    let old_binding = registry
+        .binding_for_runtime(initial.runtime_id)
+        .unwrap()
+        .unwrap();
+
+    registry
+        .mark_runtime_recovery_required(initial.runtime_id, initial.revision)
+        .unwrap();
+    let replacement = registry
+        .reserve_runtime_recovery(registered.workstream_id)
+        .unwrap();
+    registry
+        .mark_runtime_recovery_required(replacement.runtime_id, replacement.revision)
+        .unwrap();
+
+    assert_eq!(
+        registry
+            .retained_codex_binding_for_runtime(replacement.runtime_id)
+            .unwrap()
+            .unwrap()
+            .native_session_id,
+        old_binding.native_session_id
+    );
+    let overview = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == registered.workstream_id)
+        .unwrap();
+    assert_eq!(overview.lifecycle, WorkstreamLifecycle::RecoveryRequired);
+    assert_eq!(overview.runtime.unwrap().status, RuntimeStatus::Unknown);
+    assert_eq!(overview.binding.unwrap(), old_binding);
+}
+
+#[test]
+fn retained_codex_binding_path_rejects_opencode_runtimes() {
+    let (_temporary, mut registry) = registry();
+    let registered = registry
+        .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
+        .unwrap();
+    let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+
+    assert!(matches!(
+        registry.retained_codex_binding_for_runtime(runtime.runtime_id),
+        Err(StateError::ProviderIdentityMismatch)
+    ));
 }
 
 #[test]

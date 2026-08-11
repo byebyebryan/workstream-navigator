@@ -119,7 +119,7 @@ fn start_codex(
     }
     let prior_binding = prior_runtime
         .as_ref()
-        .map(|runtime| registry.binding_for_runtime(runtime.runtime_id))
+        .map(|runtime| registry.retained_codex_binding_for_runtime(runtime.runtime_id))
         .transpose()?
         .flatten();
     let record = registry.reserve_runtime_with_provider(workstream_id, overview.provider)?;
@@ -253,7 +253,7 @@ fn recover_codex(
             return Err(ActionError::RuntimeProbeAmbiguous);
         }
     }
-    let prior_binding = registry.binding_for_runtime(prior_runtime.runtime_id)?;
+    let prior_binding = registry.retained_codex_binding_for_runtime(prior_runtime.runtime_id)?;
     let record =
         registry.reserve_runtime_recovery_with_provider(workstream_id, overview.provider)?;
     launch_reserved_runtime(

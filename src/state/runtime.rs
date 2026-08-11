@@ -474,6 +474,78 @@ impl HostRegistry {
         Ok(binding)
     }
 
+    /// Reads a previously corroborated Codex session for an inactive Runtime.
+    ///
+    /// An exact current-generation binding is returned for any Runtime status.
+    /// A binding from an older generation is returned only for a persisted
+    /// `stopped` or `unknown` Runtime, where it is resume history rather than
+    /// hook or mutation authority. `OpenCode` deliberately has no retained
+    /// binding path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Runtime, Workstream, or binding provider
+    /// identities disagree, when the persisted binding is malformed, or when
+    /// a stale binding belongs to an active Runtime.
+    pub(crate) fn retained_codex_binding_for_runtime(
+        &self,
+        runtime_id: RuntimeId,
+    ) -> Result<Option<ProviderBinding>, StateError> {
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(StateError::Sqlite)?;
+        let (runtime_provider, workstream_provider, generation, lifecycle): (
+            String,
+            String,
+            String,
+            String,
+        ) = transaction
+            .query_row(
+                "SELECT runtimes.provider, workstreams.provider,
+                            runtimes.tmux_generation, runtimes.lifecycle
+                     FROM runtimes
+                     JOIN workstreams ON workstreams.workstream_id = runtimes.workstream_id
+                     WHERE runtimes.runtime_id = ?1",
+                [runtime_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::UnknownRuntime(runtime_id))?;
+        let runtime_provider = provider_kind_from_text(&runtime_provider)?;
+        let workstream_provider = provider_kind_from_text(&workstream_provider)?;
+        validate_registry_text("runtime generation", &generation)?;
+        let runtime_status = runtime_status_from_text(&lifecycle)?;
+        if runtime_provider != workstream_provider || runtime_provider != ProviderKind::Codex {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+        let binding = load_binding(&transaction, runtime_id)?;
+        let Some(binding) = binding else {
+            transaction.commit().map_err(StateError::Sqlite)?;
+            return Ok(None);
+        };
+        if binding.provider != ProviderKind::Codex
+            || binding.native_session_id.provider() != ProviderKind::Codex
+            || binding
+                .predecessor_native_session_id
+                .as_ref()
+                .is_some_and(|session| session.provider() != ProviderKind::Codex)
+        {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+        if binding.runtime_generation != generation
+            && !matches!(
+                runtime_status,
+                RuntimeStatus::Stopped | RuntimeStatus::Unknown
+            )
+        {
+            return Err(StateError::HookEvidenceMismatch);
+        }
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(Some(binding))
+    }
+
     /// Loads the host-private `OpenCode` endpoint and observer identity for one
     /// exact Runtime.  It refuses to return a handle whose provider or
     /// generation no longer matches the current Runtime and binding.

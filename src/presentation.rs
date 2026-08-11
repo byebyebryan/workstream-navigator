@@ -13,6 +13,7 @@ use thiserror::Error;
 
 use crate::{
     domain::WorkstreamId,
+    private_tmux::TERMINAL_CAPABILITY_CONFIG,
     process::{BoundedProcessError, output_bounded},
 };
 
@@ -27,23 +28,22 @@ const PREFERRED_PROVIDER_PANE_WIDTH: u16 = 96;
 const MAX_TMUX_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_ATTACHMENT_STATUS_BYTES: u64 = 4 * 1024;
 const ATTACHMENT_STATUS_FILE: &str = "attachment.json";
-const PRESENTATION_TMUX_CONFIG: &str = concat!(
+const PRESENTATION_TMUX_CONFIG_PREFIX: &str = concat!(
     "set -g status off\n",
     "set -g mouse on\n",
     "set -g remain-on-exit on\n",
-    "set -g default-terminal tmux-256color\n",
-    "set-environment -g COLORTERM truecolor\n",
-    // The provider pane is a nested tmux client. Keep RGB styling and
-    // modified keys intact both from Ghostty into this presentation and from
-    // this presentation into the provider Runtime.
-    "set -g extended-keys always\n",
-    // tmux 3.4 already emits extended keys as CSI-u but predates the
-    // selectable format option; tmux 3.5+ applies the explicit selection.
-    "set -q -g extended-keys-format csi-u\n",
-    "set -as terminal-features ',xterm-ghostty:RGB:extkeys'\n",
-    "set -as terminal-features ',tmux-256color:RGB:extkeys'\n",
-    "bind-key -n MouseUp1Pane select-pane -t = \\; send-keys -M\n",
 );
+const PRESENTATION_TMUX_CONFIG_SUFFIX: &str =
+    "bind-key -n MouseUp1Pane select-pane -t = \\; send-keys -M\n";
+
+fn presentation_tmux_config() -> String {
+    [
+        PRESENTATION_TMUX_CONFIG_PREFIX,
+        TERMINAL_CAPABILITY_CONFIG,
+        PRESENTATION_TMUX_CONFIG_SUFFIX,
+    ]
+    .concat()
+}
 
 /// Ephemeral provider-pane attempt metadata read only by the local navigator.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -502,7 +502,9 @@ impl Presentation {
                 .ok_or_else(|| PresentationError::InvalidControlPath(directory.clone()))?;
             let presentation =
                 Self::from_control(state_root, directory.join("tmux.sock"), session_name)?;
-            if presentation.is_live()? {
+            let session_live = presentation.is_live()?;
+            let navigator_pane_dead = session_live && presentation.navigator_pane_is_dead()?;
+            if should_reuse_presentation(session_live, navigator_pane_dead) {
                 live.push(presentation);
             } else {
                 presentation.close()?;
@@ -674,18 +676,20 @@ impl Presentation {
     }
 
     fn provider_pane_is_dead(&self) -> Result<bool, PresentationError> {
+        self.pane_is_dead(PROVIDER_PANE)
+    }
+
+    fn navigator_pane_is_dead(&self) -> Result<bool, PresentationError> {
+        self.pane_is_dead(NAVIGATOR_PANE)
+    }
+
+    fn pane_is_dead(&self, pane: &str) -> Result<bool, PresentationError> {
         let mut command = Command::new("tmux");
         command
             .env_remove("TMUX")
             .arg("-S")
             .arg(&self.paths.socket)
-            .args([
-                "display-message",
-                "-p",
-                "-t",
-                &format!("{}:{PROVIDER_PANE}", self.paths.session_name),
-                "#{pane_dead}",
-            ]);
+            .args(self.pane_dead_arguments(pane));
         let output = output_bounded(&mut command, 16, MAX_TMUX_OUTPUT_BYTES)
             .map_err(PresentationError::from_bounded_tmux)?;
         if !output.status.success() {
@@ -698,6 +702,16 @@ impl Presentation {
             b"1\n" | b"1\r\n" => Ok(true),
             _ => Err(PresentationError::InvalidAttachmentStatus),
         }
+    }
+
+    fn pane_dead_arguments(&self, pane: &str) -> Vec<OsString> {
+        vec![
+            "display-message".into(),
+            "-p".into(),
+            "-t".into(),
+            format!("{}:{pane}", self.paths.session_name).into(),
+            "#{pane_dead}".into(),
+        ]
     }
 
     /// Keeps the narrow navigator at its deliberate default width, leaving
@@ -784,7 +798,7 @@ fn create_paths(paths: &PresentationPaths) -> Result<(), PresentationError> {
     set_mode(parent, 0o700)?;
     fs::create_dir(&paths.directory).map_err(PresentationError::Io)?;
     set_mode(&paths.directory, 0o700)?;
-    fs::write(&paths.config, PRESENTATION_TMUX_CONFIG).map_err(PresentationError::Io)?;
+    fs::write(&paths.config, presentation_tmux_config()).map_err(PresentationError::Io)?;
     set_mode(&paths.config, 0o600)
 }
 
@@ -802,6 +816,10 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<(), PresentationError> {
 
 fn stopped_owned_presentation(presentation_live: bool) -> bool {
     !presentation_live
+}
+
+fn should_reuse_presentation(session_live: bool, navigator_pane_dead: bool) -> bool {
+    session_live && !navigator_pane_dead
 }
 
 /// Presentation ownership failures; no provider content is retained in their
@@ -850,27 +868,59 @@ mod tests {
     }
 
     #[test]
-    fn presentation_config_selects_the_clicked_pane_on_mouse_release() {
-        assert!(PRESENTATION_TMUX_CONFIG.contains("set -g mouse on"));
-        assert!(
-            PRESENTATION_TMUX_CONFIG
-                .contains("bind-key -n MouseUp1Pane select-pane -t = \\; send-keys -M")
-        );
+    fn dead_navigator_pane_is_not_reused_even_when_the_session_is_live() {
+        assert!(should_reuse_presentation(true, false));
+        assert!(!should_reuse_presentation(true, true));
+        assert!(!should_reuse_presentation(false, false));
     }
 
     #[test]
-    fn presentation_config_preserves_ghostty_rgb_and_extended_keys() {
-        assert!(PRESENTATION_TMUX_CONFIG.contains("set -g default-terminal tmux-256color"));
-        assert!(PRESENTATION_TMUX_CONFIG.contains("set-environment -g COLORTERM truecolor"));
-        assert!(PRESENTATION_TMUX_CONFIG.contains("set -g extended-keys always"));
-        assert!(PRESENTATION_TMUX_CONFIG.contains("set -q -g extended-keys-format csi-u"));
-        assert!(
-            PRESENTATION_TMUX_CONFIG
-                .contains("set -as terminal-features ',xterm-ghostty:RGB:extkeys'")
+    fn navigator_liveness_probe_targets_only_the_exact_owned_pane() {
+        let temporary = tempfile::tempdir().unwrap();
+        let presentation = Presentation {
+            paths: PresentationPaths::fresh(temporary.path()),
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+
+        let arguments = presentation.pane_dead_arguments(NAVIGATOR_PANE);
+
+        assert_eq!(arguments[0], "display-message");
+        assert_eq!(arguments[2], "-t");
+        assert_eq!(
+            arguments[3],
+            std::ffi::OsString::from(format!(
+                "{}:{NAVIGATOR_PANE}",
+                presentation.paths.session_name
+            ))
         );
-        assert!(
-            PRESENTATION_TMUX_CONFIG
-                .contains("set -as terminal-features ',tmux-256color:RGB:extkeys'")
+        assert_eq!(arguments[4], "#{pane_dead}");
+        assert!(arguments.iter().all(|argument| argument != "0.1"));
+    }
+
+    #[test]
+    fn presentation_config_selects_the_clicked_pane_on_mouse_release() {
+        let config = presentation_tmux_config();
+        assert!(config.contains("set -g mouse on"));
+        assert!(config.contains("bind-key -n MouseUp1Pane select-pane -t = \\; send-keys -M"));
+    }
+
+    #[test]
+    fn presentation_config_matches_the_d8_6_baseline() {
+        assert_eq!(
+            presentation_tmux_config(),
+            concat!(
+                "set -g status off\n",
+                "set -g mouse on\n",
+                "set -g remain-on-exit on\n",
+                "set -g default-terminal tmux-256color\n",
+                "set-environment -g COLORTERM truecolor\n",
+                "set -g extended-keys always\n",
+                "set -q -g extended-keys-format csi-u\n",
+                "set -as terminal-features ',xterm-ghostty:RGB:extkeys'\n",
+                "set -as terminal-features ',tmux-256color:RGB:extkeys'\n",
+                "bind-key -n MouseUp1Pane select-pane -t = \\; send-keys -M\n",
+            )
         );
     }
 

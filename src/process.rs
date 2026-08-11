@@ -35,6 +35,19 @@ pub fn output_bounded(
     output_bounded_with_timeout(command, max_stdout_bytes, max_stderr_bytes, CONTROL_TIMEOUT)
 }
 
+/// Isolates a long-lived helper from a finite control command's process group.
+///
+/// [`output_bounded`] always terminates its owned process group after the
+/// direct child exits, including on success. A deliberately disconnected
+/// helper must therefore enter its own group before it can outlive that child.
+pub(crate) fn isolate_long_lived_helper(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+}
+
 fn output_bounded_with_timeout(
     command: &mut Command,
     max_stdout_bytes: usize,

@@ -740,21 +740,7 @@ fn spawn_opencode_observer(
     observer: &OpenCodeObserverLaunch,
 ) -> Result<(), ActionError> {
     let executable = env::current_exe().map_err(ActionError::Io)?;
-    let mut command = std::process::Command::new(executable);
-    command
-        .arg("--state-root")
-        .arg(&observer.root)
-        .arg("_opencode_observer")
-        .arg(observer.runtime_id.to_string())
-        .arg(&observer.generation)
-        .arg(observer.endpoint.port.to_string())
-        .arg(observer.session.native_id())
-        .arg(observer.pane_pid.to_string())
-        .arg(observer.cwd.as_os_str())
-        .arg(&observer.process_birth)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+    let mut command = opencode_observer_command(&executable, observer);
     let mut child = command.spawn().map_err(ActionError::Io)?;
     let observer_pid = child.id();
     let Some(observer_birth) = LinuxProcessProbe.process_birth(observer_pid) else {
@@ -782,6 +768,29 @@ fn spawn_opencode_observer(
         &observer_birth,
         &starting,
     )
+}
+
+fn opencode_observer_command(
+    executable: &Path,
+    observer: &OpenCodeObserverLaunch,
+) -> std::process::Command {
+    let mut command = std::process::Command::new(executable);
+    command
+        .arg("--state-root")
+        .arg(&observer.root)
+        .arg("_opencode_observer")
+        .arg(observer.runtime_id.to_string())
+        .arg(&observer.generation)
+        .arg(observer.endpoint.port.to_string())
+        .arg(observer.session.native_id())
+        .arg(observer.pane_pid.to_string())
+        .arg(observer.cwd.as_os_str())
+        .arg(&observer.process_birth)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    crate::process::isolate_long_lived_helper(&mut command);
+    command
 }
 
 pub(super) fn backfill_live_runtime_provider_pid(
@@ -959,4 +968,43 @@ pub(super) fn runtime_launch_program(
     ];
     wrapped.extend(program);
     Ok(wrapped)
+}
+
+#[cfg(all(test, unix))]
+mod observer_command_tests {
+    use std::{fs, os::unix::fs::PermissionsExt};
+
+    use nix::unistd::{Pid, getpgid};
+
+    use super::*;
+
+    #[test]
+    fn opencode_observer_command_owns_an_independent_process_group() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("observer-helper");
+        fs::write(&executable, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        let observer = OpenCodeObserverLaunch {
+            root: temporary.path().to_path_buf(),
+            runtime_id: RuntimeId::new(),
+            generation: "generation-a".to_owned(),
+            endpoint: OpenCodeEndpoint::loopback(12_345).unwrap(),
+            session: ProviderSessionId::new(ProviderKind::OpenCode, "session-a").unwrap(),
+            pane_pid: 42,
+            cwd: temporary.path().to_path_buf(),
+            process_birth: "provider-birth".to_owned(),
+            handle_revision: Revision::INITIAL,
+        };
+        let mut command = opencode_observer_command(&executable, &observer);
+        let mut child = command.spawn().unwrap();
+        let child_pid = i32::try_from(child.id()).unwrap();
+
+        let process_group = getpgid(Some(Pid::from_raw(child_pid))).unwrap();
+        let cleanup = child.kill();
+        let reaped = child.wait();
+
+        cleanup.unwrap();
+        reaped.unwrap();
+        assert_eq!(process_group.as_raw(), child_pid);
+    }
 }

@@ -132,7 +132,7 @@ remain disabled until compatibility and connectivity are restored.
 
 ## Repository status
 
-V1 is implemented through D8.6 as a source-installed `0.1.0` operator beta.
+V1 is implemented through D8.9 as a source-installed `0.1.0` operator beta.
 There is no tagged binary release, automatic updater, remote deployment
 service, crates.io publication, or compatibility commitment to the earlier
 Python prototype.

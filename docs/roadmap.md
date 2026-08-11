@@ -156,9 +156,9 @@ historical only; it is not a current product commitment. Host schema 8 is a
 clean breaking boundary and requires explicit reset/re-registration instead of
 an automatic migration from the retired schema.
 
-Date: 2026-08-09
+Date: 2026-08-11
 
-Status: D0 through D8.6 are complete. V1 remains a source-installed operator
+Status: D0 through D8.9 are complete. V1 remains a source-installed operator
 beta.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
@@ -212,6 +212,9 @@ This document owns sequencing, exit gates, and progress.
 | D8.4 | Fail-closed Linux process-group probe reliability | Complete (2026-08-09) |
 | D8.5 | Behavior-neutral action and CLI orchestration decomposition | Complete (2026-08-09) |
 | D8.6 | tmux 3.4 attachment compatibility and CI acceptance reliability | Complete (2026-08-09) |
+| D8.7 | Private tmux terminal configuration drift guard | Complete (2026-08-09) |
+| D8.8 | Inactive Codex binding and failed-presentation recovery | Complete (2026-08-10) |
+| D8.9 | OpenCode observer lifetime across bounded local actions | Complete (2026-08-11) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -1717,6 +1720,233 @@ Completion evidence (2026-08-09):
   acceptance harness, and diff checks pass through `scripts/check`. The exact
   published commit passes both GitHub jobs twice. No live provider or SSH
   acceptance was run.
+
+## D8.7 - Private tmux terminal configuration drift guard
+
+Status: Complete on 2026-08-09.
+
+This checkpoint removes one demonstrated source of nested-terminal drift after
+D8.6 required the same compatibility correction in two separately owned tmux
+configurations. It is a behavior-neutral configuration-ownership cleanup, not
+a new tmux compatibility layer or runtime design.
+
+Scope:
+
+- give the terminal capability lines shared by the private Runtime and
+  presentation tmux servers one crate-private source of truth;
+- keep Runtime-only and presentation-only tmux behavior in their existing
+  owning modules;
+- preserve the generated Runtime and presentation configuration bytes exactly;
+  and
+- strengthen focused regressions from individual-line presence checks to the
+  complete generated configuration contract.
+
+Non-goals and hard boundaries:
+
+- no tmux version detection, compatibility matrix, command retry, fallback, or
+  new configuration option;
+- no change to private socket/session ownership, attachment, pane layout,
+  terminal features, mouse behavior, UTF-8 handling, or default tmux access;
+- no protocol, schema, persistence, CLI, provider, process, lifecycle,
+  diagnostic, dependency, or acceptance-harness change; and
+- no structural split of Runtime, presentation, Navigator, state, or provider
+  modules.
+
+Exit gate:
+
+- both private tmux configurations consume the same exact terminal capability
+  fragment while retaining their module-specific prefix and suffix settings;
+- focused tests lock the complete generated configuration bytes to the D8.6
+  baseline;
+- tmux 3.4 and 3.7 D4 attachment acceptance retain the exact two-surface proof;
+  and
+- `scripts/check` plus staged and unstaged `git diff --check` pass. Live
+  provider or SSH acceptance is not required for this source-only cleanup.
+
+Completion evidence (2026-08-09):
+
+- `src/private_tmux.rs` owns the six terminal capability lines that must remain
+  identical across nested private tmux layers. Runtime retains only its
+  status/mouse prefix, while presentation retains its status/mouse/
+  `remain-on-exit` prefix and mouse-binding suffix.
+- focused Runtime and presentation regressions compare the complete generated
+  configurations byte for byte with the D8.6 baseline. Both configs retain
+  quiet tmux 3.4 handling, explicit CSI-u selection where supported, RGB,
+  extkeys, and every topology-specific line.
+- the 32-test Runtime and 15-test presentation suites pass. D4 retains its
+  exact native marker in both the Runtime and attached-client surfaces, plus
+  detach, fork, park, and cleanup, on Ubuntu 24.04 tmux 3.4 and the ordinary
+  tmux 3.7 development host.
+- the 367-test library suite and five integration tests pass. Formatting,
+  Clippy with warnings denied, Cargo packaging and dependency policy,
+  shell/Python/fixture checks, every disposable D4 through D8.2 acceptance
+  harness, and diff checks pass through a final uninterrupted `scripts/check`
+  run. No live provider session was launched for this source-only cleanup.
+- two earlier full-gate attempts exposed separate existing load-sensitive
+  timing failures in the OpenCode recovery and creation-guardian harnesses.
+  Each harness passed immediately in isolation and the final complete gate
+  passed unchanged; recurrence remains separate acceptance-reliability work,
+  not permission to weaken either lifecycle proof.
+
+## D8.8 - Inactive Codex binding and failed-presentation recovery
+
+Status: Complete on 2026-08-10.
+
+This checkpoint repairs a live operator-beta failure in which an exact Codex
+binding corroborated by an earlier Runtime generation becomes retained history
+after a replacement generation is explicitly parked before its `SessionStart`
+hook arrives. That retained binding must remain usable for exact later resume,
+but it must not authorize hooks or other mutations as though it belonged to
+the inactive generation. A navigator process that fails during startup must
+also not leave a provider-wait pane that makes the failed presentation appear
+reconnectable forever.
+
+Scope:
+
+- represent a previously corroborated Codex binding as retained resume state
+  for an inactive `stopped` or `unknown` Runtime without weakening the exact
+  current-generation binding check;
+- let bounded workstream snapshots and the proven-absent Codex start/recovery
+  paths consume that retained binding while keeping stale hook evidence
+  rejected;
+- retire an owned presentation whose navigator pane is dead even when its
+  blank provider-wait pane still keeps the private tmux server alive; and
+- cover both behaviors with disposable regressions matching the observed
+  persisted lifecycle sequence.
+
+Non-goals and hard boundaries:
+
+- no acceptance of stale-generation hook, attachment, rename, or live Runtime
+  mutation authority;
+- no provider-session adoption, database rewrite, schema/protocol change, or
+  manual repair of operator state;
+- no provider-pane diagnostics or capture, ordinary tmux access, presentation
+  topology/layout change, or automatic provider launch; and
+- no change to OpenCode recovery ownership or later deferred scope.
+
+Exit gate:
+
+- an exact prior Codex binding remains available to a parked or
+  recovery-required Workstream after an uncorroborated replacement generation
+  stops, while `binding_for_runtime` and lifecycle hooks still reject the
+  generation mismatch;
+- later Codex start/recovery selects that exact retained native session only
+  after the owned Runtime is conclusively absent;
+- discovery closes only an owned presentation with a dead navigator pane and
+  creates a fresh presentation, without touching any provider Runtime or the
+  ordinary tmux server;
+- a disposable copy of the observed host-state shape produces a bounded
+  navigator snapshot without editing the live database; and
+- focused state/action/presentation tests, `scripts/check`, and staged and
+  unstaged `git diff --check` pass.
+
+Completion evidence (2026-08-10):
+
+- one live `starship` record reproduced the failure without database
+  corruption: an exact Codex binding retained its earlier Runtime generation
+  while the replacement Runtime was `stopped` and its Workstream `parked`.
+  The installed D8.6 navigator exited with `hook evidence does not match the
+  managed runtime`, and its dead navigator pane remained discoverable because
+  the blank provider-wait pane kept the private presentation server alive.
+- the crate-private retained-binding reader accepts that previously
+  corroborated Codex session only for an inactive `stopped` or `unknown`
+  Runtime. The existing exact-current binding reader is unchanged, active and
+  starting generation mismatches still fail closed, stale lifecycle evidence
+  remains rejected, and OpenCode has no retained-binding path.
+- Codex start and recovery read retained resume state only after the exact
+  private Runtime probe is conclusively `Missing`. Snapshot hydration preserves
+  the parked or recovery-required row and its exact resume session without
+  granting attachment, rename, hook, or live-mutation authority.
+- presentation discovery now reads only bounded `#{pane_dead}` metadata for the
+  exact owned navigator pane. A dead navigator closes that disposable private
+  server even when its provider-wait pane remains alive; no provider pane is
+  captured and the ordinary tmux server is never addressed. A disposable
+  integration regression constructs that exact failed topology on its own
+  private tmux socket, proves the failed owner is retired, and receives a
+  distinct fresh presentation.
+- focused state, action, and presentation suites pass with 77, 17, and 17
+  tests respectively. A disposable SQLite backup of the observed host state
+  was rejected by D8.6 as unavailable, while the candidate returned a valid
+  three-Workstream snapshot containing both parked rows. The live candidate
+  retired the failed presentation and rendered the bounded workstream list;
+  zero WSNav processes or private presentation sockets remained after exit,
+  and the ordinary tmux fingerprint was unchanged.
+- the 372-test library suite and six integration tests pass. Formatting,
+  Clippy with warnings denied, Cargo packaging and dependency policy,
+  shell/Python/fixture checks, every disposable D4 through D8.2 acceptance
+  harness, and diff checks pass through one uninterrupted `scripts/check` run.
+  No Workstream provider Runtime was launched.
+- running the uninstalled candidate against live state rotated exact observer
+  ownership as designed and discarded the prior native trust suffix. Cleanup
+  restored the canonical `/home/bryan/.local/bin/wsnav` hook declaration and
+  left the integration honestly `trust_pending`; completing native review is
+  an operator-only deployment follow-up, not source acceptance evidence.
+
+## D8.9 - OpenCode observer lifetime across bounded local actions
+
+Status: Complete on 2026-08-11.
+
+This checkpoint repairs a local Navigator failure in which an OpenCode observer
+reached `ready` and was then terminated when the successful finite `start`
+action cleaned up its owned process group. The provider Runtime remained healthy,
+but exact attachment correctly failed closed after the observer PID disappeared.
+
+Scope:
+
+- isolate the deliberately long-lived OpenCode observer from the finite local
+  control command's process group before spawning it;
+- retain exact observer PID/birth ownership and the existing bounded Park
+  cleanup path;
+- prove the observer helper owns an independent process group; and
+- validate the ordinary Navigator start-and-attach path against the installed
+  release without capturing or writing provider-pane content.
+
+Non-goals and hard boundaries:
+
+- no weakening of `output_bounded` descendant cleanup for finite control
+  commands;
+- no observer adoption, restart-in-place, session rebinding, endpoint fallback,
+  provider-input injection, or payload logging;
+- no change to OpenCode lifecycle evidence, attachment preflight authority,
+  private Runtime ownership, or ordinary tmux state; and
+- no remote-host, protocol, schema, dependency, or provider-version change.
+
+Exit gate:
+
+- a successful local Navigator `start` cannot terminate the disconnected
+  observer when its finite action process group is cleaned up;
+- the observer remains exact and `ready` through attachment preflight, while
+  Park still stops it by its persisted PID/birth evidence;
+- focused observer-command and process tests plus the uninterrupted
+  `scripts/check` gate pass; and
+- sanitized live acceptance leaves the OpenCode provider pane attached and the
+  observer live, with all superseded provider/observer processes absent.
+
+Completion evidence (2026-08-11):
+
+- the live localhost failure was reproduced with OpenCode 1.18.11: the observer
+  reached `ready`, the finite Navigator action returned, the observer process
+  disappeared, and attachment marked only that exact handle `unknown` while the
+  provider endpoint remained healthy.
+- source review traced the failure to the Navigator's bounded local `run_action`
+  path using `output_bounded`, whose successful cleanup terminates the action's
+  entire owned process group. The observer inherited that group and was
+  therefore treated as a finite descendant even though its standard streams
+  were disconnected.
+- the observer spawn now enters its own process group. Existing Park cleanup
+  remains exact-PID/birth based, so isolation does not broaden mutation
+  authority or leave helper descendants behind.
+- the observer-command regression proves the production command builder gives
+  its helper an independent process group. One uninterrupted `scripts/check`
+  run passes 373 library tests, six integration tests, formatting, Clippy with
+  warnings denied, packaging, dependency policy, shell/Python/fixture checks,
+  disposable D4 through D8.2 acceptance harnesses, and diff checks.
+- the rebuilt release was installed locally and the existing presentation was
+  refreshed without replacing its provider pane. A normal Navigator activation
+  resumed the exact bound OpenCode session; delayed metadata-only verification
+  found the observer still `ready`, the attachment `running`, the provider pane
+  active, and every superseded provider/observer PID absent. No provider content
+  was captured or written, and the ordinary tmux server was not addressed.
 
 ## Deferred beyond V1
 

@@ -156,9 +156,9 @@ historical only; it is not a current product commitment. Host schema 8 is a
 clean breaking boundary and requires explicit reset/re-registration instead of
 an automatic migration from the retired schema.
 
-Date: 2026-08-11
+Date: 2026-08-13
 
-Status: D0 through D8.9 are complete. V1 remains a source-installed operator
+Status: D0 through D8.11 are complete. V1 remains a source-installed operator
 beta.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
@@ -215,6 +215,8 @@ This document owns sequencing, exit gates, and progress.
 | D8.7 | Private tmux terminal configuration drift guard | Complete (2026-08-09) |
 | D8.8 | Inactive Codex binding and failed-presentation recovery | Complete (2026-08-10) |
 | D8.9 | OpenCode observer lifetime across bounded local actions | Complete (2026-08-11) |
+| D8.10 | OpenCode settled-state and activity-age reconciliation | Complete (2026-08-12) |
+| D8.11 | Navigator steady-state latency and redraw containment | Complete (2026-08-13) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -1947,6 +1949,181 @@ Completion evidence (2026-08-11):
   found the observer still `ready`, the attachment `running`, the provider pane
   active, and every superseded provider/observer PID absent. No provider content
   was captured or written, and the ordinary tmux server was not addressed.
+
+## D8.10 - OpenCode settled-state and activity-age reconciliation
+
+Status: Complete on 2026-08-12.
+
+This checkpoint repairs a live OpenCode lifecycle regression without changing
+the exact settled-message boundary. The observer accepted and persisted the
+latest completed assistant message, then a trailing incomplete
+`message.updated` moved the Runtime from `attention` back to `working` even
+though the exact bound root session was already idle. OpenCode observations
+also advanced activity ordering without recording the wall-clock time required
+by the Navigator's relative-age contract.
+
+Scope:
+
+- require exact root-session busy status before an SSE working hint may change
+  Runtime lifecycle;
+- keep the existing completed-assistant SSE candidate plus exact idle-status
+  corroboration as the only OpenCode settled-message authority;
+- record wall-clock activity on the first observed OpenCode working transition
+  and on every accepted settled result; and
+- cover trailing idle events, repeated working observations, settled attention,
+  and activity timestamps with deterministic regressions.
+
+Non-goals and hard boundaries:
+
+- no message ID derived from polling, message lists, content, title, ordering,
+  or timestamps;
+- no raw provider payload persistence, diagnostics, or provider-pane capture;
+- no session adoption, binding rewrite, observer restart-in-place, provider
+  input, or manual live-database repair; and
+- no Codex lifecycle, schema, protocol, UI layout, remote-host, dependency, or
+  provider-version change.
+
+Exit gate:
+
+- an exact idle root session cannot regress from `attention` to `working` on a
+  trailing incomplete `message.updated` event;
+- an exact busy root session still becomes `working`, and status polling remains
+  the bounded fallback if the event/status ordering races;
+- OpenCode working and settled observations establish and refresh the persisted
+  conversation activity time without changing identity or mutation authority;
+- focused observer/state tests and one uninterrupted `scripts/check` run pass;
+  and
+- operator-gated local acceptance shows a new OpenCode turn settle to attention
+  with a known age while the observer, binding, endpoint, and private Runtime
+  remain exact and provider content is neither captured nor written.
+
+Completion evidence (2026-08-12):
+
+- source review and metadata-only live evidence reproduced the ordering race:
+  the observer had already accepted the exact latest completed assistant
+  message and moved the Runtime to `attention`, then a trailing incomplete
+  `message.updated` moved it back to `working` while the exact root session was
+  idle. OpenCode activity ordering also lacked the wall-clock timestamp needed
+  for a relative age.
+- working SSE evidence now requires exact root-session Busy corroboration
+  before it can move a non-working Runtime to `working`. A completed assistant
+  SSE candidate plus exact idle corroboration remains the only settled-message
+  authority; polling still cannot supply or infer a message identifier.
+- the first accepted OpenCode working transition and every accepted settled
+  result now update conversation activity time. Focused observer and state
+  regressions cover trailing events, repeated working evidence, settled
+  attention, and timestamps without persisting provider payloads.
+- one uninterrupted `scripts/check` run passes 374 library tests, six
+  integration tests, formatting, Clippy with warnings denied, packaging,
+  dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
+  acceptance harnesses, and diff checks.
+- the exact release candidate was installed locally and the existing bound
+  OpenCode session was resumed under a fresh private Runtime generation.
+  Metadata-only acceptance found its observer exact and `ready`, endpoint and
+  root-session evidence healthy, and the completed turn at `attention` with a
+  known activity age. The Navigator pane alone showed the settled marker; no
+  provider pane was captured or written and the ordinary tmux server was not
+  addressed.
+
+## D8.11 - Navigator steady-state latency and redraw containment
+
+Status: Complete on 2026-08-13.
+
+This checkpoint responds to operator-visible flicker and delayed typing echo
+in the retained presentation topology. Live inspection found three avoidable
+steady-state costs: a 10 FPS working animation forces outer-presentation
+redraws; every 500 ms local snapshot repeats executable/version probes; and
+OpenCode supervision performs synchronous HTTP ownership/status work at SSE
+event frequency during streaming. The existing tmux 3.7b nested-redraw
+amplification remains upstream, but WSNav must stop feeding it avoidable churn.
+
+Scope:
+
+- cache fixed local executable and installation evidence once per Navigator
+  process while recomputing dynamic observer/trust readiness from durable host
+  state on every snapshot;
+- preserve fresh provider-capability validation at every stateful host action
+  boundary so presentation caching never becomes mutation authority;
+- short-circuit repeated OpenCode working events before HTTP corroboration and
+  rate-limit health/endpoint supervision independently of SSE event volume,
+  while retaining the exact 500 ms root-status fallback and strict Runtime
+  generation, PID, birth, directory, session, and endpoint checks;
+- replace the animated working spinner with one static single-cell marker so
+  steady working state does not itself schedule presentation redraws; and
+- add deterministic regressions plus a disposable synthetic key-to-echo study
+  that records aggregate timing only and leaves ordinary tmux unchanged.
+
+Non-goals and hard boundaries:
+
+- no weakening of exact OpenCode settled-message authority, status
+  corroboration, failure limits, observer cleanup, or action-time capability
+  validation;
+- no provider-pane capture or input, prompt/output persistence, raw provider
+  payload diagnostics, hook/plugin installation, or live database repair;
+- no redesign of SSH polling, the two-private-tmux topology, navigator layout,
+  provider native UI, terminal capability settings, or tmux itself; and
+- no schema, protocol, dependency, remote-host, provider-version, session
+  adoption, or binding change.
+
+Exit gate:
+
+- repeated steady-state snapshots reuse one fixed installation probe result,
+  while a durable Codex observer/trust lifecycle change remains visible on the
+  next snapshot and every provider action still performs fresh validation;
+- an already-working OpenCode Runtime performs no per-event root-status HTTP
+  request, periodic health/endpoint supervision is cadence-bounded, and an
+  `attention` to `working` transition still requires exact Busy evidence;
+- a visible working row causes no timer-driven Navigator redraw, while actual
+  input, resize, snapshot, attachment, and transient-message changes still
+  redraw normally;
+- focused tests, the sanitized disposable key-to-echo study, and one
+  uninterrupted `scripts/check` run pass; and
+- operator-gated local acceptance shows responsive native typing and bounded
+  working-state flicker without capturing or writing provider content or
+  touching ordinary tmux.
+
+Completion evidence (2026-08-13):
+
+- the long-lived Navigator now caches only fixed executable/installation
+  evidence. Dynamic Codex observer readiness is still read from durable host
+  state on every snapshot, while every stateful action retains its existing
+  fresh capability validation. A production-path disposable Navigator was
+  sampled 150 times after startup and spawned zero `codex`, `opencode`, or
+  `tmux` version-probe children during steady state; its exact private
+  presentation was then removed and ordinary tmux remained unchanged.
+- repeated OpenCode working evidence now reads durable Runtime state before
+  constructing its lazy exact-status request. Deterministic coverage proves an
+  already-working or missing Runtime performs zero status calls, while an
+  attention Runtime calls once and accepts only exact Busy evidence. Health
+  and endpoint ownership remain fail-closed but are cadence-gated independently
+  of SSE event volume; the existing exact root-status poll remains the bounded
+  fallback.
+- the animated spinner, timer, frame state, and 100 ms redraw path are absent.
+  One static yellow `●` retains visible working status and still supersedes a
+  stale result marker, while the 500 ms snapshot and ordinary input, resize,
+  attachment, and message redraw paths remain.
+- [Spike 0018](evidence/spikes/0018-navigator-input-latency.md) returned all 90
+  samples per case on tmux 3.7b. The static nested case measured 0.385 ms p95
+  input delivery and 0.557 ms p95 echo, with complete cleanup and ordinary-tmux
+  noninterference. The diagnostic 10 FPS case did not increase local synthetic
+  latency, so the evidence does not misattribute the reported SSH/provider lag
+  to animation alone.
+- one uninterrupted `scripts/check` run passes 377 library tests, six
+  integration tests, formatting, Clippy with warnings denied, packaging,
+  dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
+  acceptance harnesses, and diff checks.
+- release SHA-256
+  `df25ec4660bb381063a1e4d548787513c34133073915556a936da7785e6d850f`
+  is installed locally. The exact OpenCode Runtime was rotated through
+  Park/Start: its native-session hash was unchanged, both superseded processes
+  were absent, and the fresh provider/observer pair was live with observer
+  status `ready`. No provider content was captured or written.
+- with the retained presentation open on the installed candidate, the operator
+  reported that typing lag was much better and the remaining native cursor
+  blink was materially less flickery and acceptable. A scoped steady-cursor A/B
+  confirmed that OpenCode explicitly requests a blinking cursor through both
+  private tmux layers; the ineffective pane/server overrides were reverted and
+  no terminal-setting workaround entered the repository or ordinary tmux.
 
 ## Deferred beyond V1
 

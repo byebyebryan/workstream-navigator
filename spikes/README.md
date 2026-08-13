@@ -135,6 +135,33 @@ counts and ratios. A candidate presentation change is confirmed when the
 `nested_motion_not_amplified` and `nested_bytes_not_amplified` assertions pass
 without breaking the existing native presentation acceptance.
 
+## navigator-input-latency.py
+
+This local study separates input delivery from visible acknowledgement echo in
+the retained two-private-tmux topology. It uses a synthetic raw-mode endpoint,
+a narrow navigator pane, and a PTY-attached presentation client; no provider,
+authentication, Workstream state, or ordinary tmux server is used.
+
+~~~console
+spikes/navigator-input-latency.py \
+  --result /tmp/wsnav-navigator-input-latency.json
+~~~
+
+Two fresh disposable cases send the same 90 timestamped tokens. The static
+case draws its navigator once, while the diagnostic comparison redraws that
+pane at 10 FPS. The endpoint's monotonic receive time measures client-to-pane
+input delivery independently from the time its acknowledgement becomes
+visible at the presentation client. Only aggregate median, p95, maximum, and
+ratio values are retained; raw PTY bytes, tokens, paths, and process identities
+are discarded with the private servers and mode-0700 temporary root.
+
+The recorded [Spike 0018](../docs/evidence/spikes/0018-navigator-input-latency.md)
+fixture passes on local tmux 3.7b with sub-millisecond p95 input and echo for
+both cases. The animation did not increase local synthetic latency, so this
+study does not attribute the operator's SSH/provider lag to redraws alone. It
+does establish a bounded static-marker baseline and explicitly makes no claim
+about SSH, network, or real-provider event-loop latency.
+
 ## codex-observer-profile.sh
 
 This local study validates the proposed dedicated Codex observer profile and

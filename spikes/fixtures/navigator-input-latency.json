@@ -1,0 +1,50 @@
+{
+  "study": "navigator-input-latency",
+  "contract_fingerprint": "nested-tmux-input-echo-ab-v1",
+  "status": "pass",
+  "environment": {
+    "tmux_version": "3.7b"
+  },
+  "sample_count": 90,
+  "static": {
+    "sample_count": 90,
+    "input_delivery_ms": {
+      "median_ms": 0.161,
+      "p95_ms": 0.385,
+      "max_ms": 0.454
+    },
+    "echo_ms": {
+      "median_ms": 0.274,
+      "p95_ms": 0.557,
+      "max_ms": 0.623
+    }
+  },
+  "animated_10fps": {
+    "sample_count": 90,
+    "input_delivery_ms": {
+      "median_ms": 0.201,
+      "p95_ms": 0.371,
+      "max_ms": 0.505
+    },
+    "echo_ms": {
+      "median_ms": 0.301,
+      "p95_ms": 0.49,
+      "max_ms": 0.717
+    }
+  },
+  "animated_static_p95_ratios": {
+    "input_delivery": 0.964,
+    "echo": 0.88
+  },
+  "assertions": {
+    "both_cases_return_every_sample": true,
+    "cleanup_complete": true,
+    "ordinary_tmux_unchanged": true,
+    "static_input_delivery_p95_le_25_ms": true,
+    "static_echo_p95_le_50_ms": true
+  },
+  "cleanup_complete": true,
+  "ordinary_tmux_unchanged": true,
+  "elapsed_seconds": 8.259,
+  "limitation": "synthetic local PTY/tmux evidence; no SSH, network, or provider latency claim"
+}

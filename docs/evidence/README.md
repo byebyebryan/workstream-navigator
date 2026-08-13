@@ -31,12 +31,14 @@ The [spikes](spikes/) establish the narrow tmux, remote attachment, native
 Codex presentation, observer, naming, and settled-fork boundaries. They are
 falsification studies, not product documentation. [Spike
 0014](spikes/0014-terminal-fidelity-a-b.md) adds the deterministic A/B
-instrument for the deferred terminal-fidelity cursor amplification, and
-[Spike 0015](spikes/0015-opencode-provider-feasibility.md) records the
+instrument for the deferred terminal-fidelity cursor amplification; [Spike
+0018](spikes/0018-navigator-input-latency.md) separates local synthetic input
+delivery from presentation echo under static and 10 FPS Navigator panes; [Spike
+0015](spikes/0015-opencode-provider-feasibility.md) records the
 opencode provider fork-exactness, fork-lineage, and shared-database
 concurrency probes; [Spike
 0016](spikes/0016-opencode-runtime-contract.md) records the native TUI
-Runtime, observer, and exact HTTP Fork boundary; [Spike
+Runtime, observer, and exact HTTP Fork boundary; and [Spike
 0017](spikes/0017-opencode-fresh-session.md) records blank-session binding,
 endpoint ownership, and per-Runtime observer sidecar evidence.
 

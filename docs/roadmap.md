@@ -62,6 +62,32 @@ where cursor-state updates restart blinking (Ghostty included), repeated
 redraws during streaming visibly disrupt the blink phase. This is documented
 as [tmux issue 5419](https://github.com/tmux/tmux/issues/5419).
 
+This does not reproduce in the same way when a provider is launched manually
+inside one ordinary tmux pane because that path has one tmux renderer. The
+retained WSNav path is terminal -> private presentation tmux -> private Runtime
+tmux -> provider, with another renderer in front when WSNav itself is launched
+from ordinary tmux. The Runtime server preserves the exact provider process and
+completed output; the presentation server owns the Navigator/provider split.
+Its provider pane is a nested tmux attachment rather than a transparent byte
+pipe, so each layer parses and re-renders the inner terminal stream. This is the
+source of the measured amplification, not a provider hook or pane-management
+write.
+
+Cursor state must not be confused with that amplification. Both private tmux
+servers retained `cursor-style default`; the effective Ghostty configuration
+had no blink override. A metadata-only live check on 2026-08-13 reported
+`cursor_blinking=1` for the private OpenCode Runtime and `cursor_blinking=0` for
+the private Codex Runtime, the Codex-attached presentation pane, and two
+ordinary Codex panes. No pane content was captured or input injected. The
+[OpenCode TUI configuration](https://opencode.ai/docs/tui/) confirms that a
+blinking block cursor is OpenCode's default and exposes `cursor.blinking` as the
+native control. That control belongs to the operator's OpenCode configuration,
+not WSNav. The V1 decision is to leave OpenCode's blinking default unchanged and
+add no WSNav, tmux, Ghostty, or managed OpenCode cursor override. The irregular
+flicker remains nested redraw traffic disturbing the cursor. The operator
+reports Claude is steady too, but Claude is outside the V1 provider surface and
+was not independently verified here.
+
 The following WSNav-controllable candidates were each ruled out with the
 instrument and left the `civis`/`cnorm` emission unchanged:
 
@@ -71,6 +97,12 @@ instrument and left the `civis`/`cnorm` emission unchanged:
 - `set -g update-scroll-region on`; and
 - the `sync` (`CSI ?2026`) terminal feature, which is already active for
   Ghostty clients.
+
+A live A/B also applied steady `cursor-style block` overrides at both server
+and pane scope on the active private presentation and Runtime layers. OpenCode
+continued blinking because its own TUI cursor policy remained enabled. Every
+override was restored to `default`; no cursor workaround entered WSNav,
+Ghostty, or ordinary tmux configuration.
 
 The fix is version-bound: tmux `3.7b` (current Arch `extra`) has the behavior,
 the AUR `tmux-git` package is stale, and upstream master does not yet contain
@@ -943,11 +975,11 @@ Delivery slices:
 2. **D7.1 - Management navigation foundation.** Add the Workstreams home and
    its Projects and Hosts child pages, inline inventory rows, mouse behavior,
    and direct page-local keys without changing provider state. Refine the
-   narrow Workstreams pane with two-line
-   Recent rows, explicit two-line tree children in grouped views, the `Recent`
-   / `By project` / `By host` / `Archived` cycle, compact bottom key hints, and a
-   single-column expanded reference while retaining the accepted Workstreams
-   bindings. Each later stateful action owns its bounded text entry,
+   narrow Workstreams pane with initially two-line Recent rows (later split
+   into three lines by D8.14), explicit two-line tree children in grouped views,
+   the `Recent` / `By project` / `By host` / `Archived` cycle, compact bottom key
+   hints, and a single-column expanded reference while retaining the accepted
+   Workstreams bindings. Each later stateful action owns its bounded text entry,
    confirmation, and non-blocking progress path; D7.1 deliberately does not
    ship an unused generic modal.
 3. **D7.2 - Workstream lifecycle and recovery.** Add bounded status and
@@ -988,7 +1020,7 @@ Exit gate:
 
 - deterministic tests cover page navigation, modal input isolation,
   confirmation, duplicate-action suppression, status/action-line separation,
-  compact/expanded key-help state, narrow-width row truncation, two-line mouse
+  compact/expanded key-help state, narrow-width row truncation, variable-height mouse
   targeting, explicit grouped-tree rendering, view-cycle order, archive/restore
   revisions, ProjectLocation ownership, remote path bounds, host forget
   semantics, and local-host protection;
@@ -2124,6 +2156,227 @@ Completion evidence (2026-08-13):
   confirmed that OpenCode explicitly requests a blinking cursor through both
   private tmux layers; the ineffective pane/server overrides were reverted and
   no terminal-setting workaround entered the repository or ordinary tmux.
+
+## D8.12 - Workstream context-row scanability
+
+Status: Complete on 2026-08-13.
+
+At delivery, this checkpoint refined the first display line of each two-line
+Workstream card. D8.14 later splits only Recent into three lines while retaining
+the provider palette and grouped-view layouts established here. It makes
+Project, provider, and host identity easier to scan without changing grouping,
+selection, action routing, or the native provider surface.
+
+Scope:
+
+- split every Workstream context line into left- and right-justified sections;
+- show Project on the left and provider plus host on the right in `Recent`;
+- show provider on the left and host on the right in `By project`;
+- show Project on the left and provider on the right in `By host`, removing the
+  adjacent separator and Project-marker dots from the former composition;
+- give Codex and OpenCode labels stable, distinct provider accents instead of
+  the white/neutral Workstream-title foreground; and
+- retain the full provider label at the supported narrow width while truncating
+  variable Project and host labels first.
+
+Non-goals and hard boundaries:
+
+- no view-order, grouping, selection, mouse-target, lifecycle, state, schema,
+  protocol, host-action, provider, tmux, or terminal-setting change; and
+- no provider content capture, provider-pane input, durable color identity, or
+  new user preference.
+
+Exit gate:
+
+- deterministic rendering tests cover the exact left/right identity order in
+  all three active views, absence of the redundant grouped-view dots, full
+  OpenCode visibility at the narrow width, and provider-palette separation;
+- selected-row styling preserves provider, host, Project, and lifecycle
+  foregrounds; and
+- formatting, tests, lint, package checks, and `git diff --check` pass.
+
+Completion evidence (2026-08-13):
+
+- one width-aware context-line renderer now places the view-specific identity
+  sections at opposite edges. `Recent` renders Project versus provider/host,
+  `By project` renders provider versus host, and `By host` renders Project
+  versus provider without the former `provider · • Project` composition;
+- Codex and OpenCode use distinct 256-color accents outside the host and Project
+  palettes. Workstream titles remain white, selected rows retain their semantic
+  foregrounds, and the colors carry no action or durable identity meaning;
+- deterministic 30-cell tests cover the three layouts, long-label truncation,
+  full OpenCode visibility, separator removal, palette separation, and selected
+  styling; and
+- one uninterrupted `scripts/check` run passes 378 library tests, six
+  integration tests, formatting, Clippy with warnings denied, packaging,
+  dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
+  acceptance harnesses, and diff checks.
+
+## D8.13 - Initial presentation-width convergence
+
+Status: Implementation complete on 2026-08-13; operator visual confirmation
+pending.
+
+This checkpoint fixes a fresh presentation opening with an expanded Navigator
+pane and reaching its intended 32-column width only after the outer terminal is
+resized. The fault is presentation startup ordering: detached tmux first lays
+out the panes at its default window size, then proportionally expands both when
+the real client dimensions arrive.
+
+Scope:
+
+- establish the 32-column Navigator width at private tmux `client-attached` and
+  `window-resized` event boundaries;
+- retain the Rust TUI resize correction as a defensive path; and
+- target only the exact private presentation session and Navigator pane.
+
+Non-goals and hard boundaries:
+
+- no provider Runtime resize command, provider-pane input or capture, ordinary
+  tmux access, terminal-size polling, layout preference, schema, protocol,
+  lifecycle, or provider behavior change.
+
+Exit gate:
+
+- a production-path disposable presentation expands from an 80-column detached
+  window to 150 columns while its Navigator remains exactly 32 columns;
+- deterministic command coverage proves both hooks target only the exact owned
+  Navigator pane without a shell;
+- formatting, tests, lint, package checks, disposable acceptance, and
+  `git diff --check` pass; and
+- a fresh installed presentation opens at 32 columns without requiring an
+  operator-generated resize event.
+
+Implementation evidence (2026-08-13):
+
+- a disposable tmux reproduction started at 80 columns with a 32-column
+  Navigator, then expanded the window to 150 columns; uncorrected tmux grew the
+  Navigator to 67 columns. The production-path regression performs the same
+  transition with the private hooks installed and retains exactly 32 columns;
+- the hook-command regression proves `client-attached` and `window-resized`
+  target only the generated private presentation session's Navigator pane and
+  invoke no shell or provider command;
+- one uninterrupted `scripts/check` run passes 379 library tests, seven
+  integration tests, formatting, Clippy with warnings denied, packaging,
+  dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
+  acceptance harnesses, and diff checks; and
+- release SHA-256
+  `58ec66122c6800becd225c761bbac496133b051a54e08fbd998da6c94111c3e9`
+  is installed locally. Operator confirmation of a fresh real presentation
+  remains the final gate.
+
+## D8.14 - Workstream card hierarchy cleanup
+
+Status: Implementation complete on 2026-08-13; operator visual confirmation
+pending.
+
+This checkpoint reduces identity crowding in the flat Recent view by spending
+one additional vertical row, and removes the redundant accent bullet before a
+By project group name that already carries the same accent. It does not change
+global recency, group ordering, Archived, or any Workstream action.
+
+Scope:
+
+- render each active Recent Workstream as exactly three rows: Project name,
+  provider versus host, then lifecycle/thread versus activity age;
+- preserve the provider, host, Project, lifecycle, and age color semantics from
+  D8.12 while removing their competition for one context line;
+- keep `By project`, `By host`, and Archived cards at two rows;
+- use the colored Project name as the sole By project group-header identity cue;
+  and
+- map every visible row of either card height to the same exact Workstream for
+  selection and mouse activation.
+
+Non-goals and hard boundaries:
+
+- no recency order, grouping, card selection, action routing, provider pane,
+  host/protocol/state, terminal, tmux, schema, or durable preference change.
+
+Exit gate:
+
+- deterministic rendering proves Project, environment, and thread/age occupy
+  three separate Recent rows at the default 30-cell inner width;
+- mouse mapping covers all three rows, scrolled selection remains exact, and
+  Archived is explicitly distinct at two rows;
+- grouped-view layout, long-label truncation, and provider visibility tests
+  remain green, and the By project rendering contains no decorative bullet;
+- formatting, tests, lint, package checks, disposable acceptance, and
+  `git diff --check` pass; and
+- the installed Recent view is visually confirmed less crowded without losing
+  actionable density in grouped or Archived views.
+
+Implementation evidence (2026-08-13):
+
+- Recent now has a distinct three-row entry height and renderer, while Archived
+  has its own explicit two-row context instead of sharing Recent's internal
+  variant. Grouped views remain unchanged at two rows;
+- deterministic rendering places Project, OpenCode/host, and thread/age on
+  three separate 30-cell inner rows. Mouse tests map all three rows to the exact
+  same Workstream; the By project header keeps its colored name without the
+  former bullet; and the existing scrolled-selection and grouped-tree suites
+  pass;
+- one uninterrupted `scripts/check` run passes 380 library tests, seven
+  integration tests, formatting, Clippy with warnings denied, packaging,
+  dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
+  acceptance harnesses, and diff checks; and
+- release SHA-256
+  `cd47a23d063e0bf3f191ade8728fef7885ee58486894c48e07f4d4c8565fa0d2`
+  is installed locally. The exact live private Navigator pane was refreshed at
+  32 columns while the provider attachment pane PID remained unchanged;
+  operator visual confirmation remains the final gate.
+
+## D8.15 - Expanded shortcut alignment
+
+Status: Implementation complete on 2026-08-13; operator visual confirmation
+pending.
+
+This checkpoint corrects uneven description columns in the Navigator-local `?`
+reference. The long `↑/↓ or j/k` label overflowed the hand-padded column, while
+the `←/→` row was also padded as if its key label were one cell wide.
+
+Scope:
+
+- render every expanded-help binding through one display-width-aware alignment
+  function with descriptions beginning at column 11;
+- advertise only the canonical `↑/↓` selection keys, retaining `j/k` as
+  unadvertised compatibility aliases;
+- keep `←/→` and every page/detail action aligned to the same column; and
+- use concise descriptions no wider than the 19 cells remaining at the normal
+  32-column Navigator width.
+
+Non-goals and hard boundaries:
+
+- no key-handler, compact-footer, help scrolling, page/action, provider pane,
+  state, protocol, terminal, tmux, schema, or durable preference change.
+
+Exit gate:
+
+- deterministic help rendering proves `↑/↓` and `←/→` are present, `j/k` is
+  absent, and every advertised binding description begins at column 11;
+- every Workstreams, Archived, Projects, Hosts, ordinary-detail, and
+  recovery-detail help row fits the 30-cell inner pane without clipping;
+- the existing help modal-isolation and page-specific content tests pass;
+- formatting, tests, lint, package checks, disposable acceptance, and
+  `git diff --check` pass; and
+- the installed `?` reference is visually confirmed aligned at the 32-column
+  Navigator width.
+
+Implementation evidence (2026-08-13):
+
+- every expanded-help key/description pair now uses one terminal-cell-aware
+  column calculation. Deterministic coverage checks the resulting column,
+  confirms both arrow labels remain visible while `j/k` is omitted, and proves
+  that the Workstreams, Archived, Projects, Hosts, ordinary-detail, and
+  recovery-detail descriptions fit the normal 30-cell inner pane;
+- one uninterrupted `scripts/check` run passes 381 library tests, seven
+  integration tests, formatting, Clippy with warnings denied, packaging,
+  dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
+  acceptance harnesses, and diff checks; and
+- release SHA-256
+  `84794788c9b2cedb38456bbe4ed8d68e29e401e13c9ff9e903b860f45ffa2660`
+  is installed locally. The exact live private Navigator pane was refreshed at
+  32 columns while the provider attachment pane PID remained unchanged;
+  operator visual confirmation remains the final gate.
 
 ## Deferred beyond V1
 

@@ -46,6 +46,34 @@ workarounds, and the decision gates are recorded in
 [Spike 0014](evidence/spikes/0014-terminal-fidelity-a-b.md) and the
 [roadmap](roadmap.md#2026-08-04-terminal-fidelity-root-cause-is-upstream-tmux).
 
+A provider launched manually in one ordinary tmux pane does not use the same
+rendering path. Its output crosses one tmux renderer. WSNav keeps each provider
+inside its own private Runtime tmux server so the process and completed output
+survive presentation detach, then uses a separate private presentation tmux
+server to place the Navigator beside it. The presentation's provider pane runs
+a nested tmux client attached to the Runtime; it is not a transparent byte
+pipe. Provider terminal output is therefore parsed and rendered by the Runtime
+server, then parsed and rendered again by the presentation server. Launching
+WSNav from an ordinary tmux pane adds a third renderer. This intentional
+topology explains why the artifact can be absent in a manual pane while the
+same native provider shows it through WSNav.
+
+Provider cursor mode is a separate concern from redraw amplification. WSNav's
+private tmux servers leave `cursor-style` at `default`, and the local Ghostty
+configuration has no cursor-blink override. A metadata-only check on 2026-08-13
+found the live private OpenCode Runtime in blinking mode and both a live private
+Codex Runtime and ordinary Codex panes in steady mode. The
+[OpenCode TUI configuration](https://opencode.ai/docs/tui/) documents a block
+cursor with blinking enabled as its default and provides the native
+`cursor.blinking = false` control in `tui.json` or `tui.jsonc`. Cursor policy
+therefore remains provider-owned. WSNav intentionally leaves OpenCode's native
+blinking default unchanged and must not impose a tmux override or manage an
+OpenCode cursor configuration to normalize providers. The distracting irregular
+flicker remains the separate nested tmux redraw path repeatedly hiding, showing,
+and disturbing the cursor. An operator also reports a steady cursor in Claude,
+but Claude is outside the V1 provider surface and that observation is not
+independent WSNav evidence.
+
 ## V1 tenets
 
 1. **Preserve the native provider workflow.** Codex owns its composer, models,
@@ -224,10 +252,15 @@ and configuration. It never modifies or depends on the user's ordinary tmux
 server.
 
 The initial presentation sets the navigator to its normal 32-cell width and
-gives every remaining terminal column to the provider pane. Tmux can rescale a
-new split when it adopts the controlling terminal, so the navigator reapplies
-that width after each terminal resize. Individual renderers retain their
-compact fallbacks for explicitly narrowed panes.
+gives every remaining terminal column to the provider pane. A detached tmux
+server begins at a default size and proportionally redistributes panes when its
+first real client supplies the terminal dimensions. The private presentation
+therefore installs exact `client-attached` and `window-resized` hooks that
+resize only its Navigator pane; the Rust TUI also retains its resize correction
+as a defensive path. This applies the compact width at tmux's event boundary
+without addressing the nested provider Runtime or an ordinary tmux server.
+Individual renderers retain their compact fallbacks for explicitly narrowed
+panes.
 
 The navigator is a small Rust TUI in one pane. The provider pane is not a
 terminal widget rendered by Rust; it is a real tmux attachment to the host-owned
@@ -257,6 +290,10 @@ pages fit without scrolling at the standard navigator height. It still scrolls
 if a terminal is unusually short rather than pairing or wrapping entries into
 each other. `?`, `Esc`, or `q` collapses it. This is not a tmux popup, window,
 centered overlay, or provider overlay.
+Shortcut descriptions begin at one display-cell-aware column regardless of key
+label width and are bounded to the remaining 19 cells of the normal 30-cell
+inner pane. The reference advertises `↑/↓` as the canonical selection keys;
+`j/k` remain accepted compatibility aliases but do not consume help width.
 While expanded, all other navigator keyboard and mouse actions are inert, so
 help cannot accidentally activate or mutate a Workstream.
 
@@ -342,19 +379,32 @@ detail, visibility-filter, and grouping choices are client presentation state,
 not host action authority.
 
 The navigator assumes horizontal space is scarce and spends vertical space to
-keep rows scannable. A `Recent` Workstream uses exactly two display lines:
+keep rows scannable. A `Recent` Workstream uses exactly three display lines:
 
 ```text
-local · workstream-navigator
-✓ lifecycle hook repair                              3m
+workstream-navigator
+Codex                                                  local
+✓ lifecycle hook repair                            3m ago
 ```
 
-The first line owns host and Project context. The second owns the lifecycle
-indicator, Codex thread title, and compact activity age. Age is right-aligned
-when space permits; the title truncates before the indicator or age is lost.
-Both display lines are one selectable and mouse-actionable Workstream row.
-Long context labels truncate within their own line rather than pushing title,
-status, or age onto a third line.
+Recent separates Project, environment, and conversation identity: the first
+line gives the Project name the full content width, the second edge-justifies
+provider and host, and the third edge-justifies lifecycle/thread against age.
+Grouped views remain compact two-line tree children whose context-line scanning
+order follows the active grouping:
+
+```text
+By project:  Codex                                       local
+By host:     project-name                              OpenCode
+```
+
+Provider names use stable provider-specific accents rather than the white used
+for Workstream titles. Host and Project labels retain their own identity
+palettes; green, yellow, and red remain lifecycle colors. Age is right-aligned
+when space permits; variable Project, host, and thread labels truncate before
+the provider name, indicator, or age is lost. Every display line in a card is
+one selectable and mouse-actionable Workstream row. Archived remains a compact
+two-line restore surface rather than inheriting Recent's three-row card.
 
 Project inventory rows use the same narrow-pane discipline. At the 32-cell
 navigator minimum, Project counts use the compact `loc` label so the active
@@ -365,6 +415,9 @@ Grouped views render explicit trees instead of communicating hierarchy through
 indentation alone. The group header is the selected axis; each Workstream is a
 two-line child whose context line names the other axis and whose continuation
 line carries status, title, and age:
+
+Project group headers use the accented Project name as their sole identity cue;
+they do not repeat that same accent in a decorative bullet.
 
 ```text
 By project

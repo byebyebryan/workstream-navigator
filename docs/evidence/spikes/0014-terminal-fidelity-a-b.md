@@ -51,6 +51,28 @@ re-emits the cursor churn. Status is `falsified:
 nested-presentation-cursor-emission-amplified` because the amplification
 exceeds the recorded bounds (`motion <= 1.5x` and `bytes <= 1.3x`).
 
+## Why a manual tmux pane does not reproduce it
+
+The direct baseline and retained presentation have materially different
+rendering paths:
+
+~~~text
+manual provider:       Ghostty -> ordinary tmux -> provider
+WSNav direct:          Ghostty -> presentation tmux -> Runtime tmux -> provider
+WSNav from user tmux:  Ghostty -> ordinary tmux -> presentation tmux
+                                -> Runtime tmux -> provider
+~~~
+
+The private Runtime server owns the persistent provider process and completed
+terminal output. The private presentation server owns the side-by-side
+Navigator/provider layout. Its provider pane runs a real tmux client attached
+to the Runtime server, not a transparent relay. The Runtime tmux first parses
+the provider's escape stream and renders a client view; the presentation tmux
+then parses that view and renders it again for Ghostty. Each extra renderer can
+reconstruct cursor motion, erase, synchronization, and visibility sequences.
+The measured amplification is therefore topology-bound and explains why an
+ordinary single-tmux Codex or OpenCode pane can look stable.
+
 ## Follow-up: root cause is upstream tmux, not WSNav configuration
 
 Follow-up probing with the instrument identified the root cause as **upstream
@@ -79,6 +101,54 @@ The artifact is therefore version-bound and not config-fixable by WSNav. The
 instrument remains the objective confirmation gate for an upstream fix. See
 the [roadmap](../../roadmap.md#2026-08-04-terminal-fidelity-root-cause-is-upstream-tmux)
 for the deferred-fix decision.
+
+## Application cursor state is separate from redraw flicker
+
+A metadata-only live check on 2026-08-13 queried tmux format state without
+capturing pane content or injecting input. Both private servers reported
+`cursor-style default`. The effective Ghostty 1.3.1 configuration contained no
+`cursor-style-blink` override; its documentation states that an unset value
+blinks by default while allowing applications to override it with `DECSCUSR`
+or DEC Mode 12. The live panes reported:
+
+- one live private OpenCode Runtime with `cursor_blinking=1`;
+- one live private Codex Runtime with `cursor_blinking=0`;
+- the active Codex-attached presentation provider pane with
+  `cursor_blinking=0`; and
+- two ordinary Codex panes with `cursor_blinking=0`.
+
+This separates application cursor state from the irregular nested-redraw
+artifact. Codex is establishing a steady cursor because its live state differs
+from the blinking terminal baseline in both private and ordinary tmux. A
+follow-up check of the official
+[OpenCode TUI configuration](https://opencode.ai/docs/tui/) and
+[TUI schema](https://opencode.ai/tui.json) confirmed that OpenCode defaults to a
+blinking block cursor and supports a native steady setting:
+
+~~~json
+{
+  "$schema": "https://opencode.ai/tui.json",
+  "cursor": {
+    "style": "block",
+    "blinking": false
+  }
+}
+~~~
+
+The global file would be `~/.config/opencode/tui.json` or `tui.jsonc`. This is a
+native operator preference, not a WSNav control. The decision is to leave
+OpenCode's blinking default unchanged and add no WSNav, tmux, Ghostty, or managed
+OpenCode cursor override. The operator also reports that Claude is steady, but
+Claude is outside the V1 provider surface and was not independently tested by
+this study.
+
+A bounded live A/B applied `cursor-style block` at both server and pane scope
+on the active private presentation and Runtime servers. OpenCode continued to
+blink because its native TUI setting remained enabled. The experiment then
+restored every private option to `default`; it made no repository, Ghostty, or
+ordinary-tmux configuration change. Future work must not treat normal OpenCode
+blinking as evidence that redraw amplification has regressed, or normalize
+native provider cursor behavior in WSNav to conceal the nested tmux artifact.
 
 ## Decision and limits
 

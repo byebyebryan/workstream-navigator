@@ -2,6 +2,7 @@ use ratatui::backend::TestBackend;
 use ratatui::{
     Terminal,
     style::{Color, Style},
+    text::Line,
 };
 use std::{
     cell::Cell,
@@ -129,6 +130,14 @@ fn archived_view_filters_rows_and_keeps_selection_visible() {
             .collect::<Vec<_>>(),
         vec![1]
     );
+    assert!(matches!(
+        view.list_entries().as_slice(),
+        [NavigatorListEntry::Workstream {
+            context: WorkstreamRowContext::Archived,
+            ..
+        }]
+    ));
+    assert_eq!(view.list_entries()[0].height(), 2);
 
     view.cycle_view_mode_next();
     assert_eq!(view.view_mode(), NavigatorViewMode::Recent);
@@ -567,7 +576,7 @@ fn mouse_click_retains_blank_focus_and_row_activation_intent() {
 }
 
 #[test]
-fn row_mapping_covers_both_lines_of_each_workstream() {
+fn row_mapping_covers_all_three_recent_lines_of_each_workstream() {
     let mut view = NavigatorView::new(LocalNavigatorSnapshot {
         workstreams: vec![
             row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle),
@@ -585,10 +594,11 @@ fn row_mapping_covers_both_lines_of_each_workstream() {
     assert_eq!(view.row_from_y(0), None);
     assert_eq!(view.row_from_y(1), Some(0));
     assert_eq!(view.row_from_y(2), Some(0));
-    assert_eq!(view.row_from_y(3), Some(1));
+    assert_eq!(view.row_from_y(3), Some(0));
     assert_eq!(view.row_from_y(4), Some(1));
-    assert_eq!(view.row_from_y(5), None);
-    assert_eq!(view.row_from_y(6), None);
+    assert_eq!(view.row_from_y(5), Some(1));
+    assert_eq!(view.row_from_y(6), Some(1));
+    assert_eq!(view.row_from_y(7), None);
 }
 
 #[test]
@@ -783,7 +793,7 @@ fn renderer_shows_done_indicator_without_provider_content() {
 }
 
 #[test]
-fn recent_context_right_aligns_the_secondary_host_label() {
+fn recent_context_justifies_provider_against_host() {
     let snapshot = LocalNavigatorSnapshot {
         workstreams: vec![NavigatorWorkstream {
             project_label: "project".to_owned(),
@@ -811,20 +821,29 @@ fn recent_context_right_aligns_the_secondary_host_label() {
         .map(|span| span.content.as_ref())
         .collect::<String>();
     assert_eq!(line.width(), 30);
-    assert!(rendered.starts_with("   Codex · project"));
+    assert!(rendered.starts_with("   Codex"));
     assert!(rendered.ends_with("local"));
-    assert!(rendered.contains("Codex"));
+    assert!(!rendered.contains("project"));
+    assert_eq!(
+        line.spans
+            .iter()
+            .find(|span| span.content == "Codex")
+            .unwrap()
+            .style
+            .fg,
+        Some(provider_color(ProviderKind::Codex))
+    );
     assert!(
         line.spans
             .iter()
             .any(|span| span.style.fg == Some(Color::LightBlue))
     );
-    assert!(rendered.contains(" · "));
+    assert!(!rendered.contains(" · "));
     assert!(!rendered.contains('•'));
 }
 
 #[test]
-fn recent_context_preserves_a_project_prefix_when_a_host_is_long() {
+fn recent_context_preserves_provider_when_host_is_long() {
     let snapshot = LocalNavigatorSnapshot {
         workstreams: vec![NavigatorWorkstream {
             host: NavigatorHost::Remote {
@@ -856,10 +875,92 @@ fn recent_context_preserves_a_project_prefix_when_a_host_is_long() {
         .collect::<String>();
 
     assert_eq!(line.width(), 30);
-    assert!(rendered.starts_with("   Codex · "));
+    assert!(rendered.starts_with("   Codex"), "{rendered:?}");
     assert!(rendered.contains('…'));
-    assert!(rendered.contains("remote-term"));
-    assert!(rendered.ends_with('…'));
+    assert!(rendered.ends_with("remote-term…"), "{rendered:?}");
+    assert!(!rendered.contains("project"));
+}
+
+#[test]
+fn recent_card_renders_project_environment_and_thread_on_separate_rows() {
+    let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+        workstreams: vec![NavigatorWorkstream {
+            provider: ProviderKind::OpenCode,
+            project_label: "project-name".to_owned(),
+            display_name: "thread-name".to_owned(),
+            ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
+        }],
+        ..LocalNavigatorSnapshot::default()
+    });
+    let mut terminal = Terminal::new(TestBackend::new(32, 8)).unwrap();
+
+    terminal.draw(|frame| view.render(frame)).unwrap();
+
+    let rows = terminal
+        .backend()
+        .buffer()
+        .content()
+        .chunks(32)
+        .map(|cells| {
+            cells
+                .iter()
+                .map(ratatui::buffer::Cell::symbol)
+                .collect::<String>()
+        })
+        .collect::<Vec<_>>();
+    assert!(rows[1].contains("project-name"));
+    assert!(!rows[1].contains("OpenCode"));
+    assert!(rows[2].contains("OpenCode"));
+    assert!(rows[2].contains("local"));
+    assert!(!rows[2].contains("project-name"));
+    assert!(!rows[2].contains("thread-name"));
+    assert!(rows[3].contains("thread-n…"));
+    assert!(rows[3].contains("activity unknown"));
+}
+
+#[test]
+fn grouped_contexts_justify_the_requested_identity_axes_without_separators() {
+    let snapshot = LocalNavigatorSnapshot {
+        workstreams: vec![NavigatorWorkstream {
+            provider: ProviderKind::OpenCode,
+            project_label: "project".to_owned(),
+            ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Idle)
+        }],
+        ..LocalNavigatorSnapshot::default()
+    };
+    let row = &snapshot.workstreams[0];
+    let project_colors = visible_project_colors(&snapshot);
+
+    let by_project = workstream_context_line(
+        row,
+        WorkstreamRowContext::Project,
+        " └─ ",
+        &project_colors,
+        30,
+    );
+    let by_project_rendered = by_project
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(by_project.width(), 30);
+    assert!(by_project_rendered.starts_with(" └─ OpenCode"));
+    assert!(by_project_rendered.ends_with("local"));
+    assert!(!by_project_rendered.contains(" · "));
+    assert!(!by_project_rendered.contains('•'));
+
+    let by_host =
+        workstream_context_line(row, WorkstreamRowContext::Host, " └─ ", &project_colors, 30);
+    let by_host_rendered = by_host
+        .spans
+        .iter()
+        .map(|span| span.content.as_ref())
+        .collect::<String>();
+    assert_eq!(by_host.width(), 30);
+    assert!(by_host_rendered.starts_with(" └─ project"));
+    assert!(by_host_rendered.ends_with("OpenCode"));
+    assert!(!by_host_rendered.contains(" · "));
+    assert!(!by_host_rendered.contains('•'));
 }
 
 #[test]
@@ -881,6 +982,7 @@ fn every_workstream_context_keeps_open_code_visible_at_supported_narrow_width() 
 
     for (context, prefix) in [
         (WorkstreamRowContext::Recent, "   "),
+        (WorkstreamRowContext::Archived, "   "),
         (WorkstreamRowContext::Host, " └─ "),
         (WorkstreamRowContext::Project, " └─ "),
     ] {
@@ -901,7 +1003,17 @@ fn host_and_project_accents_use_separate_color_families() {
     assert_eq!(host_color("local"), HOST_LABEL_PALETTE[0]);
     for host_color in HOST_LABEL_PALETTE {
         assert!(!PROJECT_MARKER_PALETTE.contains(&host_color));
+        assert!(!PROVIDER_LABEL_PALETTE.contains(&host_color));
     }
+    for provider_color in PROVIDER_LABEL_PALETTE {
+        assert!(!PROJECT_MARKER_PALETTE.contains(&provider_color));
+    }
+    assert_ne!(provider_color(ProviderKind::Codex), Color::White);
+    assert_ne!(provider_color(ProviderKind::OpenCode), Color::White);
+    assert_ne!(
+        provider_color(ProviderKind::Codex),
+        provider_color(ProviderKind::OpenCode)
+    );
 }
 
 #[test]
@@ -930,6 +1042,7 @@ fn selected_row_background_never_masks_semantic_row_foregrounds() {
     assert!(!semantic_colors.contains(&SELECTED_ROW_BACKGROUND));
     assert!(!HOST_LABEL_PALETTE.contains(&SELECTED_ROW_BACKGROUND));
     assert!(!PROJECT_MARKER_PALETTE.contains(&SELECTED_ROW_BACKGROUND));
+    assert!(!PROVIDER_LABEL_PALETTE.contains(&SELECTED_ROW_BACKGROUND));
     assert_ne!(PROJECT_TREE_COLOR, Color::DarkGray);
     assert_ne!(PROJECT_ORIGIN_ICON_COLOR, Color::DarkGray);
     assert_ne!(PROJECT_ORIGIN_LABEL_COLOR, Color::DarkGray);
@@ -1366,7 +1479,7 @@ fn renderer_draws_a_navigator_only_shortcut_overlay() {
     .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
     .collect::<String>();
     assert!(full_help.contains("←/→"));
-    assert!(full_help.contains("cycle recent/project/host/archived"));
+    assert!(full_help.contains("cycle views"));
     assert!(!full_help.contains("recover an unresolved"));
     assert!(!full_help.contains("Mouse"));
     assert!(!full_help.contains("click a row to select"));
@@ -1918,8 +2031,8 @@ fn compact_management_controls_keep_related_actions_adjacent() {
     .into_iter()
     .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
     .collect::<String>();
-    assert!(host_help.contains("add, verify, and set up a remote SSH host"));
-    assert!(host_help.contains("disconnect or offboard the selected remote Host"));
+    assert!(host_help.contains("add/setup SSH host"));
+    assert!(host_help.contains("disconnect/offboard"));
 }
 
 #[test]
@@ -1952,7 +2065,7 @@ fn expanded_controls_preserve_terminal_key_memory() {
         .iter()
         .map(ratatui::buffer::Cell::symbol)
         .collect::<String>();
-    assert!(rendered_help.contains("archive (confirms a working Runtime)"));
+    assert!(rendered_help.contains("archive (may park)"));
 
     let archived_help = help_lines(
         NavigatorPage::Workstreams,
@@ -1963,7 +2076,7 @@ fn expanded_controls_preserve_terminal_key_memory() {
     .into_iter()
     .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
     .collect::<String>();
-    assert!(archived_help.contains("restore without starting the native provider"));
+    assert!(archived_help.contains("restore (no start)"));
     assert!(!archived_help.contains("new Workstream"));
     assert!(!archived_help.contains("focus native agent"));
 
@@ -1980,6 +2093,94 @@ fn expanded_controls_preserve_terminal_key_memory() {
             .count()
             <= 1
     }));
+    let rendered_expanded = expanded
+        .iter()
+        .flat_map(|line| line.spans.iter().map(|span| span.content.as_ref()))
+        .collect::<String>();
+    assert!(rendered_expanded.contains("↑/↓"));
+    assert!(rendered_expanded.contains("←/→"));
+    assert!(!rendered_expanded.contains("j/k"));
+    for line in &expanded {
+        let Some(shortcut) = line
+            .spans
+            .first()
+            .filter(|span| span.style.fg == Some(Color::Yellow))
+        else {
+            continue;
+        };
+        let padding = line.spans[1]
+            .content
+            .chars()
+            .take_while(|character| *character == ' ')
+            .count();
+        assert_eq!(
+            Line::raw(shortcut.content.as_ref()).width() + padding,
+            HELP_DESCRIPTION_COLUMN
+        );
+    }
+}
+
+#[test]
+fn expanded_help_descriptions_fit_every_default_width_surface() {
+    let surfaces = [
+        help_lines(
+            NavigatorPage::Workstreams,
+            false,
+            false,
+            NavigatorViewMode::Recent,
+        ),
+        help_lines(
+            NavigatorPage::Workstreams,
+            false,
+            false,
+            NavigatorViewMode::Archived,
+        ),
+        help_lines(
+            NavigatorPage::Projects,
+            false,
+            false,
+            NavigatorViewMode::Recent,
+        ),
+        help_lines(
+            NavigatorPage::Hosts,
+            false,
+            false,
+            NavigatorViewMode::Recent,
+        ),
+        help_lines(
+            NavigatorPage::Workstreams,
+            true,
+            false,
+            NavigatorViewMode::Recent,
+        ),
+        help_lines(
+            NavigatorPage::Workstreams,
+            true,
+            true,
+            NavigatorViewMode::Recent,
+        ),
+    ];
+
+    for lines in surfaces {
+        for line in lines {
+            let Some(shortcut) = line
+                .spans
+                .first()
+                .filter(|span| span.style.fg == Some(Color::Yellow))
+            else {
+                continue;
+            };
+            assert!(
+                line.width() <= HELP_CONTENT_WIDTH,
+                "help row exceeds {HELP_CONTENT_WIDTH} cells: {line:?}"
+            );
+            assert!(
+                Line::raw(line.spans[1].content.trim_start()).width() <= HELP_DESCRIPTION_WIDTH,
+                "help description exceeds {HELP_DESCRIPTION_WIDTH} cells: {line:?}"
+            );
+            assert!(Line::raw(shortcut.content.as_ref()).width() < HELP_DESCRIPTION_COLUMN);
+        }
+    }
 }
 
 #[test]
@@ -2083,6 +2284,7 @@ fn grouped_rows_render_explicit_two_line_tree_and_bound_title_width() {
     assert!(rendered.contains("├─"));
     assert!(rendered.contains("└─"));
     assert!(rendered.contains("│"));
+    assert!(!rendered.contains('•'));
 
     let spans = thread_line(
         &view.snapshot.workstreams[0],

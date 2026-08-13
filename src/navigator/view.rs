@@ -258,6 +258,7 @@ impl NavigatorViewMode {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(in crate::navigator) enum WorkstreamRowContext {
     Recent,
+    Archived,
     Host,
     Project,
 }
@@ -287,6 +288,10 @@ impl NavigatorListEntry {
     pub(in crate::navigator) const fn height(&self) -> u16 {
         match self {
             Self::HostHeader { .. } | Self::ProjectHeader { .. } => 1,
+            Self::Workstream {
+                context: WorkstreamRowContext::Recent,
+                ..
+            } => 3,
             Self::Workstream { .. } => 2,
         }
     }
@@ -1722,7 +1727,7 @@ impl NavigatorView {
                 .filter(|(_, row)| self.view_mode.includes(row))
                 .map(|(snapshot_index, _)| NavigatorListEntry::Workstream {
                     snapshot_index,
-                    context: WorkstreamRowContext::Recent,
+                    context: WorkstreamRowContext::Archived,
                     tree_branch: None,
                 })
                 .collect(),

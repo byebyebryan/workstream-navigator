@@ -14,6 +14,7 @@ const FALSE_PROGRAM: &str = "/usr/bin/false";
 const SLEEP_PROGRAM: &str = "/usr/bin/sleep";
 const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 const READINESS_POLL: Duration = Duration::from_millis(10);
+const DEFAULT_NAVIGATOR_PANE_WIDTH: u16 = 32;
 
 struct PrivateTmuxGuard {
     directory: PathBuf,
@@ -103,6 +104,41 @@ fn open_or_create_retires_a_live_session_with_a_dead_navigator_pane() {
     assert!(!session_exists(&paths.socket, &paths.session_name));
 }
 
+#[test]
+fn private_presentation_restores_navigator_width_when_the_window_resizes() {
+    if !tmux_available() {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+
+    let state_root = tempfile::tempdir().unwrap();
+    let presentation = Presentation::fresh(state_root.path()).unwrap();
+    let paths = presentation.paths().clone();
+    let _guard = PrivateTmuxGuard {
+        directory: paths.directory.clone(),
+        socket: paths.socket.clone(),
+    };
+    presentation.start().unwrap();
+
+    let mut resize = tmux_command(&paths.socket);
+    let status = resize
+        .args(["resize-window", "-t"])
+        .arg(format!("{}:0", paths.session_name))
+        .args(["-x", "150", "-y", "40"])
+        .status()
+        .unwrap();
+    assert!(status.success());
+
+    assert_eq!(
+        pane_width(&paths.socket, &paths.session_name, NAVIGATOR_PANE),
+        Some(DEFAULT_NAVIGATOR_PANE_WIDTH)
+    );
+    assert!(
+        pane_width(&paths.socket, &paths.session_name, PROVIDER_PANE)
+            .is_some_and(|width| width > DEFAULT_NAVIGATOR_PANE_WIDTH)
+    );
+}
+
 fn tmux_available() -> bool {
     Command::new("tmux")
         .arg("-V")
@@ -141,6 +177,24 @@ fn pane_dead(socket: &Path, session: &str, target: &str) -> Option<bool> {
         .output()
         .ok()?;
     parse_pane_dead(&output)
+}
+
+fn pane_width(socket: &Path, session: &str, target: &str) -> Option<u16> {
+    let mut command = tmux_command(socket);
+    let output = command
+        .args(["display-message", "-p", "-t"])
+        .arg(format!("{session}:{target}"))
+        .arg("#{pane_width}")
+        .output()
+        .ok()?;
+    if !output.status.success() || output.stdout.len() > 16 {
+        return None;
+    }
+    std::str::from_utf8(&output.stdout)
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 fn parse_pane_dead(output: &Output) -> Option<bool> {

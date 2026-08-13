@@ -500,32 +500,24 @@ pub(in crate::navigator) fn help_lines(
     let key = Style::default().fg(Color::Yellow);
     let mut lines = vec![
         Line::from(Span::styled("Navigation", heading)),
-        Line::from(vec![Span::styled("↑/↓ or j/k", key), Span::raw("  select")]),
-        Line::from(vec![
-            Span::styled(",", key),
-            Span::raw("          Projects page"),
-        ]),
-        Line::from(vec![
-            Span::styled(".", key),
-            Span::raw("          Hosts page"),
-        ]),
+        help_binding_line("↑/↓", "select", key),
+        help_binding_line(",", "Projects page", key),
+        help_binding_line(".", "Hosts page", key),
     ];
     if showing_detail {
         lines.extend([
             Line::raw(""),
             Line::from(Span::styled("Details", heading)),
-            Line::from(vec![
-                Span::styled("Enter", key),
-                Span::raw(if showing_recovery {
-                    "      reconcile selected operation"
+            help_binding_line(
+                "Enter",
+                if showing_recovery {
+                    "reconcile operation"
                 } else {
-                    "      return to the list"
-                }),
-            ]),
-            Line::from(vec![
-                Span::styled("Esc", key),
-                Span::raw("        return to the list"),
-            ]),
+                    "return to list"
+                },
+                key,
+            ),
+            help_binding_line("Esc", "return to list", key),
         ]);
     } else if page == NavigatorPage::Workstreams {
         lines.extend(workstream_help_lines(workstream_view, heading, key));
@@ -536,38 +528,37 @@ pub(in crate::navigator) fn help_lines(
         ];
         if page == NavigatorPage::Projects {
             page_lines.extend([
-                Line::from(vec![
-                    Span::styled("a", key),
-                    Span::raw("          browse and add a Project"),
-                ]),
-                Line::from(vec![
-                    Span::styled("x", key),
-                    Span::raw("          remove an archived Project from WSNav"),
-                ]),
+                help_binding_line("a", "browse/add Project", key),
+                help_binding_line("x", "forget archived", key),
             ]);
         } else if page == NavigatorPage::Hosts {
             page_lines.extend([
-                Line::from(vec![
-                    Span::styled("a", key),
-                    Span::raw("          add, verify, and set up a remote SSH host"),
-                ]),
-                Line::from(vec![
-                    Span::styled("s", key),
-                    Span::raw("          review the selected Host's Codex observer"),
-                ]),
-                Line::from(vec![
-                    Span::styled("r", key),
-                    Span::raw("          set the selected Host's Project browser root"),
-                ]),
-                Line::from(vec![
-                    Span::styled("x", key),
-                    Span::raw("          disconnect or offboard the selected remote Host"),
-                ]),
+                help_binding_line("a", "add/setup SSH host", key),
+                help_binding_line("s", "review Codex hooks", key),
+                help_binding_line("r", "set Project root", key),
+                help_binding_line("x", "disconnect/offboard", key),
             ]);
         }
         lines.extend(page_lines);
     }
     lines
+}
+
+pub(in crate::navigator) const HELP_DESCRIPTION_COLUMN: usize = 11;
+pub(in crate::navigator) const HELP_CONTENT_WIDTH: usize = 30;
+pub(in crate::navigator) const HELP_DESCRIPTION_WIDTH: usize =
+    HELP_CONTENT_WIDTH - HELP_DESCRIPTION_COLUMN;
+
+fn help_binding_line(shortcut: &str, description: &str, key: Style) -> Line<'static> {
+    debug_assert!(Line::raw(description).width() <= HELP_DESCRIPTION_WIDTH);
+    let shortcut_width = Line::raw(shortcut).width();
+    let padding = HELP_DESCRIPTION_COLUMN
+        .saturating_sub(shortcut_width)
+        .max(1);
+    Line::from(vec![
+        Span::styled(shortcut.to_owned(), key),
+        Span::raw(format!("{}{description}", " ".repeat(padding))),
+    ])
 }
 
 fn workstream_help_lines(
@@ -578,51 +569,21 @@ fn workstream_help_lines(
     let mut lines = vec![
         Line::raw(""),
         Line::from(Span::styled("Workstreams", heading)),
-        Line::from(vec![
-            Span::styled("←/→", key),
-            Span::raw("          cycle recent/project/host/archived"),
-        ]),
-        Line::from(vec![
-            Span::styled("Enter", key),
-            Span::raw("      open, start, or recover"),
-        ]),
-        Line::from(vec![
-            Span::styled("i", key),
-            Span::raw("          show bounded status"),
-        ]),
+        help_binding_line("←/→", "cycle views", key),
+        help_binding_line("Enter", "open/start/recover", key),
+        help_binding_line("i", "show bounded status", key),
     ];
     if view_mode.is_archived() {
-        lines.push(Line::from(vec![
-            Span::styled("u", key),
-            Span::raw("          restore without starting the native provider"),
-        ]));
+        lines.push(help_binding_line("u", "restore (no start)", key));
     } else {
-        lines.push(Line::from(vec![
-            Span::styled("Tab", key),
-            Span::raw("        focus native agent"),
-        ]));
+        lines.push(help_binding_line("Tab", "focus native agent", key));
         lines.extend([
-            Line::from(vec![
-                Span::styled("n", key),
-                Span::raw("          new Workstream"),
-            ]),
-            Line::from(vec![
-                Span::styled("f", key),
-                Span::raw("          fork at last settled turn"),
-            ]),
-            Line::from(vec![Span::styled("p", key), Span::raw("          park")]),
-            Line::from(vec![
-                Span::styled("r", key),
-                Span::raw("          rename canonical provider thread"),
-            ]),
-            Line::from(vec![
-                Span::styled("x", key),
-                Span::raw("          archive (confirms a working Runtime)"),
-            ]),
-            Line::from(vec![
-                Span::styled("a", key),
-                Span::raw("          acknowledge attention"),
-            ]),
+            help_binding_line("n", "new Workstream", key),
+            help_binding_line("f", "fork settled turn", key),
+            help_binding_line("p", "park", key),
+            help_binding_line("r", "rename thread", key),
+            help_binding_line("x", "archive (may park)", key),
+            help_binding_line("a", "ack attention", key),
         ]);
     }
     lines
@@ -655,6 +616,10 @@ pub(in crate::navigator) const PROJECT_ORIGIN_ICON_COLOR: Color = Color::Indexed
 pub(in crate::navigator) const PROJECT_ORIGIN_LABEL_COLOR: Color = Color::Indexed(250);
 pub(in crate::navigator) const PROJECT_ACTIVE_COLOR: Color = Color::Green;
 pub(in crate::navigator) const PROJECT_ARCHIVED_COLOR: Color = Color::Indexed(110);
+/// Provider identity uses its own warm/teal accents so it stays distinct from
+/// white Workstream titles, blue hosts, violet Projects, and lifecycle state.
+pub(in crate::navigator) const PROVIDER_LABEL_PALETTE: [Color; 2] =
+    [Color::Indexed(209), Color::Indexed(80)];
 
 pub(in crate::navigator) fn selected_row_style() -> Style {
     Style::default()
@@ -894,8 +859,6 @@ fn project_header_item(
 ) -> ListItem<'static> {
     ListItem::new(Line::from(vec![
         Span::raw("  "),
-        project_marker(project_id, project_colors),
-        Span::raw(" "),
         Span::styled(
             label.to_owned(),
             Style::default()
@@ -915,23 +878,41 @@ fn workstream_item(
     let (indicator, indicator_style) = status_indicator(row);
     let thread_style = Style::default().fg(Color::White);
     let (context_prefix, thread_prefix) = tree_prefix(tree_branch);
-    ListItem::new(vec![
-        workstream_context_line(
+    let mut lines = if context == WorkstreamRowContext::Recent {
+        vec![
+            recent_project_line(
+                context_prefix,
+                &row.project_label,
+                row.project_id,
+                project_colors,
+                available_width,
+            ),
+            workstream_context_line(
+                row,
+                context,
+                context_prefix,
+                project_colors,
+                available_width,
+            ),
+        ]
+    } else {
+        vec![workstream_context_line(
             row,
             context,
             context_prefix,
             project_colors,
             available_width,
-        ),
-        Line::from(thread_line(
-            row,
-            indicator,
-            indicator_style,
-            thread_style,
-            thread_prefix,
-            available_width,
-        )),
-    ])
+        )]
+    };
+    lines.push(Line::from(thread_line(
+        row,
+        indicator,
+        indicator_style,
+        thread_style,
+        thread_prefix,
+        available_width,
+    )));
+    ListItem::new(lines)
 }
 
 fn tree_prefix(tree_branch: Option<TreeBranch>) -> (&'static str, &'static str) {
@@ -950,7 +931,10 @@ pub(in crate::navigator) fn workstream_context_line(
     available_width: u16,
 ) -> Line<'static> {
     match context {
-        WorkstreamRowContext::Recent => recent_context_line(
+        WorkstreamRowContext::Recent => {
+            recent_context_line(prefix, row.host.alias(), row.provider, available_width)
+        }
+        WorkstreamRowContext::Archived => archived_context_line(
             prefix,
             &row.project_label,
             row.project_id,
@@ -961,48 +945,100 @@ pub(in crate::navigator) fn workstream_context_line(
         ),
         WorkstreamRowContext::Host => {
             let prefix_width = Line::raw(prefix).width();
-            let fixed_width = prefix_width
-                .saturating_add(2)
-                .saturating_add(provider_context_width(row.provider));
-            let project_budget = usize::from(available_width).saturating_sub(fixed_width);
+            let provider_width = provider_label_width(row.provider);
+            let project_budget = usize::from(available_width)
+                .saturating_sub(prefix_width)
+                .saturating_sub(provider_width)
+                .saturating_sub(1);
             let project = truncate_display_width(&row.project_label, project_budget);
-            let mut line = vec![Span::raw(prefix.to_owned())];
-            line.extend(provider_context_spans(row.provider));
-            line.extend([
-                project_marker(row.project_id, project_colors),
-                Span::raw(" "),
-                Span::styled(
+            justified_context_line(
+                prefix,
+                vec![Span::styled(
                     project,
                     Style::default()
                         .fg(project_accent(row.project_id, project_colors))
                         .add_modifier(Modifier::BOLD),
-                ),
-            ]);
-            Line::from(line)
+                )],
+                vec![provider_context_span(row.provider)],
+                available_width,
+            )
         }
         WorkstreamRowContext::Project => {
+            let prefix_width = Line::raw(prefix).width();
+            let provider_width = provider_label_width(row.provider);
             let host_budget = usize::from(available_width)
-                .saturating_sub(Line::raw(prefix).width())
-                .saturating_sub(provider_context_width(row.provider));
+                .saturating_sub(prefix_width)
+                .saturating_sub(provider_width)
+                .saturating_sub(1);
             let host = truncate_display_width(row.host.alias(), host_budget);
-            let mut line = vec![Span::raw(prefix.to_owned())];
-            line.extend(provider_context_spans(row.provider));
-            line.push(Span::styled(
-                host,
-                Style::default()
-                    .fg(host_color(row.host.alias()))
-                    .add_modifier(Modifier::BOLD),
-            ));
-            Line::from(line)
+            justified_context_line(
+                prefix,
+                vec![provider_context_span(row.provider)],
+                vec![Span::styled(
+                    host,
+                    Style::default()
+                        .fg(host_color(row.host.alias()))
+                        .add_modifier(Modifier::BOLD),
+                )],
+                available_width,
+            )
         }
     }
 }
 
-/// A Recent row reserves its fixed provider segment first. Within the remaining
-/// width it remains intentionally project-first: the host is useful location
-/// evidence, but secondary to finding the right workstream, so it occupies a
-/// bounded right-aligned column rather than competing with the Project name.
+/// A Recent card gives environment identity a quiet line of its own, with the
+/// provider and host anchored at opposite scanning edges.
 fn recent_context_line(
+    prefix: &str,
+    host_alias: &str,
+    provider: ProviderKind,
+    available_width: u16,
+) -> Line<'static> {
+    const MAX_HOST_WIDTH: usize = 12;
+
+    let prefix_width = Line::raw(prefix).width();
+    let content_width = usize::from(available_width).saturating_sub(prefix_width);
+    let provider_width = provider_label_width(provider);
+    let host_budget = content_width
+        .saturating_sub(provider_width)
+        .saturating_sub(1)
+        .min(MAX_HOST_WIDTH);
+    let host = truncate_display_width(host_alias, host_budget);
+    justified_context_line(
+        prefix,
+        vec![provider_context_span(provider)],
+        vec![Span::styled(
+            host,
+            Style::default()
+                .fg(host_color(host_alias))
+                .add_modifier(Modifier::BOLD),
+        )],
+        available_width,
+    )
+}
+
+fn recent_project_line(
+    prefix: &str,
+    project_label: &str,
+    project_id: ProjectId,
+    project_colors: &BTreeMap<ProjectId, Color>,
+    available_width: u16,
+) -> Line<'static> {
+    let project_budget = usize::from(available_width).saturating_sub(Line::raw(prefix).width());
+    Line::from(vec![
+        Span::raw(prefix.to_owned()),
+        Span::styled(
+            truncate_display_width(project_label, project_budget),
+            Style::default()
+                .fg(project_accent(project_id, project_colors))
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])
+}
+
+/// Archived remains a compact two-row restore surface even though it shares
+/// Recent's flat ordering and identity axes.
+fn archived_context_line(
     prefix: &str,
     project_label: &str,
     project_id: ProjectId,
@@ -1015,61 +1051,83 @@ fn recent_context_line(
     const MAX_HOST_WIDTH: usize = 12;
 
     let prefix_width = Line::raw(prefix).width();
-    let content_width = usize::from(available_width)
-        .saturating_sub(prefix_width)
-        .saturating_sub(provider_context_width(provider));
+    let content_width = usize::from(available_width).saturating_sub(prefix_width);
+    let provider_width = provider_label_width(provider);
     let host_budget = content_width
-        .saturating_sub(MIN_PROJECT_WIDTH.saturating_add(1))
+        .saturating_sub(provider_width)
+        .saturating_sub(3)
+        .saturating_sub(MIN_PROJECT_WIDTH)
+        .saturating_sub(1)
         .min(MAX_HOST_WIDTH);
     let host = truncate_display_width(host_alias, host_budget);
     let host_width = Line::raw(&host).width();
     let project_budget = content_width
-        .saturating_sub(host_width.saturating_add(1))
+        .saturating_sub(provider_width)
+        .saturating_sub(3)
+        .saturating_sub(host_width)
+        .saturating_sub(1)
         .max(MIN_PROJECT_WIDTH);
     let project = truncate_display_width(project_label, project_budget);
-    let used_width = prefix_width + Line::raw(&project).width() + host_width;
-    let padding = usize::from(available_width)
-        .saturating_sub(used_width + provider_context_width(provider))
-        .max(1);
-    let mut line = vec![Span::raw(prefix.to_owned())];
-    line.extend(provider_context_spans(provider));
-    line.extend([
-        Span::styled(
+    justified_context_line(
+        prefix,
+        vec![Span::styled(
             project,
             Style::default()
                 .fg(project_accent(project_id, project_colors))
                 .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" ".repeat(padding)),
-        Span::styled(
-            host,
-            Style::default()
-                .fg(host_color(host_alias))
-                .add_modifier(Modifier::BOLD),
-        ),
-    ]);
-    Line::from(line)
-}
-
-fn provider_context_width(provider: ProviderKind) -> usize {
-    3 + provider_label(provider).chars().count()
-}
-
-fn provider_context_spans(provider: ProviderKind) -> Vec<Span<'static>> {
-    vec![
-        Span::styled(provider_label(provider), Style::default().fg(Color::Gray)),
-        Span::styled(" · ", Style::default().fg(PROJECT_TREE_COLOR)),
-    ]
-}
-
-fn project_marker(
-    project_id: ProjectId,
-    project_colors: &BTreeMap<ProjectId, Color>,
-) -> Span<'static> {
-    Span::styled(
-        "•",
-        Style::default().fg(project_accent(project_id, project_colors)),
+        )],
+        vec![
+            provider_context_span(provider),
+            Span::styled(" · ", Style::default().fg(PROJECT_TREE_COLOR)),
+            Span::styled(
+                host,
+                Style::default()
+                    .fg(host_color(host_alias))
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ],
+        available_width,
     )
+}
+
+fn justified_context_line(
+    prefix: &str,
+    left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+    available_width: u16,
+) -> Line<'static> {
+    let used_width = Line::raw(prefix).width()
+        + Line::from(left.clone()).width()
+        + Line::from(right.clone()).width();
+    let padding = usize::from(available_width)
+        .saturating_sub(used_width)
+        .max(1);
+    let mut spans = Vec::with_capacity(2 + left.len() + right.len());
+    spans.push(Span::raw(prefix.to_owned()));
+    spans.extend(left);
+    spans.push(Span::raw(" ".repeat(padding)));
+    spans.extend(right);
+    Line::from(spans)
+}
+
+fn provider_label_width(provider: ProviderKind) -> usize {
+    Line::raw(provider_label(provider)).width()
+}
+
+fn provider_context_span(provider: ProviderKind) -> Span<'static> {
+    Span::styled(
+        provider_label(provider),
+        Style::default()
+            .fg(provider_color(provider))
+            .add_modifier(Modifier::BOLD),
+    )
+}
+
+pub(in crate::navigator) const fn provider_color(provider: ProviderKind) -> Color {
+    match provider {
+        ProviderKind::Codex => PROVIDER_LABEL_PALETTE[0],
+        ProviderKind::OpenCode => PROVIDER_LABEL_PALETTE[1],
+    }
 }
 
 fn project_accent(project_id: ProjectId, project_colors: &BTreeMap<ProjectId, Color>) -> Color {

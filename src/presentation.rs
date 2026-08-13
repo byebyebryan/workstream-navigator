@@ -22,6 +22,7 @@ const PRESENTATION_PREFIX: &str = "wsnav-presentation-";
 const NAVIGATOR_WINDOW: &str = "navigator";
 const NAVIGATOR_PANE: &str = "0.0";
 const PROVIDER_PANE: &str = "0.1";
+const NAVIGATOR_WIDTH_HOOKS: [&str; 2] = ["client-attached", "window-resized"];
 /// The normal narrow navigator width, including its outside borders.
 const DEFAULT_NAVIGATOR_PANE_WIDTH: u16 = 32;
 const PREFERRED_PROVIDER_PANE_WIDTH: u16 = 96;
@@ -234,7 +235,10 @@ impl Presentation {
             let _ = self.close();
             return Err(error);
         }
-        if let Err(error) = self.set_default_navigator_width() {
+        if let Err(error) = self
+            .set_default_navigator_width()
+            .and_then(|()| self.install_navigator_width_hooks())
+        {
             let _ = self.close();
             return Err(error);
         }
@@ -736,6 +740,31 @@ impl Presentation {
         ]
     }
 
+    /// Keeps the compact split invariant at the private tmux event boundary.
+    /// A detached server starts at its configured default size; when the first
+    /// real client attaches, tmux otherwise expands both panes proportionally
+    /// before the Navigator can receive a terminal resize event.
+    fn install_navigator_width_hooks(&self) -> Result<(), PresentationError> {
+        for hook in NAVIGATOR_WIDTH_HOOKS {
+            self.invoke(None, self.navigator_width_hook_arguments(hook))?;
+        }
+        Ok(())
+    }
+
+    fn navigator_width_hook_arguments(&self, hook: &str) -> Vec<OsString> {
+        vec![
+            "set-hook".into(),
+            "-t".into(),
+            self.paths.session_name.clone().into(),
+            hook.into(),
+            format!(
+                "resize-pane -t {}:{NAVIGATOR_PANE} -x {DEFAULT_NAVIGATOR_PANE_WIDTH}",
+                self.paths.session_name
+            )
+            .into(),
+        ]
+    }
+
     fn invoke(
         &self,
         config: Option<&Path>,
@@ -940,6 +969,36 @@ mod tests {
         assert_eq!(arguments[1], "-t");
         assert_eq!(arguments[3], "-x");
         assert_eq!(arguments[4], "32");
+    }
+
+    #[test]
+    fn navigator_width_hooks_target_only_the_exact_private_pane() {
+        let temporary = tempfile::tempdir().unwrap();
+        let presentation = Presentation {
+            paths: PresentationPaths::fresh(temporary.path()),
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        let exact_target = format!("{}:{NAVIGATOR_PANE}", presentation.paths.session_name);
+
+        for hook in NAVIGATOR_WIDTH_HOOKS {
+            let arguments = presentation.navigator_width_hook_arguments(hook);
+            assert_eq!(arguments[0], "set-hook");
+            assert_eq!(arguments[1], "-t");
+            assert_eq!(
+                arguments[2],
+                OsString::from(&presentation.paths.session_name)
+            );
+            assert_eq!(arguments[3], hook);
+            assert_eq!(
+                arguments[4],
+                OsString::from(format!(
+                    "resize-pane -t {exact_target} -x {DEFAULT_NAVIGATOR_PANE_WIDTH}"
+                ))
+            );
+            assert!(arguments.iter().all(|argument| argument != "run-shell"));
+            assert!(arguments.iter().all(|argument| argument != PROVIDER_PANE));
+        }
     }
 
     #[test]

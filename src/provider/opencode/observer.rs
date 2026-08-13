@@ -24,6 +24,7 @@ use super::{
 };
 
 const HEALTH_DEADLINE: Duration = Duration::from_secs(15);
+const SUPERVISION_INTERVAL: Duration = Duration::from_millis(500);
 const STATUS_POLL_INTERVAL: Duration = Duration::from_millis(500);
 const STATUS_FAILURE_LIMIT: u8 = 4;
 const RECONNECT_LIMIT: u8 = 4;
@@ -188,6 +189,7 @@ fn supervise(
     let mut reconnect_failures = 0_u8;
     let mut candidate_message_id = None;
     let mut last_status_poll = Instant::now();
+    let mut last_supervision = Instant::now();
     let mut status_failures = 0_u8;
     loop {
         let Some(current) = registry.runtime_by_id(context.runtime_id)? else {
@@ -196,17 +198,29 @@ fn supervise(
         if current.tmux_generation != context.generation
             || current.provider_pid != Some(context.pane_pid)
             || current.process_birth.as_deref() != Some(context.provider_birth.as_str())
-            || !client
-                .health()
-                .is_ok_and(|health| health.version == supervision.provider_version)
-            || !endpoint_owned_by_process(
-                client.endpoint(),
-                context.pane_pid,
-                supervision.pane_birth,
-            )
         {
             mark_unknown(registry, context);
             return Ok(());
+        }
+
+        // The event stream can deliver many updates per second. Health and
+        // endpoint ownership remain fail-closed supervision evidence, but do
+        // not need to contend with every provider event. Initial readiness
+        // checks above already proved both before this loop became live.
+        if supervision_due(last_supervision, Instant::now()) {
+            if !client
+                .health()
+                .is_ok_and(|health| health.version == supervision.provider_version)
+                || !endpoint_owned_by_process(
+                    client.endpoint(),
+                    context.pane_pid,
+                    supervision.pane_birth,
+                )
+            {
+                mark_unknown(registry, context);
+                return Ok(());
+            }
+            last_supervision = Instant::now();
         }
 
         // Polling is corroboration, never a source of a message ID. It also
@@ -350,6 +364,10 @@ fn poll_root_status(
     Ok(*status_failures < STATUS_FAILURE_LIMIT)
 }
 
+fn supervision_due(last_supervision: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(last_supervision) >= SUPERVISION_INTERVAL
+}
+
 struct ObserverEvidence<'a> {
     context: &'a OpenCodeObserverContext,
     observer_pid: u32,
@@ -366,7 +384,22 @@ fn apply_event(
     record_candidate(candidate_message_id, event);
     match &event.hint {
         Some(LifecycleHint::Working) => {
-            apply_hint(registry, evidence, LifecycleHint::Working)?;
+            // An incomplete message update may trail the provider's completed
+            // assistant update and idle transition. SSE is evidence, not
+            // mutation authority: require the exact root session to still be
+            // busy before moving an idle/attention Runtime back to working.
+            // The regular status poll remains the bounded fallback if the
+            // event arrives before the status map changes.
+            let runtime_status = registry
+                .runtime_by_id(evidence.context.runtime_id)?
+                .map(|runtime| runtime.status);
+            if should_apply_working_event(runtime_status, || {
+                client
+                    .session_status_with_root(&evidence.context.session, &evidence.context.cwd)
+                    .ok()
+            }) {
+                apply_hint(registry, evidence, LifecycleHint::Working)?;
+            }
         }
         Some(LifecycleHint::Settled { .. }) if candidate_message_id.is_some() => {
             settle_if_idle(registry, evidence, candidate_message_id, client)?;
@@ -379,6 +412,16 @@ fn apply_event(
         Some(LifecycleHint::Settled { .. }) | None => {}
     }
     Ok(true)
+}
+
+fn should_apply_working_event(
+    runtime_status: Option<RuntimeStatus>,
+    exact_status: impl FnOnce() -> Option<OpenCodeSessionStatus>,
+) -> bool {
+    match runtime_status {
+        Some(RuntimeStatus::Working) | None => false,
+        Some(_) => exact_status().is_some_and(|status| status == OpenCodeSessionStatus::Busy),
+    }
 }
 
 fn record_candidate(candidate_message_id: &mut Option<String>, event: &OpenCodeEvent) {
@@ -528,5 +571,55 @@ mod tests {
             },
         );
         assert_eq!(candidate.as_deref(), Some("message-1"));
+    }
+
+    #[test]
+    fn working_event_status_corroboration_is_lazy_and_exact() {
+        let calls = std::cell::Cell::new(0);
+        assert!(!should_apply_working_event(
+            Some(RuntimeStatus::Working),
+            || {
+                calls.set(calls.get() + 1);
+                Some(OpenCodeSessionStatus::Busy)
+            }
+        ));
+        assert_eq!(calls.get(), 0);
+        assert!(!should_apply_working_event(None, || {
+            calls.set(calls.get() + 1);
+            Some(OpenCodeSessionStatus::Busy)
+        }));
+        assert_eq!(calls.get(), 0);
+
+        assert!(should_apply_working_event(
+            Some(RuntimeStatus::Attention),
+            || {
+                calls.set(calls.get() + 1);
+                Some(OpenCodeSessionStatus::Busy)
+            }
+        ));
+        assert_eq!(calls.get(), 1);
+        assert!(!should_apply_working_event(
+            Some(RuntimeStatus::Attention),
+            || {
+                calls.set(calls.get() + 1);
+                Some(OpenCodeSessionStatus::Idle)
+            }
+        ));
+        assert_eq!(calls.get(), 2);
+        assert!(!should_apply_working_event(
+            Some(RuntimeStatus::Attention),
+            || {
+                calls.set(calls.get() + 1);
+                Some(OpenCodeSessionStatus::Unknown)
+            }
+        ));
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn supervision_is_cadence_gated() {
+        let start = Instant::now();
+        assert!(!supervision_due(start, start + Duration::from_millis(499)));
+        assert!(supervision_due(start, start + SUPERVISION_INTERVAL));
     }
 }

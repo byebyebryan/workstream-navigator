@@ -1642,6 +1642,9 @@ fn opencode_observer_lifecycle_is_revision_guarded_and_bounded() {
     let next = registry
         .apply_opencode_lifecycle_observation(runtime.runtime_id, &working)
         .unwrap();
+    let working_activity = registry.workstream_overviews().unwrap()[0]
+        .last_activity_at_millis
+        .expect("first working observation establishes wall-clock activity");
     let uncorroborated = OpenCodeLifecycleObservation {
         runtime_revision: next,
         hint: LifecycleHint::Settled { message_id: None },
@@ -1670,6 +1673,7 @@ fn opencode_observer_lifecycle_is_revision_guarded_and_bounded() {
         .apply_opencode_lifecycle_observation(runtime.runtime_id, &settled)
         .unwrap();
     let overview = registry.workstream_overviews().unwrap().remove(0);
+    assert!(overview.last_activity_at_millis.unwrap() >= working_activity);
     assert_eq!(
         overview.binding.unwrap().last_settled_turn_id.as_deref(),
         Some("completed-message")

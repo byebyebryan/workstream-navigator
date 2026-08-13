@@ -4,8 +4,8 @@ use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
 use crate::domain::{
-    ProviderKind, ProviderSessionId, Revision, RuntimeId, RuntimeStatus, WorkstreamId,
-    WorkstreamLifecycle,
+    Clock, ProviderKind, ProviderSessionId, Revision, RuntimeId, RuntimeStatus, SystemClock,
+    WorkstreamId, WorkstreamLifecycle,
 };
 
 use super::attention::ensure_recovery_attention_in_transaction;
@@ -832,6 +832,17 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?;
         let (lifecycle, workstream_id) =
             validate_opencode_observation(&transaction, runtime_id, observation)?;
+        let activity_at_millis = match &observation.hint {
+            crate::provider::lifecycle::LifecycleHint::Working if lifecycle != "working" => {
+                Some(SystemClock.now_millis()?)
+            }
+            crate::provider::lifecycle::LifecycleHint::Settled { .. } => {
+                Some(SystemClock.now_millis()?)
+            }
+            crate::provider::lifecycle::LifecycleHint::Started
+            | crate::provider::lifecycle::LifecycleHint::Working
+            | crate::provider::lifecycle::LifecycleHint::Ended => None,
+        };
         apply_opencode_lifecycle_transition(
             &transaction,
             runtime_id,
@@ -840,7 +851,7 @@ impl HostRegistry {
             workstream_id,
             observation,
         )?;
-        touch_workstream(&transaction, &workstream_id.to_string(), None)?;
+        touch_workstream(&transaction, &workstream_id.to_string(), activity_at_millis)?;
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(observation.runtime_revision.next())
     }

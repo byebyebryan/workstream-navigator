@@ -20,11 +20,11 @@ use super::model::{
     operation_phase_label, provider_label,
 };
 use super::render::{
-    ATTACHMENT_READY_MESSAGE_DURATION, COMPACT_HINT_LEFT_INSET, STATUS_BOX_HEIGHT,
-    WORKING_SPINNER_FRAMES, binding_line, help_lines, host_overview_height, host_overview_item,
-    navigator_list_item, navigator_modal_area, navigator_modal_content,
-    project_browser_entry_indexes, project_browser_scroll_to_selected, project_overview_height,
-    project_overview_item, selected_row_style, visible_project_colors,
+    ATTACHMENT_READY_MESSAGE_DURATION, COMPACT_HINT_LEFT_INSET, STATUS_BOX_HEIGHT, binding_line,
+    help_lines, host_overview_height, host_overview_item, navigator_list_item,
+    navigator_modal_area, navigator_modal_content, project_browser_entry_indexes,
+    project_browser_scroll_to_selected, project_overview_height, project_overview_item,
+    selected_row_style, visible_project_colors,
 };
 use super::snapshot::bounded_display;
 
@@ -48,7 +48,6 @@ pub struct NavigatorView {
     pub(in crate::navigator) mouse_click: Option<MouseClickIntent>,
     pub(in crate::navigator) message: Option<String>,
     pub(in crate::navigator) transient_message: Option<(String, Instant)>,
-    pub(in crate::navigator) spinner_frame: usize,
     pub(in crate::navigator) help_visible: bool,
     pub(in crate::navigator) help_scroll: u16,
     pub(in crate::navigator) modal: Option<NavigatorModal>,
@@ -321,7 +320,6 @@ impl NavigatorView {
             mouse_click: None,
             message: None,
             transient_message: None,
-            spinner_frame: 0,
             help_visible: false,
             help_scroll: 0,
             modal: None,
@@ -1369,26 +1367,6 @@ impl NavigatorView {
         self.view_mode
     }
 
-    /// Advances the active-work indicator only while it is visible in the
-    /// Workstreams list. This is deliberately presentation-only: it must not
-    /// refresh Runtime or presentation-tmux state.
-    pub(in crate::navigator) fn advance_working_indicator(&mut self) -> bool {
-        let visible = self.page == NavigatorPage::Workstreams
-            && self.detail.is_none()
-            && !self.help_visible
-            && self.modal.is_none()
-            && self.list_entries().into_iter().any(|entry| {
-                entry.workstream_index().is_some_and(|index| {
-                    let row = &self.snapshot.workstreams[index];
-                    row.host.is_reachable() && row.runtime_status == NavigatorRuntimeStatus::Working
-                })
-            });
-        if visible {
-            self.spinner_frame = (self.spinner_frame + 1) % WORKING_SPINNER_FRAMES.len();
-        }
-        visible
-    }
-
     pub fn render(&mut self, frame: &mut Frame<'_>) {
         let status = self.footer_status();
         let status_height = if status.is_empty() {
@@ -1475,7 +1453,6 @@ impl NavigatorView {
     fn render_workstreams(&mut self, frame: &mut Frame<'_>, area: Rect) {
         let entries = self.list_entries();
         let project_colors = visible_project_colors(&self.snapshot);
-        let spinner_frame = self.spinner_frame;
         let items = entries
             .iter()
             .map(|entry| {
@@ -1484,7 +1461,6 @@ impl NavigatorView {
                     &self.snapshot,
                     &project_colors,
                     area.width.saturating_sub(2),
-                    spinner_frame,
                 )
             })
             .collect::<Vec<_>>();

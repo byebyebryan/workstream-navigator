@@ -629,12 +629,6 @@ fn workstream_help_lines(
 }
 
 pub(in crate::navigator) const ATTACHMENT_READY_MESSAGE_DURATION: Duration = Duration::from_secs(3);
-/// A 10 FPS A/B-test cadence: this is a local navigator redraw, never a tmux
-/// control-plane probe.
-pub(in crate::navigator) const WORKING_SPINNER_FRAME_INTERVAL: Duration =
-    Duration::from_millis(100);
-pub(in crate::navigator) const WORKING_SPINNER_FRAMES: [&str; 10] =
-    ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 pub(in crate::navigator) const COMPACT_HINT_LEFT_INSET: usize = 1;
 /// A bordered status frame with at most three wrapped content lines.
 pub(in crate::navigator) const STATUS_BOX_HEIGHT: u16 = 5;
@@ -673,7 +667,6 @@ pub(in crate::navigator) fn navigator_list_item(
     snapshot: &LocalNavigatorSnapshot,
     project_colors: &BTreeMap<ProjectId, Color>,
     available_width: u16,
-    spinner_frame: usize,
 ) -> ListItem<'static> {
     match entry {
         NavigatorListEntry::HostHeader { alias } => host_header_item(alias),
@@ -690,7 +683,6 @@ pub(in crate::navigator) fn navigator_list_item(
             *tree_branch,
             project_colors,
             available_width,
-            spinner_frame,
         ),
     }
 }
@@ -919,9 +911,8 @@ fn workstream_item(
     tree_branch: Option<TreeBranch>,
     project_colors: &BTreeMap<ProjectId, Color>,
     available_width: u16,
-    spinner_frame: usize,
 ) -> ListItem<'static> {
-    let (indicator, indicator_style) = status_indicator(row, spinner_frame);
+    let (indicator, indicator_style) = status_indicator(row);
     let thread_style = Style::default().fg(Color::White);
     let (context_prefix, thread_prefix) = tree_prefix(tree_branch);
     ListItem::new(vec![
@@ -1289,19 +1280,13 @@ pub(in crate::navigator) fn activity_age_color(
 /// Returns a compact user-facing state from bounded lifecycle and attention
 /// metadata. Ordinary idle is deliberately unmarked; active and completed
 /// work stand out without consuming thread-title space.
-pub(in crate::navigator) fn status_indicator(
-    row: &NavigatorWorkstream,
-    spinner_frame: usize,
-) -> (&'static str, Style) {
+pub(in crate::navigator) fn status_indicator(row: &NavigatorWorkstream) -> (&'static str, Style) {
     if !row.host.is_reachable() {
         return ("?", Style::default().fg(Color::Red));
     }
     match row.runtime_status {
         NavigatorRuntimeStatus::RecoveryRequired => ("!", Style::default().fg(Color::Red)),
-        NavigatorRuntimeStatus::Working => (
-            WORKING_SPINNER_FRAMES[spinner_frame % WORKING_SPINNER_FRAMES.len()],
-            Style::default().fg(Color::Yellow),
-        ),
+        NavigatorRuntimeStatus::Working => ("●", Style::default().fg(Color::Yellow)),
         NavigatorRuntimeStatus::Unknown => ("?", Style::default().fg(Color::Red)),
         NavigatorRuntimeStatus::Parked => ("p", Style::default().fg(PARKED_INDICATOR_COLOR)),
         NavigatorRuntimeStatus::Starting => ("…", Style::default().fg(Color::Cyan)),

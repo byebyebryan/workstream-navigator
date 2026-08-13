@@ -19,6 +19,40 @@ pub mod lifecycle;
 pub mod names;
 pub mod opencode;
 
+/// Static executable evidence collected once for a navigator process.
+///
+/// This cache deliberately contains only installation/probe results. Dynamic
+/// integration and observer readiness remains read from the registry whenever
+/// capabilities are assembled, and action boundaries continue to use a fresh
+/// [`discover_capabilities`] probe.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct InstallationProbeCache {
+    codex_available: bool,
+    tmux_available: bool,
+    opencode: opencode::InstallationProbe,
+}
+
+impl InstallationProbeCache {
+    /// Collects bounded executable evidence for one navigator process.
+    #[must_use]
+    pub fn probe() -> Self {
+        Self::probe_with(command_available, opencode::probe_installation())
+    }
+
+    /// Deterministic seam for tests and isolated callers.
+    #[must_use]
+    pub fn probe_with(
+        command_available: impl Fn(&str) -> bool,
+        opencode: opencode::InstallationProbe,
+    ) -> Self {
+        Self {
+            codex_available: command_available("codex"),
+            tmux_available: command_available("tmux"),
+            opencode,
+        }
+    }
+}
+
 /// Dynamically observed provider readiness evidence. This is intentionally
 /// read-only and bounded; it never carries process output, paths, prompts, or
 /// provider payloads.
@@ -30,6 +64,27 @@ pub fn discover_capabilities(
     registry: &HostRegistry,
 ) -> Result<Vec<ProviderCapability>, StateError> {
     discover_capabilities_with_probe(registry, command_available, opencode::probe_installation())
+}
+
+/// Reassembles capabilities from cached static installation evidence and
+/// freshly observed registry integration state.
+///
+/// # Errors
+///
+/// Returns an error when the host registry cannot read Codex observer state.
+pub fn discover_capabilities_with_installation_cache(
+    registry: &HostRegistry,
+    cache: InstallationProbeCache,
+) -> Result<Vec<ProviderCapability>, StateError> {
+    discover_capabilities_with_probe(
+        registry,
+        |program| match program {
+            "codex" => cache.codex_available,
+            "tmux" => cache.tmux_available,
+            _ => false,
+        },
+        cache.opencode,
+    )
 }
 
 /// Capability discovery with an injected `OpenCode` installation outcome. The
@@ -460,7 +515,7 @@ pub(crate) fn command_available(program: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{cell::Cell, path::PathBuf};
 
     use super::*;
 
@@ -785,5 +840,51 @@ mod tests {
             ProviderCapabilityStatus::Unavailable
         );
         assert!(!capabilities[1].fresh_launch);
+    }
+
+    #[test]
+    fn cached_installation_evidence_is_reused_while_registry_readiness_refreshes() {
+        let (_temporary, mut registry) = registry();
+        let codex_calls = Cell::new(0);
+        let tmux_calls = Cell::new(0);
+        let cache = InstallationProbeCache::probe_with(
+            |program| match program {
+                "codex" => {
+                    codex_calls.set(codex_calls.get() + 1);
+                    true
+                }
+                "tmux" => {
+                    tmux_calls.set(tmux_calls.get() + 1);
+                    true
+                }
+                _ => false,
+            },
+            opencode::InstallationProbe::Available,
+        );
+
+        let initial = discover_capabilities_with_installation_cache(&registry, cache).unwrap();
+        assert_eq!(codex_calls.get(), 1);
+        assert_eq!(tmux_calls.get(), 1);
+        assert_eq!(
+            initial[0].reason,
+            ProviderCapabilityReason::ObserverNotReady
+        );
+
+        let ready = crate::provider::codex::profile::ProfileOwnership {
+            canonical_path: PathBuf::from("/tmp/wsnav-observer.json"),
+            owner_id: "owner".to_owned(),
+            profile_schema_version: 2,
+            hook_executable: PathBuf::from("/tmp/wsnav"),
+            content_hash: "hash".to_owned(),
+        };
+        registry
+            .record_codex_integration(ready, IntegrationLifecycle::Ready)
+            .unwrap();
+        let refreshed = discover_capabilities_with_installation_cache(&registry, cache).unwrap();
+
+        assert_eq!(codex_calls.get(), 1);
+        assert_eq!(tmux_calls.get(), 1);
+        assert_eq!(refreshed[0].status, ProviderCapabilityStatus::Available);
+        assert_eq!(refreshed[1].status, ProviderCapabilityStatus::Available);
     }
 }

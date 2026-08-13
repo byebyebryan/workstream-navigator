@@ -11,6 +11,7 @@ use crate::{
     build_info::BuildInfoError,
     domain::{AttentionState, HostId, ProjectId, Revision, RuntimeStatus, WorkstreamLifecycle},
     protocol::{ObserverStatus, ProviderCapability, SnapshotResponse},
+    provider::InstallationProbeCache,
     provider::names::{NameContext, resolve_name},
     state::{
         ClientCatalog, ClientHost, ClientHostTransport, ClientProjectLocation, HostIdentity,
@@ -40,11 +41,22 @@ use super::model::{
 /// Returns an error when the local registry cannot be opened or contains
 /// invalid persisted state.
 pub fn local_snapshot(root: &StateRoot) -> Result<LocalNavigatorSnapshot, NavigatorError> {
+    let installation_cache = InstallationProbeCache::probe();
+    local_snapshot_with_installation_cache(root, installation_cache)
+}
+
+pub(in crate::navigator) fn local_snapshot_with_installation_cache(
+    root: &StateRoot,
+    installation_cache: InstallationProbeCache,
+) -> Result<LocalNavigatorSnapshot, NavigatorError> {
     let mut registry = HostRegistry::open(root)?;
     crate::repository::refresh_pending_metadata(&mut registry)?;
     let host = registry.identity()?;
     let observer_status = observer_status(&registry)?;
-    let provider_capabilities = crate::provider::discover_capabilities(&registry)?;
+    let provider_capabilities = crate::provider::discover_capabilities_with_installation_cache(
+        &registry,
+        installation_cache,
+    )?;
     let mut catalog = ClientCatalog::open(root)?;
     let executable = std::env::current_exe().map_err(NavigatorError::CurrentExecutable)?;
     let workstreams = registry
@@ -332,6 +344,7 @@ pub(in crate::navigator) struct RemoteMonitor {
     pub(in crate::navigator) sender: Sender<RemotePollResult>,
     pub(in crate::navigator) receiver: Receiver<RemotePollResult>,
     pub(in crate::navigator) hosts: BTreeMap<String, CachedRemoteHost>,
+    installation_cache: Option<InstallationProbeCache>,
 }
 
 pub(in crate::navigator) struct CachedRemoteHost {
@@ -365,7 +378,15 @@ impl RemoteMonitor {
             sender,
             receiver,
             hosts: BTreeMap::new(),
+            installation_cache: None,
         }
+    }
+
+    pub(in crate::navigator) fn set_installation_cache(
+        &mut self,
+        installation_cache: InstallationProbeCache,
+    ) {
+        self.installation_cache = Some(installation_cache);
     }
 
     pub(in crate::navigator) fn refresh(
@@ -647,7 +668,12 @@ pub(in crate::navigator) fn combined_snapshot(
     remote: &mut RemoteMonitor,
     selected_host: Option<&str>,
 ) -> Result<LocalNavigatorSnapshot, NavigatorError> {
-    let local = local_snapshot(root)?;
+    let local = match remote.installation_cache.as_ref() {
+        Some(installation_cache) => {
+            local_snapshot_with_installation_cache(root, *installation_cache)?
+        }
+        None => local_snapshot(root)?,
+    };
     let mut catalog = ClientCatalog::open(root)?;
     remote.refresh(&mut catalog, selected_host)?;
     Ok(remote.combine(local))

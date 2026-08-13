@@ -4,8 +4,9 @@ use ratatui::{
     style::{Color, Style},
 };
 use std::{
+    cell::Cell,
     cmp::Ordering,
-    path::Path,
+    path::{Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -723,7 +724,7 @@ fn activity_age_color_is_brightest_for_recent_work_and_dims_with_age() {
 #[test]
 fn parked_indicator_has_its_own_readable_state_color() {
     let row = row(WorkstreamId::new(), NavigatorRuntimeStatus::Parked);
-    let (indicator, style) = status_indicator(&row, 0);
+    let (indicator, style) = status_indicator(&row);
 
     assert_eq!(indicator, "p");
     assert_eq!(style.fg, Some(PARKED_INDICATOR_COLOR));
@@ -2107,37 +2108,24 @@ fn working_state_wins_over_a_prior_unacknowledged_result() {
         ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Working)
     };
 
-    assert_eq!(status_indicator(&row, 0).0, WORKING_SPINNER_FRAMES[0]);
+    assert_eq!(status_indicator(&row).0, "●");
 }
 
 #[test]
 fn acknowledged_attention_returns_to_an_empty_idle_indicator() {
     let row = row(WorkstreamId::new(), NavigatorRuntimeStatus::Attention);
 
-    assert_eq!(status_indicator(&row, 0).0, " ");
+    assert_eq!(status_indicator(&row).0, " ");
 }
 
 #[test]
-fn working_indicator_advances_only_while_visible() {
-    let snapshot = LocalNavigatorSnapshot {
-        workstreams: vec![row(WorkstreamId::new(), NavigatorRuntimeStatus::Working)],
-        ..LocalNavigatorSnapshot::default()
+fn working_indicator_is_static_and_wins_over_a_stale_result() {
+    let row = NavigatorWorkstream {
+        result_ready: true,
+        ..row(WorkstreamId::new(), NavigatorRuntimeStatus::Working)
     };
-    let mut view = NavigatorView::new(snapshot);
 
-    assert!(view.advance_working_indicator());
-    assert_eq!(view.spinner_frame, 1);
-    assert_eq!(
-        status_indicator(&view.snapshot.workstreams[0], view.spinner_frame).0,
-        WORKING_SPINNER_FRAMES[1]
-    );
-
-    view.detail = Some(NavigatorDetail::Workstream {
-        host_alias: "local".to_owned(),
-        workstream_id: view.snapshot.workstreams[0].workstream_id,
-    });
-    assert!(!view.advance_working_indicator());
-    assert_eq!(view.spinner_frame, 1);
+    assert_eq!(status_indicator(&row).0, "●");
 }
 
 #[test]
@@ -2208,6 +2196,61 @@ fn local_snapshot_caches_fresh_provider_capabilities() {
             .map(|capability| capability.kind)
             .collect::<Vec<_>>(),
         crate::protocol::KNOWN_PROVIDER_KINDS,
+    );
+}
+
+#[test]
+fn combined_snapshot_reuses_installation_evidence_and_refreshes_registry_readiness() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = StateRoot::create(temporary.path().join("state")).unwrap();
+    let codex_calls = Cell::new(0);
+    let tmux_calls = Cell::new(0);
+    let installation_cache = crate::provider::InstallationProbeCache::probe_with(
+        |program| match program {
+            "codex" => {
+                codex_calls.set(codex_calls.get() + 1);
+                true
+            }
+            "tmux" => {
+                tmux_calls.set(tmux_calls.get() + 1);
+                true
+            }
+            _ => false,
+        },
+        crate::provider::opencode::InstallationProbe::Available,
+    );
+    let mut remote = RemoteMonitor::new();
+    remote.set_installation_cache(installation_cache);
+
+    let first = combined_snapshot(&root, &mut remote, None).unwrap();
+    assert_eq!(codex_calls.get(), 1);
+    assert_eq!(tmux_calls.get(), 1);
+    assert_eq!(
+        first.hosts[0].provider_capabilities[0].reason,
+        crate::protocol::ProviderCapabilityReason::ObserverNotReady
+    );
+
+    let mut registry = HostRegistry::open(&root).unwrap();
+    registry
+        .record_codex_integration(
+            crate::provider::codex::profile::ProfileOwnership {
+                canonical_path: PathBuf::from("/tmp/wsnav-observer.json"),
+                owner_id: "owner".to_owned(),
+                profile_schema_version: 2,
+                hook_executable: PathBuf::from("/tmp/wsnav"),
+                content_hash: "hash".to_owned(),
+            },
+            crate::state::IntegrationLifecycle::Ready,
+        )
+        .unwrap();
+    drop(registry);
+
+    let refreshed = combined_snapshot(&root, &mut remote, None).unwrap();
+    assert_eq!(codex_calls.get(), 1);
+    assert_eq!(tmux_calls.get(), 1);
+    assert_eq!(
+        refreshed.hosts[0].provider_capabilities[0].status,
+        crate::protocol::ProviderCapabilityStatus::Available
     );
 }
 

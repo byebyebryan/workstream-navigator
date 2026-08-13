@@ -47,7 +47,7 @@ const MAX_HTTP_BODY_BYTES: usize = 128 * 1024;
 const MAX_EVENT_BYTES: usize = 64 * 1024;
 
 /// Read-only result of the fixed executable probe.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InstallationProbe {
     NotInstalled,
     Available,

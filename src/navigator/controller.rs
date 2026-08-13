@@ -36,7 +36,6 @@ use super::{
         LocalNavigatorSnapshot, NavigatorError, NavigatorHost, NavigatorOperation,
         NavigatorRuntimeStatus, NavigatorWorkstream, RemoteHostReachability,
     },
-    render::WORKING_SPINNER_FRAME_INTERVAL,
     snapshot::{MAX_NAVIGATOR_TEXT_INPUT_BYTES, RemoteMonitor, bounded_display, combined_snapshot},
     view::{
         MouseClickIntent, NavigatorDetail, NavigatorModal, NavigatorPage, NavigatorView,
@@ -60,12 +59,12 @@ pub fn run_local_navigator(
 ) -> Result<(), NavigatorError> {
     let presentation = Presentation::from_control(root.base(), socket, session_name)?;
     let mut remote = RemoteMonitor::new();
+    remote.set_installation_cache(crate::provider::InstallationProbeCache::probe());
     let snapshot = combined_snapshot(root, &mut remote, None)?;
     let mut view = NavigatorView::new(snapshot);
     let mut observer_needs_review = initialize_observer_activation_message(root, &mut view);
     let mut terminal = TerminalSession::enter()?;
     let mut last_refresh = Instant::now();
-    let mut last_spinner_frame = Instant::now();
     let mut needs_redraw = true;
     needs_redraw |= refresh_attachment_status(&presentation, &mut view);
     let outcome: Result<(), NavigatorError> = loop {
@@ -106,10 +105,6 @@ pub fn run_local_navigator(
                 &mut observer_needs_review,
             );
             last_refresh = Instant::now();
-        }
-        if last_spinner_frame.elapsed() >= WORKING_SPINNER_FRAME_INTERVAL {
-            needs_redraw |= view.advance_working_indicator();
-            last_spinner_frame = Instant::now();
         }
         if view.expire_transient_message(Instant::now()) {
             needs_redraw = true;

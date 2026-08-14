@@ -13,8 +13,8 @@
 
 - [V1 design](design.md) is the product and architecture authority.
 - [V1 roadmap](roadmap.md) owns delivery order, checkpoint status, and exit
-  gates. D0 through D8.11 are complete. The source remains an operator beta,
-  not a tagged distribution.
+  gates, including any pending operator confirmation. The source remains an
+  operator beta, not a tagged distribution.
 
 ## Historical evidence
 

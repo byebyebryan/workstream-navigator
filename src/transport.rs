@@ -18,6 +18,12 @@ use thiserror::Error;
 
 use crate::build_info::BuildInfo;
 use crate::domain::{RuntimeId, WorkstreamId};
+#[cfg(unix)]
+use crate::process::capture_process_group;
+use crate::process::{
+    ChildCleanup, ChildCleanupError, OwnedProcessGroup, ProcessGroupError, cleanup_child,
+    force_cleanup_child,
+};
 use crate::protocol::{
     HelloResponse, HostAction, HostRequest, HostResponse, KNOWN_PROVIDER_KINDS, MAX_FRAME_BYTES,
     MAX_SNAPSHOT_PAGES, ObserverStatus, OperationsResponse, ProjectDirectoriesResponse,
@@ -181,20 +187,21 @@ impl SystemCommandRunner {
         }
         let mut child = command.spawn().map_err(TransportError::Launch)?;
         #[cfg(unix)]
-        let process_group = match process_group_identity(child.id()) {
+        let process_group = match capture_process_group(child.id()) {
             Ok(group) => group,
             Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(error);
+                force_cleanup_child(&mut child);
+                return Err(map_process_group_error(error));
             }
         };
+        #[cfg(not(unix))]
+        let process_group = None;
         let stdout = child.stdout.take().ok_or_else(|| {
-            let error = terminate_process_group(&mut child, process_group).err();
+            let error = cleanup_transport_child(&mut child, process_group).err();
             error.unwrap_or(TransportError::MissingPipe)
         })?;
         let stderr = child.stderr.take().ok_or_else(|| {
-            let error = terminate_process_group(&mut child, process_group).err();
+            let error = cleanup_transport_child(&mut child, process_group).err();
             error.unwrap_or(TransportError::MissingPipe)
         })?;
         let stdout_reader = thread::spawn(move || read_bounded(stdout, MAX_FRAME_BYTES));
@@ -213,7 +220,7 @@ impl SystemCommandRunner {
         // Reap the direct child and terminate any descendants before joining
         // readers. Every return path, including write and wait failures, owns
         // one process group and must discharge that ownership here.
-        let cleanup = terminate_process_group(&mut child, process_group);
+        let cleanup = cleanup_transport_child(&mut child, process_group);
         if cleanup.is_err() {
             drop(stdout_reader);
             drop(stderr_reader);
@@ -821,176 +828,38 @@ fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<bool, TransportE
     }
 }
 
-#[cfg(unix)]
-#[derive(Clone, Copy)]
-struct OwnedProcessGroup {
-    process_group_id: i32,
-    session_id: i32,
-}
-
-#[cfg(unix)]
-fn process_group_identity(pid: u32) -> Result<Option<OwnedProcessGroup>, TransportError> {
-    use nix::{errno::Errno, unistd::Pid};
-
-    let pid = i32::try_from(pid).map_err(|_| TransportError::InvalidPid)?;
-    let pid = Pid::from_raw(pid);
-    let process_group_id = match nix::unistd::getpgid(Some(pid)) {
-        Ok(value) => value.as_raw(),
-        Err(Errno::ESRCH) => return Ok(None),
-        Err(error) => {
-            return Err(TransportError::ProcessGroup(
-                std::io::Error::from_raw_os_error(error as i32),
-            ));
-        }
-    };
-    let session_id = nix::unistd::getsid(Some(pid)).map_err(|error| {
-        TransportError::ProcessGroup(std::io::Error::from_raw_os_error(error as i32))
-    })?;
-    Ok(Some(OwnedProcessGroup {
-        process_group_id,
-        session_id: session_id.as_raw(),
-    }))
-}
-
-#[cfg(unix)]
-fn process_group_has_member(group: OwnedProcessGroup) -> Result<bool, TransportError> {
-    let entries = std::fs::read_dir("/proc").map_err(|error| {
-        TransportError::ProcessGroup(std::io::Error::new(error.kind(), error.to_string()))
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            TransportError::ProcessGroup(std::io::Error::new(error.kind(), error.to_string()))
-        })?;
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Ok(stat) => stat,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(TransportError::ProcessGroup(std::io::Error::new(
-                    error.kind(),
-                    error.to_string(),
-                )));
-            }
-        };
-        let Some(close_paren) = stat.rfind(')') else {
-            return Err(TransportError::ProcessGroup(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "malformed process stat",
-            )));
-        };
-        let fields = stat
-            .get(close_paren + 2..)
-            .ok_or_else(|| {
-                TransportError::ProcessGroup(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "malformed process stat",
-                ))
-            })?
-            .split_whitespace()
-            .collect::<Vec<_>>();
-        let process_group_id = fields
-            .get(2)
-            .ok_or_else(|| {
-                TransportError::ProcessGroup(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "malformed process stat",
-                ))
-            })?
-            .parse::<i32>()
-            .map_err(|_| {
-                TransportError::ProcessGroup(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "malformed process stat",
-                ))
-            })?;
-        let session_id = fields
-            .get(3)
-            .ok_or_else(|| {
-                TransportError::ProcessGroup(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "malformed process stat",
-                ))
-            })?
-            .parse::<i32>()
-            .map_err(|_| {
-                TransportError::ProcessGroup(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "malformed process stat",
-                ))
-            })?;
-        if process_group_id == group.process_group_id && session_id == group.session_id {
-            return Ok(true);
-        }
+fn map_process_group_error(error: ProcessGroupError) -> TransportError {
+    match error {
+        ProcessGroupError::InvalidPid => TransportError::InvalidPid,
+        ProcessGroupError::Probe(error) => TransportError::ProcessGroup(error),
+        ProcessGroupError::Signal(error) => TransportError::Kill(error),
     }
-    Ok(false)
 }
 
-#[cfg(unix)]
-fn terminate_process_group(
+fn cleanup_transport_child(
     child: &mut Child,
     process_group: Option<OwnedProcessGroup>,
 ) -> Result<(), TransportError> {
-    use nix::{
-        sys::signal::{Signal, killpg},
-        unistd::Pid,
-    };
-
-    let (signal_error, group_probe_error) = if let Some(group) = process_group {
-        match process_group_has_member(group) {
-            Ok(true) => (
-                Some(killpg(
-                    Pid::from_raw(group.process_group_id),
-                    Signal::SIGKILL,
-                )),
-                None,
-            ),
-            Ok(false) => (None, None),
-            Err(error) => (None, Some(error)),
-        }
-    } else {
-        (None, None)
-    };
-    let direct_error = if child.try_wait().map_err(TransportError::Wait)?.is_none() {
-        // `Child` is exact direct-process authority even when the captured
-        // group has become empty or changed unexpectedly. Keep cleanup
-        // finite instead of entering an unbounded wait on that process.
-        child.kill().err()
-    } else {
-        None
-    };
-    child.wait().map_err(TransportError::Wait)?;
-    if let Some(error) = direct_error {
-        return Err(TransportError::Kill(error));
-    }
-    if let Some(error) = signal_error.and_then(Result::err) {
-        if error == nix::errno::Errno::ESRCH {
-            return group_probe_error.map_or(Ok(()), Err);
-        }
-        return Err(TransportError::Kill(std::io::Error::from_raw_os_error(
-            error as i32,
-        )));
-    }
-    if let Some(error) = group_probe_error {
-        return Err(error);
-    }
-    Ok(())
+    let cleanup = cleanup_child(child, process_group).map_err(|error| match error {
+        ChildCleanupError::Wait(error) => TransportError::Wait(error),
+        #[cfg(not(unix))]
+        ChildCleanupError::Kill(error) => TransportError::Kill(error),
+    })?;
+    map_transport_cleanup(cleanup)
 }
 
-#[cfg(not(unix))]
-fn terminate_process_group(
-    child: &mut Child,
-    _process_group: Option<()>,
-) -> Result<(), TransportError> {
-    if child.try_wait().map_err(TransportError::Wait)?.is_none() {
-        child.kill().map_err(TransportError::Kill)?;
+fn map_transport_cleanup(cleanup: ChildCleanup) -> Result<(), TransportError> {
+    // Preserve the transport cleanup contract: the mandatory reap result is
+    // reported before captured direct-kill or process-group errors.
+    if let Some(error) = cleanup.wait {
+        return Err(TransportError::Wait(error));
     }
-    child.wait().map_err(TransportError::Wait)?;
+    if let Some(error) = cleanup.direct_kill {
+        return Err(TransportError::Kill(error));
+    }
+    if let Some(error) = cleanup.process_group {
+        return Err(map_process_group_error(error));
+    }
     Ok(())
 }
 
@@ -1077,6 +946,54 @@ mod tests {
         domain::HostId,
         protocol::{CURRENT_PROTOCOL_VERSION, Capabilities},
     };
+
+    #[test]
+    fn transport_cleanup_mapping_preserves_precedence_and_categories() {
+        let result = map_transport_cleanup(ChildCleanup {
+            direct_kill: Some(std::io::Error::other("direct")),
+            wait: Some(std::io::Error::other("wait")),
+            process_group: Some(ProcessGroupError::Probe(std::io::Error::other("probe"))),
+        });
+        assert!(matches!(
+            result,
+            Err(TransportError::Wait(error)) if error.to_string() == "wait"
+        ));
+
+        let result = map_transport_cleanup(ChildCleanup {
+            direct_kill: Some(std::io::Error::other("direct")),
+            wait: None,
+            process_group: Some(ProcessGroupError::Probe(std::io::Error::other("probe"))),
+        });
+        assert!(matches!(
+            result,
+            Err(TransportError::Kill(error)) if error.to_string() == "direct"
+        ));
+
+        assert!(matches!(
+            map_transport_cleanup(ChildCleanup {
+                direct_kill: None,
+                wait: None,
+                process_group: Some(ProcessGroupError::Probe(std::io::Error::other("probe"))),
+            }),
+            Err(TransportError::ProcessGroup(error)) if error.to_string() == "probe"
+        ));
+        assert!(matches!(
+            map_transport_cleanup(ChildCleanup {
+                direct_kill: None,
+                wait: None,
+                process_group: Some(ProcessGroupError::Signal(std::io::Error::other("signal"))),
+            }),
+            Err(TransportError::Kill(error)) if error.to_string() == "signal"
+        ));
+        assert!(matches!(
+            map_transport_cleanup(ChildCleanup {
+                direct_kill: None,
+                wait: None,
+                process_group: Some(ProcessGroupError::InvalidPid),
+            }),
+            Err(TransportError::InvalidPid)
+        ));
+    }
 
     #[derive(Clone, Debug)]
     struct RecordingRunner {

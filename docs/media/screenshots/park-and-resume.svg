@@ -79,172 +79,217 @@
 <rect x="288" y="21" width="12" height="21" fill="#303030"/>
 <rect x="300" y="21" width="12" height="21" fill="#303030"/>
 <rect x="312" y="21" width="12" height="21" fill="#303030"/>
-<text x="312" y="37" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">l</text>
 <rect x="324" y="21" width="12" height="21" fill="#303030"/>
-<text x="324" y="37" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
 <rect x="336" y="21" width="12" height="21" fill="#303030"/>
-<text x="336" y="37" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">c</text>
 <rect x="348" y="21" width="12" height="21" fill="#303030"/>
-<text x="348" y="37" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
 <rect x="360" y="21" width="12" height="21" fill="#303030"/>
-<text x="360" y="37" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">l</text>
 <text x="372" y="37" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
 <text x="0" y="58" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
 <rect x="12" y="42" width="12" height="21" fill="#303030"/>
 <rect x="24" y="42" width="12" height="21" fill="#303030"/>
-<text x="24" y="58" fill="#0dbc79" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">✓</text>
 <rect x="36" y="42" width="12" height="21" fill="#303030"/>
 <rect x="48" y="42" width="12" height="21" fill="#303030"/>
-<text x="48" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">P</text>
+<text x="48" y="58" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">C</text>
 <rect x="60" y="42" width="12" height="21" fill="#303030"/>
-<text x="60" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
+<text x="60" y="58" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
 <rect x="72" y="42" width="12" height="21" fill="#303030"/>
-<text x="72" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">l</text>
+<text x="72" y="58" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">d</text>
 <rect x="84" y="42" width="12" height="21" fill="#303030"/>
-<text x="84" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">i</text>
+<text x="84" y="58" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
 <rect x="96" y="42" width="12" height="21" fill="#303030"/>
-<text x="96" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">s</text>
+<text x="96" y="58" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">x</text>
 <rect x="108" y="42" width="12" height="21" fill="#303030"/>
-<text x="108" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">h</text>
 <rect x="120" y="42" width="12" height="21" fill="#303030"/>
 <rect x="132" y="42" width="12" height="21" fill="#303030"/>
-<text x="132" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">t</text>
 <rect x="144" y="42" width="12" height="21" fill="#303030"/>
-<text x="144" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">h</text>
 <rect x="156" y="42" width="12" height="21" fill="#303030"/>
-<text x="156" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
 <rect x="168" y="42" width="12" height="21" fill="#303030"/>
 <rect x="180" y="42" width="12" height="21" fill="#303030"/>
-<text x="180" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">n</text>
 <rect x="192" y="42" width="12" height="21" fill="#303030"/>
-<text x="192" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
 <rect x="204" y="42" width="12" height="21" fill="#303030"/>
-<text x="204" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">v</text>
 <rect x="216" y="42" width="12" height="21" fill="#303030"/>
-<text x="216" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">i</text>
 <rect x="228" y="42" width="12" height="21" fill="#303030"/>
-<text x="228" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">g</text>
 <rect x="240" y="42" width="12" height="21" fill="#303030"/>
-<text x="240" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
 <rect x="252" y="42" width="12" height="21" fill="#303030"/>
-<text x="252" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">t</text>
 <rect x="264" y="42" width="12" height="21" fill="#303030"/>
-<text x="264" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
 <rect x="276" y="42" width="12" height="21" fill="#303030"/>
-<text x="276" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">r</text>
 <rect x="288" y="42" width="12" height="21" fill="#303030"/>
 <rect x="300" y="42" width="12" height="21" fill="#303030"/>
-<text x="300" y="58" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">…</text>
 <rect x="312" y="42" width="12" height="21" fill="#303030"/>
+<text x="312" y="58" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">l</text>
 <rect x="324" y="42" width="12" height="21" fill="#303030"/>
-<text x="324" y="58" fill="#eeeeee" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">n</text>
+<text x="324" y="58" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
 <rect x="336" y="42" width="12" height="21" fill="#303030"/>
-<text x="336" y="58" fill="#eeeeee" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
+<text x="336" y="58" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">c</text>
 <rect x="348" y="42" width="12" height="21" fill="#303030"/>
-<text x="348" y="58" fill="#eeeeee" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">w</text>
+<text x="348" y="58" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
 <rect x="360" y="42" width="12" height="21" fill="#303030"/>
+<text x="360" y="58" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">l</text>
 <text x="372" y="58" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
 <text x="0" y="79" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
-<text x="48" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">w</text>
-<text x="60" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
-<text x="72" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">r</text>
-<text x="84" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">k</text>
-<text x="96" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">s</text>
-<text x="108" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">t</text>
-<text x="120" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">r</text>
-<text x="132" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
-<text x="144" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
-<text x="156" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">m</text>
-<text x="168" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">-</text>
-<text x="180" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">n</text>
-<text x="192" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
-<text x="204" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">v</text>
-<text x="216" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">i</text>
-<text x="228" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">g</text>
-<text x="240" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
-<text x="252" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">t</text>
-<text x="264" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
-<text x="276" y="79" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">r</text>
-<text x="312" y="79" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">l</text>
-<text x="324" y="79" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
-<text x="336" y="79" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">c</text>
-<text x="348" y="79" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
-<text x="360" y="79" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">l</text>
+<rect x="12" y="63" width="12" height="21" fill="#303030"/>
+<rect x="24" y="63" width="12" height="21" fill="#303030"/>
+<text x="24" y="79" fill="#0dbc79" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">✓</text>
+<rect x="36" y="63" width="12" height="21" fill="#303030"/>
+<rect x="48" y="63" width="12" height="21" fill="#303030"/>
+<text x="48" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">P</text>
+<rect x="60" y="63" width="12" height="21" fill="#303030"/>
+<text x="60" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
+<rect x="72" y="63" width="12" height="21" fill="#303030"/>
+<text x="72" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">l</text>
+<rect x="84" y="63" width="12" height="21" fill="#303030"/>
+<text x="84" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">i</text>
+<rect x="96" y="63" width="12" height="21" fill="#303030"/>
+<text x="96" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">s</text>
+<rect x="108" y="63" width="12" height="21" fill="#303030"/>
+<text x="108" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">h</text>
+<rect x="120" y="63" width="12" height="21" fill="#303030"/>
+<rect x="132" y="63" width="12" height="21" fill="#303030"/>
+<text x="132" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">t</text>
+<rect x="144" y="63" width="12" height="21" fill="#303030"/>
+<text x="144" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">h</text>
+<rect x="156" y="63" width="12" height="21" fill="#303030"/>
+<text x="156" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
+<rect x="168" y="63" width="12" height="21" fill="#303030"/>
+<rect x="180" y="63" width="12" height="21" fill="#303030"/>
+<text x="180" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">n</text>
+<rect x="192" y="63" width="12" height="21" fill="#303030"/>
+<text x="192" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
+<rect x="204" y="63" width="12" height="21" fill="#303030"/>
+<text x="204" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">v</text>
+<rect x="216" y="63" width="12" height="21" fill="#303030"/>
+<text x="216" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">i</text>
+<rect x="228" y="63" width="12" height="21" fill="#303030"/>
+<text x="228" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">g</text>
+<rect x="240" y="63" width="12" height="21" fill="#303030"/>
+<text x="240" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
+<rect x="252" y="63" width="12" height="21" fill="#303030"/>
+<text x="252" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">t</text>
+<rect x="264" y="63" width="12" height="21" fill="#303030"/>
+<text x="264" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
+<rect x="276" y="63" width="12" height="21" fill="#303030"/>
+<text x="276" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">r</text>
+<rect x="288" y="63" width="12" height="21" fill="#303030"/>
+<rect x="300" y="63" width="12" height="21" fill="#303030"/>
+<text x="300" y="79" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">…</text>
+<rect x="312" y="63" width="12" height="21" fill="#303030"/>
+<rect x="324" y="63" width="12" height="21" fill="#303030"/>
+<text x="324" y="79" fill="#eeeeee" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">n</text>
+<rect x="336" y="63" width="12" height="21" fill="#303030"/>
+<text x="336" y="79" fill="#eeeeee" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
+<rect x="348" y="63" width="12" height="21" fill="#303030"/>
+<text x="348" y="79" fill="#eeeeee" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">w</text>
+<rect x="360" y="63" width="12" height="21" fill="#303030"/>
 <text x="372" y="79" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
 <text x="0" y="100" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
-<text x="24" y="100" fill="#e5e510" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">⠋</text>
-<text x="48" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">E</text>
-<text x="60" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">x</text>
-<text x="72" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">p</text>
-<text x="84" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">l</text>
-<text x="96" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">o</text>
-<text x="108" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">r</text>
-<text x="120" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
-<text x="144" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">t</text>
-<text x="156" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">h</text>
-<text x="168" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
-<text x="192" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">a</text>
-<text x="204" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">l</text>
-<text x="216" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">t</text>
-<text x="228" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
-<text x="240" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">r</text>
-<text x="252" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">n</text>
-<text x="264" y="100" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">…</text>
-<text x="288" y="100" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">3</text>
-<text x="300" y="100" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">m</text>
-<text x="324" y="100" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">a</text>
-<text x="336" y="100" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">g</text>
-<text x="348" y="100" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">o</text>
+<text x="48" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">w</text>
+<text x="60" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
+<text x="72" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">r</text>
+<text x="84" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">k</text>
+<text x="96" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">s</text>
+<text x="108" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">t</text>
+<text x="120" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">r</text>
+<text x="132" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
+<text x="144" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
+<text x="156" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">m</text>
+<text x="168" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">-</text>
+<text x="180" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">n</text>
+<text x="192" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
+<text x="204" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">v</text>
+<text x="216" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">i</text>
+<text x="228" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">g</text>
+<text x="240" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
+<text x="252" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">t</text>
+<text x="264" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
+<text x="276" y="100" fill="#875faf" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">r</text>
 <text x="372" y="100" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
 <text x="0" y="121" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
-<text x="48" y="121" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">r</text>
-<text x="60" y="121" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
-<text x="72" y="121" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">l</text>
-<text x="84" y="121" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
-<text x="96" y="121" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
-<text x="108" y="121" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">s</text>
-<text x="120" y="121" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
-<text x="132" y="121" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">-</text>
-<text x="144" y="121" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">n</text>
-<text x="156" y="121" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
-<text x="168" y="121" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">t</text>
-<text x="180" y="121" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
-<text x="192" y="121" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">s</text>
-<text x="324" y="121" fill="#87d7ff" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">s</text>
-<text x="336" y="121" fill="#87d7ff" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">n</text>
-<text x="348" y="121" fill="#87d7ff" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
-<text x="360" y="121" fill="#87d7ff" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">p</text>
+<text x="48" y="121" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">C</text>
+<text x="60" y="121" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
+<text x="72" y="121" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">d</text>
+<text x="84" y="121" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
+<text x="96" y="121" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">x</text>
+<text x="312" y="121" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">l</text>
+<text x="324" y="121" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
+<text x="336" y="121" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">c</text>
+<text x="348" y="121" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
+<text x="360" y="121" fill="#3b8eea" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">l</text>
 <text x="372" y="121" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
 <text x="0" y="142" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
-<text x="24" y="142" fill="#87afd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">p</text>
-<text x="48" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">R</text>
-<text x="60" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
-<text x="72" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">v</text>
-<text x="84" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">i</text>
-<text x="96" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
-<text x="108" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">w</text>
-<text x="132" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">t</text>
-<text x="144" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">h</text>
-<text x="156" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
-<text x="180" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">r</text>
-<text x="192" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
-<text x="204" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">m</text>
-<text x="216" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">o</text>
-<text x="228" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">t</text>
-<text x="240" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
-<text x="252" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">…</text>
-<text x="276" y="142" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">1</text>
-<text x="288" y="142" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">5</text>
+<text x="24" y="142" fill="#e5e510" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">●</text>
+<text x="48" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">E</text>
+<text x="60" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">x</text>
+<text x="72" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">p</text>
+<text x="84" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">l</text>
+<text x="96" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">o</text>
+<text x="108" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">r</text>
+<text x="120" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
+<text x="144" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">t</text>
+<text x="156" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">h</text>
+<text x="168" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
+<text x="192" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">a</text>
+<text x="204" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">l</text>
+<text x="216" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">t</text>
+<text x="228" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
+<text x="240" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">r</text>
+<text x="252" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">n</text>
+<text x="264" y="142" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">…</text>
+<text x="288" y="142" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">3</text>
 <text x="300" y="142" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">m</text>
 <text x="324" y="142" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">a</text>
 <text x="336" y="142" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">g</text>
 <text x="348" y="142" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">o</text>
 <text x="372" y="142" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
 <text x="0" y="163" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
+<text x="48" y="163" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">r</text>
+<text x="60" y="163" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
+<text x="72" y="163" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">l</text>
+<text x="84" y="163" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
+<text x="96" y="163" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
+<text x="108" y="163" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">s</text>
+<text x="120" y="163" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
+<text x="132" y="163" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">-</text>
+<text x="144" y="163" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">n</text>
+<text x="156" y="163" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
+<text x="168" y="163" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">t</text>
+<text x="180" y="163" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
+<text x="192" y="163" fill="#875fd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">s</text>
 <text x="372" y="163" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
 <text x="0" y="184" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
+<text x="48" y="184" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">C</text>
+<text x="60" y="184" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">o</text>
+<text x="72" y="184" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">d</text>
+<text x="84" y="184" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">e</text>
+<text x="96" y="184" fill="#ff875f" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">x</text>
+<text x="324" y="184" fill="#87d7ff" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">s</text>
+<text x="336" y="184" fill="#87d7ff" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">n</text>
+<text x="348" y="184" fill="#87d7ff" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">a</text>
+<text x="360" y="184" fill="#87d7ff" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17" font-weight="700">p</text>
 <text x="372" y="184" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
 <text x="0" y="205" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
+<text x="24" y="205" fill="#87afd7" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">p</text>
+<text x="48" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">R</text>
+<text x="60" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
+<text x="72" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">v</text>
+<text x="84" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">i</text>
+<text x="96" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
+<text x="108" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">w</text>
+<text x="132" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">t</text>
+<text x="144" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">h</text>
+<text x="156" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
+<text x="180" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">r</text>
+<text x="192" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
+<text x="204" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">m</text>
+<text x="216" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">o</text>
+<text x="228" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">t</text>
+<text x="240" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">e</text>
+<text x="252" y="205" fill="#e5e5e5" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">…</text>
+<text x="276" y="205" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">1</text>
+<text x="288" y="205" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">5</text>
+<text x="300" y="205" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">m</text>
+<text x="324" y="205" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">a</text>
+<text x="336" y="205" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">g</text>
+<text x="348" y="205" fill="#c6c6c6" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">o</text>
 <text x="372" y="205" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
 <text x="0" y="226" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>
 <text x="372" y="226" fill="#d7dde8" font-family="JetBrains Mono, Iosevka, ui-monospace, monospace" font-size="17">│</text>

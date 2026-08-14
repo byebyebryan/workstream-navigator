@@ -132,10 +132,11 @@ remain disabled until compatibility and connectivity are restored.
 
 ## Repository status
 
-V1 is implemented through D8.9 as a source-installed `0.1.0` operator beta.
-There is no tagged binary release, automatic updater, remote deployment
-service, crates.io publication, or compatibility commitment to the earlier
-Python prototype.
+V1 is a source-installed `0.1.0` operator beta. The
+[roadmap](docs/roadmap.md) is the sole authority for current checkpoint and
+operator-acceptance status. There is no tagged binary release, automatic
+updater, remote deployment service, crates.io publication, or compatibility
+commitment to the earlier Python prototype.
 
 The implementation supports Codex and installed OpenCode releases that satisfy
 the bounded Runtime API/process contract for New, exact resume, same-provider
@@ -154,8 +155,8 @@ automatic context transfer remain out of scope.
 
 ## Development
 
-The project requires the latest stable Rust toolchain, Cargo Deny 0.20.2, Git,
-jq, Ruff 0.16.0, and ShellCheck.
+The project requires Rust 1.88 or newer, Cargo Deny 0.20.x, Git, jq, Ruff
+0.16.x, and ShellCheck.
 
 ```console
 scripts/check

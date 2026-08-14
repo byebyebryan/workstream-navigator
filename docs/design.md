@@ -2,8 +2,8 @@
 
 Date: 2026-08-01
 
-Status: implemented operator-beta contract through D8.2; no compatibility
-contract
+Status: V1 operator-beta contract; implementation and acceptance status lives
+in the roadmap; no compatibility contract
 
 The design is the current product and architecture contract. Dated acceptance,
 spike, and study records preserve the evidence and limitations of the candidate

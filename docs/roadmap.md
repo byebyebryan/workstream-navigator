@@ -188,10 +188,11 @@ historical only; it is not a current product commitment. Host schema 8 is a
 clean breaking boundary and requires explicit reset/re-registration instead of
 an automatic migration from the retired schema.
 
-Date: 2026-08-13
+Date: 2026-08-14
 
-Status: D0 through D8.11 are complete. V1 remains a source-installed operator
-beta.
+Status: D0 through D8.12 and D8.16 are complete. D8.13 through D8.15 are
+implemented and awaiting operator confirmation during daily use. V1 remains a
+source-installed operator beta.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -249,6 +250,11 @@ This document owns sequencing, exit gates, and progress.
 | D8.9 | OpenCode observer lifetime across bounded local actions | Complete (2026-08-11) |
 | D8.10 | OpenCode settled-state and activity-age reconciliation | Complete (2026-08-12) |
 | D8.11 | Navigator steady-state latency and redraw containment | Complete (2026-08-13) |
+| D8.12 | Workstream context-row scanability | Complete (2026-08-13) |
+| D8.13 | Initial presentation-width convergence | Operator confirmation pending |
+| D8.14 | Workstream card hierarchy cleanup | Operator confirmation pending |
+| D8.15 | Expanded shortcut alignment | Operator confirmation pending |
+| D8.16 | Finite-control authority and repository drift cleanup | Complete (2026-08-14) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -2377,6 +2383,84 @@ Implementation evidence (2026-08-13):
   is installed locally. The exact live private Navigator pane was refreshed at
   32 columns while the provider attachment pane PID remained unchanged;
   operator visual confirmation remains the final gate.
+
+## D8.16 - Finite-control authority and repository drift cleanup
+
+Status: Complete on 2026-08-14.
+
+This checkpoint removes repeated low-level ownership and cleanup mechanics from
+three finite child-command paths while preserving their existing public
+behavior. It also reconciles present-tense repository status, generated product
+captures, and dependency-policy drift found by the project-wide cleanup audit.
+
+Scope:
+
+- give bounded local commands, bounded SSH host commands, and the ephemeral
+  Codex App Server one crate-private authority for child PID-to-PGID/session
+  capture, Linux process-table membership proof, guarded process-group
+  signaling, and direct-child cleanup/reap mechanics;
+- retain each caller's existing timeout, stream, output-bound, public-error,
+  and cleanup-error precedence contract through explicit local adapters and
+  deterministic tests;
+- make the roadmap the sole present-tense checkpoint-status authority, while
+  leaving D8.13 through D8.15 pending their stated operator confirmation;
+- refresh the privacy-safe fixture captures from the current real Navigator
+  renderer; and
+- remove license allowlist entries unused by the locked dependency graph.
+
+Non-goals and hard boundaries:
+
+- no persistent Runtime, observer, provider-process, attachment, or interactive
+  SSH signal-authority change;
+- no transient process-table retry, timeout, stream, provider command,
+  lifecycle, recovery, error wording, or error-precedence change;
+- no protocol, host/client schema, control ABI, Cargo dependency, private tmux
+  configuration, provider-pane input, or provider-content capture; and
+- no completion claim for operator-visible checkpoints that remain under daily
+  use evaluation.
+
+Exit gate:
+
+- raw finite-child PGID/session capture, process-table membership parsing,
+  guarded group signaling, and direct-child cleanup/reap mechanics exist only
+  in `src/process.rs` and all three consumers use that authority;
+- deterministic tests lock Linux stat parsing, group-plus-session matching,
+  invalid-PID mapping, and each caller's exact cleanup-error precedence;
+- protocol 17, host schema 12, client schema 5, control ABI 1, Cargo manifests,
+  private tmux configurations, and native provider command vectors remain
+  unchanged;
+- regenerated product captures contain only deterministic fixture data and the
+  dependency policy passes without obsolete license-allow warnings; and
+- one uninterrupted `scripts/check` run plus staged and unstaged
+  `git diff --check` pass. Live provider or SSH acceptance is neither required
+  nor performed for this behavior-neutral cleanup.
+
+Completion evidence (2026-08-14):
+
+- `src/process.rs` now owns the finite-child PID-to-PGID/session capture,
+  Linux process-table parser and membership proof, guarded process-group
+  signal, direct-child kill, and reap mechanics consumed by bounded local
+  commands, `SystemCommandRunner`, and `EphemeralAppServer`. The consumers keep
+  only their caller-specific adapters;
+- deterministic tests cover last-parenthesis stat parsing, malformed identity
+  rejection, exact group-plus-session matching, invalid-PID mapping, and the
+  established cleanup-error precedence for all three callers. Existing
+  deadline, descendant cleanup, output-bound, and App Server process-group
+  regressions retain their meaning and pass;
+- the README and documentation map now defer changing checkpoint status to this
+  roadmap, while D8.13 through D8.15 remain pending operator confirmation. The
+  three SVG/PNG frames and GIF tour were regenerated from the deterministic
+  fixture renderer and visually inspected without accessing a provider pane;
+- Cargo Deny passes after removing only the unused BSD-2-Clause and
+  BSD-3-Clause allow entries. Its existing duplicate-version warnings remain;
+- protocol 17, host schema 12, client schema 5, control ABI 1, `Cargo.toml`,
+  `Cargo.lock`, native provider commands, and both private tmux configurations
+  are unchanged; and
+- one uninterrupted `scripts/check` run passes 387 library tests, seven
+  integration tests, formatting, Clippy with warnings denied, packaging,
+  dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
+  acceptance harnesses, and diff checks. No live provider or SSH acceptance,
+  installation, or Runtime rotation was performed.
 
 ## Deferred beyond V1
 

@@ -11,6 +11,12 @@ use std::{
 use serde_json::{Value, json};
 use thiserror::Error;
 
+#[cfg(unix)]
+use crate::process::capture_process_group;
+use crate::process::{
+    ChildCleanup, ChildCleanupError, OwnedProcessGroup, ProcessGroupError, cleanup_child,
+};
+
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const HOOK_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -238,11 +244,11 @@ impl EphemeralAppServer {
         }
         let mut child = command.spawn().map_err(AppServerError::Launch)?;
         #[cfg(unix)]
-        let process_group = match process_group_identity(child.id()) {
+        let process_group = match capture_process_group(child.id()) {
             Ok(group) => group,
             Err(error) => {
-                let _ = kill_and_reap(&mut child, None);
-                return Err(error);
+                let _ = cleanup_child(&mut child, None);
+                return Err(map_process_group_error(error));
             }
         };
         #[cfg(not(unix))]
@@ -331,117 +337,6 @@ fn wait_for_child(child: &mut Child) -> Option<AppServerError> {
     }
 }
 
-#[cfg(unix)]
-#[derive(Clone, Copy)]
-struct OwnedProcessGroup {
-    process_group_id: i32,
-    session_id: i32,
-}
-
-#[cfg(unix)]
-fn process_group_identity(pid: u32) -> Result<Option<OwnedProcessGroup>, AppServerError> {
-    use nix::{errno::Errno, unistd::Pid};
-
-    let pid = i32::try_from(pid)
-        .map_err(|_| AppServerError::Cleanup(std::io::Error::other("invalid process ID")))?;
-    let pid = Pid::from_raw(pid);
-    let process_group_id = match nix::unistd::getpgid(Some(pid)) {
-        Ok(value) => value.as_raw(),
-        Err(Errno::ESRCH) => return Ok(None),
-        Err(error) => {
-            return Err(AppServerError::Cleanup(std::io::Error::from_raw_os_error(
-                error as i32,
-            )));
-        }
-    };
-    let session_id = nix::unistd::getsid(Some(pid)).map_err(|error| {
-        AppServerError::Cleanup(std::io::Error::from_raw_os_error(error as i32))
-    })?;
-    Ok(Some(OwnedProcessGroup {
-        process_group_id,
-        session_id: session_id.as_raw(),
-    }))
-}
-
-#[cfg(unix)]
-fn process_group_has_member(group: OwnedProcessGroup) -> Result<bool, AppServerError> {
-    let entries = std::fs::read_dir("/proc").map_err(|error| {
-        AppServerError::Cleanup(std::io::Error::new(error.kind(), error.to_string()))
-    })?;
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            AppServerError::Cleanup(std::io::Error::new(error.kind(), error.to_string()))
-        })?;
-        let Some(pid) = entry
-            .file_name()
-            .to_str()
-            .and_then(|name| name.parse::<u32>().ok())
-        else {
-            continue;
-        };
-        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
-            Ok(stat) => stat,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(error) => {
-                return Err(AppServerError::Cleanup(std::io::Error::new(
-                    error.kind(),
-                    error.to_string(),
-                )));
-            }
-        };
-        let Some(close_paren) = stat.rfind(')') else {
-            return Err(AppServerError::Cleanup(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "malformed process stat",
-            )));
-        };
-        let fields = stat
-            .get(close_paren + 2..)
-            .ok_or_else(|| {
-                AppServerError::Cleanup(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "malformed process stat",
-                ))
-            })?
-            .split_whitespace()
-            .collect::<Vec<_>>();
-        let process_group_id = fields
-            .get(2)
-            .ok_or_else(|| {
-                AppServerError::Cleanup(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "malformed process stat",
-                ))
-            })?
-            .parse::<i32>()
-            .map_err(|_| {
-                AppServerError::Cleanup(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "malformed process stat",
-                ))
-            })?;
-        let session_id = fields
-            .get(3)
-            .ok_or_else(|| {
-                AppServerError::Cleanup(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "malformed process stat",
-                ))
-            })?
-            .parse::<i32>()
-            .map_err(|_| {
-                AppServerError::Cleanup(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "malformed process stat",
-                ))
-            })?;
-        if process_group_id == group.process_group_id && session_id == group.session_id {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 fn cleanup_error(
     child: &mut Child,
     process_group: Option<OwnedProcessGroup>,
@@ -468,62 +363,44 @@ fn cleanup_with_reader(
 
 fn kill_and_reap(
     child: &mut Child,
-    #[cfg(unix)] process_group: Option<OwnedProcessGroup>,
-    #[cfg(not(unix))] _process_group: Option<()>,
+    process_group: Option<OwnedProcessGroup>,
 ) -> Result<(), AppServerError> {
-    #[cfg(unix)]
-    {
-        use nix::{
-            errno::Errno,
-            sys::signal::{Signal, killpg},
-            unistd::Pid,
-        };
+    let cleanup = cleanup_child(child, process_group).map_err(map_child_cleanup_error)?;
+    map_app_server_cleanup(cleanup)
+}
 
-        let mut group_probe_error = None;
-        let signal_error = if let Some(group) = process_group {
-            match process_group_has_member(group) {
-                Ok(true) => Some(killpg(
-                    Pid::from_raw(group.process_group_id),
-                    Signal::SIGKILL,
-                )),
-                Ok(false) => None,
-                Err(error) => {
-                    group_probe_error = Some(error);
-                    None
-                }
-            }
-        } else {
-            None
-        };
-        let direct_error = if child.try_wait().map_err(AppServerError::Cleanup)?.is_none() {
-            child.kill().err()
-        } else {
-            None
-        };
-        let wait_error = child.wait().err().map(AppServerError::Cleanup);
-        if let Some(error) = direct_error {
-            return Err(AppServerError::Cleanup(error));
-        }
-        if let Some(error) = wait_error {
-            return Err(error);
-        }
-        if let Some(error) = group_probe_error {
-            return Err(error);
-        }
-        if let Some(error) = signal_error.and_then(Result::err)
-            && error != Errno::ESRCH
-        {
-            return Err(AppServerError::Cleanup(std::io::Error::from_raw_os_error(
-                error as i32,
-            )));
-        }
+fn map_app_server_cleanup(cleanup: ChildCleanup) -> Result<(), AppServerError> {
+    // Preserve the App Server contract: direct-kill errors outrank wait,
+    // followed by process-group proof/signal errors.
+    if let Some(error) = cleanup.direct_kill {
+        return Err(AppServerError::Cleanup(error));
     }
-    #[cfg(not(unix))]
-    if child.try_wait().map_err(AppServerError::Cleanup)?.is_none() {
-        child.kill().map_err(AppServerError::Cleanup)?;
+    if let Some(error) = cleanup.wait {
+        return Err(AppServerError::Cleanup(error));
     }
-    child.wait().map_err(AppServerError::Cleanup)?;
+    if let Some(error) = cleanup.process_group {
+        return Err(map_process_group_error(error));
+    }
     Ok(())
+}
+
+fn map_child_cleanup_error(error: ChildCleanupError) -> AppServerError {
+    match error {
+        ChildCleanupError::Wait(error) => AppServerError::Cleanup(error),
+        #[cfg(not(unix))]
+        ChildCleanupError::Kill(error) => AppServerError::Cleanup(error),
+    }
+}
+
+fn map_process_group_error(error: ProcessGroupError) -> AppServerError {
+    match error {
+        ProcessGroupError::InvalidPid => {
+            AppServerError::Cleanup(std::io::Error::other("invalid process ID"))
+        }
+        ProcessGroupError::Probe(error) | ProcessGroupError::Signal(error) => {
+            AppServerError::Cleanup(error)
+        }
+    }
 }
 
 fn thread_metadata_from_result(
@@ -709,6 +586,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn app_server_cleanup_mapping_preserves_precedence_and_categories() {
+        let result = map_app_server_cleanup(ChildCleanup {
+            direct_kill: Some(std::io::Error::other("direct")),
+            wait: Some(std::io::Error::other("wait")),
+            process_group: Some(ProcessGroupError::Probe(std::io::Error::other("probe"))),
+        });
+        assert!(matches!(
+            result,
+            Err(AppServerError::Cleanup(error)) if error.to_string() == "direct"
+        ));
+
+        let result = map_app_server_cleanup(ChildCleanup {
+            direct_kill: None,
+            wait: Some(std::io::Error::other("wait")),
+            process_group: Some(ProcessGroupError::Probe(std::io::Error::other("probe"))),
+        });
+        assert!(matches!(
+            result,
+            Err(AppServerError::Cleanup(error)) if error.to_string() == "wait"
+        ));
+
+        for process_group in [
+            ProcessGroupError::Probe(std::io::Error::other("probe")),
+            ProcessGroupError::Signal(std::io::Error::other("signal")),
+        ] {
+            assert!(matches!(
+                map_app_server_cleanup(ChildCleanup {
+                    direct_kill: None,
+                    wait: None,
+                    process_group: Some(process_group),
+                }),
+                Err(AppServerError::Cleanup(_))
+            ));
+        }
+        assert!(matches!(
+            map_app_server_cleanup(ChildCleanup {
+                direct_kill: None,
+                wait: None,
+                process_group: Some(ProcessGroupError::InvalidPid),
+            }),
+            Err(AppServerError::Cleanup(error))
+                if error.to_string() == "invalid process ID"
+        ));
+    }
+
+    #[test]
     fn only_the_exact_action_result_is_accepted_without_waiting_for_eof() {
         let output =
             b"{\"id\":1,\"result\":{}}\n{\"id\":2,\"result\":{\"thread\":{\"name\":\"name\"}}}\n";
@@ -842,7 +765,7 @@ mod tests {
             ))
             .process_group(0);
         let mut child = command.spawn().unwrap();
-        let process_group = process_group_identity(child.id()).unwrap();
+        let process_group = capture_process_group(child.id()).unwrap();
         let pid = (0..100)
             .find_map(|_| {
                 fs::read_to_string(&pid_path)

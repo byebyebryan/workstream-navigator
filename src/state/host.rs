@@ -115,6 +115,7 @@ impl HostRegistry {
     pub fn project_directories(
         &self,
         relative_path: &str,
+        include_hidden: bool,
     ) -> Result<ProjectDirectoriesResponse, StateError> {
         let root = self.project_browser_root()?;
         let current = self.project_browser_directory(relative_path)?;
@@ -124,7 +125,7 @@ impl HostRegistry {
             .filter_map(Result::ok)
             .filter_map(|entry| {
                 let name = entry.file_name().into_string().ok()?;
-                if !safe_project_browser_entry_name(&name) {
+                if !safe_project_browser_entry_name(&name, include_hidden) {
                     return None;
                 }
                 let path = fs::canonicalize(entry.path()).ok()?;
@@ -137,11 +138,21 @@ impl HostRegistry {
                 })
             })
             .collect::<Vec<_>>();
-        entries.sort_by(|left, right| left.name.cmp(&right.name));
+        entries.sort_by_cached_key(|entry| {
+            let repository_group = u8::from(!entry.is_git_repository);
+            let hidden_group = u8::from(!(include_hidden && entry.name.starts_with('.')));
+            (
+                repository_group,
+                hidden_group,
+                entry.name.to_lowercase(),
+                entry.name.clone(),
+            )
+        });
         entries.truncate(MAX_PROJECT_BROWSER_ENTRIES);
         Ok(ProjectDirectoriesResponse {
             root_label: project_browser_root_label(&root),
             relative_path: relative_path.to_owned(),
+            include_hidden,
             entries,
         })
     }

@@ -96,7 +96,7 @@ fn local_subprocess_uses_the_same_bounded_protocol_service_as_ssh() {
     assert!(hello.registry_generation.len() <= 128);
     assert!(snapshot.workstreams.is_empty());
     assert!(operations.operations.is_empty());
-    assert_eq!(CURRENT_PROTOCOL_VERSION, 17);
+    assert_eq!(CURRENT_PROTOCOL_VERSION, 18);
 }
 
 #[test]
@@ -295,7 +295,9 @@ fn local_subprocess_browses_and_registers_a_host_private_project_directory() {
     let endpoint = provider_fixture_endpoint(&temporary, state_root);
     let client = HostClient::new(SystemCommandRunner);
 
-    let directories = client.project_directories_local(&endpoint, "").unwrap();
+    let directories = client
+        .project_directories_local(&endpoint, "", false)
+        .unwrap();
 
     assert_eq!(directories.root_label, "custom root · projects");
     assert!(

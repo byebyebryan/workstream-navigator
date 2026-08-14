@@ -1,3 +1,4 @@
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::backend::TestBackend;
 use ratatui::{
     Terminal,
@@ -329,6 +330,7 @@ fn project_registration_uses_a_navigator_local_host_picker_then_a_path_free_brow
         directories: ProjectDirectoriesResponse {
             root_label: "~/code".to_owned(),
             relative_path: String::new(),
+            include_hidden: false,
             entries: vec![ProjectDirectoryEntry {
                 name: "switchboard".to_owned(),
                 is_git_repository: true,
@@ -337,6 +339,7 @@ fn project_registration_uses_a_navigator_local_host_picker_then_a_path_free_brow
         selected: 0,
         scroll: 0,
         filter: String::new(),
+        include_hidden: false,
     });
     let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
 
@@ -392,6 +395,7 @@ fn project_browser_keeps_the_selected_directory_inside_its_viewport() {
         directories: ProjectDirectoriesResponse {
             root_label: "~/code".to_owned(),
             relative_path: String::new(),
+            include_hidden: false,
             entries: (0..12)
                 .map(|index| ProjectDirectoryEntry {
                     name: format!("project-{index:02}"),
@@ -402,6 +406,7 @@ fn project_browser_keeps_the_selected_directory_inside_its_viewport() {
         selected: 0,
         scroll: 0,
         filter: String::new(),
+        include_hidden: false,
     });
     for _ in 0..10 {
         view.select_project_browser_next();
@@ -421,6 +426,439 @@ fn project_browser_keeps_the_selected_directory_inside_its_viewport() {
         .collect::<String>();
     assert!(rendered.contains("> project-10"));
     assert!(!rendered.contains("project-00"));
+}
+
+#[test]
+fn project_browser_hidden_toggle_key_preserves_filter_and_normalizes_selection() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = StateRoot::create(temporary.path().join("state")).unwrap();
+    let mut remote = RemoteMonitor::new();
+    let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
+    view.modal = Some(NavigatorModal::ProjectBrowser {
+        host: NavigatorHost::Local,
+        directories: ProjectDirectoriesResponse {
+            root_label: "~/code".to_owned(),
+            relative_path: "workspace".to_owned(),
+            include_hidden: false,
+            entries: vec![ProjectDirectoryEntry {
+                name: "visible".to_owned(),
+                is_git_repository: false,
+            }],
+        },
+        selected: 0,
+        scroll: 0,
+        filter: "vis".to_owned(),
+        include_hidden: false,
+    });
+
+    let mut request = |host: &NavigatorHost, cursor: &str, include_hidden: bool| {
+        assert_eq!(host.alias(), "local");
+        assert_eq!(cursor, "workspace");
+        assert!(include_hidden);
+        Ok::<_, NavigatorError>(ProjectDirectoriesResponse {
+            root_label: "~/code".to_owned(),
+            relative_path: "workspace".to_owned(),
+            include_hidden,
+            entries: vec![
+                ProjectDirectoryEntry {
+                    name: ".local".to_owned(),
+                    is_git_repository: false,
+                },
+                ProjectDirectoryEntry {
+                    name: "visible".to_owned(),
+                    is_git_repository: false,
+                },
+            ],
+        })
+    };
+    handle_project_browser_modal_key_with(
+        KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE),
+        &root,
+        &mut remote,
+        &mut view,
+        &mut request,
+    );
+
+    let Some(NavigatorModal::ProjectBrowser {
+        directories,
+        filter,
+        include_hidden,
+        selected,
+        ..
+    }) = view.modal.as_ref()
+    else {
+        panic!("project browser should remain open");
+    };
+    assert!(*include_hidden);
+    assert_eq!(filter, "vis");
+    assert_eq!(directories.relative_path, "workspace");
+    assert!(directories.include_hidden);
+    assert_eq!(*selected, 1);
+}
+
+#[test]
+fn project_browser_right_and_left_keys_preserve_hidden_visibility() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = StateRoot::create(temporary.path().join("state")).unwrap();
+    let mut remote = RemoteMonitor::new();
+    let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
+    view.modal = Some(NavigatorModal::ProjectBrowser {
+        host: NavigatorHost::Local,
+        directories: ProjectDirectoriesResponse {
+            root_label: "~/code".to_owned(),
+            relative_path: String::new(),
+            include_hidden: true,
+            entries: vec![ProjectDirectoryEntry {
+                name: "project".to_owned(),
+                is_git_repository: true,
+            }],
+        },
+        selected: 0,
+        scroll: 0,
+        filter: String::new(),
+        include_hidden: true,
+    });
+
+    let mut requests = Vec::new();
+    let mut request = |_: &NavigatorHost, cursor: &str, include_hidden: bool| {
+        requests.push((cursor.to_owned(), include_hidden));
+        assert!(include_hidden);
+        match cursor {
+            "project" => Ok(ProjectDirectoriesResponse {
+                root_label: "~/code".to_owned(),
+                relative_path: "project".to_owned(),
+                include_hidden,
+                entries: vec![ProjectDirectoryEntry {
+                    name: ".local".to_owned(),
+                    is_git_repository: false,
+                }],
+            }),
+            "" => Ok(ProjectDirectoriesResponse {
+                root_label: "~/code".to_owned(),
+                relative_path: String::new(),
+                include_hidden,
+                entries: vec![ProjectDirectoryEntry {
+                    name: "project".to_owned(),
+                    is_git_repository: false,
+                }],
+            }),
+            other => panic!("unexpected browser cursor {other}"),
+        }
+    };
+
+    handle_project_browser_modal_key_with(
+        KeyEvent::new(KeyCode::Right, KeyModifiers::NONE),
+        &root,
+        &mut remote,
+        &mut view,
+        &mut request,
+    );
+    assert!(matches!(
+        view.modal.as_ref(),
+        Some(NavigatorModal::ProjectBrowser {
+            directories: ProjectDirectoriesResponse {
+                relative_path,
+                include_hidden: true,
+                ..
+            },
+            include_hidden: true,
+            ..
+        }) if relative_path == "project"
+    ));
+
+    handle_project_browser_modal_key_with(
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        &root,
+        &mut remote,
+        &mut view,
+        &mut request,
+    );
+    assert_eq!(
+        requests,
+        [("project".to_owned(), true), (String::new(), true)]
+    );
+    assert!(matches!(
+        view.modal.as_ref(),
+        Some(NavigatorModal::ProjectBrowser {
+            directories: ProjectDirectoriesResponse {
+                relative_path,
+                include_hidden: true,
+                ..
+            },
+            include_hidden: true,
+            ..
+        }) if relative_path.is_empty()
+    ));
+}
+
+#[test]
+fn project_browser_left_at_root_stays_open_without_requesting() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = StateRoot::create(temporary.path().join("state")).unwrap();
+    let mut remote = RemoteMonitor::new();
+    let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
+    view.modal = Some(NavigatorModal::ProjectBrowser {
+        host: NavigatorHost::Local,
+        directories: ProjectDirectoriesResponse {
+            root_label: "~".to_owned(),
+            relative_path: String::new(),
+            include_hidden: false,
+            entries: Vec::new(),
+        },
+        selected: 0,
+        scroll: 0,
+        filter: String::new(),
+        include_hidden: false,
+    });
+
+    let mut request = |_: &NavigatorHost, _: &str, _: bool| {
+        panic!("left at the configured root must not issue a host request")
+    };
+    handle_project_browser_modal_key_with(
+        KeyEvent::new(KeyCode::Left, KeyModifiers::NONE),
+        &root,
+        &mut remote,
+        &mut view,
+        &mut request,
+    );
+
+    assert!(matches!(
+        view.modal,
+        Some(NavigatorModal::ProjectBrowser { .. })
+    ));
+    assert_eq!(
+        view.message.as_deref(),
+        Some("already at the Project browser root")
+    );
+}
+
+#[test]
+fn project_browser_enter_adds_only_git_rows_and_letters_filter() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = StateRoot::create(temporary.path().join("state")).unwrap();
+    let mut remote = RemoteMonitor::new();
+    let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+        hosts: vec![NavigatorHostOverview {
+            alias: "local".to_owned(),
+            reachability: RemoteHostReachability::Reachable,
+            observer_status: ObserverStatus::Ready,
+            provider_capabilities: capabilities(true, true),
+        }],
+        ..LocalNavigatorSnapshot::default()
+    });
+    view.modal = Some(NavigatorModal::ProjectBrowser {
+        host: NavigatorHost::Local,
+        directories: ProjectDirectoriesResponse {
+            root_label: "~".to_owned(),
+            relative_path: "code".to_owned(),
+            include_hidden: false,
+            entries: vec![
+                ProjectDirectoryEntry {
+                    name: "folder".to_owned(),
+                    is_git_repository: false,
+                },
+                ProjectDirectoryEntry {
+                    name: "repository".to_owned(),
+                    is_git_repository: true,
+                },
+            ],
+        },
+        selected: 0,
+        scroll: 0,
+        filter: String::new(),
+        include_hidden: false,
+    });
+    let mut request = |_: &NavigatorHost, _: &str, _: bool| {
+        panic!("enter and filter input must not issue directory requests")
+    };
+
+    handle_project_browser_modal_key_with(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &root,
+        &mut remote,
+        &mut view,
+        &mut request,
+    );
+    assert_eq!(
+        view.message.as_deref(),
+        Some("selected folder is not a Git repository; press → to open it")
+    );
+
+    for character in ['h', 'j', 'k', 'r'] {
+        handle_project_browser_modal_key_with(
+            KeyEvent::new(KeyCode::Char(character), KeyModifiers::NONE),
+            &root,
+            &mut remote,
+            &mut view,
+            &mut request,
+        );
+    }
+    assert!(matches!(
+        view.modal.as_ref(),
+        Some(NavigatorModal::ProjectBrowser { filter, selected: 0, .. }) if filter == "hjkr"
+    ));
+
+    for _ in 0..4 {
+        handle_project_browser_modal_key_with(
+            KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            &root,
+            &mut remote,
+            &mut view,
+            &mut request,
+        );
+    }
+    if let Some(NavigatorModal::ProjectBrowser { selected, .. }) = view.modal.as_mut() {
+        *selected = 1;
+    }
+    handle_project_browser_modal_key_with(
+        KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        &root,
+        &mut remote,
+        &mut view,
+        &mut request,
+    );
+    assert!(matches!(
+        view.modal,
+        Some(NavigatorModal::SelectProvider {
+            intent: ProviderChoiceIntent::Register { ref relative_path, .. },
+            ..
+        }) if relative_path == "code/repository"
+    ));
+}
+
+#[test]
+fn project_browser_escape_quits_picker() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = StateRoot::create(temporary.path().join("state")).unwrap();
+    let mut remote = RemoteMonitor::new();
+    let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
+    view.modal = Some(NavigatorModal::ProjectBrowser {
+        host: NavigatorHost::Local,
+        directories: ProjectDirectoriesResponse {
+            root_label: "~".to_owned(),
+            relative_path: String::new(),
+            include_hidden: false,
+            entries: Vec::new(),
+        },
+        selected: 0,
+        scroll: 0,
+        filter: String::new(),
+        include_hidden: false,
+    });
+    let mut request =
+        |_: &NavigatorHost, _: &str, _: bool| panic!("escape must not issue a host request");
+
+    handle_project_browser_modal_key_with(
+        KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+        &root,
+        &mut remote,
+        &mut view,
+        &mut request,
+    );
+
+    assert!(view.modal.is_none());
+}
+
+#[test]
+fn project_browser_hidden_toggle_failure_keeps_prior_listing_and_filter() {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = StateRoot::create(temporary.path().join("state")).unwrap();
+    let mut remote = RemoteMonitor::new();
+    let mut view = NavigatorView::new(LocalNavigatorSnapshot::default());
+    let response = ProjectDirectoriesResponse {
+        root_label: "~/code".to_owned(),
+        relative_path: String::new(),
+        include_hidden: false,
+        entries: vec![ProjectDirectoryEntry {
+            name: "visible".to_owned(),
+            is_git_repository: false,
+        }],
+    };
+    view.modal = Some(NavigatorModal::ProjectBrowser {
+        host: NavigatorHost::Local,
+        directories: response.clone(),
+        selected: 0,
+        scroll: 0,
+        filter: "vis".to_owned(),
+        include_hidden: false,
+    });
+
+    let mut request = |_: &NavigatorHost, _: &str, _: bool| {
+        Err::<ProjectDirectoriesResponse, _>(NavigatorError::ActionFailed)
+    };
+    handle_project_browser_modal_key_with(
+        KeyEvent::new(KeyCode::Char('.'), KeyModifiers::NONE),
+        &root,
+        &mut remote,
+        &mut view,
+        &mut request,
+    );
+
+    let Some(NavigatorModal::ProjectBrowser {
+        directories,
+        filter,
+        include_hidden,
+        ..
+    }) = view.modal.as_ref()
+    else {
+        panic!("project browser should remain open");
+    };
+    assert_eq!(directories, &response);
+    assert_eq!(filter, "vis");
+    assert!(!*include_hidden);
+    assert_eq!(
+        view.message.as_deref(),
+        Some("the local navigator action failed")
+    );
+}
+
+#[test]
+fn project_browser_rendering_exposes_picker_keys_at_narrow_widths() {
+    let modal = NavigatorModal::ProjectBrowser {
+        host: NavigatorHost::Local,
+        directories: ProjectDirectoriesResponse {
+            root_label: "~/code".to_owned(),
+            relative_path: String::new(),
+            include_hidden: false,
+            entries: Vec::new(),
+        },
+        selected: 0,
+        scroll: 0,
+        filter: String::new(),
+        include_hidden: false,
+    };
+    assert_eq!(
+        navigator_modal_area(ratatui::layout::Rect::new(0, 0, 80, 20), &modal).height,
+        8
+    );
+    let (_, lines) = navigator_modal_content(modal, 24);
+    let rendered = lines
+        .into_iter()
+        .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+        .collect::<String>();
+    assert!(rendered.contains("Hidden: off · . show"));
+    assert!(rendered.contains("← up · → open"));
+    assert!(rendered.contains("Enter add · Esc quit"));
+
+    let modal = NavigatorModal::ProjectBrowser {
+        host: NavigatorHost::Local,
+        directories: ProjectDirectoriesResponse {
+            root_label: "~/code".to_owned(),
+            relative_path: String::new(),
+            include_hidden: true,
+            entries: Vec::new(),
+        },
+        selected: 0,
+        scroll: 0,
+        filter: String::new(),
+        include_hidden: true,
+    };
+    let (_, lines) = navigator_modal_content(modal, 24);
+    let rendered = lines
+        .into_iter()
+        .flat_map(|line| line.spans.into_iter().map(|span| span.content.into_owned()))
+        .collect::<String>();
+    assert!(rendered.contains("Hidden: on · . hide"));
 }
 
 #[test]

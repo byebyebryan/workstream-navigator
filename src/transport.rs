@@ -368,10 +368,11 @@ impl<R: CommandRunner> HostClient<R> {
         &self,
         endpoint: &SshEndpoint,
         relative_path: &str,
+        include_hidden: bool,
     ) -> Result<ProjectDirectoriesResponse, TransportError> {
         self.project_directories(&ssh_invocation(
             endpoint,
-            &project_directories_request(relative_path)?,
+            &project_directories_request(relative_path, include_hidden)?,
         ))
     }
 
@@ -384,10 +385,11 @@ impl<R: CommandRunner> HostClient<R> {
         &self,
         endpoint: &LocalEndpoint,
         relative_path: &str,
+        include_hidden: bool,
     ) -> Result<ProjectDirectoriesResponse, TransportError> {
         self.project_directories(&local_invocation(
             endpoint,
-            &project_directories_request(relative_path)?,
+            &project_directories_request(relative_path, include_hidden)?,
         ))
     }
 
@@ -648,11 +650,15 @@ fn operations_request() -> Result<RequestEnvelope, TransportError> {
     Ok(request)
 }
 
-fn project_directories_request(relative_path: &str) -> Result<RequestEnvelope, TransportError> {
+fn project_directories_request(
+    relative_path: &str,
+    include_hidden: bool,
+) -> Result<RequestEnvelope, TransportError> {
     let request = RequestEnvelope {
         version: crate::protocol::CURRENT_PROTOCOL_VERSION,
         request: HostRequest::ProjectDirectories {
             relative_path: relative_path.to_owned(),
+            include_hidden,
         },
     };
     request.validate()?;
@@ -1046,6 +1052,56 @@ mod tests {
             .collect::<Vec<_>>(),
         );
         assert!(RequestEnvelope::decode(&invocation.stdin).is_ok());
+    }
+
+    #[test]
+    fn project_browser_requests_carry_the_hidden_directory_flag_over_local_and_ssh() {
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let runner = RecordingRunner {
+            response: ResponseEnvelope {
+                version: CURRENT_PROTOCOL_VERSION,
+                response: HostResponse::ProjectDirectories(
+                    crate::protocol::ProjectDirectoriesResponse {
+                        root_label: "~".to_owned(),
+                        relative_path: String::new(),
+                        include_hidden: true,
+                        entries: Vec::new(),
+                    },
+                ),
+            },
+            calls: calls.clone(),
+        };
+        let ssh_endpoint = SshEndpoint::new(
+            SshDestination::parse("snap").unwrap(),
+            RemoteExecutable::parse("/home/bryan/.local/bin/wsnav").unwrap(),
+        );
+        let local_endpoint = LocalEndpoint {
+            executable: "/tmp/wsnav".into(),
+            state_root: "/tmp/wsnav-state".into(),
+        };
+        let client = HostClient::new(runner);
+
+        client
+            .project_directories_ssh(&ssh_endpoint, "", true)
+            .unwrap();
+        client
+            .project_directories_local(&local_endpoint, "", true)
+            .unwrap();
+
+        let requests = calls
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|invocation| RequestEnvelope::decode(&invocation.stdin).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(requests.len(), 2);
+        assert!(requests.iter().all(|request| matches!(
+            request.request,
+            HostRequest::ProjectDirectories {
+                include_hidden: true,
+                ..
+            }
+        )));
     }
 
     #[test]

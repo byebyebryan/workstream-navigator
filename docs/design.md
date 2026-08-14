@@ -343,14 +343,33 @@ Project registration is an explicit two-step navigator flow: `Projects → a`
 first selects the owning host, then opens a centered browser inside the
 navigator pane. The browser starts at that host's configured workspace root
 (`~` by default), lists only bounded direct-child names plus a Git marker,
-omits dot-prefixed files and folders by default, and uses a root label and
-relative cursor rather than returning absolute paths.
-`Enter` opens a directory or registers a marked Git Project; `r` registers the
-current browser directory. The Hosts page owns the explicit root-setting action
-for the selected host. A local or SSH host resolves the selected relative cursor
-and performs Git inspection itself, so raw paths never enter a snapshot, client
-catalog, protocol response, or provider pane. This is a navigator-only modal,
-not a tmux popup, window, or provider overlay. Its rows stay single-line at the
+omits dot-prefixed directories by default, and uses a root label and relative
+cursor rather than returning absolute paths. `.` toggles one explicit
+modal-local hidden-directory request: every new browser starts hidden-off, and
+the selected visibility persists while entering children or moving to a parent
+inside that browser. The host returns safe dot-directory names only when that
+request flag is true; files, `.`, `..`, unsafe names, and canonical paths outside
+the configured root remain excluded. The flag and echoed visibility state bump
+the typed host-control protocol from 17 to 18; host schema 12, client schema 5,
+and control ABI 1 are unchanged. The bounded response ranks direct Git
+repositories before navigation-only directories. Within each tier it groups
+explicitly shown dot-directories before visible directories, sorts by a
+locale-independent Unicode lowercase key, and uses the original exact name as
+its deterministic tie-breaker. This ordering does not change Git detection,
+the bounded filesystem scan, or the completeness claim beyond that scan.
+`Right` enters the selected directory even when it is a marked Git repository,
+`Left` moves to the parent without crossing the configured root, `Enter`
+registers only a selected marked Git Project, and `Esc` closes the browser. A
+plain-folder `Enter` remains in the browser with bounded guidance to use
+`Right`. No letter is reserved for navigation or registration: letters filter
+the current listing, including `h`, `j`, `k`, and `r`. Adding a repository that
+would otherwise be the configured browser root requires configuring its parent
+as the root and selecting the repository normally. The Hosts page owns that
+explicit root-setting action for the selected host. A local or SSH host resolves
+the selected relative cursor and performs Git inspection itself, so raw paths
+never enter a snapshot, client catalog, protocol response, or provider pane.
+This is a navigator-only modal, not a tmux popup, window, or provider overlay.
+Its rows stay single-line at the
 32-cell navigator width, truncating names before layout; a bounded viewport
 follows the selected directory rather than allowing the selector to scroll out
 of the visible modal.

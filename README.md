@@ -95,7 +95,14 @@ passive observer profile for native hook review. When OpenCode is already
 eligible, that Codex review is optional and remains available from Hosts;
 approve it before starting a Codex Workstream. The host-private directory
 browser starts at `~` by default; configure another browser root from
-Hosts with `.` then `r`.
+Hosts with `.` then `r`. Inside the browser, `.` shows or hides dot-directories
+for that picker; each newly opened picker starts with them hidden. Directory
+Git repositories sort ahead of navigation folders; within each tier, shown
+dot-directories group first and names sort case-insensitively. Use `→` to enter
+the selected folder, `←` to move toward the configured root, `Enter` to add a
+selected Git repository, and `Esc` to quit the picker. All letter keys filter
+the current listing; configure the parent when a Git repository would otherwise
+be the browser root itself.
 
 From the Workstreams home:
 

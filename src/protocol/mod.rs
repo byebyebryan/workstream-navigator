@@ -13,7 +13,7 @@ use crate::domain::{
     RuntimeId, RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
 };
 
-pub const CURRENT_PROTOCOL_VERSION: u16 = 17;
+pub const CURRENT_PROTOCOL_VERSION: u16 = 18;
 pub const MAX_FRAME_BYTES: usize = 64 * 1024;
 pub const MAX_DIAGNOSTIC_BYTES: usize = 512;
 pub const MAX_SNAPSHOT_WORKSTREAMS: usize = 128;
@@ -90,6 +90,7 @@ pub enum HostRequest {
     /// project-browser root. The path is relative and cannot escape that root.
     ProjectDirectories {
         relative_path: String,
+        include_hidden: bool,
     },
     Attach {
         runtime_id: RuntimeId,
@@ -106,9 +107,10 @@ impl HostRequest {
                 validate_bounded("client alias", client_alias, MAX_ALIAS_BYTES)
             }
             Self::Snapshot { .. } | Self::Operations | Self::Attach { .. } => Ok(()),
-            Self::ProjectDirectories { relative_path } => {
-                validate_relative_browser_path(relative_path)
-            }
+            Self::ProjectDirectories {
+                relative_path,
+                include_hidden: _,
+            } => validate_relative_browser_path(relative_path),
             Self::Apply { action } => action.validate(),
         }
     }
@@ -379,6 +381,7 @@ impl HostResponse {
 pub struct ProjectDirectoriesResponse {
     pub root_label: String,
     pub relative_path: String,
+    pub include_hidden: bool,
     pub entries: Vec<ProjectDirectoryEntry>,
 }
 
@@ -389,9 +392,13 @@ impl ProjectDirectoriesResponse {
         if self.entries.len() > MAX_PROJECT_BROWSER_ENTRIES {
             return Err(ProtocolError::SnapshotTooLarge);
         }
-        self.entries
-            .iter()
-            .try_for_each(ProjectDirectoryEntry::validate)
+        self.entries.iter().try_for_each(|entry| {
+            entry.validate()?;
+            if !self.include_hidden && entry.name.starts_with('.') {
+                return Err(ProtocolError::InvalidProjectBrowserPath);
+            }
+            Ok(())
+        })
     }
 }
 
@@ -903,6 +910,33 @@ mod tests {
     }
 
     #[test]
+    fn protocol_seventeen_is_refused_after_the_project_browser_wire_bump() {
+        let envelope = RequestEnvelope {
+            version: 17,
+            request: HostRequest::ProjectDirectories {
+                relative_path: String::new(),
+                include_hidden: false,
+            },
+        };
+
+        assert!(matches!(
+            envelope.validate(),
+            Err(ProtocolError::UnsupportedVersion(17))
+        ));
+
+        let response = ResponseEnvelope {
+            version: 17,
+            response: HostResponse::Rejected {
+                diagnostic: "unsupported protocol version".to_owned(),
+            },
+        };
+        assert!(matches!(
+            response.validate(),
+            Err(ProtocolError::UnsupportedVersion(17))
+        ));
+    }
+
+    #[test]
     fn unknown_provider_wire_values_fail_closed() {
         let frame = format!(
             "{{\"version\":{CURRENT_PROTOCOL_VERSION},\"request\":{{\"kind\":\"apply\",\"action\":{{\"kind\":\"register_checkout\",\"checkout_path\":\"/tmp/project\",\"provider\":\"other\"}}}}}}\n"
@@ -1083,6 +1117,7 @@ mod tests {
             version: CURRENT_PROTOCOL_VERSION,
             request: HostRequest::ProjectDirectories {
                 relative_path: "workspace/wsnav".to_owned(),
+                include_hidden: false,
             },
         };
         assert!(accepted.validate().is_ok());
@@ -1116,6 +1151,7 @@ mod tests {
             response: HostResponse::ProjectDirectories(ProjectDirectoriesResponse {
                 root_label: "~/code".to_owned(),
                 relative_path: "workspace".to_owned(),
+                include_hidden: false,
                 entries: vec![ProjectDirectoryEntry {
                     name: "wsnav".to_owned(),
                     is_git_repository: true,
@@ -1124,11 +1160,43 @@ mod tests {
         };
         assert!(response.validate().is_ok());
 
+        let hidden = ResponseEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            response: HostResponse::ProjectDirectories(ProjectDirectoriesResponse {
+                root_label: "~/code".to_owned(),
+                relative_path: "workspace".to_owned(),
+                include_hidden: true,
+                entries: vec![ProjectDirectoryEntry {
+                    name: ".local".to_owned(),
+                    is_git_repository: false,
+                }],
+            }),
+        };
+        assert!(hidden.validate().is_ok());
+
+        let hidden_without_flag = ResponseEnvelope {
+            version: CURRENT_PROTOCOL_VERSION,
+            response: HostResponse::ProjectDirectories(ProjectDirectoriesResponse {
+                root_label: "~/code".to_owned(),
+                relative_path: "workspace".to_owned(),
+                include_hidden: false,
+                entries: vec![ProjectDirectoryEntry {
+                    name: ".local".to_owned(),
+                    is_git_repository: false,
+                }],
+            }),
+        };
+        assert!(matches!(
+            hidden_without_flag.validate(),
+            Err(ProtocolError::InvalidProjectBrowserPath)
+        ));
+
         let invalid = ResponseEnvelope {
             version: CURRENT_PROTOCOL_VERSION,
             response: HostResponse::ProjectDirectories(ProjectDirectoriesResponse {
                 root_label: "~/code".to_owned(),
                 relative_path: String::new(),
+                include_hidden: false,
                 entries: vec![ProjectDirectoryEntry {
                     name: "../../private".to_owned(),
                     is_git_repository: false,
@@ -1145,6 +1213,7 @@ mod tests {
             response: HostResponse::ProjectDirectories(ProjectDirectoriesResponse {
                 root_label: "/private/host/path".to_owned(),
                 relative_path: String::new(),
+                include_hidden: false,
                 entries: Vec::new(),
             }),
         };

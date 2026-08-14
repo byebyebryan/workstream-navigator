@@ -55,8 +55,8 @@ pub(in crate::navigator) fn navigator_modal_area(outer: Rect, modal: &NavigatorM
         NavigatorModal::ProjectBrowser { directories, .. } => directories
             .entries
             .len()
-            .min(PROJECT_BROWSER_VIEWPORT_ROWS)
-            .saturating_add(5),
+            .clamp(1, PROJECT_BROWSER_VIEWPORT_ROWS)
+            .saturating_add(7),
         NavigatorModal::ConfirmArchive(_)
         | NavigatorModal::ConfirmForkRecovery { .. }
         | NavigatorModal::SelectHostRemoval { .. }
@@ -182,6 +182,7 @@ pub(in crate::navigator) fn navigator_modal_content(
             selected,
             scroll,
             ref filter,
+            ..
         } => project_browser_modal(
             host,
             directories,
@@ -233,6 +234,7 @@ fn project_browser_modal(
     content_width: usize,
     key: Style,
 ) -> (String, Vec<Line<'static>>) {
+    let include_hidden = directories.include_hidden;
     let visible = project_browser_entry_indexes(directories, filter);
     let cursor = if directories.relative_path.is_empty() {
         directories.root_label.clone()
@@ -286,7 +288,22 @@ fn project_browser_modal(
         }
     }
     lines.push(Line::from(Span::styled(
-        truncate_display("Enter open/add · r add · h up", content_width),
+        truncate_display(
+            if include_hidden {
+                "Hidden: on · . hide"
+            } else {
+                "Hidden: off · . show"
+            },
+            content_width,
+        ),
+        key,
+    )));
+    lines.push(Line::from(Span::styled(
+        truncate_display("← up · → open", content_width),
+        key,
+    )));
+    lines.push(Line::from(Span::styled(
+        truncate_display("Enter add · Esc quit", content_width),
         key,
     )));
     (format!(" Add Project · {} ", host.alias()), lines)

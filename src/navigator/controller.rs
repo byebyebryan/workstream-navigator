@@ -371,32 +371,56 @@ fn handle_project_browser_modal_key(
     remote: &mut RemoteMonitor,
     view: &mut NavigatorView,
 ) -> bool {
+    let mut request = |host: &NavigatorHost, cursor: &str, include_hidden: bool| {
+        project_directories(root, host, cursor, include_hidden)
+    };
+    handle_project_browser_modal_key_with(key, root, remote, view, &mut request)
+}
+
+pub(in crate::navigator) fn handle_project_browser_modal_key_with<F>(
+    key: crossterm::event::KeyEvent,
+    root: &StateRoot,
+    remote: &mut RemoteMonitor,
+    view: &mut NavigatorView,
+    mut request: F,
+) -> bool
+where
+    F: FnMut(&NavigatorHost, &str, bool) -> Result<ProjectDirectoriesResponse, NavigatorError>,
+{
     match key.code {
         KeyCode::Esc => view.dismiss_modal(),
-        KeyCode::Down | KeyCode::Char('j') => view.select_project_browser_next(),
-        KeyCode::Up | KeyCode::Char('k') => view.select_project_browser_previous(),
+        KeyCode::Down => view.select_project_browser_next(),
+        KeyCode::Up => view.select_project_browser_previous(),
+        KeyCode::Char('.') => toggle_project_browser_hidden_with(view, &mut request),
         KeyCode::Backspace => {
             if let Some(NavigatorModal::ProjectBrowser { filter, .. }) = view.modal.as_mut() {
                 filter.pop();
             }
             view.normalize_project_browser_selection();
         }
-        KeyCode::Char('h') => {
-            let Some((host, cursor)) = view.project_browser_cursor() else {
+        KeyCode::Left => {
+            let Some((host, cursor, include_hidden)) = view.project_browser_navigation_context()
+            else {
                 return false;
             };
+            if cursor.is_empty() {
+                view.set_message("already at the Project browser root");
+                return false;
+            }
             let parent = cursor
                 .rsplit_once('/')
                 .map_or_else(String::new, |(parent, _)| parent.to_owned());
-            open_project_browser(root, view, host, &parent);
+            refresh_project_browser_with(
+                view,
+                host,
+                &parent,
+                include_hidden,
+                String::new(),
+                false,
+                &mut request,
+            );
         }
-        KeyCode::Char('r') => {
-            let Some((host, cursor)) = view.project_browser_cursor() else {
-                return false;
-            };
-            register_project_browser_directory(root, remote, view, &host, &cursor);
-        }
-        KeyCode::Enter => {
+        KeyCode::Right => {
             let Some((host, cursor, entry)) = view.project_browser_selected_entry() else {
                 view.set_message("no folder is selected");
                 return false;
@@ -406,11 +430,34 @@ fn handle_project_browser_modal_key(
             } else {
                 format!("{cursor}/{}", entry.name)
             };
-            if entry.is_git_repository {
-                register_project_browser_directory(root, remote, view, &host, &relative_path);
-            } else {
-                open_project_browser(root, view, host, &relative_path);
+            let include_hidden = view
+                .project_browser_navigation_context()
+                .is_some_and(|(_, _, include_hidden)| include_hidden);
+            refresh_project_browser_with(
+                view,
+                host,
+                &relative_path,
+                include_hidden,
+                String::new(),
+                false,
+                &mut request,
+            );
+        }
+        KeyCode::Enter => {
+            let Some((host, cursor, entry)) = view.project_browser_selected_entry() else {
+                view.set_message("no folder is selected");
+                return false;
+            };
+            if !entry.is_git_repository {
+                view.set_message("selected folder is not a Git repository; press → to open it");
+                return false;
             }
+            let relative_path = if cursor.is_empty() {
+                entry.name
+            } else {
+                format!("{cursor}/{}", entry.name)
+            };
+            register_project_browser_directory(root, remote, view, &host, &relative_path);
         }
         KeyCode::Char(character) if !character.is_control() => {
             if let Some(NavigatorModal::ProjectBrowser { filter, .. }) = view.modal.as_mut()
@@ -1208,14 +1255,88 @@ fn open_project_browser(
         view.set_message("remote host is unavailable; Project browser was not opened");
         return;
     }
-    match project_directories(root, &host, relative_path) {
+    refresh_project_browser(root, view, host, relative_path, false, String::new(), false);
+}
+
+fn refresh_project_browser(
+    root: &StateRoot,
+    view: &mut NavigatorView,
+    host: NavigatorHost,
+    relative_path: &str,
+    include_hidden: bool,
+    filter: String,
+    preserve_selection: bool,
+) {
+    if host.is_remote() && !host.is_reachable() {
+        view.set_message("remote host is unavailable; Project browser was not opened");
+        return;
+    }
+    refresh_project_browser_with(
+        view,
+        host,
+        relative_path,
+        include_hidden,
+        filter,
+        preserve_selection,
+        |host, cursor, include_hidden| project_directories(root, host, cursor, include_hidden),
+    );
+}
+
+fn refresh_project_browser_with<F>(
+    view: &mut NavigatorView,
+    host: NavigatorHost,
+    relative_path: &str,
+    include_hidden: bool,
+    filter: String,
+    preserve_selection: bool,
+    mut request: F,
+) where
+    F: FnMut(&NavigatorHost, &str, bool) -> Result<ProjectDirectoriesResponse, NavigatorError>,
+{
+    let result = request(&host, relative_path, include_hidden);
+    apply_project_browser_refresh(
+        view,
+        host,
+        include_hidden,
+        filter,
+        preserve_selection,
+        result,
+    );
+}
+
+fn apply_project_browser_refresh(
+    view: &mut NavigatorView,
+    host: NavigatorHost,
+    include_hidden: bool,
+    filter: String,
+    preserve_selection: bool,
+    result: Result<ProjectDirectoriesResponse, NavigatorError>,
+) {
+    let selected_name = preserve_selection
+        .then(|| view.project_browser_selected_name())
+        .flatten();
+    match result {
         Ok(directories) => {
+            if directories.include_hidden != include_hidden {
+                view.set_message("project browser returned an inconsistent visibility state");
+                return;
+            }
+            let selected = selected_name
+                .as_deref()
+                .and_then(|name| {
+                    directories
+                        .entries
+                        .iter()
+                        .position(|entry| entry.name == name)
+                })
+                .unwrap_or(0);
             view.modal = Some(NavigatorModal::ProjectBrowser {
                 host,
                 directories,
-                selected: 0,
+                selected,
                 scroll: 0,
-                filter: String::new(),
+                filter,
+                include_hidden,
             });
             view.normalize_project_browser_selection();
         }
@@ -1225,22 +1346,38 @@ fn open_project_browser(
     }
 }
 
+fn toggle_project_browser_hidden_with<F>(view: &mut NavigatorView, request: &mut F)
+where
+    F: FnMut(&NavigatorHost, &str, bool) -> Result<ProjectDirectoriesResponse, NavigatorError>,
+{
+    let Some((host, cursor, include_hidden)) = view.project_browser_navigation_context() else {
+        return;
+    };
+    let filter = match view.modal.as_ref() {
+        Some(NavigatorModal::ProjectBrowser { filter, .. }) => filter.clone(),
+        _ => String::new(),
+    };
+    let result = request(&host, &cursor, !include_hidden);
+    apply_project_browser_refresh(view, host, !include_hidden, filter, true, result);
+}
+
 fn project_directories(
     root: &StateRoot,
     host: &NavigatorHost,
     relative_path: &str,
+    include_hidden: bool,
 ) -> Result<ProjectDirectoriesResponse, NavigatorError> {
     let client = HostClient::new(SystemCommandRunner);
     if host.is_remote() {
         let endpoint = checked_navigator_ssh_endpoint(root, host.alias())?;
-        return Ok(client.project_directories_ssh(&endpoint, relative_path)?);
+        return Ok(client.project_directories_ssh(&endpoint, relative_path, include_hidden)?);
     }
     let executable = std::env::current_exe().map_err(NavigatorError::CurrentExecutable)?;
     let endpoint = LocalEndpoint {
         executable,
         state_root: root.base().to_path_buf(),
     };
-    Ok(client.project_directories_local(&endpoint, relative_path)?)
+    Ok(client.project_directories_local(&endpoint, relative_path, include_hidden)?)
 }
 
 fn checked_navigator_ssh_endpoint(

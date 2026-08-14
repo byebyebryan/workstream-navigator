@@ -130,6 +130,7 @@ pub(in crate::navigator) enum NavigatorModal {
         selected: usize,
         scroll: usize,
         filter: String,
+        include_hidden: bool,
     },
     ConfigureProjectBrowserRoot {
         host: NavigatorHost,
@@ -1307,14 +1308,28 @@ impl NavigatorView {
             })?
     }
 
-    pub(in crate::navigator) fn project_browser_cursor(&self) -> Option<(NavigatorHost, String)> {
+    pub(in crate::navigator) fn project_browser_navigation_context(
+        &self,
+    ) -> Option<(NavigatorHost, String, bool)> {
         let NavigatorModal::ProjectBrowser {
-            host, directories, ..
+            host,
+            directories,
+            include_hidden,
+            ..
         } = self.modal.as_ref()?
         else {
             return None;
         };
-        Some((host.clone(), directories.relative_path.clone()))
+        Some((
+            host.clone(),
+            directories.relative_path.clone(),
+            *include_hidden,
+        ))
+    }
+
+    pub(in crate::navigator) fn project_browser_selected_name(&self) -> Option<String> {
+        self.project_browser_selected_entry()
+            .map(|(_, _, entry)| entry.name)
     }
 
     pub(in crate::navigator) fn toggle_host_removal_mode(&mut self) {

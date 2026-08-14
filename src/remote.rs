@@ -138,15 +138,16 @@ fn dispatch(state_root: Option<std::path::PathBuf>, request: &RequestEnvelope) -
             },
             Err(_) => rejected("host operation list is unavailable"),
         },
-        HostRequest::ProjectDirectories { relative_path } => {
-            match registry.project_directories(relative_path) {
-                Ok(directories) => ResponseEnvelope {
-                    version: CURRENT_PROTOCOL_VERSION,
-                    response: HostResponse::ProjectDirectories(directories),
-                },
-                Err(_) => rejected("project browser is unavailable"),
-            }
-        }
+        HostRequest::ProjectDirectories {
+            relative_path,
+            include_hidden,
+        } => match registry.project_directories(relative_path, *include_hidden) {
+            Ok(directories) => ResponseEnvelope {
+                version: CURRENT_PROTOCOL_VERSION,
+                response: HostResponse::ProjectDirectories(directories),
+            },
+            Err(_) => rejected("project browser is unavailable"),
+        },
         HostRequest::Attach { runtime_id } => match registry.runtime_by_id(*runtime_id) {
             Ok(Some(runtime)) => match crate::actions::preflight_attachment_runtime(
                 &root,

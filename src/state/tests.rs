@@ -61,15 +61,24 @@ fn project_browser_lists_only_safe_directories_without_exposing_root_paths() {
     let browser_root = temporary.path().join("projects");
     let git_project = browser_root.join("navigator");
     let ordinary_directory = browser_root.join("scratch");
+    let hidden_directory = browser_root.join(".local");
     fs::create_dir_all(git_project.join(".git")).unwrap();
     fs::create_dir_all(&ordinary_directory).unwrap();
+    fs::create_dir_all(&hidden_directory).unwrap();
     fs::create_dir_all(browser_root.join(".hidden-project")).unwrap();
+    fs::write(browser_root.join(".not-a-directory"), b"ignored").unwrap();
     fs::write(browser_root.join("not-a-directory"), b"ignored").unwrap();
+    #[cfg(unix)]
+    {
+        let outside = temporary.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, browser_root.join(".escape")).unwrap();
+    }
     registry
         .set_project_browser_root(&browser_root.to_string_lossy())
         .unwrap();
 
-    let directories = registry.project_directories("").unwrap();
+    let directories = registry.project_directories("", false).unwrap();
 
     assert_eq!(directories.relative_path, "");
     assert_eq!(directories.root_label, "custom root · projects");
@@ -86,6 +95,39 @@ fn project_browser_lists_only_safe_directories_without_exposing_root_paths() {
             .collect::<Vec<_>>(),
         vec![("navigator", true), ("scratch", false)]
     );
+    let with_hidden = registry.project_directories("", true).unwrap();
+    assert!(with_hidden.include_hidden);
+    assert!(
+        with_hidden
+            .entries
+            .iter()
+            .any(|entry| entry.name == ".hidden-project")
+    );
+    assert!(
+        with_hidden
+            .entries
+            .iter()
+            .any(|entry| entry.name == ".local")
+    );
+    assert!(
+        !with_hidden
+            .entries
+            .iter()
+            .any(|entry| entry.name == ".not-a-directory")
+    );
+    #[cfg(unix)]
+    assert!(
+        !with_hidden
+            .entries
+            .iter()
+            .any(|entry| entry.name == ".escape")
+    );
+    for unsafe_name in ["", ".", "..", "bad/name", "bad\\name", "line\nfeed"] {
+        assert!(!super::utils::safe_project_browser_entry_name(
+            unsafe_name,
+            true
+        ));
+    }
     assert!(matches!(
         registry.project_browser_directory("../outside"),
         Err(StateError::InvalidProjectBrowserRelativePath)
@@ -93,6 +135,64 @@ fn project_browser_lists_only_safe_directories_without_exposing_root_paths() {
     assert_eq!(
         registry.project_browser_directory("navigator").unwrap(),
         fs::canonicalize(git_project).unwrap()
+    );
+}
+
+#[test]
+fn project_browser_orders_repositories_before_case_insensitive_directory_groups() {
+    let (temporary, mut registry) = registry();
+    let browser_root = temporary.path().join("projects");
+    for name in [
+        ".Repo",
+        ".repo",
+        "AlphaRepo",
+        "zulu-repo",
+        ".alpha",
+        ".Zebra",
+        "ALPHA",
+        "alpha",
+        "Beta",
+        "zeta",
+    ] {
+        let directory = browser_root.join(name);
+        fs::create_dir_all(&directory).unwrap();
+        if name.ends_with("Repo") || name.ends_with("repo") {
+            fs::create_dir_all(directory.join(".git")).unwrap();
+        }
+    }
+    registry
+        .set_project_browser_root(&browser_root.to_string_lossy())
+        .unwrap();
+
+    let visible = registry.project_directories("", false).unwrap();
+    assert_eq!(
+        visible
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec!["AlphaRepo", "zulu-repo", "ALPHA", "alpha", "Beta", "zeta"]
+    );
+
+    let with_hidden = registry.project_directories("", true).unwrap();
+    assert_eq!(
+        with_hidden
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect::<Vec<_>>(),
+        vec![
+            ".Repo",
+            ".repo",
+            "AlphaRepo",
+            "zulu-repo",
+            ".alpha",
+            ".Zebra",
+            "ALPHA",
+            "alpha",
+            "Beta",
+            "zeta",
+        ]
     );
 }
 

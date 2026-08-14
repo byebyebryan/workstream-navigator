@@ -190,7 +190,7 @@ an automatic migration from the retired schema.
 
 Date: 2026-08-14
 
-Status: D0 through D8.18 are complete. V1 remains a source-installed operator
+Status: D0 through D8.22 are complete. V1 remains a source-installed operator
 beta.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
@@ -256,6 +256,10 @@ This document owns sequencing, exit gates, and progress.
 | D8.16 | Finite-control authority and repository drift cleanup | Complete (2026-08-14) |
 | D8.17 | Navigator-retained mouse Workstream switching | Complete (2026-08-14) |
 | D8.18 | Home-root Project browser default | Complete (2026-08-14) |
+| D8.19 | Modal-local hidden Project-directory toggle | Complete (2026-08-14) |
+| D8.20 | Human-facing Project-directory ordering | Complete (2026-08-14) |
+| D8.21 | Repository-first Project-directory ordering | Complete (2026-08-14) |
+| D8.22 | Directional Project-browser navigation | Complete (2026-08-14) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -2616,6 +2620,258 @@ Operator confirmation (2026-08-14):
   `~`; and
 - no state reset or Runtime rotation was performed, and both existing open
   Workstreams remained intact.
+
+## D8.19 - Modal-local hidden Project-directory toggle
+
+Status: Complete on 2026-08-14.
+
+This checkpoint makes a Project under a dot-directory reachable without
+changing the host's configured browser root or adding arbitrary path entry.
+Each newly opened Project browser continues to omit dot-directories; `.`
+explicitly shows or hides them for that modal, and the selection persists while
+navigating down or up inside the same bounded browser.
+
+Scope:
+
+- add one explicit modal-local hidden-directory visibility state, default it to
+  off for each new Project browser, and expose its current action in the narrow
+  browser footer;
+- carry that state through the then-current child `Enter` and parent `h` key
+  paths, preserving the current filter and selected directory where possible
+  when the visibility toggles; D8.22 later rebinds those navigation paths to
+  `Right` and `Left`; and
+- extend the bounded local/SSH Project-directory request and response with one
+  exact visibility flag, bumping protocol 17 to 18 so hidden directory names
+  cross the host-control boundary only after an explicit request.
+
+Non-goals and hard boundaries:
+
+- no typed or absolute path entry, hidden-file listing, persisted preference,
+  navigation above the configured root, root-path response, arbitrary host
+  filesystem discovery, schema migration, or compatibility behavior; and
+- no Project registration, Git inspection, provider, Runtime, attachment,
+  presentation, ordinary tmux, or dependency change.
+
+Exit gate:
+
+- deterministic host-state coverage proves hidden-off excludes dot-directories
+  while hidden-on includes safe dot-directories and still rejects files,
+  unsafe names, and canonical escapes;
+- protocol and transport coverage proves protocol 18 carries the explicit flag
+  across local and SSH requests, refuses protocol 17, and rejects a hidden name
+  in a response whose flag is false;
+- deterministic Navigator coverage drives `.`, the then-current non-Git
+  `Enter`, and `h` key paths, proving default-off toggle behavior,
+  filter/selection preservation, navigation persistence, failure preservation,
+  and narrow discoverability; D8.22 supersedes the two navigation bindings; and
+- one uninterrupted `scripts/check` run plus staged and unstaged
+  `git diff --check` pass.
+
+Completion evidence (2026-08-14):
+
+- the host-private directory listing accepts one explicit `include_hidden`
+  request, echoes that visibility in its bounded response, and filters safe
+  direct-child directories before canonical root-containment and directory
+  checks. Dot-directories remain absent unless requested; files, `.`, `..`,
+  unsafe names, and canonical escapes remain unavailable;
+- the Project browser begins hidden-off, consumes `.` as a visibility toggle,
+  preserves its prior modal on refresh failure, and threads the selected state
+  through actual child and parent navigation. Its footer renders the current
+  `Hidden: on/off` state and corresponding `. show/hide` action;
+- protocol 18 fails closed on the former version and on a hidden entry returned
+  without the visibility flag. Host schema 12, client schema 5, control ABI 1,
+  persisted roots and state, provider commands, Runtime behavior, and both
+  private tmux configurations are unchanged; and
+- one uninterrupted `scripts/check` run passes 397 library tests, seven
+  integration tests, formatting, Clippy with warnings denied, packaging,
+  dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
+  acceptance harnesses, and staged and unstaged diff checks. No live provider,
+  SSH, installation, state reset, or Runtime rotation was required.
+
+## D8.20 - Human-facing Project-directory ordering
+
+Status: Complete on 2026-08-14.
+
+This checkpoint replaces the Project browser's raw case-sensitive name order
+with one deterministic human-facing order. Ordinary mixed-case directories no
+longer split into uppercase and lowercase blocks, while explicitly shown
+dot-directories remain a predictable leading group.
+
+Scope:
+
+- group dot-directories before visible directories only when the explicit
+  D8.19 visibility request includes them;
+- sort each group by a locale-independent Unicode lowercase key and then by the
+  original exact name so equal folded keys remain deterministic; and
+- apply the same visible-directory ordering whether hidden directories are on
+  or off, without adding a dependency.
+
+Non-goals and hard boundaries:
+
+- no natural-number, locale-sensitive, modification-time, Git-status, or
+  user-configurable ordering;
+- no change to the existing bounded filesystem scan, response truncation, or
+  completeness claim for directories beyond that scan; and
+- no hidden visibility, path filtering, canonical containment, registration,
+  protocol, schema, persistence, provider, Runtime, presentation, ordinary
+  tmux, or dependency change.
+
+Exit gate:
+
+- deterministic host-state coverage proves mixed-case visible names follow
+  their lowercase keys instead of raw uppercase-first order;
+- equal lowercase keys use the exact original name as their stable tie-breaker;
+- hidden-on responses contain one leading, internally sorted dot-directory
+  group followed by the sorted visible group, while hidden-off responses retain
+  only the same correctly sorted visible group; and
+- one uninterrupted `scripts/check` run plus staged and unstaged
+  `git diff --check` pass.
+
+Completion evidence (2026-08-14):
+
+- the bounded Project-directory response now computes one cached tuple per
+  accepted entry: hidden-group rank, Unicode lowercase name, and exact original
+  name. Sorting that tuple avoids repeated fold allocation while retaining a
+  deterministic exact-name tie;
+- deterministic state coverage uses mixed-case visible names, same-fold names,
+  and mixed hidden/visible names to prove the complete ordering contract;
+- protocol 18, host schema 12, client schema 5, control ABI 1, the D8.19
+  visibility request, scan and response bounds, persisted state, provider
+  commands, Runtime behavior, and both private tmux configurations are
+  unchanged; and
+- one uninterrupted `scripts/check` run passes 398 library tests, seven
+  integration tests, formatting, Clippy with warnings denied, packaging,
+  dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
+  acceptance harnesses, and staged and unstaged diff checks. No live provider,
+  SSH, installation, state reset, or Runtime rotation was required.
+
+## D8.21 - Repository-first Project-directory ordering
+
+Status: Complete on 2026-08-14.
+
+This checkpoint makes the Project browser's actionable result the primary
+ordering signal. Direct Git repositories now appear before directories that
+only navigate deeper, while D8.20's hidden grouping and deterministic
+case-insensitive name order remain subordinate within both tiers.
+
+Scope:
+
+- rank entries already identified as direct Git repositories before ordinary
+  navigation folders, regardless of their names;
+- retain hidden-before-visible grouping independently inside the repository and
+  folder tiers when D8.19 visibility is enabled; and
+- retain the Unicode lowercase key and exact original-name tie-breaker inside
+  each resulting group without adding another filesystem probe.
+
+Non-goals and hard boundaries:
+
+- no Git detection, repository inspection, registration, filtering, marker,
+  hidden-toggle, or selected-row behavior change;
+- no header, separator, natural-number, locale-sensitive, modification-time,
+  Git-status, or user-configurable ordering; and
+- no scan/response bound, path/root, protocol, schema, persistence, provider,
+  Runtime, presentation, ordinary tmux, or dependency change.
+
+Exit gate:
+
+- deterministic host-state coverage proves a repository whose name would sort
+  late still precedes an alphabetically earlier navigation folder;
+- hidden-off responses exclude hidden entries and order visible repositories
+  before the D8.20-sorted visible-folder tier;
+- hidden-on responses order hidden repositories, visible repositories, hidden
+  folders, and visible folders, retaining mixed-case and same-fold exact-name
+  behavior inside those groups; and
+- one uninterrupted `scripts/check` run plus staged and unstaged
+  `git diff --check` pass.
+
+Completion evidence (2026-08-14):
+
+- the existing cached Project-directory sort key now begins with the already
+  computed `is_git_repository` marker, followed by hidden-group rank, Unicode
+  lowercase name, and exact original name. No new Git or filesystem probe was
+  introduced;
+- deterministic state coverage combines hidden and visible repositories,
+  hidden and visible navigation folders, mixed case, same-fold names, and a
+  late-sorting repository to prove the complete ordering hierarchy;
+- protocol 18, host schema 12, client schema 5, control ABI 1, Git detection,
+  the D8.19 visibility request, D8.20 name keys, scan and response bounds,
+  persisted state, provider commands, Runtime behavior, and both private tmux
+  configurations are unchanged; and
+- one uninterrupted `scripts/check` run passes 398 library tests, seven
+  integration tests, formatting, Clippy with warnings denied, packaging,
+  dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
+  acceptance harnesses, and staged and unstaged diff checks. No live provider,
+  SSH, installation, state reset, or Runtime rotation was required.
+
+## D8.22 - Directional Project-browser navigation
+
+Status: Complete on 2026-08-14.
+
+This checkpoint separates browsing from registration in the Project picker.
+Directional arrows now express directory navigation, while `Enter` has one
+action meaning: add the selected Git repository.
+
+Scope:
+
+- make `Right` enter any selected directory, including a directory already
+  marked as a Git repository, while preserving the modal-local hidden setting;
+- make `Left` move to the parent without crossing the configured browser root;
+- make `Enter` register only the selected marked Git repository, retaining the
+  picker with bounded `Right` guidance when a plain folder is selected;
+- retain `.` as the hidden-directory toggle, `Esc` as picker dismissal, and
+  `Up`/`Down` as selection controls;
+- remove the picker-local `j`/`k` selection aliases and `r` current-directory
+  registration action so every letter, including `h`, is ordinary filter input;
+  and
+- render only the canonical arrow, add, and quit controls in the bounded
+  footer.
+
+Non-goals and hard boundaries:
+
+- no filesystem, Git detection, directory ordering, filtering model,
+  configured-root, registration authority, or provider-selection change;
+- no navigation above the configured browser root and no typed or absolute
+  path input; a repository that is itself the configured root must instead be
+  selected from a configured parent; and
+- no protocol, schema, persistence, Runtime, presentation, ordinary tmux, or
+  dependency change.
+
+Exit gate:
+
+- deterministic Navigator coverage drives the actual `Right` and `Left` key
+  paths, proving that a marked repository can be entered and hidden visibility
+  persists in both directions;
+- deterministic coverage proves root-bounded `Left`, plain-folder `Enter`
+  guidance, marked-repository `Enter` registration intent, unrestricted letter
+  filtering, and `Esc` dismissal without live host or provider effects;
+- narrow rendering exposes the canonical hidden, navigation, add, and quit
+  controls without relying on the advanced `r` action; and
+- one uninterrupted `scripts/check` run plus staged and unstaged
+  `git diff --check` pass.
+
+Completion evidence (2026-08-14):
+
+- the Project browser now routes `Right` through the existing bounded child
+  request regardless of Git marker, routes `Left` through the bounded parent
+  request, and refuses to request a parent when its relative cursor is already
+  empty. Both directions retain the explicit hidden-directory visibility state;
+- `Enter` now sends only a selected marked repository into the existing
+  registration/provider-selection path. A plain directory remains selected
+  with bounded `Right` guidance, while `h`, `j`, `k`, and `r` reach ordinary
+  filter input and `Esc` dismisses the modal;
+- the footer gives the hidden toggle, arrow navigation, `Enter` add, and `Esc`
+  quit controls their own narrow-safe lines, without a secondary letter-key
+  command path. Empty listings reserve enough height to keep every canonical
+  control visible;
+- protocol 18, host schema 12, client schema 5, control ABI 1, host scanning,
+  repository detection, ordering, registration authority, persisted state,
+  provider commands, Runtime behavior, and both private tmux configurations are
+  unchanged; and
+- one uninterrupted `scripts/check` run passes 401 library tests, seven
+  integration tests, formatting, Clippy with warnings denied, packaging,
+  dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
+  acceptance harnesses, and staged and unstaged diff checks. No live provider,
+  SSH, installation, state reset, or Runtime rotation was required.
 
 ## Deferred beyond V1
 

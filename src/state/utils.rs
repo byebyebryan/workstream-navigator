@@ -276,10 +276,10 @@ pub(in crate::state) fn project_browser_directory(
     }
 }
 
-pub(in crate::state) fn safe_project_browser_entry_name(name: &str) -> bool {
+pub(in crate::state) fn safe_project_browser_entry_name(name: &str, include_hidden: bool) -> bool {
     !name.is_empty()
         && name.len() <= 256
-        && !name.starts_with('.')
+        && (include_hidden || !name.starts_with('.'))
         && !name.chars().any(char::is_control)
         && !name.contains(['/', '\\'])
         && !matches!(name, "." | "..")

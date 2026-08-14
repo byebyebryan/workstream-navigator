@@ -465,10 +465,16 @@ also classified as failed. These files disappear with the disposable
 presentation and contain only the host alias, Workstream ID, attempt ID, and
 phase.
 
-Focus is local presentation state, not durable Workstream state. Two navigator
-clients may look at different workstreams without racing over a global
-`current` record. Durable state records activity and attention, never an
-authoritative focused pane.
+Focus is local presentation state, not durable Workstream state. A primary
+mouse click on any line of a Workstream card selects that exact Workstream and
+switches the provider pane to its normal open/start/recover attachment while
+retaining keyboard focus in the Navigator. The user explicitly enters the
+native provider with `Enter`, `Tab`, or a click in the provider pane. This lets
+successive card clicks browse live Workstreams without transferring keyboard
+control on every selection; it does not create a passive preview mode or alter
+the selected Workstream's lifecycle action. Two navigator clients may look at
+different workstreams without racing over a global `current` record. Durable
+state records activity and attention, never an authoritative focused pane.
 
 A provider Runtime may have more than one same-user tmux attachment, including
 another Workstream Navigator client or a deliberate direct attachment to its

@@ -17,7 +17,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 
 use crate::{
     domain::{ProjectId, ProviderKind, WorkstreamId},
-    presentation::Presentation,
+    presentation::{Presentation, PresentationError},
     process::output_bounded,
     protocol::{HostAction, ObserverStatus, ProjectDirectoriesResponse, ProviderCapability},
     state::{
@@ -199,7 +199,13 @@ fn handle_navigator_key(
             false
         }
         KeyCode::Enter if workstreams => {
-            activate_selected(root, presentation, remote, view);
+            activate_selected(
+                root,
+                presentation,
+                remote,
+                view,
+                WorkstreamActivationInput::Enter,
+            );
             false
         }
         KeyCode::Char('i') if workstreams => {
@@ -634,7 +640,13 @@ fn handle_navigator_mouse(
             }
         }
         MouseEventKind::Up(MouseButton::Left) => match view.take_mouse_click() {
-            Some(MouseClickIntent::Row) => activate_selected(root, presentation, remote, view),
+            Some(MouseClickIntent::Row) => activate_selected(
+                root,
+                presentation,
+                remote,
+                view,
+                WorkstreamActivationInput::MouseClick,
+            ),
             Some(MouseClickIntent::Management | MouseClickIntent::Blank) => {
                 if let Err(error) = presentation.focus_navigator() {
                     view.set_message(action_message(&error));
@@ -716,11 +728,82 @@ fn observer_review_pending(root: &StateRoot, capabilities: &[ProviderCapability]
         .is_none_or(|integration| integration.lifecycle != IntegrationLifecycle::Ready)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::navigator) enum PostActivationFocus {
+    Provider,
+    Navigator,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::navigator) enum WorkstreamActivationInput {
+    Enter,
+    MouseClick,
+    ProviderHandoff,
+}
+
+impl WorkstreamActivationInput {
+    const fn post_activation_focus(self) -> PostActivationFocus {
+        match self {
+            Self::Enter | Self::ProviderHandoff => PostActivationFocus::Provider,
+            Self::MouseClick => PostActivationFocus::Navigator,
+        }
+    }
+}
+
+/// Narrow focus-only seam for deterministic controller tests. Presentation
+/// remains the sole production implementation; activation and attachment
+/// behavior stay on the concrete presentation owner.
+pub(in crate::navigator) trait NavigatorFocus {
+    fn focus_provider(&self) -> Result<(), PresentationError>;
+    fn focus_navigator(&self) -> Result<(), PresentationError>;
+}
+
+impl NavigatorFocus for Presentation {
+    fn focus_provider(&self) -> Result<(), PresentationError> {
+        Presentation::focus_provider(self)
+    }
+
+    fn focus_navigator(&self) -> Result<(), PresentationError> {
+        Presentation::focus_navigator(self)
+    }
+}
+
+pub(in crate::navigator) fn apply_post_activation_focus<F: NavigatorFocus>(
+    focus: &F,
+    policy: PostActivationFocus,
+) -> Result<(), PresentationError> {
+    match policy {
+        PostActivationFocus::Provider => focus.focus_provider(),
+        PostActivationFocus::Navigator => focus.focus_navigator(),
+    }
+}
+
+pub(in crate::navigator) fn focus_if_already_attached<F: NavigatorFocus>(
+    focus: &F,
+    view: &mut NavigatorView,
+    selected: &NavigatorWorkstream,
+    input: WorkstreamActivationInput,
+) -> bool {
+    if !view.is_attached_to(selected)
+        || matches!(
+            selected.runtime_status,
+            NavigatorRuntimeStatus::Parked | NavigatorRuntimeStatus::Unknown
+        )
+    {
+        return false;
+    }
+    if let Err(error) = apply_post_activation_focus(focus, input.post_activation_focus()) {
+        view.set_message(action_message(&error));
+    }
+    true
+}
+
 fn activate_selected(
     root: &StateRoot,
     presentation: &Presentation,
     remote: &mut RemoteMonitor,
     view: &mut NavigatorView,
+    input: WorkstreamActivationInput,
 ) {
     let Some(selected) = view.selected().cloned() else {
         view.set_message("no Workstream is registered; add a Git Project first");
@@ -737,15 +820,7 @@ fn activate_selected(
         view.set_message("remote host is unavailable; cached state is not actionable");
         return;
     }
-    if view.is_attached_to(&selected)
-        && !matches!(
-            selected.runtime_status,
-            NavigatorRuntimeStatus::Parked | NavigatorRuntimeStatus::Unknown
-        )
-    {
-        if let Err(error) = presentation.focus_provider() {
-            view.set_message(action_message(&error));
-        }
+    if focus_if_already_attached(presentation, view, &selected, input) {
         return;
     }
     let lifecycle_action = match selected.runtime_status {
@@ -777,7 +852,7 @@ fn activate_selected(
         }
     };
     view.observe_attachment(&attachment);
-    if let Err(error) = presentation.focus_provider() {
+    if let Err(error) = apply_post_activation_focus(presentation, input.post_activation_focus()) {
         view.set_message(action_message(&error));
     }
 }
@@ -948,7 +1023,13 @@ fn recover_operation(
             refresh_view(root, remote, view);
             view.dismiss_detail();
             if view.select_workstream(operation.host.alias(), destination) {
-                activate_selected(root, presentation, remote, view);
+                activate_selected(
+                    root,
+                    presentation,
+                    remote,
+                    view,
+                    WorkstreamActivationInput::ProviderHandoff,
+                );
                 return;
             }
             let attachment = if operation.host.is_remote() {
@@ -1091,7 +1172,13 @@ fn create_workstream_from_source(
     remote.request_soon(source.host.alias());
     refresh_view(root, remote, view);
     if view.select_workstream(source.host.alias(), destination) {
-        activate_selected(root, presentation, remote, view);
+        activate_selected(
+            root,
+            presentation,
+            remote,
+            view,
+            WorkstreamActivationInput::ProviderHandoff,
+        );
         return;
     }
     // A remote poll is asynchronous. Its control action has already created

@@ -190,9 +190,8 @@ an automatic migration from the retired schema.
 
 Date: 2026-08-14
 
-Status: D0 through D8.12 and D8.16 are complete. D8.13 through D8.15 are
-implemented and awaiting operator confirmation during daily use. V1 remains a
-source-installed operator beta.
+Status: D0 through D8.17 are complete. V1 remains a source-installed operator
+beta.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -251,10 +250,11 @@ This document owns sequencing, exit gates, and progress.
 | D8.10 | OpenCode settled-state and activity-age reconciliation | Complete (2026-08-12) |
 | D8.11 | Navigator steady-state latency and redraw containment | Complete (2026-08-13) |
 | D8.12 | Workstream context-row scanability | Complete (2026-08-13) |
-| D8.13 | Initial presentation-width convergence | Operator confirmation pending |
-| D8.14 | Workstream card hierarchy cleanup | Operator confirmation pending |
-| D8.15 | Expanded shortcut alignment | Operator confirmation pending |
+| D8.13 | Initial presentation-width convergence | Complete (2026-08-14) |
+| D8.14 | Workstream card hierarchy cleanup | Complete (2026-08-14) |
+| D8.15 | Expanded shortcut alignment | Complete (2026-08-14) |
 | D8.16 | Finite-control authority and repository drift cleanup | Complete (2026-08-14) |
+| D8.17 | Navigator-retained mouse Workstream switching | Complete (2026-08-14) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -2220,8 +2220,7 @@ Completion evidence (2026-08-13):
 
 ## D8.13 - Initial presentation-width convergence
 
-Status: Implementation complete on 2026-08-13; operator visual confirmation
-pending.
+Status: Complete on 2026-08-14.
 
 This checkpoint fixes a fresh presentation opening with an expanded Navigator
 pane and reaching its intended 32-column width only after the outer terminal is
@@ -2268,13 +2267,18 @@ Implementation evidence (2026-08-13):
   acceptance harnesses, and diff checks; and
 - release SHA-256
   `58ec66122c6800becd225c761bbac496133b051a54e08fbd998da6c94111c3e9`
-  is installed locally. Operator confirmation of a fresh real presentation
-  remains the final gate.
+  was installed locally. Operator confirmation of a fresh real presentation
+  was the remaining gate at implementation time.
+
+Operator confirmation (2026-08-14):
+
+- after installing the current reviewed checkout, a fresh real presentation
+  opened at the intended 32-column Navigator width without an
+  operator-generated resize event.
 
 ## D8.14 - Workstream card hierarchy cleanup
 
-Status: Implementation complete on 2026-08-13; operator visual confirmation
-pending.
+Status: Complete on 2026-08-14.
 
 This checkpoint reduces identity crowding in the flat Recent view by spending
 one additional vertical row, and removes the redundant accent bullet before a
@@ -2327,14 +2331,18 @@ Implementation evidence (2026-08-13):
   acceptance harnesses, and diff checks; and
 - release SHA-256
   `cd47a23d063e0bf3f191ade8728fef7885ee58486894c48e07f4d4c8565fa0d2`
-  is installed locally. The exact live private Navigator pane was refreshed at
+  was installed locally. The exact live private Navigator pane was refreshed at
   32 columns while the provider attachment pane PID remained unchanged;
-  operator visual confirmation remains the final gate.
+  operator visual confirmation was the remaining gate at implementation time.
+
+Operator confirmation (2026-08-14):
+
+- the installed Recent view was confirmed less crowded with its three-row
+  hierarchy, without losing useful density in grouped or Archived views.
 
 ## D8.15 - Expanded shortcut alignment
 
-Status: Implementation complete on 2026-08-13; operator visual confirmation
-pending.
+Status: Complete on 2026-08-14.
 
 This checkpoint corrects uneven description columns in the Navigator-local `?`
 reference. The long `↑/↓ or j/k` label overflowed the hand-padded column, while
@@ -2380,9 +2388,14 @@ Implementation evidence (2026-08-13):
   acceptance harnesses, and diff checks; and
 - release SHA-256
   `84794788c9b2cedb38456bbe4ed8d68e29e401e13c9ff9e903b860f45ffa2660`
-  is installed locally. The exact live private Navigator pane was refreshed at
+  was installed locally. The exact live private Navigator pane was refreshed at
   32 columns while the provider attachment pane PID remained unchanged;
-  operator visual confirmation remains the final gate.
+  operator visual confirmation was the remaining gate at implementation time.
+
+Operator confirmation (2026-08-14):
+
+- the installed Navigator-local `?` reference was confirmed aligned and
+  unclipped at the normal 32-column Navigator width.
 
 ## D8.16 - Finite-control authority and repository drift cleanup
 
@@ -2402,8 +2415,9 @@ Scope:
 - retain each caller's existing timeout, stream, output-bound, public-error,
   and cleanup-error precedence contract through explicit local adapters and
   deterministic tests;
-- make the roadmap the sole present-tense checkpoint-status authority, while
-  leaving D8.13 through D8.15 pending their stated operator confirmation;
+- make the roadmap the sole present-tense checkpoint-status authority while,
+  at D8.16 completion, leaving D8.13 through D8.15 pending their stated
+  operator confirmation;
 - refresh the privacy-safe fixture captures from the current real Navigator
   renderer; and
 - remove license allowlist entries unused by the locked dependency graph.
@@ -2448,8 +2462,8 @@ Completion evidence (2026-08-14):
   deadline, descendant cleanup, output-bound, and App Server process-group
   regressions retain their meaning and pass;
 - the README and documentation map now defer changing checkpoint status to this
-  roadmap, while D8.13 through D8.15 remain pending operator confirmation. The
-  three SVG/PNG frames and GIF tour were regenerated from the deterministic
+  roadmap, while D8.13 through D8.15 were still pending operator confirmation.
+  The three SVG/PNG frames and GIF tour were regenerated from the deterministic
   fixture renderer and visually inspected without accessing a provider pane;
 - Cargo Deny passes after removing only the unused BSD-2-Clause and
   BSD-3-Clause allow entries. Its existing duplicate-version warnings remain;
@@ -2461,6 +2475,80 @@ Completion evidence (2026-08-14):
   dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
   acceptance harnesses, and diff checks. No live provider or SSH acceptance,
   installation, or Runtime rotation was performed.
+
+## D8.17 - Navigator-retained mouse Workstream switching
+
+Status: Complete on 2026-08-14.
+
+This checkpoint makes Workstream-card clicks behave like navigation-first
+selection. A card click still displays the selected Workstream through the
+existing exact open/start/recover and attachment path, but keyboard control
+remains in the Navigator so the user can continue browsing. Entering the
+native provider remains an explicit `Enter`, `Tab`, or provider-pane click.
+
+Scope:
+
+- give Workstream activation an explicit post-activation focus policy;
+- retain provider focus for keyboard `Enter` while retaining Navigator focus
+  after a primary Workstream-card click;
+- preserve exact selection and activation for every rendered card line,
+  including scrolled Recent, grouped, and Archived layouts; and
+- retain the presentation tmux mouse binding so clicking the right pane still
+  transfers control directly to the native provider.
+
+Non-goals and hard boundaries:
+
+- no lifecycle, start, recover, attachment, retry, archived, unreachable-host,
+  selection, scrolling, grouping, provider-pane input, tmux topology, state,
+  schema, protocol, or provider behavior change;
+- no hover preview, double-click action, context menu, drag behavior, focus
+  persistence, or durable current-Workstream record; and
+- no provider content capture or ordinary tmux access.
+
+Exit gate:
+
+- deterministic controller coverage proves a Workstream-card click selects
+  and activates the exact Workstream without issuing provider-focus control;
+- deterministic coverage proves keyboard `Enter` retains its existing
+  provider-focus behavior, including an already attached Workstream;
+- the existing multi-line, grouped, scrolled, blank, management, failure, and
+  attachment-retry mouse behavior remains green;
+- the design contract records the navigation-first mouse focus boundary; and
+- one uninterrupted `scripts/check` run plus staged and unstaged
+  `git diff --check` pass.
+
+Completion evidence (2026-08-14):
+
+- Workstream activation now carries one typed input source. Keyboard `Enter`
+  and internal creation/recovery handoffs retain provider focus, while a
+  primary card click applies Navigator focus after the same exact lifecycle
+  and attachment path;
+- the already-attached fast path uses the same typed routing instead of
+  unconditionally focusing the provider. A narrow focus-only test seam leaves
+  attachment and presentation ownership concrete while deterministic tests
+  prove `MouseClick -> Navigator` and `Enter -> Provider`;
+- existing tests continue to cover exact multi-line and scrolled row mapping,
+  blank and management clicks, attachment failure and same-row retry, and the
+  private tmux binding that transfers focus when the provider pane itself is
+  clicked;
+- protocol 17, host schema 12, client schema 5, control ABI 1, provider
+  commands, Runtime behavior, and presentation tmux configuration are
+  unchanged; and
+- one uninterrupted `scripts/check` run passes 389 library tests, seven
+  integration tests, formatting, Clippy with warnings denied, packaging,
+  dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
+  acceptance harnesses, and staged and unstaged diff checks. No provider
+  content was captured and no live provider, SSH, or Runtime rotation was
+  required.
+
+Operator confirmation (2026-08-14):
+
+- release SHA-256
+  `b60df4942096a21706d6b73e53efe3f6d3b5e21a474b1475affe23a75809d93b`
+  was installed locally without a state reset or Runtime rotation. One existing
+  live Runtime remained untouched, and the operator confirmed that clicking a
+  Workstream card switches the provider pane while keyboard control remains in
+  the Navigator.
 
 ## Deferred beyond V1
 

@@ -5,7 +5,7 @@ use ratatui::{
     text::Line,
 };
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     cmp::Ordering,
     path::{Path, PathBuf},
     time::{Duration, Instant},
@@ -17,7 +17,7 @@ use crate::{
         AttentionState, HostId, LocationId, OperationId, OperationKind, OperationPhase, ProjectId,
         ProviderKind, Revision, RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
     },
-    presentation::{AttachmentPhase, AttachmentStatus},
+    presentation::{AttachmentPhase, AttachmentStatus, PresentationError},
     protocol::{
         ObserverStatus, ProjectDirectoriesResponse, ProjectDirectoryEntry, ProviderCapability,
         SnapshotResponse,
@@ -573,6 +573,73 @@ fn mouse_click_retains_blank_focus_and_row_activation_intent() {
     view.begin_mouse_click(Some(0));
     assert_eq!(view.take_mouse_click(), Some(MouseClickIntent::Row));
     assert_eq!(view.take_mouse_click(), None);
+}
+
+#[derive(Default)]
+struct RecordingNavigatorFocus {
+    calls: RefCell<Vec<PostActivationFocus>>,
+}
+
+impl NavigatorFocus for RecordingNavigatorFocus {
+    fn focus_provider(&self) -> Result<(), PresentationError> {
+        self.calls.borrow_mut().push(PostActivationFocus::Provider);
+        Ok(())
+    }
+
+    fn focus_navigator(&self) -> Result<(), PresentationError> {
+        self.calls.borrow_mut().push(PostActivationFocus::Navigator);
+        Ok(())
+    }
+}
+
+#[test]
+fn mouse_activation_retains_navigator_focus_on_already_attached_fast_path() {
+    let workstream_id = WorkstreamId::new();
+    let selected = row(workstream_id, NavigatorRuntimeStatus::Idle);
+    let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+        workstreams: vec![selected.clone()],
+        ..LocalNavigatorSnapshot::default()
+    });
+    view.observe_attachment(&AttachmentStatus {
+        attempt_id: uuid::Uuid::new_v4(),
+        host_alias: "local".to_owned(),
+        workstream_id,
+        phase: AttachmentPhase::Running,
+    });
+    let focus = RecordingNavigatorFocus::default();
+
+    assert!(focus_if_already_attached(
+        &focus,
+        &mut view,
+        &selected,
+        WorkstreamActivationInput::MouseClick,
+    ));
+    assert_eq!(&*focus.calls.borrow(), &[PostActivationFocus::Navigator]);
+}
+
+#[test]
+fn enter_activation_focuses_provider_on_already_attached_fast_path() {
+    let workstream_id = WorkstreamId::new();
+    let selected = row(workstream_id, NavigatorRuntimeStatus::Idle);
+    let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+        workstreams: vec![selected.clone()],
+        ..LocalNavigatorSnapshot::default()
+    });
+    view.observe_attachment(&AttachmentStatus {
+        attempt_id: uuid::Uuid::new_v4(),
+        host_alias: "local".to_owned(),
+        workstream_id,
+        phase: AttachmentPhase::Running,
+    });
+    let focus = RecordingNavigatorFocus::default();
+
+    assert!(focus_if_already_attached(
+        &focus,
+        &mut view,
+        &selected,
+        WorkstreamActivationInput::Enter,
+    ));
+    assert_eq!(&*focus.calls.borrow(), &[PostActivationFocus::Provider]);
 }
 
 #[test]

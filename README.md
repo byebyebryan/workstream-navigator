@@ -94,7 +94,7 @@ directory. If Codex is the only eligible path, WSNav first opens its exact
 passive observer profile for native hook review. When OpenCode is already
 eligible, that Codex review is optional and remains available from Hosts;
 approve it before starting a Codex Workstream. The host-private directory
-browser starts at `~/code` by default; configure another browser root from
+browser starts at `~` by default; configure another browser root from
 Hosts with `.` then `r`.
 
 From the Workstreams home:

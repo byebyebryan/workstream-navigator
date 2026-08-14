@@ -45,6 +45,17 @@ fn registry() -> (tempfile::TempDir, HostRegistry) {
 }
 
 #[test]
+fn project_browser_defaults_to_the_host_home_directory() {
+    let (_temporary, registry) = registry();
+    let home = PathBuf::from(std::env::var_os("HOME").expect("test HOME should be available"));
+
+    assert_eq!(
+        registry.project_browser_root().unwrap(),
+        fs::canonicalize(home).unwrap()
+    );
+}
+
+#[test]
 fn project_browser_lists_only_safe_directories_without_exposing_root_paths() {
     let (temporary, mut registry) = registry();
     let browser_root = temporary.path().join("projects");

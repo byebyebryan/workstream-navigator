@@ -1131,7 +1131,7 @@ impl NavigatorView {
         };
         self.modal = Some(NavigatorModal::ConfigureProjectBrowserRoot {
             host,
-            value: "~/code".to_owned(),
+            value: "~".to_owned(),
         });
     }
 

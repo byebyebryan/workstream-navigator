@@ -14,7 +14,6 @@ pub const HOST_SCHEMA_VERSION: i64 = 12;
 pub(in crate::state) const CLIENT_SCHEMA_VERSION: i64 = 5;
 pub(in crate::state) const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
 pub(in crate::state) const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
-pub(in crate::state) const DEFAULT_PROJECT_BROWSER_ROOT: &str = "code";
 pub(in crate::state) const MAX_PROJECT_BROWSER_ROOT_BYTES: usize = 4096;
 pub(in crate::state) const MAX_PROJECT_BROWSER_RELATIVE_PATH_BYTES: usize = 1024;
 

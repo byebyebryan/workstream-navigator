@@ -190,7 +190,7 @@ an automatic migration from the retired schema.
 
 Date: 2026-08-14
 
-Status: D0 through D8.17 are complete. V1 remains a source-installed operator
+Status: D0 through D8.18 are complete. V1 remains a source-installed operator
 beta.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
@@ -255,6 +255,7 @@ This document owns sequencing, exit gates, and progress.
 | D8.15 | Expanded shortcut alignment | Complete (2026-08-14) |
 | D8.16 | Finite-control authority and repository drift cleanup | Complete (2026-08-14) |
 | D8.17 | Navigator-retained mouse Workstream switching | Complete (2026-08-14) |
+| D8.18 | Home-root Project browser default | Complete (2026-08-14) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -1015,12 +1016,12 @@ Delivery slices:
    Runtime interference.
 7. **D7.6 - Host-private Project directory browser.** Replace the ordinary
    typed checkout-path form with a navigator-only host picker followed by a
-   bounded directory browser. Each host defaults to `~/code` and exposes an
-   explicit Hosts-page root setting. The protocol returns only a safe root
-   label, relative cursor, and direct-child names; host-side registration
-   reconstructs the chosen directory locally. The direct `register` and
-   `host register-checkout` commands remain optional scripting and break-glass
-   paths. This slice is complete.
+   bounded directory browser. Each host defaults to `~` after the D8.18
+   refinement and exposes an explicit Hosts-page root setting. The protocol
+   returns only a safe root label, relative cursor, and direct-child names;
+   host-side registration reconstructs the chosen directory locally. The
+   direct `register` and `host register-checkout` commands remain optional
+   scripting and break-glass paths. This slice is complete.
 
 Exit gate:
 
@@ -2549,6 +2550,72 @@ Operator confirmation (2026-08-14):
   live Runtime remained untouched, and the operator confirmed that clicking a
   Workstream card switches the provider pane while keyboard control remains in
   the Navigator.
+
+## D8.18 - Home-root Project browser default
+
+Status: Complete on 2026-08-14.
+
+This checkpoint makes a host's home directory the default Project-browser
+boundary instead of assuming repositories live under `~/code`. The browser
+remains bounded by one host-private configured root and cannot navigate above
+it; operators who prefer a narrower workspace can still set one explicitly
+from Hosts.
+
+Scope:
+
+- resolve an absent host Project-browser setting to the selected host's `HOME`;
+- initialize the Hosts-page root-setting form with `~` and describe that default
+  consistently in the product documentation; and
+- preserve every explicitly persisted local or remote root without migration.
+
+Non-goals and hard boundaries:
+
+- no navigation above the configured root, arbitrary typed path registration
+  in the ordinary picker, dot-directory visibility, root-path snapshot or
+  protocol exposure, schema migration, host registration, or Git behavior
+  change; and
+- no provider, Runtime, attachment, presentation, or ordinary tmux change.
+
+Exit gate:
+
+- deterministic state coverage proves a fresh host resolves its browser root
+  to canonical `HOME` while existing explicit-root coverage remains green;
+- deterministic Navigator coverage proves the root-setting form starts at `~`;
+- README, design, and roadmap descriptions agree on the new default; and
+- one uninterrupted `scripts/check` run plus staged and unstaged
+  `git diff --check` pass.
+
+Completion evidence (2026-08-14):
+
+- an absent `project_browser_settings` row now resolves directly to the
+  selected host's `HOME`, which the existing host registry canonicalizes and
+  bounds before listing or registration. Explicitly persisted roots retain
+  their existing resolution and storage behavior;
+- the Hosts-page root-setting form now begins with `~`, and its inline example,
+  README guidance, design contract, and D7.6 summary use the same default;
+- deterministic state coverage proves a fresh registry resolves the root to
+  canonical `HOME`, while Navigator coverage proves the root form begins with
+  `~`. Existing custom-root, safe-label, relative-cursor, escape-rejection,
+  local/SSH protocol, and Project-registration coverage remains green;
+- protocol 17, host schema 12, client schema 5, control ABI 1, persisted state,
+  provider commands, Runtime behavior, and private tmux configuration are
+  unchanged; and
+- one uninterrupted `scripts/check` run passes 391 library tests, seven
+  integration tests, formatting, Clippy with warnings denied, packaging,
+  dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
+  acceptance harnesses, and staged and unstaged diff checks. No live provider,
+  SSH, state reset, or Runtime rotation was required for checkpoint validation.
+
+Operator confirmation (2026-08-14):
+
+- release SHA-256
+  `8d515e4477e6e96da8b3f42d31a23b893d35f03f197207ab6525fb9c45667e67`
+  was installed locally on `snap`, and the existing bounded host-control action
+  persisted the home directory as that host's Project-browser root;
+- a subsequent bounded Project-directory response reported the safe root label
+  `~`; and
+- no state reset or Runtime rotation was performed, and both existing open
+  Workstreams remained intact.
 
 ## Deferred beyond V1
 

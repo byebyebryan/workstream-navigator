@@ -10,10 +10,7 @@ use crate::domain::{
 use crate::provider::names::NameState;
 
 use super::models::{IntegrationLifecycle, StateError};
-use super::schema::{
-    DEFAULT_PROJECT_BROWSER_ROOT, MAX_PROJECT_BROWSER_RELATIVE_PATH_BYTES,
-    MAX_PROJECT_BROWSER_ROOT_BYTES,
-};
+use super::schema::{MAX_PROJECT_BROWSER_RELATIVE_PATH_BYTES, MAX_PROJECT_BROWSER_ROOT_BYTES};
 
 pub(in crate::state) fn to_from_sql_error(
     error: impl std::error::Error + Send + Sync + 'static,
@@ -219,7 +216,7 @@ pub(in crate::state) fn validate_client_host_text(
 
 pub(in crate::state) fn default_project_browser_root() -> Result<PathBuf, StateError> {
     let home = env::var_os("HOME").ok_or(StateError::ProjectBrowserRootUnavailable)?;
-    Ok(PathBuf::from(home).join(DEFAULT_PROJECT_BROWSER_ROOT))
+    Ok(PathBuf::from(home))
 }
 
 pub(in crate::state) fn resolve_project_browser_root(value: &str) -> Result<PathBuf, StateError> {

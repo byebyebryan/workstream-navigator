@@ -117,7 +117,7 @@ independent WSNav evidence.
 - Explicit host registration and capability checks.
 - Logical projects with one or more explicitly registered host locations.
 - Host-private Project-directory browsing for ordinary registration, rooted at
-  each host's configurable `~/code`-style workspace root.
+  each host's configurable workspace root (`~` by default).
 - Workstream creation, switching, parking, exact resume, and display through
   the current tip's provider-owned native name when that metadata surface is
   supported.
@@ -342,7 +342,7 @@ host contract exists.
 Project registration is an explicit two-step navigator flow: `Projects → a`
 first selects the owning host, then opens a centered browser inside the
 navigator pane. The browser starts at that host's configured workspace root
-(`~/code` by default), lists only bounded direct-child names plus a Git marker,
+(`~` by default), lists only bounded direct-child names plus a Git marker,
 omits dot-prefixed files and folders by default, and uses a root label and
 relative cursor rather than returning absolute paths.
 `Enter` opens a directory or registers a marked Git Project; `r` registers the

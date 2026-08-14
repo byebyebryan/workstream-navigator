@@ -206,7 +206,7 @@ fn project_browser_root_modal(
     (
         format!(" Project browser root · {} ", host.alias()),
         vec![
-            Line::raw("Set the host-local root (for example ~/code):"),
+            Line::raw("Set the host-local root (for example ~):"),
             Line::from(Span::styled(
                 truncate_display(value, 44),
                 Style::default()

@@ -358,6 +358,27 @@ fn project_registration_uses_a_navigator_local_host_picker_then_a_path_free_brow
 }
 
 #[test]
+fn project_browser_root_configuration_defaults_to_home() {
+    let mut view = NavigatorView::new(LocalNavigatorSnapshot {
+        hosts: vec![NavigatorHostOverview {
+            alias: "local".to_owned(),
+            reachability: RemoteHostReachability::Reachable,
+            observer_status: ObserverStatus::NotInstalled,
+            provider_capabilities: SnapshotResponse::default().provider_capabilities,
+        }],
+        ..LocalNavigatorSnapshot::default()
+    });
+    view.select_page(NavigatorPage::Hosts);
+
+    view.begin_project_browser_root_configuration();
+
+    assert!(matches!(
+        view.modal,
+        Some(NavigatorModal::ConfigureProjectBrowserRoot { value, .. }) if value == "~"
+    ));
+}
+
+#[test]
 fn project_browser_keeps_the_selected_directory_inside_its_viewport() {
     let mut view = NavigatorView::new(LocalNavigatorSnapshot {
         workstreams: Vec::new(),

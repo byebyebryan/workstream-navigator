@@ -268,7 +268,7 @@ Individual renderers retain their compact fallbacks for explicitly narrowed
 panes.
 
 The presentation begins with exactly the Navigator and provider panes. The
-planned D8.23 utility-shell action may split only the provider region once,
+planned D12 utility-shell action may split only the provider region once,
 placing one shell below the provider. `Ctrl+b "` is the sole shell-creation
 gesture: it creates and focuses that pane when absent and otherwise focuses the
 existing shell. `Ctrl+b %` does not create an alternate orientation or a

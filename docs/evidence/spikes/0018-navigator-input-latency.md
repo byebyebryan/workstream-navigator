@@ -51,7 +51,7 @@ path stayed responsive during this bounded workload.
 
 ## Decision and limits
 
-D8.11 may remove the animated marker to eliminate avoidable redraw churn, but
+D10.0 may remove the animated marker to eliminate avoidable redraw churn, but
 must not claim that animation alone caused the reported typing lag. The other
 observed hot paths—repeated executable probes and event-frequency OpenCode HTTP
 corroboration—remain independent latency candidates and are corrected by the

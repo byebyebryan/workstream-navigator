@@ -190,8 +190,26 @@ an automatic migration from the retired schema.
 
 Date: 2026-08-14
 
-Status: D0 through D8.22 are complete. D8.23 is planned. V1 remains a
+Status: D0 through D11.4 are complete. D12 is planned. V1 remains a
 source-installed operator beta.
+
+Roadmap organization note (2026-08-14): the completed checkpoints that
+followed the original multi-provider outcome are grouped below by the product
+or engineering outcome they actually delivered. This documentation-only
+reclassification preserves their delivery order and completion evidence:
+
+| Former checkpoints | Current checkpoints | Stage |
+| --- | --- | --- |
+| D8.0-D8.2 | unchanged | Multi-provider Workstreams |
+| D8.3-D8.10 | D9.0-D9.7 | Architecture and runtime reliability |
+| D8.11-D8.17 | D10.0-D10.6 | Navigator responsiveness and interaction |
+| D8.18-D8.22 | D11.0-D11.4 | Project browser usability |
+| D8.23 | D12 | Ephemeral Workstream shell |
+
+Historical commit subjects and acceptance-artifact filenames retain the
+identifiers in use when they were created. They are not rewritten, and this
+mapping changes no implementation, protocol, schema, acceptance result, or
+product boundary.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -202,6 +220,9 @@ This document owns sequencing, exit gates, and progress.
 - Each checkpoint ends in a working, reviewable repository state.
 - Commit by coherent capability; do not hold unrelated layers for one large
   checkpoint commit.
+- Close a stage when its named product or engineering outcome passes. A later
+  unrelated capability, hardening series, or UX series starts a new stage
+  instead of extending the prior stage suffix indefinitely.
 - Automated tests use disposable state, repositories, Codex homes, and private
   tmux sockets. They never install hooks or mutate ordinary Codex or tmux state.
 - Live acceptance is bounded, records sanitized evidence, and proves cleanup
@@ -237,30 +258,34 @@ This document owns sequencing, exit gates, and progress.
 | D6.9 | Codex observer authority repair | Complete |
 | D7 | Navigator workflow and lifecycle management | Complete through D7.6 |
 | D7.6 | Host-private Project directory browser | Complete |
+| D8 | Multi-provider Workstreams | Complete through D8.2 |
 | D8.0 | Provider identity foundation and Codex parity | Complete (2026-08-05) |
 | D8.1 | Provider-aware New and OpenCode New/Resume vertical slice | Complete (2026-08-06) |
 | D8.2 | OpenCode Fork, recovery, and integrated acceptance | Complete (2026-08-07) |
-| D8.3 | Behavior-neutral internal architecture consolidation | Complete (2026-08-08) |
-| D8.4 | Fail-closed Linux process-group probe reliability | Complete (2026-08-09) |
-| D8.5 | Behavior-neutral action and CLI orchestration decomposition | Complete (2026-08-09) |
-| D8.6 | tmux 3.4 attachment compatibility and CI acceptance reliability | Complete (2026-08-09) |
-| D8.7 | Private tmux terminal configuration drift guard | Complete (2026-08-09) |
-| D8.8 | Inactive Codex binding and failed-presentation recovery | Complete (2026-08-10) |
-| D8.9 | OpenCode observer lifetime across bounded local actions | Complete (2026-08-11) |
-| D8.10 | OpenCode settled-state and activity-age reconciliation | Complete (2026-08-12) |
-| D8.11 | Navigator steady-state latency and redraw containment | Complete (2026-08-13) |
-| D8.12 | Workstream context-row scanability | Complete (2026-08-13) |
-| D8.13 | Initial presentation-width convergence | Complete (2026-08-14) |
-| D8.14 | Workstream card hierarchy cleanup | Complete (2026-08-14) |
-| D8.15 | Expanded shortcut alignment | Complete (2026-08-14) |
-| D8.16 | Finite-control authority and repository drift cleanup | Complete (2026-08-14) |
-| D8.17 | Navigator-retained mouse Workstream switching | Complete (2026-08-14) |
-| D8.18 | Home-root Project browser default | Complete (2026-08-14) |
-| D8.19 | Modal-local hidden Project-directory toggle | Complete (2026-08-14) |
-| D8.20 | Human-facing Project-directory ordering | Complete (2026-08-14) |
-| D8.21 | Repository-first Project-directory ordering | Complete (2026-08-14) |
-| D8.22 | Directional Project-browser navigation | Complete (2026-08-14) |
-| D8.23 | Presentation-scoped ephemeral Workstream shell | Planned |
+| D9 | Architecture and runtime reliability | Complete through D9.7 |
+| D9.0 | Behavior-neutral internal architecture consolidation | Complete (2026-08-08) |
+| D9.1 | Fail-closed Linux process-group probe reliability | Complete (2026-08-09) |
+| D9.2 | Behavior-neutral action and CLI orchestration decomposition | Complete (2026-08-09) |
+| D9.3 | tmux 3.4 attachment compatibility and CI acceptance reliability | Complete (2026-08-09) |
+| D9.4 | Private tmux terminal configuration drift guard | Complete (2026-08-09) |
+| D9.5 | Inactive Codex binding and failed-presentation recovery | Complete (2026-08-10) |
+| D9.6 | OpenCode observer lifetime across bounded local actions | Complete (2026-08-11) |
+| D9.7 | OpenCode settled-state and activity-age reconciliation | Complete (2026-08-12) |
+| D10 | Navigator responsiveness and interaction | Complete through D10.6 |
+| D10.0 | Navigator steady-state latency and redraw containment | Complete (2026-08-13) |
+| D10.1 | Workstream context-row scanability | Complete (2026-08-13) |
+| D10.2 | Initial presentation-width convergence | Complete (2026-08-14) |
+| D10.3 | Workstream card hierarchy cleanup | Complete (2026-08-14) |
+| D10.4 | Expanded shortcut alignment | Complete (2026-08-14) |
+| D10.5 | Finite-control authority and repository drift cleanup | Complete (2026-08-14) |
+| D10.6 | Navigator-retained mouse Workstream switching | Complete (2026-08-14) |
+| D11 | Project browser usability | Complete through D11.4 |
+| D11.0 | Home-root Project browser default | Complete (2026-08-14) |
+| D11.1 | Modal-local hidden Project-directory toggle | Complete (2026-08-14) |
+| D11.2 | Human-facing Project-directory ordering | Complete (2026-08-14) |
+| D11.3 | Repository-first Project-directory ordering | Complete (2026-08-14) |
+| D11.4 | Directional Project-browser navigation | Complete (2026-08-14) |
+| D12 | Presentation-scoped ephemeral Workstream shell | Planned |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -988,7 +1013,7 @@ Delivery slices:
    its Projects and Hosts child pages, inline inventory rows, mouse behavior,
    and direct page-local keys without changing provider state. Refine the
    narrow Workstreams pane with initially two-line Recent rows (later split
-   into three lines by D8.14), explicit two-line tree children in grouped views,
+   into three lines by D10.3), explicit two-line tree children in grouped views,
    the `Recent` / `By project` / `By host` / `Archived` cycle, compact bottom key
    hints, and a single-column expanded reference while retaining the accepted
    Workstreams bindings. Each later stateful action owns its bounded text entry,
@@ -1021,7 +1046,7 @@ Delivery slices:
    Runtime interference.
 7. **D7.6 - Host-private Project directory browser.** Replace the ordinary
    typed checkout-path form with a navigator-only host picker followed by a
-   bounded directory browser. Each host defaults to `~` after the D8.18
+   bounded directory browser. Each host defaults to `~` after the D11.0
    refinement and exposes an explicit Hosts-page root setting. The protocol
    returns only a safe root label, relative cursor, and direct-child names;
    host-side registration reconstructs the chosen directory locally. The
@@ -1470,7 +1495,15 @@ Disposable acceptance advertises deliberately non-accepted future/development
 version strings and still passes the unchanged API contract. Malformed health
 metadata and mid-generation mismatches remain fail-closed.
 
-## D8.3 - Internal architecture consolidation
+## D9 - Architecture and runtime reliability
+
+Implementation status: D9.0 through D9.7 are complete. This stage groups the
+behavior-neutral architecture work, bounded process and tmux hardening, failed
+presentation recovery, and provider lifecycle reconciliation delivered after
+the D8 multi-provider outcome. The roadmap reclassification changes none of
+their original scope, delivery order, or completion evidence.
+
+## D9.0 - Internal architecture consolidation
 
 Status: Complete on 2026-08-08.
 
@@ -1542,15 +1575,15 @@ Completion evidence (2026-08-08):
 - candidate validation exposed an intermittent fail-closed Linux process-group
   probe under heavy unrelated host process churn. The affected unchanged
   harnesses also passed independently and in the final uninterrupted gate.
-  D8.3 does not weaken the probe or add retry behavior; any reliability change
+  D9.0 does not weaken the probe or add retry behavior; any reliability change
   remains separate correctness work.
 
-## D8.4 - Fail-closed Linux process-group probe reliability
+## D9.1 - Fail-closed Linux process-group probe reliability
 
 Status: Complete on 2026-08-09.
 
 This checkpoint corrects the intermittent ordinary-host process-group probe
-failure exposed during D8.3 validation. It preserves the existing ownership
+failure exposed during D9.0 validation. It preserves the existing ownership
 and signal-authority boundary: retry may turn a transient read into exact
 evidence, but it may never turn ambiguous evidence into absence, ownership, or
 permission to signal.
@@ -1615,14 +1648,14 @@ Completion evidence (2026-08-09):
   acceptance harness, and staged/unstaged diff checks pass through
   `scripts/check`. No live provider or SSH acceptance was run.
 
-## D8.5 - Behavior-neutral action and CLI orchestration decomposition
+## D9.2 - Behavior-neutral action and CLI orchestration decomposition
 
 Status: Complete on 2026-08-09.
 
-This checkpoint completes the bounded source-organization pass begun in D8.3.
+This checkpoint completes the bounded source-organization pass begun in D9.0.
 It separates action orchestration and CLI dispatch responsibilities without
 changing product behavior, command surfaces, or the runtime/process boundary
-corrected in D8.4.
+corrected in D9.1.
 
 Scope:
 
@@ -1690,11 +1723,11 @@ Completion evidence (2026-08-09):
   harness, and staged/unstaged diff checks pass through one uninterrupted
   `scripts/check` run.
 - protocol 17, host schema 12, client schema 5, control ABI 1, Cargo manifests,
-  D8.4 process-probe behavior, provider modules, presentation, native provider
+  D9.1 process-probe behavior, provider modules, presentation, native provider
   command vectors, and both private tmux configurations remain unchanged. No
   live provider or SSH acceptance was run.
 
-## D8.6 - tmux 3.4 attachment compatibility and CI acceptance reliability
+## D9.3 - tmux 3.4 attachment compatibility and CI acceptance reliability
 
 Status: Complete on 2026-08-09.
 
@@ -1748,7 +1781,7 @@ Completion evidence (2026-08-09):
 - the failing GitHub runner and a disposable Ubuntu 24.04 reproduction both
   used tmux 3.4. The Runtime pane contained the exact fixture marker, while the
   nested client displayed `invalid option: extended-keys-format`; the same D4
-  assertion failed on the preceding D8.2 and D8.3 publications.
+  assertion failed on the preceding D8.2 and D9.0 publications.
 - both private configs now use quiet assignment for the tmux-3.5-only format
   option. tmux 3.4 ignores that unavailable selector while retaining
   `extended-keys always` and its fixed CSI-u output; tmux 3.5 and later retain
@@ -1767,12 +1800,12 @@ Completion evidence (2026-08-09):
   published commit passes both GitHub jobs twice. No live provider or SSH
   acceptance was run.
 
-## D8.7 - Private tmux terminal configuration drift guard
+## D9.4 - Private tmux terminal configuration drift guard
 
 Status: Complete on 2026-08-09.
 
 This checkpoint removes one demonstrated source of nested-terminal drift after
-D8.6 required the same compatibility correction in two separately owned tmux
+D9.3 required the same compatibility correction in two separately owned tmux
 configurations. It is a behavior-neutral configuration-ownership cleanup, not
 a new tmux compatibility layer or runtime design.
 
@@ -1802,7 +1835,7 @@ Exit gate:
 
 - both private tmux configurations consume the same exact terminal capability
   fragment while retaining their module-specific prefix and suffix settings;
-- focused tests lock the complete generated configuration bytes to the D8.6
+- focused tests lock the complete generated configuration bytes to the D9.3
   baseline;
 - tmux 3.4 and 3.7 D4 attachment acceptance retain the exact two-surface proof;
   and
@@ -1816,7 +1849,7 @@ Completion evidence (2026-08-09):
   status/mouse prefix, while presentation retains its status/mouse/
   `remain-on-exit` prefix and mouse-binding suffix.
 - focused Runtime and presentation regressions compare the complete generated
-  configurations byte for byte with the D8.6 baseline. Both configs retain
+  configurations byte for byte with the D9.3 baseline. Both configs retain
   quiet tmux 3.4 handling, explicit CSI-u selection where supported, RGB,
   extkeys, and every topology-specific line.
 - the 32-test Runtime and 15-test presentation suites pass. D4 retains its
@@ -1834,7 +1867,7 @@ Completion evidence (2026-08-09):
   passed unchanged; recurrence remains separate acceptance-reliability work,
   not permission to weaken either lifecycle proof.
 
-## D8.8 - Inactive Codex binding and failed-presentation recovery
+## D9.5 - Inactive Codex binding and failed-presentation recovery
 
 Status: Complete on 2026-08-10.
 
@@ -1891,7 +1924,7 @@ Completion evidence (2026-08-10):
 - one live `starship` record reproduced the failure without database
   corruption: an exact Codex binding retained its earlier Runtime generation
   while the replacement Runtime was `stopped` and its Workstream `parked`.
-  The installed D8.6 navigator exited with `hook evidence does not match the
+  The installed D9.3 navigator exited with `hook evidence does not match the
   managed runtime`, and its dead navigator pane remained discoverable because
   the blank provider-wait pane kept the private presentation server alive.
 - the crate-private retained-binding reader accepts that previously
@@ -1912,7 +1945,7 @@ Completion evidence (2026-08-10):
   distinct fresh presentation.
 - focused state, action, and presentation suites pass with 77, 17, and 17
   tests respectively. A disposable SQLite backup of the observed host state
-  was rejected by D8.6 as unavailable, while the candidate returned a valid
+  was rejected by D9.3 as unavailable, while the candidate returned a valid
   three-Workstream snapshot containing both parked rows. The live candidate
   retired the failed presentation and rendered the bounded workstream list;
   zero WSNav processes or private presentation sockets remained after exit,
@@ -1928,7 +1961,7 @@ Completion evidence (2026-08-10):
   left the integration honestly `trust_pending`; completing native review is
   an operator-only deployment follow-up, not source acceptance evidence.
 
-## D8.9 - OpenCode observer lifetime across bounded local actions
+## D9.6 - OpenCode observer lifetime across bounded local actions
 
 Status: Complete on 2026-08-11.
 
@@ -1994,7 +2027,7 @@ Completion evidence (2026-08-11):
   active, and every superseded provider/observer PID absent. No provider content
   was captured or written, and the ordinary tmux server was not addressed.
 
-## D8.10 - OpenCode settled-state and activity-age reconciliation
+## D9.7 - OpenCode settled-state and activity-age reconciliation
 
 Status: Complete on 2026-08-12.
 
@@ -2069,7 +2102,15 @@ Completion evidence (2026-08-12):
   provider pane was captured or written and the ordinary tmux server was not
   addressed.
 
-## D8.11 - Navigator steady-state latency and redraw containment
+## D10 - Navigator responsiveness and interaction
+
+Implementation status: D10.0 through D10.6 are complete. This stage groups the
+performance, visual hierarchy, terminal-presentation, finite-control cleanup,
+and mouse-selection work that refined the everyday Navigator experience. The
+roadmap reclassification changes none of their original scope, delivery order,
+or completion evidence.
+
+## D10.0 - Navigator steady-state latency and redraw containment
 
 Status: Complete on 2026-08-13.
 
@@ -2169,12 +2210,12 @@ Completion evidence (2026-08-13):
   private tmux layers; the ineffective pane/server overrides were reverted and
   no terminal-setting workaround entered the repository or ordinary tmux.
 
-## D8.12 - Workstream context-row scanability
+## D10.1 - Workstream context-row scanability
 
 Status: Complete on 2026-08-13.
 
 At delivery, this checkpoint refined the first display line of each two-line
-Workstream card. D8.14 later splits only Recent into three lines while retaining
+Workstream card. D10.3 later splits only Recent into three lines while retaining
 the provider palette and grouped-view layouts established here. It makes
 Project, provider, and host identity easier to scan without changing grouping,
 selection, action routing, or the native provider surface.
@@ -2224,7 +2265,7 @@ Completion evidence (2026-08-13):
   dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
   acceptance harnesses, and diff checks.
 
-## D8.13 - Initial presentation-width convergence
+## D10.2 - Initial presentation-width convergence
 
 Status: Complete on 2026-08-14.
 
@@ -2282,7 +2323,7 @@ Operator confirmation (2026-08-14):
   opened at the intended 32-column Navigator width without an
   operator-generated resize event.
 
-## D8.14 - Workstream card hierarchy cleanup
+## D10.3 - Workstream card hierarchy cleanup
 
 Status: Complete on 2026-08-14.
 
@@ -2296,7 +2337,7 @@ Scope:
 - render each active Recent Workstream as exactly three rows: Project name,
   provider versus host, then lifecycle/thread versus activity age;
 - preserve the provider, host, Project, lifecycle, and age color semantics from
-  D8.12 while removing their competition for one context line;
+  D10.1 while removing their competition for one context line;
 - keep `By project`, `By host`, and Archived cards at two rows;
 - use the colored Project name as the sole By project group-header identity cue;
   and
@@ -2346,7 +2387,7 @@ Operator confirmation (2026-08-14):
 - the installed Recent view was confirmed less crowded with its three-row
   hierarchy, without losing useful density in grouped or Archived views.
 
-## D8.15 - Expanded shortcut alignment
+## D10.4 - Expanded shortcut alignment
 
 Status: Complete on 2026-08-14.
 
@@ -2403,7 +2444,7 @@ Operator confirmation (2026-08-14):
 - the installed Navigator-local `?` reference was confirmed aligned and
   unclipped at the normal 32-column Navigator width.
 
-## D8.16 - Finite-control authority and repository drift cleanup
+## D10.5 - Finite-control authority and repository drift cleanup
 
 Status: Complete on 2026-08-14.
 
@@ -2422,7 +2463,7 @@ Scope:
   and cleanup-error precedence contract through explicit local adapters and
   deterministic tests;
 - make the roadmap the sole present-tense checkpoint-status authority while,
-  at D8.16 completion, leaving D8.13 through D8.15 pending their stated
+  at D10.5 completion, leaving D10.2 through D10.4 pending their stated
   operator confirmation;
 - refresh the privacy-safe fixture captures from the current real Navigator
   renderer; and
@@ -2468,7 +2509,7 @@ Completion evidence (2026-08-14):
   deadline, descendant cleanup, output-bound, and App Server process-group
   regressions retain their meaning and pass;
 - the README and documentation map now defer changing checkpoint status to this
-  roadmap, while D8.13 through D8.15 were still pending operator confirmation.
+  roadmap, while D10.2 through D10.4 were still pending operator confirmation.
   The three SVG/PNG frames and GIF tour were regenerated from the deterministic
   fixture renderer and visually inspected without accessing a provider pane;
 - Cargo Deny passes after removing only the unused BSD-2-Clause and
@@ -2482,7 +2523,7 @@ Completion evidence (2026-08-14):
   acceptance harnesses, and diff checks. No live provider or SSH acceptance,
   installation, or Runtime rotation was performed.
 
-## D8.17 - Navigator-retained mouse Workstream switching
+## D10.6 - Navigator-retained mouse Workstream switching
 
 Status: Complete on 2026-08-14.
 
@@ -2556,7 +2597,15 @@ Operator confirmation (2026-08-14):
   Workstream card switches the provider pane while keyboard control remains in
   the Navigator.
 
-## D8.18 - Home-root Project browser default
+## D11 - Project browser usability
+
+Implementation status: D11.0 through D11.4 are complete. This stage groups the
+home-root default, hidden-directory control, human-facing and repository-first
+ordering, and directional navigation refinements into one Project-discovery
+outcome. The roadmap reclassification changes none of their original scope,
+delivery order, or completion evidence.
+
+## D11.0 - Home-root Project browser default
 
 Status: Complete on 2026-08-14.
 
@@ -2622,7 +2671,7 @@ Operator confirmation (2026-08-14):
 - no state reset or Runtime rotation was performed, and both existing open
   Workstreams remained intact.
 
-## D8.19 - Modal-local hidden Project-directory toggle
+## D11.1 - Modal-local hidden Project-directory toggle
 
 Status: Complete on 2026-08-14.
 
@@ -2639,7 +2688,7 @@ Scope:
   browser footer;
 - carry that state through the then-current child `Enter` and parent `h` key
   paths, preserving the current filter and selected directory where possible
-  when the visibility toggles; D8.22 later rebinds those navigation paths to
+  when the visibility toggles; D11.4 later rebinds those navigation paths to
   `Right` and `Left`; and
 - extend the bounded local/SSH Project-directory request and response with one
   exact visibility flag, bumping protocol 17 to 18 so hidden directory names
@@ -2664,7 +2713,7 @@ Exit gate:
 - deterministic Navigator coverage drives `.`, the then-current non-Git
   `Enter`, and `h` key paths, proving default-off toggle behavior,
   filter/selection preservation, navigation persistence, failure preservation,
-  and narrow discoverability; D8.22 supersedes the two navigation bindings; and
+  and narrow discoverability; D11.4 supersedes the two navigation bindings; and
 - one uninterrupted `scripts/check` run plus staged and unstaged
   `git diff --check` pass.
 
@@ -2689,7 +2738,7 @@ Completion evidence (2026-08-14):
   acceptance harnesses, and staged and unstaged diff checks. No live provider,
   SSH, installation, state reset, or Runtime rotation was required.
 
-## D8.20 - Human-facing Project-directory ordering
+## D11.2 - Human-facing Project-directory ordering
 
 Status: Complete on 2026-08-14.
 
@@ -2701,7 +2750,7 @@ dot-directories remain a predictable leading group.
 Scope:
 
 - group dot-directories before visible directories only when the explicit
-  D8.19 visibility request includes them;
+  D11.1 visibility request includes them;
 - sort each group by a locale-independent Unicode lowercase key and then by the
   original exact name so equal folded keys remain deterministic; and
 - apply the same visible-directory ordering whether hidden directories are on
@@ -2736,7 +2785,7 @@ Completion evidence (2026-08-14):
   deterministic exact-name tie;
 - deterministic state coverage uses mixed-case visible names, same-fold names,
   and mixed hidden/visible names to prove the complete ordering contract;
-- protocol 18, host schema 12, client schema 5, control ABI 1, the D8.19
+- protocol 18, host schema 12, client schema 5, control ABI 1, the D11.1
   visibility request, scan and response bounds, persisted state, provider
   commands, Runtime behavior, and both private tmux configurations are
   unchanged; and
@@ -2746,13 +2795,13 @@ Completion evidence (2026-08-14):
   acceptance harnesses, and staged and unstaged diff checks. No live provider,
   SSH, installation, state reset, or Runtime rotation was required.
 
-## D8.21 - Repository-first Project-directory ordering
+## D11.3 - Repository-first Project-directory ordering
 
 Status: Complete on 2026-08-14.
 
 This checkpoint makes the Project browser's actionable result the primary
 ordering signal. Direct Git repositories now appear before directories that
-only navigate deeper, while D8.20's hidden grouping and deterministic
+only navigate deeper, while D11.2's hidden grouping and deterministic
 case-insensitive name order remain subordinate within both tiers.
 
 Scope:
@@ -2760,7 +2809,7 @@ Scope:
 - rank entries already identified as direct Git repositories before ordinary
   navigation folders, regardless of their names;
 - retain hidden-before-visible grouping independently inside the repository and
-  folder tiers when D8.19 visibility is enabled; and
+  folder tiers when D11.1 visibility is enabled; and
 - retain the Unicode lowercase key and exact original-name tie-breaker inside
   each resulting group without adding another filesystem probe.
 
@@ -2778,7 +2827,7 @@ Exit gate:
 - deterministic host-state coverage proves a repository whose name would sort
   late still precedes an alphabetically earlier navigation folder;
 - hidden-off responses exclude hidden entries and order visible repositories
-  before the D8.20-sorted visible-folder tier;
+  before the D11.2-sorted visible-folder tier;
 - hidden-on responses order hidden repositories, visible repositories, hidden
   folders, and visible folders, retaining mixed-case and same-fold exact-name
   behavior inside those groups; and
@@ -2795,7 +2844,7 @@ Completion evidence (2026-08-14):
   hidden and visible navigation folders, mixed case, same-fold names, and a
   late-sorting repository to prove the complete ordering hierarchy;
 - protocol 18, host schema 12, client schema 5, control ABI 1, Git detection,
-  the D8.19 visibility request, D8.20 name keys, scan and response bounds,
+  the D11.1 visibility request, D11.2 name keys, scan and response bounds,
   persisted state, provider commands, Runtime behavior, and both private tmux
   configurations are unchanged; and
 - one uninterrupted `scripts/check` run passes 398 library tests, seven
@@ -2804,7 +2853,7 @@ Completion evidence (2026-08-14):
   acceptance harnesses, and staged and unstaged diff checks. No live provider,
   SSH, installation, state reset, or Runtime rotation was required.
 
-## D8.22 - Directional Project-browser navigation
+## D11.4 - Directional Project-browser navigation
 
 Status: Complete on 2026-08-14.
 
@@ -2874,7 +2923,7 @@ Completion evidence (2026-08-14):
   acceptance harnesses, and staged and unstaged diff checks. No live provider,
   SSH, installation, state reset, or Runtime rotation was required.
 
-## D8.23 - Presentation-scoped ephemeral Workstream shell
+## D12 - Presentation-scoped ephemeral Workstream shell
 
 Status: Planned; no implementation or acceptance is complete.
 

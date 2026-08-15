@@ -100,8 +100,9 @@ independent WSNav evidence.
 9. **Keep ordinary operation inside the TUI.** After WSNav and its declared
    external prerequisites are installed, a user can perform every ordinary
    WSNav-owned catalog, lifecycle, recovery, and observer action from the
-   two-pane navigator. Direct CLI commands remain optional scripting,
-   diagnostics, and break-glass parity, never a required normal workflow.
+   default Navigator/provider presentation. Direct CLI commands remain optional
+   scripting, diagnostics, and break-glass parity, never a required normal
+   workflow.
 
 ## V1 scope
 
@@ -112,8 +113,9 @@ independent WSNav evidence.
   lost-Runtime recovery contract. Real OpenCode acceptance currently covers
   `1.18.11`; release numbers are diagnostic evidence, not compatibility
   authority.
-- A minimal two-pane terminal experience: navigator beside the directly
-  interactive native provider TUI.
+- A minimal terminal experience that defaults to the Navigator beside the
+  directly interactive native provider TUI and may temporarily add at most one
+  ephemeral utility shell below the provider.
 - Explicit host registration and capability checks.
 - Logical projects with one or more explicitly registered host locations.
 - Host-private Project-directory browsing for ordinary registration, rooted at
@@ -222,11 +224,14 @@ local terminal
 └── dedicated local tmux presentation session (disposable)
     ├── navigator pane
     │   └── wsnav TUI
-    └── provider pane
-        └── wsnav attach helper
-            ├── local host: wsnav host helper -> exact runtime tmux server
-            └── SSH host: ssh -tt -> remote wsnav helper -> exact runtime tmux
-                                                       └── native provider TUI
+    ├── provider pane
+    │   └── wsnav attach helper
+    │       ├── local host: wsnav host helper -> exact runtime tmux server
+    │       └── SSH host: ssh -tt -> remote wsnav helper -> exact runtime tmux
+    │                                                  └── native provider TUI
+    └── optional utility-shell pane (at most one; below provider)
+        ├── local host: account shell at exact ProjectLocation root
+        └── SSH host: ssh -tt -> remote wsnav helper -> account shell at root
 
 wsnav TUI
 ├── local client catalog
@@ -262,10 +267,52 @@ without addressing the nested provider Runtime or an ordinary tmux server.
 Individual renderers retain their compact fallbacks for explicitly narrowed
 panes.
 
+The presentation begins with exactly the Navigator and provider panes. The
+planned D8.23 utility-shell action may split only the provider region once,
+placing one shell below the provider. `Ctrl+b "` is the sole shell-creation
+gesture: it creates and focuses that pane when absent and otherwise focuses the
+existing shell. `Ctrl+b %` does not create an alternate orientation or a
+second pane. Unknown or duplicate pane-role evidence is ambiguity and must
+leave the layout unchanged.
+
+The private presentation does not inherit tmux's general-purpose prefix or root
+management tables. Its prefix table is rebuilt as an explicit allowlist:
+`Ctrl+b "` opens or focuses the shell; `Ctrl+b %` gives bounded guidance;
+`Ctrl+b x` confirms close
+only for the utility shell; `Ctrl+b d` detaches; `Ctrl+b o` and directional
+keys move among owned panes; `Ctrl+b Ctrl+b` delivers a literal `Ctrl+b` to the
+focused application without exposing the nested Runtime's tmux prefix table;
+and `Ctrl+b ?` shows only this curated help. Its root table retains only the
+primary mouse selection/forwarding and bounded scrolling/copy interactions
+required by the existing Navigator and native provider surfaces. Default
+right-click management menus, mouse split/swap/kill/respawn actions, arbitrary
+tmux command prompts, additional splits, windows, sessions, and layout mutation
+bindings are absent. These restrictions belong only to WSNav's private
+presentation server and never modify the user's ordinary tmux server or
+configuration.
+
 The navigator is a small Rust TUI in one pane. The provider pane is not a
 terminal widget rendered by Rust; it is a real tmux attachment to the host-owned
 provider runtime. This retains direct keyboard, mouse, resize, color, and native
 TUI behavior without building a PTY server or terminal emulator.
+
+The optional utility shell is presentation state, not a Workstream, Runtime,
+provider session, or durable terminal. It may open only beside one exact live
+`Running` provider attachment. The host resolves that attachment's opaque
+Workstream identity to its canonical registered ProjectLocation root. Local
+shells start there directly; remote shells use a fixed interactive SSH command
+whose remote wsnav helper resolves the same root, so an absolute repository path
+never crosses the SSH boundary. Pending, completed, failed, blank,
+observer-review, dead, stale, or ambiguous provider surfaces create no shell.
+
+The shell keeps its launch host and root until it exits. Switching the provider
+pane never retargets or kills an existing shell. Shell exit, `Ctrl+d`, or the
+guarded shell-only close binding removes its pane immediately and restores the
+two-pane geometry; Navigator and provider dead-pane retention remain unchanged.
+WSNav persists no shell identity, command, output, history, terminal capture,
+or restoration record. A live shell may naturally survive a client detach only
+while its disposable presentation tmux server remains alive; presentation loss
+ends it, and WSNav never reconstructs it.
 
 The dedicated tmux status line stays disabled because it consumes a row from
 the provider surface. Navigation and status live in the navigator pane.

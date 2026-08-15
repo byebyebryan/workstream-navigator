@@ -190,8 +190,8 @@ an automatic migration from the retired schema.
 
 Date: 2026-08-14
 
-Status: D0 through D8.22 are complete. V1 remains a source-installed operator
-beta.
+Status: D0 through D8.22 are complete. D8.23 is planned. V1 remains a
+source-installed operator beta.
 
 This roadmap turns the reconciled [V1 design](design.md) into reviewable
 delivery checkpoints. The design remains the product and architecture contract.
@@ -260,6 +260,7 @@ This document owns sequencing, exit gates, and progress.
 | D8.20 | Human-facing Project-directory ordering | Complete (2026-08-14) |
 | D8.21 | Repository-first Project-directory ordering | Complete (2026-08-14) |
 | D8.22 | Directional Project-browser navigation | Complete (2026-08-14) |
+| D8.23 | Presentation-scoped ephemeral Workstream shell | Planned |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -2872,6 +2873,122 @@ Completion evidence (2026-08-14):
   dependency policy, shell/Python/fixture checks, disposable D4 through D8.2
   acceptance harnesses, and staged and unstaged diff checks. No live provider,
   SSH, installation, state reset, or Runtime rotation was required.
+
+## D8.23 - Presentation-scoped ephemeral Workstream shell
+
+Status: Planned; no implementation or acceptance is complete.
+
+This checkpoint adds quick, unmanaged terminal access beside the currently
+attached provider without turning WSNav into a general-purpose terminal
+multiplexer. The normal presentation still begins with the Navigator and one
+native provider pane. One private tmux chord may temporarily add one ordinary
+shell below the provider for short host-local work such as inspecting or
+manually operating Git. The shell is never a Workstream or durable session.
+
+Scope:
+
+- replace the private presentation's inherited tmux prefix and root tables with
+  explicit allowlists. Bind only `Ctrl+b "` for create-or-focus utility shell,
+  `Ctrl+b %` for bounded guidance, confirmed `Ctrl+b x` for shell-only close,
+  `Ctrl+b d` for detach, `Ctrl+b o` and directional keys for owned-pane focus,
+  `Ctrl+b Ctrl+b` for literal `Ctrl+b` delivery to the focused application
+  without exposing the nested Runtime prefix table, and `Ctrl+b ?` for curated
+  help;
+- retain in the root table only the primary mouse selection/forwarding and
+  bounded scrolling/copy interactions required by the existing Navigator and
+  native provider surfaces. Remove default right-click management menus,
+  mouse split/swap/kill/respawn controls, and other topology-changing root
+  bindings so a future tmux default cannot silently widen the surface;
+- bind `Ctrl+b "` to create exactly one shell below the provider and transfer
+  focus into it. Repeating the chord, including while the shell has focus,
+  focuses the existing pane and never creates or rearranges another pane;
+- suppress `Ctrl+b %` with bounded guidance to use `Ctrl+b "`. Expose no raw
+  alternate split, arbitrary command prompt, new window or session,
+  break/join/swap/rotate/layout command, or Navigator/provider kill or respawn
+  binding;
+- authorize shell creation only from one exact live provider surface whose
+  presentation-private attachment phase is `Running`, whose provider pane is
+  alive, and whose host alias and Workstream ID remain unambiguous. Pending,
+  completed, failed, blank, observer-review, dead, stale, and malformed
+  surfaces fail closed without changing layout;
+- resolve the Workstream to its canonical registered ProjectLocation root on
+  the authoritative host. Start the host account's ordinary interactive shell
+  at that root without introducing a WSNav shell configuration or policy;
+- for SSH Workstreams, preflight the fixed registered endpoint and invoke a
+  fixed `ssh -tt` remote wsnav command carrying only the opaque Workstream ID.
+  Resolve the absolute project root on the remote host and never place it in an
+  SSH argument or protocol response;
+- tag only bounded pane-role and Workstream context in disposable private tmux
+  state, detect zero/one/multiple utility panes deterministically, and refuse
+  ambiguous or unexpected topology rather than deleting panes;
+- set shell-pane `remain-on-exit` off while retaining the Navigator/provider
+  dead-pane behavior. Normal shell exit, `Ctrl+d`, remote disconnect, or the
+  guarded shell-only close removes the pane and restores the two-pane layout
+  without restarting WSNav; and
+- keep a live shell fixed to its launch host and ProjectLocation until it exits.
+  Provider switching neither retargets nor kills it. Client detach may leave it
+  alive only as part of the same disposable presentation; there is no durable
+  restoration after presentation loss.
+
+Planned implementation slices:
+
+1. land this design and roadmap contract without production behavior;
+2. add presentation pane-role authority, the curated prefix table, idempotent
+   below-provider split/focus/close behavior, host-local root resolution, and
+   disposable local tmux coverage;
+3. add the fixed remote interactive shell helper, SSH argument-vector and
+   remote-root tests, and bump control ABI 1 to 2 so an older remote executable
+   cannot be mistaken for shell-compatible; and
+4. complete repository validation plus explicit operator-gated local and real
+   SSH terminal acceptance with sanitized evidence and complete cleanup.
+
+Non-goals and hard boundaries:
+
+- no second shell, `Ctrl+b %` layout, persistent terminal entity, shell list,
+  restoration record, shell title/rename model, or remembered shell policy;
+- no command, output, history, scrollback, transcript, terminal capture,
+  environment, credential, repository path, or raw SSH payload persistence;
+- no Git lifecycle ownership or automatic fetch, pull, commit, push, branch,
+  worktree, or conflict action;
+- no provider Runtime split, manager-originated provider input injection,
+  provider-pane management diagnostic, provider process/lifecycle change, or
+  completed-output loss;
+- no Navigator-side shell shortcut, generic terminal launcher, arbitrary tmux
+  command surface, ordinary tmux configuration change, or claim that the
+  private socket is a security boundary against an operator deliberately
+  invoking tmux out of band; and
+- no host/client schema or JSON host-protocol change. Protocol 18, host schema
+  12, and client schema 5 stay fixed; only the independently versioned remote
+  control ABI advances for the new interactive command.
+
+Exit gate:
+
+- deterministic configuration tests prove the presentation prefix and root
+  tables are allowlists, `Ctrl+b "` is the only shell creator, `Ctrl+b %`
+  cannot split, guarded close cannot target Navigator/provider panes, required
+  existing mouse behavior remains intact, unsafe mouse menus and topology
+  actions are absent, and the ordinary tmux server plus private Runtime
+  configuration remain unchanged;
+- deterministic nested-input coverage proves `Ctrl+b Ctrl+b` reaches the
+  focused application as one literal control character and cannot leave the
+  provider Runtime tmux client in prefix mode or invoke its key table;
+- disposable tmux tests prove zero-to-one creation, repeated and concurrent
+  create-or-focus idempotence, focus from every owned pane, both normal and
+  failed shell-process cleanup, exact two-pane layout restoration, and
+  fail-closed duplicate/unrecognized topology;
+- host-state and command-vector tests prove exact local cwd, unknown or stale
+  Workstream rejection, fixed remote SSH arguments with no repository path,
+  remote host-side root resolution, and control-ABI mismatch rejection before
+  interactive launch;
+- switching Workstreams while a shell is open leaves its process and launch
+  context unchanged while provider attachment continues to target only its
+  exact owned pane;
+- explicit operator-gated local and real SSH confirmation verifies hostname,
+  cwd, a harmless Git inspection, provider interactivity and completed output,
+  shell exit cleanup, detach/reattach behavior, and non-interference with an
+  ordinary tmux session. Evidence contains no provider or shell capture; and
+- one uninterrupted `scripts/check` run plus staged and unstaged
+  `git diff --check` pass.
 
 ## Deferred beyond V1
 

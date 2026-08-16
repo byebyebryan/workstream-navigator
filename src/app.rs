@@ -43,8 +43,8 @@ pub(super) use crate::{
         StateError, StateRoot,
     },
     transport::{
-        HostClient, RemoteExecutable, STANDARD_REMOTE_EXECUTABLE, SshDestination, SshEndpoint,
-        SystemCommandRunner, attach_ssh,
+        CommandRunner, HostClient, RemoteExecutable, STANDARD_REMOTE_EXECUTABLE, SshDestination,
+        SshEndpoint, SystemCommandRunner, attach_ssh,
     },
 };
 

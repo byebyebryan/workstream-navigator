@@ -1451,6 +1451,35 @@ impl<'a> PrivateRuntime<'a> {
         command
     }
 
+    /// Delivers exactly one literal C-b to the owned provider pane through
+    /// this Runtime's private tmux server. This bypasses the nested client's
+    /// prefix table entirely; callers must complete authoritative attachment
+    /// preflight before invoking it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact private Runtime tmux server rejects
+    /// the bounded input action.
+    pub fn send_literal_ctrl_b(&self) -> Result<(), RuntimeError> {
+        let response = self.tmux.invoke(&TmuxInvocation {
+            socket: self.paths.socket.clone(),
+            config: None,
+            arguments: vec![
+                OsString::from("send-keys"),
+                OsString::from("-t"),
+                OsString::from(format!("{}:{PROVIDER_WINDOW}.0", self.paths.session_name)),
+                OsString::from("C-b"),
+            ],
+        })?;
+        if response.success {
+            Ok(())
+        } else {
+            Err(RuntimeError::TmuxRejected(trim_diagnostic(
+                &response.stderr,
+            )))
+        }
+    }
+
     /// Stops only the server at this runtime's recorded private socket.
     ///
     /// # Errors
@@ -2543,6 +2572,31 @@ mod tests {
                 "attach-session".to_owned(),
                 "-t".to_owned(),
                 paths.session_name,
+            ]
+        );
+    }
+
+    #[test]
+    fn literal_ctrl_b_targets_only_the_exact_private_provider_pane() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let tmux = FakeTmux::with_responses([successful()]);
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
+
+        runtime.send_literal_ctrl_b().unwrap();
+
+        let calls = tmux.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].socket, paths.socket);
+        assert_eq!(calls[0].config, None);
+        assert_eq!(
+            calls[0].arguments,
+            vec![
+                OsString::from("send-keys"),
+                OsString::from("-t"),
+                OsString::from(format!("{}:provider.0", paths.session_name)),
+                OsString::from("C-b"),
             ]
         );
     }

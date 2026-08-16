@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use super::{
     HostRegistry, IntegrationLifecycle, ObserverProfile, Path, RuntimeId, StateRoot,
     cli::{Cli, Commands, HostCommands, is_provider_surface_command},
-    dispatch::should_prepare_codex_observer,
+    dispatch::{self, should_prepare_codex_observer},
     local::codex_launch_program,
     model::AppError,
     observer::{
@@ -139,6 +139,7 @@ fn opencode_guardian_is_state_free_hidden_and_not_provider_surface() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn provider_surface_helpers_are_silent_cli_commands() {
     let local = Cli::try_parse_from([
         "wsnav",
@@ -181,6 +182,114 @@ fn provider_surface_helpers_are_silent_cli_commands() {
 
     let review = Cli::try_parse_from(["wsnav", "_observer_review"]).unwrap();
     assert!(is_provider_surface_command(review.command.as_ref()));
+
+    let control = Cli::try_parse_from([
+        "wsnav",
+        "_presentation_control",
+        "--presentation-socket",
+        "/state/presentation/presentation-0123456789ab/tmux.sock",
+        "--presentation-session",
+        "wsnav-presentation-0123456789ab",
+        "--action",
+        "literal-c-b",
+        "--source-pane",
+        "%1",
+        "--client-name",
+        "/dev/pts/9",
+    ])
+    .unwrap();
+    assert!(matches!(
+        control.command.as_ref(),
+        Some(Commands::PresentationControl { action, source_pane, client_name, .. })
+            if action == "literal-c-b" && source_pane == "%1" && client_name == "/dev/pts/9"
+    ));
+    assert!(is_provider_surface_command(control.command.as_ref()));
+
+    let shell = Cli::try_parse_from([
+        "wsnav",
+        "_presentation_shell",
+        "--presentation-socket",
+        "/state/presentation/presentation-0123456789ab/tmux.sock",
+        "--presentation-session",
+        "wsnav-presentation-0123456789ab",
+        "--shell",
+        "/bin/sh",
+        "--cwd",
+        "/tmp/project",
+    ])
+    .unwrap();
+    assert!(matches!(
+        shell.command.as_ref(),
+        Some(Commands::PresentationShell { shell, cwd, .. })
+            if shell == &std::path::PathBuf::from("/bin/sh")
+                && cwd == &std::path::PathBuf::from("/tmp/project")
+    ));
+    assert!(is_provider_surface_command(shell.command.as_ref()));
+
+    let remote_shell = Cli::try_parse_from([
+        "wsnav",
+        "_presentation_ssh_shell",
+        "--presentation-socket",
+        "/state/presentation/presentation-0123456789ab/tmux.sock",
+        "--presentation-session",
+        "wsnav-presentation-0123456789ab",
+        "--destination",
+        "snap",
+        "--executable",
+        "/home/user/.local/bin/wsnav",
+        "--workstream-id",
+        "00000000-0000-0000-0000-000000000001",
+    ])
+    .unwrap();
+    assert!(matches!(
+        remote_shell.command.as_ref(),
+        Some(Commands::PresentationRemoteShell {
+            destination,
+            executable,
+            workstream_id,
+            ..
+        }) if destination == "snap"
+            && executable == &std::path::PathBuf::from("/home/user/.local/bin/wsnav")
+            && workstream_id == "00000000-0000-0000-0000-000000000001"
+    ));
+    assert!(is_provider_surface_command(remote_shell.command.as_ref()));
+
+    let host_shell = Cli::try_parse_from([
+        "wsnav",
+        "_presentation_remote_shell",
+        "00000000-0000-0000-0000-000000000001",
+    ])
+    .unwrap();
+    assert!(matches!(
+        host_shell.command.as_ref(),
+        Some(Commands::RemotePresentationShell { workstream_id })
+            if workstream_id == "00000000-0000-0000-0000-000000000001"
+    ));
+    assert!(!is_provider_surface_command(host_shell.command.as_ref()));
+
+    let host_literal = Cli::try_parse_from([
+        "wsnav",
+        "_presentation_remote_literal",
+        "00000000-0000-0000-0000-000000000001",
+    ])
+    .unwrap();
+    assert!(matches!(
+        host_literal.command.as_ref(),
+        Some(Commands::RemotePresentationLiteral { workstream_id })
+            if workstream_id == "00000000-0000-0000-0000-000000000001"
+    ));
+    assert!(!is_provider_surface_command(host_literal.command.as_ref()));
+
+    let temporary = tempfile::tempdir().unwrap();
+    let invalid_remote = Cli::try_parse_from([
+        "wsnav",
+        "--state-root",
+        temporary.path().to_str().unwrap(),
+        "_presentation_remote_literal",
+        "00000000-0000-0000-0000-000000000001",
+    ])
+    .unwrap();
+    assert!(dispatch::execute(invalid_remote).is_err());
 
     let user =
         Cli::try_parse_from(["wsnav", "attach", "00000000-0000-0000-0000-000000000001"]).unwrap();

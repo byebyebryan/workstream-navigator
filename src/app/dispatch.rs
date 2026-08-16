@@ -2,7 +2,8 @@ use super::{FromStr, HostRegistry, Presentation, RuntimeId, StateRoot, run_local
 use super::{
     cli::{Cli, Commands},
     launch::{
-        OpenCodeObserverArguments, opencode_observer, provider_attach, provider_remote_attach,
+        OpenCodeObserverArguments, opencode_observer, presentation_control,
+        presentation_remote_shell, presentation_shell, provider_attach, provider_remote_attach,
         provider_remote_observer_review, provider_wait, runtime_launch,
     },
     lifecycle::{acknowledge, fork_workstream, new_workstream, register},
@@ -75,6 +76,40 @@ fn execute_root_command(root: &StateRoot, command: Commands) -> Result<(), AppEr
             presentation_session,
         } => run_local_navigator(root, presentation_socket, presentation_session)
             .map_err(AppError::Navigator),
+        Commands::PresentationControl {
+            presentation_socket,
+            presentation_session,
+            action,
+            source_pane,
+            client_name,
+        } => presentation_control(
+            root,
+            presentation_socket,
+            presentation_session,
+            &action,
+            &source_pane,
+            &client_name,
+        ),
+        Commands::PresentationShell {
+            presentation_socket,
+            presentation_session,
+            shell,
+            cwd,
+        } => presentation_shell(root, presentation_socket, presentation_session, shell, cwd),
+        Commands::PresentationRemoteShell {
+            presentation_socket,
+            presentation_session,
+            destination,
+            executable,
+            workstream_id,
+        } => presentation_remote_shell(
+            root,
+            presentation_socket,
+            presentation_session,
+            &destination,
+            &executable,
+            &workstream_id,
+        ),
         Commands::ProviderWait => provider_wait(),
         Commands::ObserverReview => observer_review(root),
         Commands::RemoteObserverReview => {
@@ -129,6 +164,16 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
             // the local navigator observes the resulting runtime state.
             let _ = crate::remote::attach(root, runtime_id);
             return Ok(());
+        }
+        Commands::RemotePresentationShell { workstream_id } => {
+            let workstream_id = parse_workstream(&workstream_id)?;
+            return crate::remote::presentation_shell(root, workstream_id)
+                .map_err(AppError::Remote);
+        }
+        Commands::RemotePresentationLiteral { workstream_id } => {
+            let workstream_id = parse_workstream(&workstream_id)?;
+            return crate::remote::presentation_literal_ctrl_b(root, workstream_id)
+                .map_err(AppError::Remote);
         }
         Commands::RuntimeLaunch {
             runtime_id,

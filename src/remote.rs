@@ -5,8 +5,12 @@
 //! process with exactly one JSON request and response frame.
 
 use std::{
+    env,
+    ffi::OsString,
+    fs,
     io::{self, Read, Write},
-    path::Path,
+    path::{Path, PathBuf},
+    process::Command,
     process::Stdio,
 };
 
@@ -97,6 +101,161 @@ pub fn attach(root: &StateRoot, runtime_id: RuntimeId) -> Result<(), RemoteError
         Ok(())
     } else {
         Err(RemoteError::AttachFailed)
+    }
+}
+
+/// Runs the host side of a remote presentation utility shell. Only the
+/// opaque Workstream ID crosses SSH; this function resolves the authoritative
+/// `ProjectLocation` root and account shell from host-local state.
+///
+/// # Errors
+///
+/// Returns a bounded error when the Workstream, Runtime, project root, or
+/// account shell cannot be corroborated.
+pub fn presentation_shell(
+    root: &StateRoot,
+    workstream_id: WorkstreamId,
+) -> Result<(), RemoteError> {
+    let (runtime, overview) = preflight_presentation(root, workstream_id)?;
+    let shell = env::var_os("SHELL")
+        .map(PathBuf::from)
+        .ok_or(RemoteError::PresentationUnavailable)?;
+    let plan = presentation_shell_plan(&overview.project_repository_path, &runtime.cwd, &shell)?;
+    let mut command = Command::new(&plan.shell);
+    command.current_dir(&plan.cwd).args(&plan.arguments);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        Err(RemoteError::Io(command.exec()))
+    }
+    #[cfg(not(unix))]
+    {
+        let status = command.status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            Err(RemoteError::PresentationUnavailable)
+        }
+    }
+}
+
+/// Sends one literal C-b to the exact remote private Runtime. The host
+/// preflight is repeated here so a stale SSH invocation cannot target a
+/// replacement Runtime or a different Workstream.
+///
+/// # Errors
+///
+/// Returns a bounded error when the Workstream, Runtime, or private tmux
+/// server cannot be corroborated.
+pub fn presentation_literal_ctrl_b(
+    root: &StateRoot,
+    workstream_id: WorkstreamId,
+) -> Result<(), RemoteError> {
+    let (runtime, _overview) = preflight_presentation(root, workstream_id)?;
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(
+        &tmux,
+        &process_probe,
+        RuntimePaths::for_record(root.base(), runtime.runtime_id, &runtime.tmux_session)?,
+    );
+    runtime.send_literal_ctrl_b()?;
+    Ok(())
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PresentationShellPlan {
+    cwd: PathBuf,
+    shell: PathBuf,
+    arguments: Vec<OsString>,
+}
+
+fn preflight_presentation(
+    root: &StateRoot,
+    workstream_id: WorkstreamId,
+) -> Result<(crate::state::RuntimeRecord, WorkstreamOverview), RemoteError> {
+    let mut registry = HostRegistry::open(root)?;
+    let overview = registry
+        .workstream_overviews()?
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .ok_or(RemoteError::PresentationUnavailable)?;
+    let runtime = crate::actions::preflight_attachment(root, &mut registry, workstream_id)
+        .map_err(|_| RemoteError::PresentationUnavailable)?;
+    validate_presentation_state(&overview, Some(&runtime))?;
+    Ok((runtime, overview))
+}
+
+fn validate_presentation_state(
+    overview: &WorkstreamOverview,
+    runtime: Option<&crate::state::RuntimeRecord>,
+) -> Result<PathBuf, RemoteError> {
+    if overview.archived_at_millis.is_some() || overview.lifecycle != WorkstreamLifecycle::Open {
+        return Err(RemoteError::PresentationUnavailable);
+    }
+    let runtime = runtime.ok_or(RemoteError::PresentationUnavailable)?;
+    if runtime.workstream_id != overview.workstream_id
+        || !matches!(
+            runtime.status,
+            RuntimeStatus::Idle | RuntimeStatus::Working | RuntimeStatus::Attention
+        )
+    {
+        return Err(RemoteError::PresentationUnavailable);
+    }
+    // Canonicalization is performed on the host, after authoritative state
+    // lookup. No repository path is accepted from the SSH command line.
+    resolve_presentation_root(&overview.project_repository_path, &runtime.cwd)
+}
+
+fn presentation_shell_plan(
+    project_root: &Path,
+    runtime_cwd: &Path,
+    shell: &Path,
+) -> Result<PresentationShellPlan, RemoteError> {
+    let cwd = resolve_presentation_root(project_root, runtime_cwd)?;
+    validate_interactive_shell(shell)?;
+    Ok(PresentationShellPlan {
+        cwd,
+        shell: shell.to_path_buf(),
+        arguments: vec!["-i".into()],
+    })
+}
+
+fn resolve_presentation_root(
+    project_root: &Path,
+    runtime_cwd: &Path,
+) -> Result<PathBuf, RemoteError> {
+    if !project_root.is_absolute() || !runtime_cwd.is_absolute() || project_root != runtime_cwd {
+        return Err(RemoteError::PresentationUnavailable);
+    }
+    let canonical_root =
+        fs::canonicalize(project_root).map_err(|_| RemoteError::PresentationUnavailable)?;
+    if canonical_root != project_root || !canonical_root.is_dir() {
+        return Err(RemoteError::PresentationUnavailable);
+    }
+    Ok(canonical_root)
+}
+
+fn validate_interactive_shell(shell: &Path) -> Result<(), RemoteError> {
+    let value = shell.to_str().ok_or(RemoteError::PresentationUnavailable)?;
+    let valid_path = shell.is_absolute()
+        && !value.is_empty()
+        && !value
+            .chars()
+            .any(|character| character.is_control() || character.is_whitespace());
+    #[cfg(unix)]
+    let executable = valid_path
+        && shell.is_file()
+        && fs::metadata(shell).is_ok_and(|metadata| {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o111 != 0
+        });
+    #[cfg(not(unix))]
+    let executable = valid_path && shell.is_file();
+    if executable {
+        Ok(())
+    } else {
+        Err(RemoteError::PresentationUnavailable)
     }
 }
 
@@ -848,7 +1007,8 @@ fn rejection_for_error(error: &RemoteError) -> ResponseEnvelope {
         | RemoteError::Runtime(_)
         | RemoteError::UnknownRuntime
         | RemoteError::RuntimeUnavailable
-        | RemoteError::AttachFailed => rejected("host request is unavailable"),
+        | RemoteError::AttachFailed
+        | RemoteError::PresentationUnavailable => rejected("host request is unavailable"),
     }
 }
 
@@ -902,6 +1062,8 @@ pub enum RemoteError {
     RuntimeUnavailable,
     #[error("native tmux attach failed")]
     AttachFailed,
+    #[error("remote presentation state is unavailable")]
+    PresentationUnavailable,
 }
 
 #[cfg(test)]
@@ -1585,6 +1747,168 @@ mod tests {
             Some("github.com/owner/dms-power-status")
         );
         assert!(snapshot.archived);
+    }
+
+    #[test]
+    fn presentation_root_is_canonicalized_and_must_match_runtime_cwd() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let equivalent = project.join("child").join("..");
+        std::fs::create_dir(project.join("child")).unwrap();
+
+        let resolved = resolve_presentation_root(&project, &project).unwrap();
+        assert_eq!(resolved, project.canonicalize().unwrap());
+        assert!(matches!(
+            resolve_presentation_root(&equivalent, &project),
+            Err(RemoteError::PresentationUnavailable)
+        ));
+
+        let other = temporary.path().join("other");
+        std::fs::create_dir(&other).unwrap();
+        assert!(matches!(
+            resolve_presentation_root(&project, &other),
+            Err(RemoteError::PresentationUnavailable)
+        ));
+        assert!(matches!(
+            resolve_presentation_root(Path::new("relative"), &project),
+            Err(RemoteError::PresentationUnavailable)
+        ));
+    }
+
+    #[test]
+    fn presentation_shell_plan_requires_an_executable_absolute_shell() {
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        let shell = std::env::current_exe().unwrap();
+
+        let plan = presentation_shell_plan(&project, &project, &shell).unwrap();
+        assert_eq!(plan.cwd, project.canonicalize().unwrap());
+        assert_eq!(plan.shell, shell);
+        assert_eq!(plan.arguments, vec![OsString::from("-i")]);
+        assert!(
+            plan.arguments
+                .iter()
+                .all(|argument| argument != project.as_os_str())
+        );
+        assert!(matches!(
+            presentation_shell_plan(&project, &project, Path::new("sh")),
+            Err(RemoteError::PresentationUnavailable)
+        ));
+        assert!(matches!(
+            presentation_shell_plan(&project, &project, Path::new("/tmp")),
+            Err(RemoteError::PresentationUnavailable)
+        ));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let non_executable = project.join("shell");
+            std::fs::write(&non_executable, b"#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(&non_executable, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+            assert!(matches!(
+                presentation_shell_plan(&project, &project, &non_executable),
+                Err(RemoteError::PresentationUnavailable)
+            ));
+        }
+    }
+
+    fn presentation_overview(
+        workstream_id: WorkstreamId,
+        project_root: &Path,
+        lifecycle: WorkstreamLifecycle,
+        archived: bool,
+    ) -> WorkstreamOverview {
+        WorkstreamOverview {
+            workstream_id,
+            location_id: crate::domain::LocationId::new(),
+            provider: crate::domain::ProviderKind::Codex,
+            project_repository_path: project_root.to_path_buf(),
+            project_display_name: "project".to_owned(),
+            remote_identity_fingerprint: None,
+            remote_identity_display: None,
+            lifecycle,
+            archived_at_millis: archived.then_some(1),
+            last_activity_sequence: 0,
+            last_activity_at_millis: None,
+            revision: Revision::INITIAL,
+            runtime: None,
+            binding: None,
+            attention: None,
+        }
+    }
+
+    fn presentation_runtime(
+        workstream_id: WorkstreamId,
+        cwd: &Path,
+        status: RuntimeStatus,
+    ) -> crate::state::RuntimeRecord {
+        crate::state::RuntimeRecord {
+            runtime_id: RuntimeId::new(),
+            workstream_id,
+            provider: crate::domain::ProviderKind::Codex,
+            tmux_generation: "generation".to_owned(),
+            tmux_session: "wsnav-runtime".to_owned(),
+            cwd: cwd.to_path_buf(),
+            provider_pid: Some(1),
+            process_birth: Some("birth".to_owned()),
+            status,
+            revision: Revision::INITIAL,
+        }
+    }
+
+    #[test]
+    fn presentation_state_plan_rejects_unknown_archived_closed_mismatched_and_nonlive_state() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let unknown = WorkstreamId::new();
+        assert!(matches!(
+            preflight_presentation(&root, unknown),
+            Err(RemoteError::PresentationUnavailable)
+        ));
+
+        let project = temporary.path().join("project");
+        let other = temporary.path().join("other");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::create_dir(&other).unwrap();
+        let workstream_id = WorkstreamId::new();
+        let live = presentation_runtime(workstream_id, &project, RuntimeStatus::Idle);
+        let archived =
+            presentation_overview(workstream_id, &project, WorkstreamLifecycle::Open, true);
+        assert!(matches!(
+            validate_presentation_state(&archived, Some(&live)),
+            Err(RemoteError::PresentationUnavailable)
+        ));
+        let closed =
+            presentation_overview(workstream_id, &project, WorkstreamLifecycle::Parked, false);
+        assert!(matches!(
+            validate_presentation_state(&closed, Some(&live)),
+            Err(RemoteError::PresentationUnavailable)
+        ));
+        let mismatch = presentation_runtime(workstream_id, &other, RuntimeStatus::Idle);
+        let open = presentation_overview(workstream_id, &project, WorkstreamLifecycle::Open, false);
+        assert!(matches!(
+            validate_presentation_state(&open, Some(&mismatch)),
+            Err(RemoteError::PresentationUnavailable)
+        ));
+        assert!(matches!(
+            validate_presentation_state(&open, None),
+            Err(RemoteError::PresentationUnavailable)
+        ));
+        for status in [
+            RuntimeStatus::Starting,
+            RuntimeStatus::Stopped,
+            RuntimeStatus::Unknown,
+            RuntimeStatus::Unreachable,
+        ] {
+            let unavailable = presentation_runtime(workstream_id, &project, status);
+            assert!(matches!(
+                validate_presentation_state(&open, Some(&unavailable)),
+                Err(RemoteError::PresentationUnavailable)
+            ));
+        }
+        assert!(validate_presentation_state(&open, Some(&live)).is_ok());
     }
 
     #[test]

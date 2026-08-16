@@ -57,6 +57,7 @@ impl SshDestination {
     /// Returns an error for an empty, oversized, or unsafe target.
     pub fn parse(value: &str) -> Result<Self, TransportError> {
         if value.is_empty()
+            || value.starts_with('-')
             || value.len() > MAX_SSH_TARGET_BYTES
             || !value
                 .bytes()
@@ -698,6 +699,57 @@ pub fn attach_ssh(endpoint: &SshEndpoint, runtime_id: RuntimeId) -> Result<(), T
     }
 }
 
+/// Opens one remote Workstream utility shell through the native terminal
+/// stream. The remote command is fixed; the only dynamic argument is the
+/// opaque Workstream ID. The host helper performs all state and cwd
+/// resolution locally on that host.
+///
+/// # Errors
+///
+/// Returns an error when SSH cannot launch or the remote shell helper exits.
+pub fn attach_presentation_shell_ssh(
+    endpoint: &SshEndpoint,
+    workstream_id: WorkstreamId,
+) -> Result<(), TransportError> {
+    let status = Command::new("ssh")
+        .args(ssh_presentation_shell_arguments(endpoint, workstream_id))
+        .stderr(Stdio::null())
+        .status()
+        .map_err(TransportError::Launch)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(TransportError::InteractivePresentationShellFailed)
+    }
+}
+
+/// Sends exactly one literal C-b to a remote Runtime through a bounded,
+/// non-interactive SSH helper. No nested SSH/tmux client receives input.
+///
+/// # Errors
+///
+/// Returns a bounded transport error when the helper cannot be launched,
+/// times out, or exits unsuccessfully. Remote stderr is never retained.
+pub fn send_remote_literal_ctrl_b(
+    endpoint: &SshEndpoint,
+    workstream_id: WorkstreamId,
+) -> Result<(), TransportError> {
+    send_remote_literal_ctrl_b_with(&SystemCommandRunner, endpoint, workstream_id)
+}
+
+fn send_remote_literal_ctrl_b_with<R: CommandRunner>(
+    runner: &R,
+    endpoint: &SshEndpoint,
+    workstream_id: WorkstreamId,
+) -> Result<(), TransportError> {
+    let result = runner.run(ssh_presentation_literal_invocation(endpoint, workstream_id))?;
+    if result.success {
+        Ok(())
+    } else {
+        Err(TransportError::RemoteCommandFailed)
+    }
+}
+
 /// Opens the remote native Codex hook-review surface through the current
 /// terminal. It has no control payload: after SSH connects, the only visible
 /// bytes are the provider's own terminal UI.
@@ -806,6 +858,49 @@ fn ssh_attach_arguments(endpoint: &SshEndpoint, runtime_id: RuntimeId) -> Vec<Os
         OsString::from("_attach"),
         OsString::from(runtime_id.to_string()),
     ]
+}
+
+/// Returns the exact interactive SSH argument vector used by the remote
+/// presentation utility shell. Keep this shell-free and deliberately narrow:
+/// destination, executable, hidden command, and opaque ID only.
+#[must_use]
+pub fn ssh_presentation_shell_arguments(
+    endpoint: &SshEndpoint,
+    workstream_id: WorkstreamId,
+) -> Vec<OsString> {
+    vec![
+        OsString::from("-tt"),
+        OsString::from("-o"),
+        OsString::from("BatchMode=yes"),
+        OsString::from("-o"),
+        OsString::from("ConnectTimeout=8"),
+        OsString::from(endpoint.destination.as_str()),
+        OsString::from(endpoint.executable.as_str()),
+        OsString::from("_presentation_remote_shell"),
+        OsString::from(workstream_id.to_string()),
+    ]
+}
+
+fn ssh_presentation_literal_invocation(
+    endpoint: &SshEndpoint,
+    workstream_id: WorkstreamId,
+) -> CommandInvocation {
+    CommandInvocation {
+        program: OsString::from("ssh"),
+        arguments: vec![
+            OsString::from("-T"),
+            OsString::from("-o"),
+            OsString::from("BatchMode=yes"),
+            OsString::from("-o"),
+            OsString::from("ConnectTimeout=8"),
+            OsString::from(endpoint.destination.as_str()),
+            OsString::from(endpoint.executable.as_str()),
+            OsString::from("_presentation_remote_literal"),
+            OsString::from(workstream_id.to_string()),
+        ],
+        stdin: Vec::new(),
+        timeout: CONTROL_TIMEOUT,
+    }
 }
 
 fn ssh_observer_review_arguments(endpoint: &SshEndpoint) -> Vec<OsString> {
@@ -929,6 +1024,8 @@ pub enum TransportError {
     InteractiveAttachmentFailed,
     #[error("remote native observer review failed")]
     InteractiveObserverReviewFailed,
+    #[error("remote presentation shell failed")]
+    InteractivePresentationShellFailed,
     #[error("host returned an unexpected protocol response")]
     UnexpectedResponse,
     #[error("host returned inconsistent snapshot pages")]
@@ -1178,6 +1275,27 @@ mod tests {
 
     #[test]
     fn unsafe_remote_values_cannot_reach_the_ssh_command() {
+        for destination in [
+            "snap",
+            "alice@snap",
+            "example.com:2222",
+            "127.0.0.1:2222",
+            "::1",
+        ] {
+            assert!(SshDestination::parse(destination).is_ok(), "{destination}");
+        }
+        for destination in ["-F", "-E", "--", "-oProxyCommand=touch"] {
+            assert!(
+                SshDestination::parse(destination).is_err(),
+                "option-like destination was accepted: {destination}"
+            );
+        }
+        let endpoint = SshEndpoint::new(
+            SshDestination::parse("alice@example.com:2222").unwrap(),
+            RemoteExecutable::parse("/home/user/wsnav").unwrap(),
+        );
+        let vector = ssh_presentation_shell_arguments(&endpoint, WorkstreamId::new());
+        assert_eq!(vector[5], OsStr::new("alice@example.com:2222"));
         assert!(SshDestination::parse("snap; whoami").is_err());
         assert!(RemoteExecutable::parse(STANDARD_REMOTE_EXECUTABLE).is_ok());
         assert!(RemoteExecutable::parse("~/bin/wsnav").is_err());
@@ -1487,6 +1605,128 @@ mod tests {
         assert_eq!(arguments[6], OsStr::new("/home/bryan/.local/bin/wsnav"));
         assert_eq!(arguments[7], OsStr::new("_remote_observer_review"));
         assert!(arguments.iter().all(|argument| argument != "sh"));
+    }
+
+    #[test]
+    fn remote_presentation_shell_is_a_fixed_tty_vector_with_only_opaque_id() {
+        let endpoint = SshEndpoint::new(
+            SshDestination::parse("snap").unwrap(),
+            RemoteExecutable::parse("/home/bryan/.local/bin/wsnav").unwrap(),
+        );
+        let workstream_id = WorkstreamId::new();
+
+        let arguments = ssh_presentation_shell_arguments(&endpoint, workstream_id);
+
+        assert_eq!(arguments[0], OsStr::new("-tt"));
+        assert_eq!(arguments[5], OsStr::new("snap"));
+        assert_eq!(arguments[6], OsStr::new("/home/bryan/.local/bin/wsnav"));
+        assert_eq!(arguments[7], OsStr::new("_presentation_remote_shell"));
+        assert_eq!(arguments[8], OsStr::new(&workstream_id.to_string()));
+        assert_eq!(arguments.len(), 9);
+        assert!(
+            arguments.iter().all(|argument| {
+                argument != "/tmp/project" && argument != "/private/repository"
+            })
+        );
+    }
+
+    #[test]
+    fn remote_presentation_literal_is_bounded_noninteractive_and_has_no_stdin() {
+        let endpoint = SshEndpoint::new(
+            SshDestination::parse("snap").unwrap(),
+            RemoteExecutable::parse("/home/bryan/.local/bin/wsnav").unwrap(),
+        );
+        let workstream_id = WorkstreamId::new();
+
+        let invocation = ssh_presentation_literal_invocation(&endpoint, workstream_id);
+
+        assert_eq!(invocation.program, OsStr::new("ssh"));
+        assert_eq!(invocation.arguments[0], OsStr::new("-T"));
+        assert_eq!(
+            invocation.arguments[7],
+            OsStr::new("_presentation_remote_literal")
+        );
+        assert_eq!(
+            invocation.arguments[8],
+            OsStr::new(&workstream_id.to_string())
+        );
+        assert!(invocation.stdin.is_empty());
+        assert_eq!(invocation.timeout, CONTROL_TIMEOUT);
+        assert!(
+            invocation.arguments.iter().all(|argument| {
+                argument != "/tmp/project" && argument != "/private/repository"
+            })
+        );
+    }
+
+    #[test]
+    fn remote_literal_failure_maps_without_remote_output() {
+        struct FailedRunner;
+
+        impl CommandRunner for FailedRunner {
+            fn run(&self, _invocation: CommandInvocation) -> Result<CommandResult, TransportError> {
+                Ok(CommandResult {
+                    success: false,
+                    stdout: b"remote path and diagnostics must not escape".to_vec(),
+                })
+            }
+        }
+
+        let endpoint = SshEndpoint::new(
+            SshDestination::parse("snap").unwrap(),
+            RemoteExecutable::parse("/home/bryan/.local/bin/wsnav").unwrap(),
+        );
+
+        assert!(matches!(
+            send_remote_literal_ctrl_b_with(&FailedRunner, &endpoint, WorkstreamId::new()),
+            Err(TransportError::RemoteCommandFailed)
+        ));
+    }
+
+    #[test]
+    fn unsafe_presentation_endpoint_values_cannot_enter_vectors() {
+        assert!(SshDestination::parse("snap;touch /tmp/marker").is_err());
+        assert!(RemoteExecutable::parse("/bin/wsnav#(touch /tmp/marker)").is_err());
+    }
+
+    #[test]
+    fn abi_mismatch_is_rejected_at_the_probe_before_any_hello_request() {
+        #[derive(Clone)]
+        struct ProbeRunner {
+            calls: std::sync::Arc<std::sync::Mutex<Vec<CommandInvocation>>>,
+        }
+
+        impl CommandRunner for ProbeRunner {
+            fn run(&self, invocation: CommandInvocation) -> Result<CommandResult, TransportError> {
+                self.calls.lock().unwrap().push(invocation);
+                let mut build = BuildInfo::current();
+                build.control_abi = 1;
+                Ok(CommandResult {
+                    success: true,
+                    stdout: serde_json::to_vec(&build).unwrap(),
+                })
+            }
+        }
+
+        let calls = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let endpoint = SshEndpoint::new(
+            SshDestination::parse("snap").unwrap(),
+            RemoteExecutable::parse("/home/bryan/.local/bin/wsnav").unwrap(),
+        );
+        let client = HostClient::new(ProbeRunner {
+            calls: calls.clone(),
+        });
+        let remote = client.probe_ssh(&endpoint).unwrap();
+        assert!(matches!(
+            remote.ensure_compatible_with_local(),
+            Err(crate::build_info::BuildInfoError::ControlAbiMismatch {
+                local: 2,
+                remote: 1
+            })
+        ));
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].arguments[7], OsStr::new("_probe"));
     }
 
     fn hello_response() -> ResponseEnvelope {

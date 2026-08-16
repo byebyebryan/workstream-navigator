@@ -1,7 +1,7 @@
 use super::{
-    ClientCatalog, ClientHostTransport, HostClient, HostIdentity, Path, RemoteExecutable,
-    STANDARD_REMOTE_EXECUTABLE, SshDestination, SshEndpoint, StateError, StateRoot,
-    SystemCommandRunner, WorkstreamId, attach_ssh,
+    ClientCatalog, ClientHostTransport, CommandRunner, HostClient, HostIdentity, Path,
+    RemoteExecutable, STANDARD_REMOTE_EXECUTABLE, SshDestination, SshEndpoint, StateError,
+    StateRoot, SystemCommandRunner, WorkstreamId, attach_ssh,
 };
 use super::{
     cli::HostCommands,
@@ -473,6 +473,15 @@ pub(super) fn checked_ssh_endpoint(
 ) -> Result<SshEndpoint, AppError> {
     let endpoint = registered_ssh_endpoint(catalog, alias)?;
     let client = HostClient::new(SystemCommandRunner);
+    checked_ssh_endpoint_with_client(catalog, alias, &client, endpoint)
+}
+
+fn checked_ssh_endpoint_with_client<R: CommandRunner>(
+    catalog: &ClientCatalog,
+    alias: &str,
+    client: &HostClient<R>,
+    endpoint: SshEndpoint,
+) -> Result<SshEndpoint, AppError> {
     client
         .probe_ssh(&endpoint)?
         .ensure_compatible_with_local()?;
@@ -508,4 +517,75 @@ fn ssh_endpoint(destination: &str, executable: &Path) -> Result<SshEndpoint, App
         .ok_or(AppError::RemoteExecutableNotUtf8)
         .and_then(|value| RemoteExecutable::parse(value).map_err(AppError::Transport))?;
     Ok(SshEndpoint::new(destination, executable))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use super::*;
+    use crate::{
+        build_info::{BuildInfo, BuildInfoError},
+        domain::HostId,
+        protocol::Capabilities,
+        transport::{CommandInvocation, CommandResult, TransportError},
+    };
+
+    #[derive(Clone)]
+    struct ProbeOnlyRunner {
+        calls: Arc<Mutex<Vec<CommandInvocation>>>,
+    }
+
+    impl CommandRunner for ProbeOnlyRunner {
+        fn run(&self, invocation: CommandInvocation) -> Result<CommandResult, TransportError> {
+            self.calls.lock().unwrap().push(invocation);
+            let mut build = BuildInfo::current();
+            build.control_abi = 1;
+            Ok(CommandResult {
+                success: true,
+                stdout: serde_json::to_vec(&build).unwrap(),
+            })
+        }
+    }
+
+    #[test]
+    fn checked_endpoint_rejects_abi_before_hello_or_interactive_effect() {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = StateRoot::create(temporary.path().join("state")).unwrap();
+        let mut catalog = ClientCatalog::open(&root).unwrap();
+        let identity = HostIdentity {
+            host_id: HostId::new(),
+            registry_generation: "generation".to_owned(),
+        };
+        catalog
+            .register_ssh_host(
+                "snap",
+                &identity,
+                Path::new("/home/bryan/.local/bin/wsnav"),
+                "snap",
+                Capabilities {
+                    git: true,
+                    tmux: true,
+                },
+            )
+            .unwrap();
+        let endpoint = registered_ssh_endpoint(&catalog, "snap").unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let client = HostClient::new(ProbeOnlyRunner {
+            calls: calls.clone(),
+        });
+
+        let result = checked_ssh_endpoint_with_client(&catalog, "snap", &client, endpoint);
+
+        assert!(matches!(
+            result,
+            Err(AppError::BuildInfo(BuildInfoError::ControlAbiMismatch {
+                local: 2,
+                remote: 1
+            }))
+        ));
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].arguments[7], "_probe");
+    }
 }

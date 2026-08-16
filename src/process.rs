@@ -6,7 +6,9 @@
 //! diagnostics boundary.
 
 use std::{
+    fs,
     io::{self, Read},
+    path::Path,
     process::{Child, Command, ExitStatus, Output, Stdio},
     thread,
     time::{Duration, Instant},
@@ -166,25 +168,67 @@ pub(crate) type OwnedProcessGroup = ();
 pub(crate) fn capture_process_group(
     pid: u32,
 ) -> Result<Option<OwnedProcessGroup>, ProcessGroupError> {
-    use nix::{errno::Errno, unistd::Pid};
-
     let pid = i32::try_from(pid).map_err(|_| ProcessGroupError::InvalidPid)?;
-    let pid = Pid::from_raw(pid);
-    let process_group_id = match nix::unistd::getpgid(Some(pid)) {
-        Ok(value) => value.as_raw(),
-        Err(Errno::ESRCH) => return Ok(None),
+    #[cfg(target_os = "linux")]
+    {
+        let Some((process_group_id, session_id)) =
+            read_process_group_snapshot(Path::new("/proc"), pid)?
+        else {
+            return Ok(None);
+        };
+        Ok(Some(OwnedProcessGroup {
+            process_group_id,
+            session_id,
+        }))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        use nix::{errno::Errno, unistd::Pid};
+
+        let pid = Pid::from_raw(pid);
+        let process_group_id = match nix::unistd::getpgid(Some(pid)) {
+            Ok(value) => value.as_raw(),
+            Err(Errno::ESRCH) => return Ok(None),
+            Err(error) => {
+                return Err(ProcessGroupError::Probe(io::Error::from_raw_os_error(
+                    error as i32,
+                )));
+            }
+        };
+        let session_id = nix::unistd::getsid(Some(pid)).map_err(|error| {
+            ProcessGroupError::Probe(io::Error::from_raw_os_error(error as i32))
+        })?;
+        Ok(Some(OwnedProcessGroup {
+            process_group_id,
+            session_id: session_id.as_raw(),
+        }))
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn read_process_group_snapshot(
+    proc_root: &Path,
+    pid: i32,
+) -> Result<Option<(i32, i32)>, ProcessGroupError> {
+    let metadata =
+        fs::metadata(proc_root).map_err(|error| ProcessGroupError::Probe(copy_io_error(&error)))?;
+    if !metadata.is_dir() {
+        return Err(ProcessGroupError::Probe(io::Error::new(
+            io::ErrorKind::NotADirectory,
+            "process table root is not a directory",
+        )));
+    }
+    let stat_path = proc_root.join(pid.to_string()).join("stat");
+    let stat = match fs::read_to_string(stat_path) {
+        Ok(stat) => stat,
+        Err(error) if process_entry_missing(&error) => return Ok(None),
         Err(error) => {
-            return Err(ProcessGroupError::Probe(io::Error::from_raw_os_error(
-                error as i32,
-            )));
+            return Err(ProcessGroupError::Probe(copy_io_error(&error)));
         }
     };
-    let session_id = nix::unistd::getsid(Some(pid))
-        .map_err(|error| ProcessGroupError::Probe(io::Error::from_raw_os_error(error as i32)))?;
-    Ok(Some(OwnedProcessGroup {
-        process_group_id,
-        session_id: session_id.as_raw(),
-    }))
+    parse_process_stat(&stat)
+        .map(Some)
+        .map_err(ProcessGroupError::Probe)
 }
 
 #[cfg(unix)]
@@ -227,7 +271,7 @@ fn process_group_has_member(group: OwnedProcessGroup) -> Result<bool, ProcessGro
         };
         let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
             Ok(stat) => stat,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) if process_entry_missing(&error) => continue,
             Err(error) => return Err(ProcessGroupError::Probe(copy_io_error(&error))),
         };
         let (process_group_id, session_id) =
@@ -242,6 +286,11 @@ fn process_group_has_member(group: OwnedProcessGroup) -> Result<bool, ProcessGro
 #[cfg(unix)]
 fn copy_io_error(error: &io::Error) -> io::Error {
     io::Error::new(error.kind(), error.to_string())
+}
+
+#[cfg(unix)]
+fn process_entry_missing(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::NotFound || error.raw_os_error() == Some(3)
 }
 
 #[cfg(unix)]
@@ -421,6 +470,36 @@ mod tests {
                 "accepted malformed stat: {stat}"
             );
         }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn process_group_snapshot_treats_only_missing_child_as_absence() {
+        use std::fs;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let proc_root = temporary.path().join("proc");
+        let pid_directory = proc_root.join("42");
+        fs::create_dir_all(&pid_directory).unwrap();
+        assert!(matches!(
+            read_process_group_snapshot(&proc_root, 42),
+            Ok(None)
+        ));
+
+        fs::write(pid_directory.join("stat"), "42 (worker) S 1 bad 17").unwrap();
+        assert!(matches!(
+            read_process_group_snapshot(&proc_root, 42),
+            Err(ProcessGroupError::Probe(error))
+                if error.kind() == io::ErrorKind::InvalidData
+        ));
+
+        let proc_file = temporary.path().join("proc-file");
+        fs::write(&proc_file, b"not a directory").unwrap();
+        assert!(matches!(
+            read_process_group_snapshot(&proc_file, 42),
+            Err(ProcessGroupError::Probe(error))
+                if error.kind() == io::ErrorKind::NotADirectory
+        ));
     }
 
     #[test]

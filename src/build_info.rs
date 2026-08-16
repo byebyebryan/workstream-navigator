@@ -7,7 +7,7 @@ use thiserror::Error;
 
 /// Increment only when a build changes the meaning of the control protocol
 /// independently of its wire version or host schema.
-pub const CONTROL_ABI: u16 = 1;
+pub const CONTROL_ABI: u16 = 2;
 const MAX_PACKAGE_VERSION_BYTES: usize = 64;
 
 /// Safe metadata returned by the hidden, state-free `_probe` command.
@@ -129,6 +129,21 @@ mod tests {
     #[test]
     fn current_build_is_compatible_with_itself() {
         assert!(BuildInfo::current().ensure_compatible_with_local().is_ok());
+        assert_eq!(CONTROL_ABI, 2);
+    }
+
+    #[test]
+    fn control_abi_mismatch_is_rejected_before_other_metadata() {
+        let mut remote = BuildInfo::current();
+        remote.control_abi = 1;
+
+        assert!(matches!(
+            remote.ensure_compatible_with_local(),
+            Err(BuildInfoError::ControlAbiMismatch {
+                local: 2,
+                remote: 1
+            })
+        ));
     }
 
     #[test]

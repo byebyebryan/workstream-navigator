@@ -60,6 +60,7 @@ scripts/d8.1-mixed-provider-acceptance.sh
 scripts/d8.2-lifecycle-correctness-acceptance.sh
 scripts/d8.2-opencode-creation-guardian-acceptance.sh
 scripts/d8.2-opencode-production-harness-acceptance.sh
+scripts/d12-presentation-harness-acceptance.sh
 
 git diff --check
 git diff --cached --check

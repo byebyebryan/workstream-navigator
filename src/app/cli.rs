@@ -110,6 +110,49 @@ pub(super) enum Commands {
         #[arg(long)]
         presentation_session: String,
     },
+    /// Internal fixed presentation control helper. It accepts only the
+    /// bounded action/source values emitted by the private tmux bindings.
+    #[command(name = "_presentation_control", hide = true)]
+    PresentationControl {
+        #[arg(long)]
+        presentation_socket: PathBuf,
+        #[arg(long)]
+        presentation_session: String,
+        #[arg(long)]
+        action: String,
+        #[arg(long)]
+        source_pane: String,
+        #[arg(long)]
+        client_name: String,
+    },
+    /// Internal utility-shell barrier. It disables pane retention before
+    /// replacing itself with the account's ordinary interactive shell.
+    #[command(name = "_presentation_shell", hide = true)]
+    PresentationShell {
+        #[arg(long)]
+        presentation_socket: PathBuf,
+        #[arg(long)]
+        presentation_session: String,
+        #[arg(long)]
+        shell: PathBuf,
+        #[arg(long)]
+        cwd: PathBuf,
+    },
+    /// Internal remote utility-shell barrier. It validates the exact private
+    /// presentation pane, then replaces itself with one fixed SSH command.
+    #[command(name = "_presentation_ssh_shell", hide = true)]
+    PresentationRemoteShell {
+        #[arg(long)]
+        presentation_socket: PathBuf,
+        #[arg(long)]
+        presentation_session: String,
+        #[arg(long)]
+        destination: String,
+        #[arg(long)]
+        executable: PathBuf,
+        #[arg(long)]
+        workstream_id: String,
+    },
     /// Internal blank provider-pane placeholder before an exact attachment is selected.
     #[command(name = "_provider_wait", hide = true)]
     ProviderWait,
@@ -162,6 +205,14 @@ pub(super) enum Commands {
     /// Internal native-terminal-only attachment endpoint used through ssh -tt.
     #[command(name = "_attach", hide = true)]
     RemoteAttach { runtime_id: String },
+    /// Internal host-side remote presentation shell helper. It accepts only
+    /// an opaque Workstream ID and resolves all state locally.
+    #[command(name = "_presentation_remote_shell", hide = true)]
+    RemotePresentationShell { workstream_id: String },
+    /// Internal host-side remote literal C-b helper. It accepts only an opaque
+    /// Workstream ID and targets the exact private Runtime socket.
+    #[command(name = "_presentation_remote_literal", hide = true)]
+    RemotePresentationLiteral { workstream_id: String },
     /// Internal one-shot launch barrier that replaces itself with the provider.
     #[command(name = "_runtime_launch", hide = true)]
     RuntimeLaunch {
@@ -294,6 +345,9 @@ pub(super) const fn is_provider_surface_command(command: Option<&Commands>) -> b
         command,
         Some(
             Commands::ProviderAttach { .. }
+                | Commands::PresentationControl { .. }
+                | Commands::PresentationShell { .. }
+                | Commands::PresentationRemoteShell { .. }
                 | Commands::ProviderRemoteAttach { .. }
                 | Commands::ProviderRemoteObserverReview { .. }
                 | Commands::ObserverReview

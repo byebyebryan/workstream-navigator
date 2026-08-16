@@ -188,10 +188,12 @@ historical only; it is not a current product commitment. Host schema 8 is a
 clean breaking boundary and requires explicit reset/re-registration instead of
 an automatic migration from the retired schema.
 
-Date: 2026-08-14
+Date: 2026-08-15
 
-Status: D0 through D11.4 are complete. D12 is planned. V1 remains a
-source-installed operator beta.
+Status: D0 through D11.4 are complete. D12 implementation, automated
+validation, and local operator acceptance are complete; its equivalent SSH
+visual confirmation remains pending. V1 remains a source-installed operator
+beta.
 
 Roadmap organization note (2026-08-14): the completed checkpoints that
 followed the original multi-provider outcome are grouped below by the product
@@ -285,7 +287,7 @@ This document owns sequencing, exit gates, and progress.
 | D11.2 | Human-facing Project-directory ordering | Complete (2026-08-14) |
 | D11.3 | Repository-first Project-directory ordering | Complete (2026-08-14) |
 | D11.4 | Directional Project-browser navigation | Complete (2026-08-14) |
-| D12 | Presentation-scoped ephemeral Workstream shell | Planned |
+| D12 | Presentation-scoped ephemeral Workstream shell | Operator acceptance pending |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -2925,7 +2927,9 @@ Completion evidence (2026-08-14):
 
 ## D12 - Presentation-scoped ephemeral Workstream shell
 
-Status: Planned; no implementation or acceptance is complete.
+Status: Implementation, automated validation, explicitly authorized local plus
+real-SSH machine acceptance, and local normal-environment visual confirmation
+complete on 2026-08-15; the equivalent SSH visual confirmation is pending.
 
 This checkpoint adds quick, unmanaged terminal access beside the currently
 attached provider without turning WSNav into a general-purpose terminal
@@ -2990,6 +2994,36 @@ Planned implementation slices:
    cannot be mistaken for shell-compatible; and
 4. complete repository validation plus explicit operator-gated local and real
    SSH terminal acceptance with sanitized evidence and complete cleanup.
+
+Implementation evidence (2026-08-15; checkpoint not yet complete):
+
+- the private presentation now rebuilds explicit root and prefix allowlists,
+  owns exact Navigator/provider/utility pane roles and the supported geometry,
+  creates or focuses at most one below-provider utility shell, routes literal
+  `Ctrl+b` directly to the exact provider Runtime, and removes a normally or
+  abnormally exited utility pane without weakening Navigator/provider
+  `remain-on-exit` behavior;
+- local shell launch resolves the exact running Workstream's canonical
+  ProjectLocation and account shell. Remote launch uses fixed `ssh -tt` and
+  bounded literal-input command vectors carrying only the endpoint executable
+  and opaque Workstream ID; the authoritative host repeats exact state/root
+  validation before launch, and control ABI 2 rejects an older endpoint before
+  any interactive effect;
+- deterministic and disposable coverage exercises allowlist drift, hostile
+  tmux-format paths, exact geometry and guarded close, concurrent idempotence,
+  failed-launch cleanup, local cwd, remote context retention, ABI preflight,
+  literal nested-prefix delivery, and ordinary-tmux non-interference; and
+- one uninterrupted `scripts/check` run passed 419 library tests, 10
+  presentation recovery tests, 5 local transport tests, package and dependency
+  policy, formatting and lint, every disposable acceptance harness, plus
+  staged and unstaged whitespace checks. This evidence does not substitute for
+  operator-visible terminal confirmation below; and
+- the explicitly authorized acceptance harness subsequently passed every
+  non-visual local and real-loopback-SSH assertion with complete cleanup and an
+  unchanged ordinary-tmux inventory. It retained no terminal content and
+  therefore left the local and SSH completed-output visual assertions to the
+  operator. A subsequent installed-build check completed the local visual gate;
+  only the SSH visual gate remains pending.
 
 Non-goals and hard boundaries:
 

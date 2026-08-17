@@ -117,9 +117,7 @@ pub fn presentation_shell(
     workstream_id: WorkstreamId,
 ) -> Result<(), RemoteError> {
     let (runtime, overview) = preflight_presentation(root, workstream_id)?;
-    let shell = env::var_os("SHELL")
-        .map(PathBuf::from)
-        .ok_or(RemoteError::PresentationUnavailable)?;
+    let shell = current_account_shell()?;
     let plan = presentation_shell_plan(&overview.project_repository_path, &runtime.cwd, &shell)?;
     let mut command = Command::new(&plan.shell);
     command.current_dir(&plan.cwd).args(&plan.arguments);
@@ -137,6 +135,23 @@ pub fn presentation_shell(
             Err(RemoteError::PresentationUnavailable)
         }
     }
+}
+
+#[cfg(unix)]
+fn current_account_shell() -> Result<PathBuf, RemoteError> {
+    use nix::unistd::{User, geteuid};
+
+    let user = User::from_uid(geteuid())
+        .map_err(|_| RemoteError::PresentationUnavailable)?
+        .ok_or(RemoteError::PresentationUnavailable)?;
+    Ok(user.shell)
+}
+
+#[cfg(not(unix))]
+fn current_account_shell() -> Result<PathBuf, RemoteError> {
+    env::var_os("SHELL")
+        .map(PathBuf::from)
+        .ok_or(RemoteError::PresentationUnavailable)
 }
 
 /// Sends one literal C-b to the exact remote private Runtime. The host
@@ -194,10 +209,16 @@ fn validate_presentation_state(
         return Err(RemoteError::PresentationUnavailable);
     }
     let runtime = runtime.ok_or(RemoteError::PresentationUnavailable)?;
+    // The caller has already corroborated the exact live provider process.
+    // `Starting` therefore means lifecycle hooks are still pending, not that
+    // the Runtime is merely reserved or safe to adopt by identity guesswork.
     if runtime.workstream_id != overview.workstream_id
         || !matches!(
             runtime.status,
-            RuntimeStatus::Idle | RuntimeStatus::Working | RuntimeStatus::Attention
+            RuntimeStatus::Starting
+                | RuntimeStatus::Idle
+                | RuntimeStatus::Working
+                | RuntimeStatus::Attention
         )
     {
         return Err(RemoteError::PresentationUnavailable);
@@ -1814,6 +1835,15 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn presentation_shell_uses_the_effective_accounts_login_shell() {
+        use nix::unistd::{User, geteuid};
+
+        let expected = User::from_uid(geteuid()).unwrap().unwrap().shell;
+        assert_eq!(current_account_shell().unwrap(), expected);
+    }
+
     fn presentation_overview(
         workstream_id: WorkstreamId,
         project_root: &Path,
@@ -1896,8 +1926,9 @@ mod tests {
             validate_presentation_state(&open, None),
             Err(RemoteError::PresentationUnavailable)
         ));
+        let starting = presentation_runtime(workstream_id, &project, RuntimeStatus::Starting);
+        assert!(validate_presentation_state(&open, Some(&starting)).is_ok());
         for status in [
-            RuntimeStatus::Starting,
             RuntimeStatus::Stopped,
             RuntimeStatus::Unknown,
             RuntimeStatus::Unreachable,

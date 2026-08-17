@@ -188,7 +188,7 @@ historical only; it is not a current product commitment. Host schema 8 is a
 clean breaking boundary and requires explicit reset/re-registration instead of
 an automatic migration from the retired schema.
 
-Date: 2026-08-15
+Date: 2026-08-17
 
 Status: D0 through D11.4 are complete. D12 implementation, automated
 validation, and local operator acceptance are complete; its equivalent SSH
@@ -2929,7 +2929,8 @@ Completion evidence (2026-08-14):
 
 Status: Implementation, automated validation, explicitly authorized local plus
 real-SSH machine acceptance, and local normal-environment visual confirmation
-complete on 2026-08-15; the equivalent SSH visual confirmation is pending.
+complete on 2026-08-15. The corrected normal-environment SSH shell-launch path
+was confirmed on 2026-08-17; SSH completed-output preservation remains pending.
 
 This checkpoint adds quick, unmanaged terminal access beside the currently
 attached provider without turning WSNav into a general-purpose terminal
@@ -3023,7 +3024,15 @@ Implementation evidence (2026-08-15; checkpoint not yet complete):
   unchanged ordinary-tmux inventory. It retained no terminal content and
   therefore left the local and SSH completed-output visual assertions to the
   operator. A subsequent installed-build check completed the local visual gate;
-  only the SSH visual gate remains pending.
+  only the SSH completed-output gate remains pending; and
+- a normal-environment remote follow-up found that the SSH helper rejected an
+  exact live Runtime while its durable lifecycle was still `Starting`, then
+  would have required a `SHELL` variable that ordinary SSH command environments
+  need not provide. The corrected path retains exact process preflight,
+  accepts that pending-hook state only after it, resolves the effective
+  account's login shell through the account database, passed a bounded
+  content-free live probe with complete cleanup, and was confirmed usable by
+  the operator on the installed remote build.
 
 Non-goals and hard boundaries:
 

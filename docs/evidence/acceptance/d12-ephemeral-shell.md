@@ -1,8 +1,9 @@
 # D12 ephemeral Workstream shell acceptance
 
 Status: local and real-SSH machine acceptance passed on 2026-08-15, followed
-by local normal-environment operator confirmation; only the SSH
-completed-output confirmation remains pending.
+by local normal-environment operator confirmation and a 2026-08-17 remote
+normal-environment shell-launch confirmation; only the SSH completed-output
+preservation confirmation remains pending.
 
 The deterministic and disposable automated gate is recorded in the D12
 roadmap section. It proves the private tmux allowlists, pane-role and geometry
@@ -92,5 +93,16 @@ account environment and confirmed the utility shell used the expected zsh
 profile, normal `exit` cleanup restored the provider geometry, guarded
 `Ctrl+b x` closed the utility, and the local completed provider surface
 remained usable. This closes the local visual gate without retroactively
-changing the content-free machine result. The equivalent SSH visual check is
-still pending on the synchronized remote installation.
+changing the content-free machine result.
+
+The first normal-environment SSH follow-up exposed two fail-closed launch
+regressions that the disposable fixture had not exercised: an exact live
+Runtime could still be durably `Starting` while lifecycle hooks were pending,
+and an SSH command environment need not export `SHELL`. The remote helper now
+accepts `Starting` only after the existing exact live-process preflight and
+resolves the effective account's login shell from the system account database.
+A bounded content-free probe then remained live until its diagnostic timeout,
+cleaned up completely, and the operator confirmed the installed remote shell
+opened and remained usable. This confirms the corrected SSH shell-launch path;
+the separate visual assertion that completed provider output remains unchanged
+is still pending.

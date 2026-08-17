@@ -1,17 +1,17 @@
 # D12 ephemeral Workstream shell acceptance
 
-Status: local and real-SSH machine acceptance passed on 2026-08-15, followed
-by local normal-environment operator confirmation and 2026-08-17 remote
-normal-environment shell-launch plus installed automatic-switch confirmation.
-Only the SSH completed-output preservation confirmation remains pending.
+Status: Complete on 2026-08-17. Local and real-SSH machine acceptance passed
+on 2026-08-15, followed by local normal-environment operator confirmation and
+2026-08-17 remote normal-environment shell-launch, installed automatic-switch,
+and SSH completed-output preservation confirmations.
 
 The deterministic and disposable automated gate is recorded in the D12
 roadmap section. It proves the private tmux allowlists, pane-role and geometry
 authority, local and remote launch vectors, control ABI, idempotence, literal
 prefix delivery, cleanup, context retention, and ordinary-tmux isolation
-without reading terminal content. This record is reserved for the remaining
-operator-visible behavior; it must not be marked passing from automated
-evidence alone.
+without reading terminal content. The checkpoint was not marked complete from
+automated evidence alone; the operator-visible confirmations are recorded
+below.
 
 ## Operator boundary
 
@@ -89,9 +89,9 @@ close the current switching gate.
 The run captured no provider, shell, terminal, or raw SSH content. Because it
 was driven without viewing those native terminal surfaces, it deliberately
 left `local_completed_output_preserved` and
-`ssh_completed_output_preserved` false. D12 therefore remains blocked on
-operator visual confirmation rather than treating machine metadata as proof of
-unchanged completed output.
+`ssh_completed_output_preserved` false. D12 therefore remained blocked at that
+time rather than treating machine metadata as proof of unchanged completed
+output.
 
 The operator subsequently tested the installed local ABI 2 build from a normal
 account environment and confirmed the utility shell used the expected zsh
@@ -108,9 +108,7 @@ accepts `Starting` only after the existing exact live-process preflight and
 resolves the effective account's login shell from the system account database.
 A bounded content-free probe then remained live until its diagnostic timeout,
 cleaned up completely, and the operator confirmed the installed remote shell
-opened and remained usable. This confirms the corrected SSH shell-launch path;
-the separate visual assertion that completed provider output remains unchanged
-is still pending.
+opened and remained usable. This confirms the corrected SSH shell-launch path.
 
 The subsequent V1 simplicity decision keeps Workstream switching free of a
 confirmation step: switching to a different Workstream closes the exact
@@ -120,5 +118,8 @@ ambiguous-pane and extra-window cases. The operator then confirmed the
 installed local presentation closes the shell on a different-Workstream
 selection, restores the two-pane layout, does not restore the old shell when
 returning, and preserves the shell on same-Workstream reselection. No terminal
-content was retained from that confirmation. The separate SSH completed-output
-visual assertion remains the only open D12 gate.
+content was retained from that confirmation. The operator then confirmed the
+completed provider result on the installed SSH Workstream remains visible and
+unchanged through utility-shell use and that the provider remains interactive
+afterward. No terminal content was retained from that confirmation. This
+closes the final D12 gate.

@@ -190,9 +190,7 @@ an automatic migration from the retired schema.
 
 Date: 2026-08-17
 
-Status: D0 through D11.4 are complete. D12 implementation, automated
-validation, and local operator acceptance are complete; its equivalent SSH
-visual confirmation remains pending. V1 remains a source-installed operator
+Status: D0 through D12 are complete. V1 remains a source-installed operator
 beta.
 
 Roadmap organization note (2026-08-14): the completed checkpoints that
@@ -287,7 +285,7 @@ This document owns sequencing, exit gates, and progress.
 | D11.2 | Human-facing Project-directory ordering | Complete (2026-08-14) |
 | D11.3 | Repository-first Project-directory ordering | Complete (2026-08-14) |
 | D11.4 | Directional Project-browser navigation | Complete (2026-08-14) |
-| D12 | Presentation-scoped ephemeral Workstream shell | Operator acceptance pending |
+| D12 | Presentation-scoped ephemeral Workstream shell | Complete (2026-08-17) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -2927,11 +2925,11 @@ Completion evidence (2026-08-14):
 
 ## D12 - Presentation-scoped ephemeral Workstream shell
 
-Status: Implementation, automated validation, explicitly authorized local plus
-real-SSH machine acceptance, and local normal-environment visual confirmation
-complete on 2026-08-15. The corrected normal-environment SSH shell-launch path
-and installed automatic cross-Workstream shell cleanup were confirmed on
-2026-08-17. Only SSH completed-output preservation remains pending.
+Status: Complete on 2026-08-17. Implementation, automated validation,
+explicitly authorized local plus real-SSH machine acceptance, and local
+normal-environment visual confirmation completed on 2026-08-15. Corrected
+normal-environment SSH launch, installed automatic cross-Workstream cleanup,
+and SSH completed-output preservation were confirmed on 2026-08-17.
 
 This checkpoint adds quick, unmanaged terminal access beside the currently
 attached provider without turning WSNav into a general-purpose terminal
@@ -3003,7 +3001,7 @@ Planned implementation slices:
 4. complete repository validation plus explicit operator-gated local and real
    SSH terminal acceptance with sanitized evidence and complete cleanup.
 
-Implementation evidence (through 2026-08-17; checkpoint not yet complete):
+Completion evidence (through 2026-08-17):
 
 - the private presentation now rebuilds explicit root and prefix allowlists,
   owns exact Navigator/provider/utility pane roles and the supported geometry,
@@ -3033,9 +3031,8 @@ Implementation evidence (through 2026-08-17; checkpoint not yet complete):
 - the explicitly authorized acceptance harness subsequently passed every
   non-visual local and real-loopback-SSH assertion with complete cleanup and an
   unchanged ordinary-tmux inventory. It retained no terminal content and
-  therefore left the local and SSH completed-output visual assertions to the
-  operator. A subsequent installed-build check completed the local visual gate;
-  only the SSH completed-output gate remains pending; and
+  therefore initially left the local and SSH completed-output visual assertions
+  to the operator; and
 - a normal-environment remote follow-up found that the SSH helper rejected an
   exact live Runtime while its durable lifecycle was still `Starting`, then
   would have required a `SHELL` variable that ordinary SSH command environments
@@ -3047,8 +3044,11 @@ Implementation evidence (through 2026-08-17; checkpoint not yet complete):
 - the operator confirmed the installed local presentation automatically closes
   the shell when selecting a different Workstream, restores the two-pane
   layout, does not restore the old shell on return, and leaves the shell intact
-  on same-Workstream reselection. No terminal content was retained; only the
-  separate SSH completed-output visual assertion remains open.
+  on same-Workstream reselection; and
+- the operator confirmed the completed provider result on the installed SSH
+  Workstream remains visible and unchanged through utility-shell use and that
+  the provider remains interactive afterward. No terminal content was retained
+  from either confirmation, closing the final D12 gate.
 
 Non-goals and hard boundaries:
 

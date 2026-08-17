@@ -2930,7 +2930,8 @@ Completion evidence (2026-08-14):
 Status: Implementation, automated validation, explicitly authorized local plus
 real-SSH machine acceptance, and local normal-environment visual confirmation
 complete on 2026-08-15. The corrected normal-environment SSH shell-launch path
-was confirmed on 2026-08-17; SSH completed-output preservation remains pending.
+and installed automatic cross-Workstream shell cleanup were confirmed on
+2026-08-17. Only SSH completed-output preservation remains pending.
 
 This checkpoint adds quick, unmanaged terminal access beside the currently
 attached provider without turning WSNav into a general-purpose terminal
@@ -2979,10 +2980,16 @@ Scope:
   dead-pane behavior. Normal shell exit, `Ctrl+d`, remote disconnect, or the
   guarded shell-only close removes the pane and restores the two-pane layout
   without restarting WSNav; and
-- keep a live shell fixed to its launch host and ProjectLocation until it exits.
-  Provider switching neither retargets nor kills it. Client detach may leave it
-  alive only as part of the same disposable presentation; there is no durable
-  restoration after presentation loss.
+- keep a live shell fixed to its launch host and ProjectLocation until it exits
+  or the user selects a different Workstream. A cross-Workstream switch closes
+  the exact utility without prompting, verifies the two-pane layout, and only
+  then replaces the provider attachment; failure refuses the switch rather than
+  leaving mixed contexts. Reselecting or reconnecting the same exact host and
+  Workstream keeps its shell. This deliberately preserves a zero-friction core
+  switching workflow and treats the utility as short-lived scratch space for
+  the currently displayed Workstream. Client detach may leave it alive only as
+  part of the same disposable presentation; there is no durable restoration
+  after presentation loss.
 
 Planned implementation slices:
 
@@ -2996,7 +3003,7 @@ Planned implementation slices:
 4. complete repository validation plus explicit operator-gated local and real
    SSH terminal acceptance with sanitized evidence and complete cleanup.
 
-Implementation evidence (2026-08-15; checkpoint not yet complete):
+Implementation evidence (through 2026-08-17; checkpoint not yet complete):
 
 - the private presentation now rebuilds explicit root and prefix allowlists,
   owns exact Navigator/provider/utility pane roles and the supported geometry,
@@ -3012,13 +3019,17 @@ Implementation evidence (2026-08-15; checkpoint not yet complete):
   any interactive effect;
 - deterministic and disposable coverage exercises allowlist drift, hostile
   tmux-format paths, exact geometry and guarded close, concurrent idempotence,
-  failed-launch cleanup, local cwd, remote context retention, ABI preflight,
-  literal nested-prefix delivery, and ordinary-tmux non-interference; and
-- one uninterrupted `scripts/check` run passed 419 library tests, 10
+  failed-launch cleanup, local cwd, remote launch-context non-retargeting,
+  same-context retention, automatic cross-Workstream cleanup, ambiguous
+  topology refusal, ABI preflight, literal nested-prefix delivery, and
+  ordinary-tmux non-interference; and
+- the current uninterrupted `scripts/check` run passes 421 library tests, 14
   presentation recovery tests, 5 local transport tests, package and dependency
   policy, formatting and lint, every disposable acceptance harness, plus
-  staged and unstaged whitespace checks. This evidence does not substitute for
-  operator-visible terminal confirmation below; and
+  staged and unstaged whitespace checks. This includes the automatic
+  cross-Workstream cleanup, same-context retention, and fail-closed extra-window
+  regressions, but does not substitute for operator-visible terminal
+  confirmation below; and
 - the explicitly authorized acceptance harness subsequently passed every
   non-visual local and real-loopback-SSH assertion with complete cleanup and an
   unchanged ordinary-tmux inventory. It retained no terminal content and
@@ -3032,12 +3043,18 @@ Implementation evidence (2026-08-15; checkpoint not yet complete):
   accepts that pending-hook state only after it, resolves the effective
   account's login shell through the account database, passed a bounded
   content-free live probe with complete cleanup, and was confirmed usable by
-  the operator on the installed remote build.
+  the operator on the installed remote build; and
+- the operator confirmed the installed local presentation automatically closes
+  the shell when selecting a different Workstream, restores the two-pane
+  layout, does not restore the old shell on return, and leaves the shell intact
+  on same-Workstream reselection. No terminal content was retained; only the
+  separate SSH completed-output visual assertion remains open.
 
 Non-goals and hard boundaries:
 
 - no second shell, `Ctrl+b %` layout, persistent terminal entity, shell list,
-  restoration record, shell title/rename model, or remembered shell policy;
+  restoration record, per-Workstream parked-shell surface, shell title/rename
+  model, or remembered shell policy;
 - no command, output, history, scrollback, transcript, terminal capture,
   environment, credential, repository path, or raw SSH payload persistence;
 - no Git lifecycle ownership or automatic fetch, pull, commit, push, branch,
@@ -3072,9 +3089,10 @@ Exit gate:
   Workstream rejection, fixed remote SSH arguments with no repository path,
   remote host-side root resolution, and control-ABI mismatch rejection before
   interactive launch;
-- switching Workstreams while a shell is open leaves its process and launch
-  context unchanged while provider attachment continues to target only its
-  exact owned pane;
+- switching to a different Workstream while a shell is open closes only the
+  exact utility, restores two-pane geometry before provider replacement, adds
+  no confirmation step, and never exposes a provider/shell context mismatch;
+  reselecting the same exact host and Workstream leaves its shell unchanged;
 - explicit operator-gated local and real SSH confirmation verifies hostname,
   cwd, a harmless Git inspection, provider interactivity and completed output,
   shell exit cleanup, detach/reattach behavior, and non-interference with an
@@ -3091,3 +3109,11 @@ automatic plan rollover, provider/model/role launch presets, provider filters
 or grouping, generalized provider onboarding, unproven OpenCode navigator
 Rename, profile composition, Claude parity, multiple-controller catalog
 synchronization, a public daemon, or a replacement provider UI.
+
+One optional and undecided post-V1 expansion is a per-Workstream presentation
+surface that treats the native provider TUI and utility shell as one unit. It
+could preserve a live shell across Workstream switches by parking its existing
+pane in an internal window of the already-owned presentation tmux session and
+restoring it when that Workstream becomes active. This remains deferred until
+its multi-shell resource bound, background-shell visibility, transition
+rollback, and cleanup contract are explicitly approved.

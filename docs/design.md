@@ -268,7 +268,7 @@ Individual renderers retain their compact fallbacks for explicitly narrowed
 panes.
 
 The presentation begins with exactly the Navigator and provider panes. The
-planned D12 utility-shell action may split only the provider region once,
+D12 utility-shell action may split only the provider region once,
 placing one shell below the provider. `Ctrl+b "` is the sole shell-creation
 gesture: it creates and focuses that pane when absent and otherwise focuses the
 existing shell. `Ctrl+b %` does not create an alternate orientation or a
@@ -305,14 +305,30 @@ whose remote wsnav helper resolves the same root, so an absolute repository path
 never crosses the SSH boundary. Pending, completed, failed, blank,
 observer-review, dead, stale, or ambiguous provider surfaces create no shell.
 
-The shell keeps its launch host and root until it exits. Switching the provider
-pane never retargets or kills an existing shell. Shell exit, `Ctrl+d`, or the
-guarded shell-only close binding removes its pane immediately and restores the
-two-pane geometry; Navigator and provider dead-pane retention remain unchanged.
-WSNav persists no shell identity, command, output, history, terminal capture,
-or restoration record. A live shell may naturally survive a client detach only
-while its disposable presentation tmux server remains alive; presentation loss
-ends it, and WSNav never reconstructs it.
+The shell keeps its launch host and root until it exits. Selecting a different
+Workstream automatically closes the exact utility pane before replacing the
+provider attachment; it never retargets the live shell or leaves Workstream B's
+provider above Workstream A's shell. This adds no confirmation step to the core
+switching workflow. Reselecting or reconnecting the same exact host and
+Workstream does not close its shell. If exact utility ownership or cleanup
+cannot be proven, the switch fails closed before changing the provider pane.
+This is a deliberate V1 simplicity choice: the utility is short-lived scratch
+space for the currently displayed Workstream, while longer-running commands
+belong in an ordinary terminal. Shell exit, `Ctrl+d`, automatic cross-Workstream
+cleanup, or the guarded shell-only close binding removes its pane immediately
+and restores the two-pane geometry; Navigator and provider dead-pane retention
+remain unchanged. WSNav persists no shell identity, command, output, history,
+terminal capture, or restoration record. A live shell may naturally survive a
+client detach only while its disposable presentation tmux server remains alive;
+presentation loss ends it, and WSNav never reconstructs it.
+
+An optional, undecided future expansion could instead treat the provider TUI
+and shell as one per-Workstream presentation surface. The private presentation
+tmux session could park an inactive Workstream's live utility pane in an
+internal window and rejoin it when that Workstream becomes active again. That
+would add multi-shell ownership, bounded resource policy, hidden-shell
+indication, failure rollback, and cleanup semantics. It is not a V1 commitment
+and does not authorize durable shell state or a general-purpose tmux surface.
 
 The dedicated tmux status line stays disabled because it consumes a row from
 the provider surface. Navigation and status live in the navigator pane.

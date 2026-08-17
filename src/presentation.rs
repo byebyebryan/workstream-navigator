@@ -383,18 +383,23 @@ impl Presentation {
         &self,
         workstream_id: WorkstreamId,
     ) -> Result<AttachmentStatus, PresentationError> {
-        let status = self.prepare_attachment("local", workstream_id)?;
-        let provider = self.provider_target()?;
-        self.set_pane_role(
-            &provider,
-            PresentationPaneRole::Provider,
-            Some((&status.host_alias, status.workstream_id)),
-        )?;
-        let result = self.invoke(
-            None,
-            self.provider_respawn_arguments(&provider, workstream_id, status.attempt_id),
-        );
-        self.finish_attachment_start(status, result)
+        self.with_attachment_claim(|| {
+            let status = self.prepare_attachment("local", workstream_id)?;
+            let result = (|| {
+                self.retire_utility_for_attachment("local", workstream_id)?;
+                let provider = self.provider_target()?;
+                self.set_pane_role(
+                    &provider,
+                    PresentationPaneRole::Provider,
+                    Some((&status.host_alias, status.workstream_id)),
+                )?;
+                self.invoke(
+                    None,
+                    self.provider_respawn_arguments(&provider, workstream_id, status.attempt_id),
+                )
+            })();
+            self.finish_attachment_start(status, result)
+        })
     }
 
     /// Replaces only the outer provider attachment helper with an interactive
@@ -410,23 +415,78 @@ impl Presentation {
         host_alias: &str,
         workstream_id: WorkstreamId,
     ) -> Result<AttachmentStatus, PresentationError> {
-        let status = self.prepare_attachment(host_alias, workstream_id)?;
-        let provider = self.provider_target()?;
-        self.set_pane_role(
-            &provider,
-            PresentationPaneRole::Provider,
-            Some((&status.host_alias, status.workstream_id)),
-        )?;
-        let result = self.invoke(
-            None,
-            self.provider_remote_respawn_arguments(
-                &provider,
-                host_alias,
-                workstream_id,
-                status.attempt_id,
-            ),
-        );
-        self.finish_attachment_start(status, result)
+        self.with_attachment_claim(|| {
+            let status = self.prepare_attachment(host_alias, workstream_id)?;
+            let result = (|| {
+                self.retire_utility_for_attachment(host_alias, workstream_id)?;
+                let provider = self.provider_target()?;
+                self.set_pane_role(
+                    &provider,
+                    PresentationPaneRole::Provider,
+                    Some((&status.host_alias, status.workstream_id)),
+                )?;
+                self.invoke(
+                    None,
+                    self.provider_remote_respawn_arguments(
+                        &provider,
+                        host_alias,
+                        workstream_id,
+                        status.attempt_id,
+                    ),
+                )
+            })();
+            self.finish_attachment_start(status, result)
+        })
+    }
+
+    /// Retires the exact utility pane before a different Workstream can
+    /// replace the provider attachment. A shell tagged for the requested
+    /// host/Workstream is retained so same-Workstream reconnects preserve its
+    /// launch context.
+    ///
+    /// This deliberately performs no provider mutation. The topology is
+    /// validated before the exact utility pane is killed and again after the
+    /// kill, so an ambiguous or unconfirmed cleanup refuses the attachment
+    /// before its provider pane is retagged or respawned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the owned presentation topology is ambiguous, an
+    /// exact utility cleanup is rejected, or the resulting two-pane geometry
+    /// cannot be proven.
+    fn retire_utility_for_attachment(
+        &self,
+        host_alias: &str,
+        workstream_id: WorkstreamId,
+    ) -> Result<(), PresentationError> {
+        validate_host_alias(host_alias)?;
+        self.validate_single_presentation_window()?;
+        let topology = self.read_topology()?;
+        let Some(utility) = topology.utility() else {
+            return Ok(());
+        };
+        let provider = topology
+            .provider()
+            .ok_or(PresentationError::InvalidTopology)?;
+        let provider_matches = (provider.host_alias.is_none() && provider.workstream_id.is_none())
+            || (provider.host_alias.as_deref() == Some(host_alias)
+                && provider.workstream_id == Some(workstream_id));
+        let utility_matches = utility.host_alias.as_deref() == Some(host_alias)
+            && utility.workstream_id == Some(workstream_id);
+        if provider_matches && utility_matches {
+            return Ok(());
+        }
+
+        let utility_id = utility.id.clone();
+        self.kill_exact_pane(&utility_id)?;
+        self.validate_single_presentation_window()?;
+        let topology = self.read_topology()?;
+        if topology.utility().is_some() {
+            return Err(PresentationError::ControlRefused(
+                "utility shell cleanup could not be proven",
+            ));
+        }
+        Ok(())
     }
 
     /// Replaces the blank provider pane with the local temporary native Codex
@@ -1056,6 +1116,32 @@ impl Presentation {
         parse_topology(&output)
     }
 
+    fn validate_single_presentation_window(&self) -> Result<(), PresentationError> {
+        let output = self.invoke_capture(
+            None,
+            vec![
+                "list-windows".into(),
+                "-t".into(),
+                self.paths.session_name.clone().into(),
+                "-F".into(),
+                "#{window_name}\t#{window_id}".into(),
+            ],
+        )?;
+        let mut windows = output.lines();
+        let Some(window) = windows.next() else {
+            return Err(PresentationError::InvalidTopology);
+        };
+        let mut fields = window.split('\t');
+        if fields.next() != Some(NAVIGATOR_WINDOW)
+            || !fields.next().is_some_and(parse_window_id)
+            || fields.next().is_some()
+            || windows.next().is_some()
+        {
+            return Err(PresentationError::InvalidTopology);
+        }
+        Ok(())
+    }
+
     fn read_topology_allow_dead(&self) -> Result<PresentationTopology, PresentationError> {
         let output = self.invoke_capture(
             None,
@@ -1157,6 +1243,28 @@ impl Presentation {
                 ],
             );
         }
+    }
+
+    fn with_attachment_claim<T>(
+        &self,
+        operation: impl FnOnce() -> Result<T, PresentationError>,
+    ) -> Result<T, PresentationError> {
+        // The shell claim is presentation-global, so holding it through the
+        // provider retag/respawn closes the race where a new utility split
+        // could appear after retirement but before attachment replacement.
+        let token = format!(
+            "attachment-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        );
+        if !self.try_shell_claim(&token)? {
+            return Err(PresentationError::ControlRefused(
+                "another presentation shell or attachment action is in progress",
+            ));
+        }
+        let result = operation();
+        self.release_shell_claim(&token);
+        result
     }
 
     fn set_pane_role(
@@ -1981,6 +2089,12 @@ fn parse_pane_id(value: &str) -> Option<String> {
         .map(|_| value.to_owned())
 }
 
+fn parse_window_id(value: &str) -> bool {
+    value.strip_prefix('@').is_some_and(|digits| {
+        !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit())
+    })
+}
+
 fn validate_shell_path(path: &Path) -> Result<(), PresentationError> {
     let value = path
         .to_str()
@@ -2231,6 +2345,15 @@ mod tests {
             parse_topology_with_dead(&valid.replace("\t0\t0\t0\t32", "\t1\t0\t0\t32"), true)
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn tmux_window_id_requires_an_at_sign_and_decimal_digits() {
+        assert!(parse_window_id("@0"));
+        assert!(parse_window_id("@123"));
+        assert!(!parse_window_id("@"));
+        assert!(!parse_window_id("@window"));
+        assert!(!parse_window_id("%0"));
     }
 
     #[test]

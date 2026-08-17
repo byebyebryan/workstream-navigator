@@ -12,7 +12,7 @@ use std::{
 
 use wsnav::{
     domain::WorkstreamId,
-    presentation::{Presentation, PresentationAction, PresentationPaths},
+    presentation::{AttachmentPhase, Presentation, PresentationAction, PresentationPaths},
     runtime::{LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, SystemTmux},
 };
 
@@ -686,7 +686,7 @@ fn failed_remote_barrier_restores_the_exact_two_pane_layout() {
 }
 
 #[test]
-fn remote_utility_keeps_its_launch_context_when_provider_tags_switch() {
+fn remote_create_or_focus_shell_does_not_retarget_under_corrupted_provider_tags() {
     if !tmux_available() {
         eprintln!("skipped: tmux is unavailable");
         return;
@@ -754,6 +754,298 @@ fn remote_utility_keeps_its_launch_context_when_provider_tags_switch() {
         pane_value(&paths, "provider", "#{@wsnav_workstream_id}"),
         second_workstream.to_string()
     );
+}
+
+#[test]
+fn local_attachment_switch_closes_only_a_different_workstream_shell() {
+    if !tmux_available() {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+    let state_root = tempfile::tempdir().unwrap();
+    let project_root = tempfile::tempdir().unwrap();
+    let fake = state_root.path().join("provider-helper");
+    fs::write(&fake, "#!/bin/sh\nexec /usr/bin/sleep 60\n").unwrap();
+    make_executable(&fake);
+    let presentation = Presentation::fresh_with_executable(state_root.path(), fake);
+    let paths = presentation.paths().clone();
+    let _guard = PrivateTmuxGuard {
+        directory: paths.directory.clone(),
+        socket: paths.socket.clone(),
+    };
+    presentation.start().unwrap();
+
+    let first_workstream = WorkstreamId::new();
+    presentation.attach_workstream(first_workstream).unwrap();
+    presentation
+        .create_or_focus_shell(
+            "%1",
+            "local",
+            first_workstream,
+            project_root.path(),
+            Path::new("/bin/sh"),
+        )
+        .unwrap();
+    wait_for_pane_count(&paths, 3);
+    let utility = pane_value(&paths, "utility", "#{pane_id}");
+    let utility_pid = pane_value(&paths, "utility", "#{pane_pid}");
+
+    // Reconnecting the same exact attachment leaves its utility pane and
+    // process untouched.
+    presentation.attach_workstream(first_workstream).unwrap();
+    assert_eq!(pane_value(&paths, "utility", "#{pane_id}"), utility);
+    assert_eq!(pane_value(&paths, "utility", "#{pane_pid}"), utility_pid);
+    assert_eq!(pane_snapshot(&paths).len(), 3);
+
+    let second_workstream = WorkstreamId::new();
+    presentation.attach_workstream(second_workstream).unwrap();
+    wait_for_pane_count(&paths, 2);
+    wait_for_pid_exit(&utility_pid);
+    assert!(pane_value_if_present(&paths, "utility", "#{pane_id}").is_none());
+    assert_eq!(
+        pane_value(&paths, "provider", "#{@wsnav_host_alias}"),
+        "local"
+    );
+    assert_eq!(
+        pane_value(&paths, "provider", "#{@wsnav_workstream_id}"),
+        second_workstream.to_string()
+    );
+    assert_eq!(pane_field(&paths, "navigator", "#{pane_top}"), 0);
+    assert_eq!(pane_field(&paths, "provider", "#{pane_top}"), 0);
+}
+
+#[test]
+fn remote_attachment_switch_repairs_a_stale_mixed_shell_context() {
+    if !tmux_available() {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+    let state_root = tempfile::tempdir().unwrap();
+    let fake = state_root.path().join("provider-helper");
+    fs::write(&fake, "#!/bin/sh\nexec /usr/bin/sleep 60\n").unwrap();
+    make_executable(&fake);
+    let presentation = Presentation::fresh_with_executable(state_root.path(), fake);
+    let paths = presentation.paths().clone();
+    let _guard = PrivateTmuxGuard {
+        directory: paths.directory.clone(),
+        socket: paths.socket.clone(),
+    };
+    presentation.start().unwrap();
+
+    let first_workstream = WorkstreamId::new();
+    presentation
+        .attach_remote_workstream("snap", first_workstream)
+        .unwrap();
+    presentation
+        .create_or_focus_remote_shell(
+            "%1",
+            "snap",
+            first_workstream,
+            "snap",
+            "/home/user/.local/bin/wsnav",
+        )
+        .unwrap();
+    wait_for_pane_count(&paths, 3);
+    let utility_pid = pane_value(&paths, "utility", "#{pane_pid}");
+
+    // Simulate the stale mixed context left by the pre-D12 switching path:
+    // the provider is tagged for another Workstream while the utility still
+    // carries its exact original identity.
+    set_provider_context_for_host(&paths, "other", WorkstreamId::new());
+    presentation
+        .attach_remote_workstream("snap", first_workstream)
+        .unwrap();
+    wait_for_pane_count(&paths, 2);
+    wait_for_pid_exit(&utility_pid);
+    assert!(pane_value_if_present(&paths, "utility", "#{pane_id}").is_none());
+    assert_eq!(
+        pane_value(&paths, "provider", "#{@wsnav_host_alias}"),
+        "snap"
+    );
+    assert_eq!(
+        pane_value(&paths, "provider", "#{@wsnav_workstream_id}"),
+        first_workstream.to_string()
+    );
+
+    // A normal remote cross-Workstream switch closes the shell tagged for the
+    // prior exact host/Workstream as well.
+    presentation
+        .create_or_focus_remote_shell(
+            "%1",
+            "snap",
+            first_workstream,
+            "snap",
+            "/home/user/.local/bin/wsnav",
+        )
+        .unwrap();
+    wait_for_pane_count(&paths, 3);
+    let utility = pane_value(&paths, "utility", "#{pane_id}");
+    let utility_pid = pane_value(&paths, "utility", "#{pane_pid}");
+    let second_workstream = WorkstreamId::new();
+    presentation
+        .attach_remote_workstream("other", second_workstream)
+        .unwrap();
+
+    wait_for_pane_count(&paths, 2);
+    wait_for_pid_exit(&utility_pid);
+    assert!(pane_value_if_present(&paths, "utility", "#{pane_id}").is_none());
+    assert_ne!(pane_value(&paths, "provider", "#{pane_id}"), utility);
+    assert_eq!(
+        pane_value(&paths, "provider", "#{@wsnav_host_alias}"),
+        "other"
+    );
+    assert_eq!(
+        pane_value(&paths, "provider", "#{@wsnav_workstream_id}"),
+        second_workstream.to_string()
+    );
+    assert_eq!(pane_field(&paths, "navigator", "#{pane_top}"), 0);
+    assert_eq!(pane_field(&paths, "provider", "#{pane_top}"), 0);
+}
+
+#[test]
+fn ambiguous_attachment_topology_refuses_switch_before_provider_mutation() {
+    if !tmux_available() {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+    let state_root = tempfile::tempdir().unwrap();
+    let project_root = tempfile::tempdir().unwrap();
+    let fake = state_root.path().join("provider-helper");
+    fs::write(&fake, "#!/bin/sh\nexec /usr/bin/sleep 60\n").unwrap();
+    make_executable(&fake);
+    let presentation = Presentation::fresh_with_executable(state_root.path(), fake);
+    let paths = presentation.paths().clone();
+    let _guard = PrivateTmuxGuard {
+        directory: paths.directory.clone(),
+        socket: paths.socket.clone(),
+    };
+    presentation.start().unwrap();
+
+    let first_workstream = WorkstreamId::new();
+    presentation.attach_workstream(first_workstream).unwrap();
+    presentation
+        .create_or_focus_shell(
+            "%1",
+            "local",
+            first_workstream,
+            project_root.path(),
+            Path::new("/bin/sh"),
+        )
+        .unwrap();
+    wait_for_pane_count(&paths, 3);
+    let provider = pane_value(&paths, "provider", "#{pane_id}");
+    let utility = pane_value(&paths, "utility", "#{pane_id}");
+    let before = pane_snapshot(&paths);
+
+    // An untagged extra pane makes the owned topology ambiguous. The target
+    // provider must retain its exact context and the utility must remain.
+    let output = tmux_command(&paths.socket)
+        .args([
+            "split-window",
+            "-v",
+            "-d",
+            "-t",
+            &provider,
+            SLEEP_PROGRAM,
+            "60",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let second_workstream = WorkstreamId::new();
+    assert!(presentation.attach_workstream(second_workstream).is_err());
+    assert_eq!(
+        presentation.attachment_status().unwrap().unwrap().phase,
+        AttachmentPhase::Failed
+    );
+    assert_eq!(pane_value(&paths, "provider", "#{pane_id}"), provider);
+    assert_eq!(
+        pane_value(&paths, "provider", "#{@wsnav_workstream_id}"),
+        first_workstream.to_string()
+    );
+    assert_eq!(pane_value(&paths, "utility", "#{pane_id}"), utility);
+    assert_ne!(pane_snapshot(&paths), before);
+}
+
+#[test]
+fn extra_presentation_window_refuses_cross_workstream_attachment_without_mutation() {
+    if !tmux_available() {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+    let state_root = tempfile::tempdir().unwrap();
+    let project_root = tempfile::tempdir().unwrap();
+    let fake = state_root.path().join("provider-helper");
+    fs::write(&fake, "#!/bin/sh\nexec /usr/bin/sleep 60\n").unwrap();
+    make_executable(&fake);
+    let presentation = Presentation::fresh_with_executable(state_root.path(), fake);
+    let paths = presentation.paths().clone();
+    let _guard = PrivateTmuxGuard {
+        directory: paths.directory.clone(),
+        socket: paths.socket.clone(),
+    };
+    presentation.start().unwrap();
+
+    let first_workstream = WorkstreamId::new();
+    presentation.attach_workstream(first_workstream).unwrap();
+    presentation
+        .create_or_focus_shell(
+            "%1",
+            "local",
+            first_workstream,
+            project_root.path(),
+            Path::new("/bin/sh"),
+        )
+        .unwrap();
+    wait_for_pane_count(&paths, 3);
+    let provider = pane_value(&paths, "provider", "#{pane_id}");
+    let utility = pane_value(&paths, "utility", "#{pane_id}");
+    let utility_pid = pane_value(&paths, "utility", "#{pane_pid}");
+
+    let output = tmux_command(&paths.socket)
+        .args([
+            "new-window",
+            "-d",
+            "-n",
+            "hidden",
+            "-t",
+            &paths.session_name,
+            SLEEP_PROGRAM,
+            "60",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "tmux failed: {:?}", output.stderr);
+    assert_eq!(
+        tmux_output(
+            &paths.socket,
+            [
+                "list-windows",
+                "-t",
+                &paths.session_name,
+                "-F",
+                "#{window_name}"
+            ]
+        )
+        .lines()
+        .count(),
+        2
+    );
+
+    let second_workstream = WorkstreamId::new();
+    assert!(presentation.attach_workstream(second_workstream).is_err());
+    assert_eq!(
+        presentation.attachment_status().unwrap().unwrap().phase,
+        AttachmentPhase::Failed
+    );
+    assert_eq!(pane_value(&paths, "provider", "#{pane_id}"), provider);
+    assert_eq!(
+        pane_value(&paths, "provider", "#{@wsnav_workstream_id}"),
+        first_workstream.to_string()
+    );
+    assert_eq!(pane_value(&paths, "utility", "#{pane_id}"), utility);
+    assert_eq!(pane_value(&paths, "utility", "#{pane_pid}"), utility_pid);
+    assert_eq!(pane_snapshot(&paths).len(), 3);
 }
 
 #[test]
@@ -1207,4 +1499,19 @@ fn wait_for_pane_count(paths: &PresentationPaths, expected: usize) {
         "expected {expected} private presentation panes, got {:?}",
         pane_snapshot(paths)
     );
+}
+
+fn wait_for_pid_exit(pid: &str) {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    while Instant::now() < deadline {
+        let exited = Command::new("kill")
+            .args(["-0", pid])
+            .status()
+            .is_ok_and(|status| !status.success());
+        if exited {
+            return;
+        }
+        thread::sleep(READINESS_POLL);
+    }
+    panic!("utility process {pid} did not exit");
 }

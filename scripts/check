@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-required_tools=(bash cargo git jq python3 ruff shellcheck)
+required_tools=(bash cargo git jq python3 rg ruff shellcheck)
 missing_tools=()
 
 for tool in "${required_tools[@]}"; do

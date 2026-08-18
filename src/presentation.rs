@@ -16,7 +16,7 @@ use thiserror::Error;
 
 use crate::{
     domain::WorkstreamId,
-    private_tmux::TERMINAL_CAPABILITY_CONFIG,
+    private_tmux::{TERMINAL_CAPABILITY_CONFIG, copy_mode_scroll_config},
     process::{BoundedProcessError, output_bounded},
 };
 
@@ -57,9 +57,11 @@ const PRESENTATION_TMUX_CONFIG_SUFFIX: &str = concat!(
 );
 
 fn presentation_tmux_config() -> String {
+    let copy_mode_scroll_config = copy_mode_scroll_config();
     [
         PRESENTATION_TMUX_CONFIG_PREFIX,
         TERMINAL_CAPABILITY_CONFIG,
+        &copy_mode_scroll_config,
         PRESENTATION_TMUX_CONFIG_SUFFIX,
     ]
     .concat()
@@ -2456,7 +2458,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     #[allow(clippy::too_many_lines)]
-    fn detached_nested_private_windows_keep_final_geometry_on_latest() {
+    fn detached_nested_private_windows_keep_geometry_and_copy_mode_profile() {
         use std::{process::Stdio, time::Instant};
 
         if Command::new("tmux")
@@ -2536,6 +2538,54 @@ mod tests {
                 "latest"
             );
         };
+        let assert_copy_mode_scroll = |socket: &Path, repeat_count: &str| {
+            for (table, key, direction) in [
+                ("copy-mode", "WheelUpPane", "scroll-up"),
+                ("copy-mode", "WheelDownPane", "scroll-down"),
+                ("copy-mode-vi", "WheelUpPane", "scroll-up"),
+                ("copy-mode-vi", "WheelDownPane", "scroll-down"),
+            ] {
+                let expected = format!(
+                    "bind-key -T {table} {key} select-pane \\; send-keys -X -N {repeat_count} {direction}"
+                );
+                let bindings = output(socket, ["list-keys", "-T", table].as_slice());
+                assert!(
+                    bindings
+                        .lines()
+                        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+                        .any(|line| line == expected),
+                    "missing copy-mode binding: {expected}\n{bindings}"
+                );
+            }
+        };
+        let set_copy_mode_scroll_repeat = |socket: &Path, repeat_count: &str| {
+            for (table, key, direction) in [
+                ("copy-mode", "WheelUpPane", "scroll-up"),
+                ("copy-mode", "WheelDownPane", "scroll-down"),
+                ("copy-mode-vi", "WheelUpPane", "scroll-up"),
+                ("copy-mode-vi", "WheelDownPane", "scroll-down"),
+            ] {
+                assert!(
+                    tmux(socket)
+                        .args([
+                            "bind-key",
+                            "-T",
+                            table,
+                            key,
+                            "select-pane",
+                            "\\;",
+                            "send-keys",
+                            "-X",
+                            "-N",
+                            repeat_count,
+                            direction,
+                        ])
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+        };
 
         let presentation = Presentation::fresh_with_executable(temporary.path(), fixture);
         presentation.start().unwrap();
@@ -2545,6 +2595,7 @@ mod tests {
         );
         let presentation_socket = presentation.paths().socket.clone();
         let presentation_target = format!("{}:navigator", presentation.paths().session_name);
+        assert_copy_mode_scroll(&presentation_socket, "1");
 
         let tmux_client = crate::runtime::SystemTmux::default();
         let process_probe = crate::runtime::LinuxProcessProbe;
@@ -2572,6 +2623,12 @@ mod tests {
             Some(runtime.paths().directory.clone()),
         );
         let runtime_target = format!("{}:provider", runtime.paths().session_name);
+        assert_copy_mode_scroll(&runtime.paths().socket, "1");
+        // Simulate a long-lived Runtime created before this profile existed.
+        // The attach preparation below must converge these exact bindings
+        // without restarting the sleeping provider pane.
+        set_copy_mode_scroll_repeat(&runtime.paths().socket, "5");
+        assert_copy_mode_scroll(&runtime.paths().socket, "5");
         assert_geometry(&presentation_socket, &presentation_target, "80x24");
         assert_geometry(&runtime.paths().socket, &runtime_target, "80x24");
 
@@ -2687,6 +2744,8 @@ mod tests {
         runtime
             .prepare_attach_with_size(provider.1, provider.2)
             .unwrap();
+        assert_copy_mode_scroll(&presentation_socket, "1");
+        assert_copy_mode_scroll(&runtime.paths().socket, "1");
         let runtime_geometry = format!("{}x{}", provider.1, provider.2);
         assert_window(&runtime.paths().socket, &runtime_target, &runtime_geometry);
 
@@ -2759,6 +2818,10 @@ mod tests {
                 "set -q -g extended-keys-format csi-u\n",
                 "set -as terminal-features ',xterm-ghostty:RGB:extkeys'\n",
                 "set -as terminal-features ',tmux-256color:RGB:extkeys'\n",
+                "bind-key -T copy-mode WheelUpPane select-pane \\; send-keys -X -N 1 scroll-up\n",
+                "bind-key -T copy-mode WheelDownPane select-pane \\; send-keys -X -N 1 scroll-down\n",
+                "bind-key -T copy-mode-vi WheelUpPane select-pane \\; send-keys -X -N 1 scroll-up\n",
+                "bind-key -T copy-mode-vi WheelDownPane select-pane \\; send-keys -X -N 1 scroll-down\n",
                 "bind-key -T root MouseDown1Pane select-pane -t = \\; send-keys -M\n",
                 "bind-key -T root MouseUp1Pane select-pane -t = \\; send-keys -M\n",
                 "bind-key -T root MouseDrag1Pane if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"copy-mode -M\"\n",

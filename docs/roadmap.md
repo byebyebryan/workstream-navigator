@@ -190,7 +190,7 @@ an automatic migration from the retired schema.
 
 Date: 2026-08-18
 
-Status: D0 through D13 are complete. V1 remains a source-installed operator
+Status: D0 through D14 are complete. V1 remains a source-installed operator
 beta.
 
 Roadmap organization note (2026-08-14): the completed checkpoints that
@@ -287,6 +287,7 @@ This document owns sequencing, exit gates, and progress.
 | D11.4 | Directional Project-browser navigation | Complete (2026-08-14) |
 | D12 | Presentation-scoped ephemeral Workstream shell | Complete (2026-08-17) |
 | D13 | Initial native-agent geometry convergence | Complete (2026-08-18) |
+| D14 | Private tmux copy-mode scroll convergence | Complete (2026-08-18) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -3166,6 +3167,80 @@ Completion evidence (2026-08-18):
   acceptance harnesses, and `git diff --check` pass through `scripts/check`.
   No live provider or SSH acceptance was performed, and no provider content,
   persistent geometry, state, schema, protocol, or ABI surface was added.
+
+## D14 - Private tmux copy-mode scroll convergence
+
+Status: Complete on 2026-08-18.
+
+Daily use exposed a second mismatch between ordinary tmux muscle memory and
+WSNav's intentionally hermetic private servers. The operator's ordinary tmux
+profile binds wheel movement in both copy-mode tables to one line, but neither
+private WSNav profile sources that executable configuration. A disposable tmux
+3.7c comparison proved the resulting gap: the private-server baseline retained
+tmux's `-N 5` bindings while the ordinary profile produced `-N 1`.
+
+Scope:
+
+- give both private tmux layers one shared, fixed interaction fragment that
+  binds wheel up and down in `copy-mode` and `copy-mode-vi` to exactly one line;
+- preserve the presentation root table's existing alternate-screen,
+  pane-in-mode, and mouse-flag forwarding decisions so provider-owned native
+  scrolling remains unchanged;
+- apply the same four fixed bindings when a new private Runtime or presentation
+  is created; and
+- before every local, SSH, or native trust-review Runtime attachment,
+  idempotently reconcile those bindings through only the exact owned Runtime
+  socket so already-running providers converge without restart.
+
+Non-goals and hard boundaries:
+
+- no source, parse, execution, or query of the user's ordinary tmux
+  configuration or default tmux server, and no general tmux inheritance or
+  public scroll preference;
+- no plugin, hook, shell command, environment, status, title, prefix, root
+  table, terminal capability, history limit, clipboard, default shell, or
+  topology import;
+- no provider-owned alternate-screen scrolling change, provider restart,
+  provider input or content capture, pane inspection, or ordinary tmux
+  mutation; and
+- no lifecycle, geometry, state, schema, protocol, control ABI, SSH argument,
+  dependency, provider command, or completed-output retention change.
+
+Exit gate:
+
+- complete generated-configuration tests prove both private layers consume the
+  same exact four one-line copy-mode bindings while all topology-specific and
+  terminal-capability bytes retain their existing meaning;
+- deterministic Runtime attach tests prove the exact socket and argument
+  vectors, idempotent success, bounded rejection before attach, and no command
+  on invalid geometry;
+- a disposable real-tmux regression proves both private layers report one-line
+  bindings in both copy-mode tables, including convergence of an existing
+  Runtime that began with tmux's five-line baseline;
+- presentation recovery proves the D12 root and prefix allowlists remain exact
+  and alternate-screen wheel events retain native forwarding; and
+- all existing attachment and non-interference coverage, one uninterrupted
+  `scripts/check` run, and staged and unstaged `git diff --check` pass.
+
+Completion evidence (2026-08-18):
+
+- one typed four-binding profile now generates the startup configuration for
+  both private tmux layers and the exact argument vectors used to reconcile an
+  existing Runtime, so those paths cannot choose different scroll counts;
+- Runtime attachment validates terminal geometry before mutation, applies the
+  idempotent profile through only the exact owned socket, fails before geometry
+  or native attach on a bounded binding rejection, then retains the D13 window
+  handshake unchanged;
+- a disposable real nested-tmux regression proves both private layers expose
+  `-N 1` for wheel up and down in both copy-mode tables and that an existing
+  Runtime deliberately returned to `-N 5` converges without restarting its
+  provider process; and
+- all 432 library tests, 14 presentation-recovery tests, 5 transport tests,
+  package and dependency-policy checks, formatting, lint, disposable
+  acceptance harnesses, and `git diff --check` pass through `scripts/check`.
+  The D12 root and prefix allowlists remain byte-exact outside the added shared
+  copy-mode fragment. No live provider or SSH acceptance was performed; the
+  real-tmux regression used local tmux 3.7c.
 
 ## Deferred beyond V1
 

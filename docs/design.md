@@ -300,6 +300,40 @@ bindings are absent. These restrictions belong only to WSNav's private
 presentation server and never modify the user's ordinary tmux server or
 configuration.
 
+Both private tmux layers also own their copy-mode wheel behavior. They bind
+`WheelUpPane` and `WheelDownPane` in the `copy-mode` and `copy-mode-vi` tables
+to one line per event instead of tmux's five-line default. This changes only
+tmux-owned history navigation: the presentation root table still forwards
+wheel events through nested alternate-screen clients, and a native provider
+that owns its alternate-screen scrolling retains its own behavior.
+
+WSNav does not source, parse, or execute the user's ordinary tmux
+configuration. A tmux configuration is an executable command stream that may
+install hooks, plugins, shell commands, or topology-changing bindings, so it
+cannot be treated as a safe preference document and then repaired by later
+overrides. Newly created private servers receive the fixed copy-mode profile
+from one shared source of truth. Immediately before attachment, the Runtime
+owner idempotently reapplies only those four fixed bindings through the exact
+owned socket so a Runtime created by an older WSNav build converges without a
+provider restart. This reconciliation reads no key table or pane content,
+touches no ordinary tmux server, and adds no user configuration, durable state,
+protocol, or provider-input surface.
+
+A possible extended feature, outside the current V1 contract and not yet an
+approved roadmap checkpoint, is selective user tmux preference import. It
+would not source or execute the user's configuration. A future study may use
+tmux's parse-only verbose mode in a disposable private parser server, convert
+only explicitly supported command shapes into bounded typed values, and then
+generate the same WSNav-owned private profiles. An initial allowlist could be
+limited to `mode-keys` and one consistent wheel repeat count across all four
+copy-mode bindings. Unknown, executable, included, conditional, conflicting,
+or malformed input would have no effect and would fall back to WSNav defaults;
+raw configuration and parser output would not be persisted. Before this can
+enter the roadmap, disposable evidence must settle supported tmux versions,
+user-config path resolution, include and conditional behavior, bounded output,
+local-versus-remote preference ownership, change detection for live Runtimes,
+and fail-closed preservation of every private topology and input boundary.
+
 The navigator is a small Rust TUI in one pane. The provider pane is not a
 terminal widget rendered by Rust; it is a real tmux attachment to the host-owned
 provider runtime. This retains direct keyboard, mouse, resize, color, and native

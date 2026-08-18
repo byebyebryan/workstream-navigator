@@ -14,7 +14,7 @@ use thiserror::Error;
 
 use crate::{
     domain::RuntimeId,
-    private_tmux::TERMINAL_CAPABILITY_CONFIG,
+    private_tmux::{COPY_MODE_SCROLL_BINDINGS, TERMINAL_CAPABILITY_CONFIG},
     process::{BoundedProcessError, output_bounded},
 };
 
@@ -30,7 +30,13 @@ const PROCESS_GROUP_STAT_RETRY_DELAY: Duration = Duration::from_millis(1);
 const RUNTIME_TMUX_CONFIG_PREFIX: &str = concat!("set -g status off\n", "set -g mouse on\n",);
 
 fn runtime_tmux_config() -> String {
-    [RUNTIME_TMUX_CONFIG_PREFIX, TERMINAL_CAPABILITY_CONFIG].concat()
+    let copy_mode_scroll_config = crate::private_tmux::copy_mode_scroll_config();
+    [
+        RUNTIME_TMUX_CONFIG_PREFIX,
+        TERMINAL_CAPABILITY_CONFIG,
+        &copy_mode_scroll_config,
+    ]
+    .concat()
 }
 
 /// A private runtime server's owned paths and stable tmux session name.
@@ -1462,7 +1468,7 @@ impl<'a> PrivateRuntime<'a> {
     /// # Errors
     ///
     /// Returns an error when the invoking terminal has no valid geometry or
-    /// either exact private tmux command is rejected.
+    /// any exact private tmux command is rejected.
     pub(crate) fn prepare_attach(&self) -> Result<(), RuntimeError> {
         let (columns, rows) =
             crossterm::terminal::size().map_err(|_| RuntimeError::TerminalGeometryUnavailable)?;
@@ -1475,6 +1481,7 @@ impl<'a> PrivateRuntime<'a> {
         rows: u16,
     ) -> Result<(), RuntimeError> {
         let (columns, rows) = validate_terminal_geometry(columns, rows)?;
+        self.reconcile_copy_mode_scroll_bindings()?;
         let target = OsString::from(format!("{}:{PROVIDER_WINDOW}", self.paths.session_name));
         let resized = self.tmux.invoke(&TmuxInvocation {
             socket: self.paths.socket.clone(),
@@ -1505,6 +1512,33 @@ impl<'a> PrivateRuntime<'a> {
         })?;
         if !latest.success {
             return Err(RuntimeError::TmuxRejected(trim_diagnostic(&latest.stderr)));
+        }
+        Ok(())
+    }
+
+    /// Reapplies the owned copy-mode wheel profile to an existing Runtime.
+    ///
+    /// Runtime servers outlive individual `wsnav attach` processes. Binding
+    /// the exact four entries on every attach converges servers created by an
+    /// older binary without restarting the native provider. Repeated binds
+    /// replace the same keys and are therefore idempotent.
+    fn reconcile_copy_mode_scroll_bindings(&self) -> Result<(), RuntimeError> {
+        for binding in COPY_MODE_SCROLL_BINDINGS {
+            let arguments = binding
+                .arguments()
+                .into_iter()
+                .map(OsString::from)
+                .collect();
+            let response = self.tmux.invoke(&TmuxInvocation {
+                socket: self.paths.socket.clone(),
+                config: None,
+                arguments,
+            })?;
+            if !response.success {
+                return Err(RuntimeError::TmuxRejected(trim_diagnostic(
+                    &response.stderr,
+                )));
+            }
         }
         Ok(())
     }
@@ -2649,18 +2683,35 @@ mod tests {
     fn attach_geometry_targets_exact_window_and_restores_latest() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
-        let tmux = FakeTmux::with_responses([successful(), successful()]);
+        let tmux = FakeTmux::with_responses([
+            successful(),
+            successful(),
+            successful(),
+            successful(),
+            successful(),
+            successful(),
+        ]);
         let process_probe = FakeProcessProbe;
         let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
 
         runtime.prepare_attach_with_size(150, 40).unwrap();
 
         let calls = tmux.calls.borrow();
-        assert_eq!(calls.len(), 2);
+        assert_eq!(calls.len(), 6);
         assert_eq!(calls[0].socket, paths.socket);
         assert_eq!(calls[0].config, None);
+        for (call, binding) in calls.iter().zip(COPY_MODE_SCROLL_BINDINGS).take(4) {
+            assert_eq!(
+                call.arguments,
+                binding
+                    .arguments()
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect::<Vec<_>>()
+            );
+        }
         assert_eq!(
-            calls[0].arguments,
+            calls[4].arguments,
             vec![
                 OsString::from("resize-window"),
                 OsString::from("-t"),
@@ -2672,7 +2723,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            calls[1].arguments,
+            calls[5].arguments,
             vec![
                 OsString::from("set-window-option"),
                 OsString::from("-t"),
@@ -2692,7 +2743,13 @@ mod tests {
             stdout: String::new(),
             stderr: "resize rejected".to_owned(),
         };
-        let tmux = FakeTmux::with_responses([rejected]);
+        let tmux = FakeTmux::with_responses([
+            successful(),
+            successful(),
+            successful(),
+            successful(),
+            rejected,
+        ]);
         let process_probe = FakeProcessProbe;
         let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
 
@@ -2700,7 +2757,7 @@ mod tests {
             runtime.prepare_attach_with_size(150, 40),
             Err(RuntimeError::TmuxRejected(message)) if message == "resize rejected"
         ));
-        assert_eq!(tmux.calls.borrow().len(), 1);
+        assert_eq!(tmux.calls.borrow().len(), 5);
     }
 
     #[test]
@@ -2712,7 +2769,14 @@ mod tests {
             stdout: String::new(),
             stderr: "latest rejected".to_owned(),
         };
-        let tmux = FakeTmux::with_responses([successful(), rejected]);
+        let tmux = FakeTmux::with_responses([
+            successful(),
+            successful(),
+            successful(),
+            successful(),
+            successful(),
+            rejected,
+        ]);
         let process_probe = FakeProcessProbe;
         let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
 
@@ -2720,7 +2784,53 @@ mod tests {
             runtime.prepare_attach_with_size(150, 40),
             Err(RuntimeError::TmuxRejected(message)) if message == "latest rejected"
         ));
-        assert_eq!(tmux.calls.borrow().len(), 2);
+        assert_eq!(tmux.calls.borrow().len(), 6);
+    }
+
+    #[test]
+    fn attach_reconciles_copy_mode_scroll_bindings_idempotently() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let tmux = FakeTmux::with_responses((0..12).map(|_| successful()));
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+
+        runtime.prepare_attach_with_size(150, 40).unwrap();
+        runtime.prepare_attach_with_size(150, 40).unwrap();
+
+        let calls = tmux.calls.borrow();
+        assert_eq!(calls.len(), 12);
+        assert_eq!(&calls[0..4], &calls[6..10]);
+        assert_eq!(calls[4].arguments[0], "resize-window");
+        assert_eq!(calls[5].arguments[0], "set-window-option");
+        assert_eq!(calls[10].arguments[0], "resize-window");
+        assert_eq!(calls[11].arguments[0], "set-window-option");
+    }
+
+    #[test]
+    fn copy_mode_binding_rejection_stops_before_geometry_or_attach() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let rejected = TmuxResponse {
+            success: false,
+            stdout: String::new(),
+            stderr: "binding rejected".to_owned(),
+        };
+        let tmux = FakeTmux::with_responses([successful(), rejected]);
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+
+        assert!(matches!(
+            runtime.prepare_attach_with_size(150, 40),
+            Err(RuntimeError::TmuxRejected(message)) if message == "binding rejected"
+        ));
+        let calls = tmux.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].arguments[0], "bind-key");
+        assert_eq!(calls[1].arguments[0], "bind-key");
+        assert!(calls.iter().all(|call| {
+            call.arguments[0] != "resize-window" && call.arguments[0] != "set-window-option"
+        }));
     }
 
     #[test]
@@ -2764,7 +2874,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_config_matches_the_d8_6_baseline() {
+    fn runtime_config_matches_the_current_owned_profile() {
         assert_eq!(
             runtime_tmux_config(),
             concat!(
@@ -2776,6 +2886,10 @@ mod tests {
                 "set -q -g extended-keys-format csi-u\n",
                 "set -as terminal-features ',xterm-ghostty:RGB:extkeys'\n",
                 "set -as terminal-features ',tmux-256color:RGB:extkeys'\n",
+                "bind-key -T copy-mode WheelUpPane select-pane \\; send-keys -X -N 1 scroll-up\n",
+                "bind-key -T copy-mode WheelDownPane select-pane \\; send-keys -X -N 1 scroll-down\n",
+                "bind-key -T copy-mode-vi WheelUpPane select-pane \\; send-keys -X -N 1 scroll-up\n",
+                "bind-key -T copy-mode-vi WheelDownPane select-pane \\; send-keys -X -N 1 scroll-down\n",
             )
         );
     }

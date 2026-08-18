@@ -24,6 +24,7 @@ product contract:
 - [D7 navigator workflow](acceptance/d7-navigator-workflow.md)
 - [D8.1 real multi-provider acceptance](acceptance/d8.1-multi-provider.md)
 - [D8.2 OpenCode Fork and recovery acceptance](acceptance/d8.2-opencode-fork-recovery.md)
+- [D12 ephemeral Workstream shell](acceptance/d12-ephemeral-shell.md)
 
 ## Design spikes
 

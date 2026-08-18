@@ -21,6 +21,8 @@ keeping the agent pane directly interactive.
   URLs, credentials, filesystem paths, prompts, or transcripts.
 - Uses one private tmux server per live runtime. It never uses or alters your
   normal tmux server.
+- Offers one optional, short-lived utility shell below the attached provider
+  for short host-local work; the shell is presentation-only and not persisted.
 
 ## Native by design
 
@@ -117,6 +119,17 @@ From the Workstreams home:
 - `←` / `→` cycle Recent, By project, By host, and Archived views.
 - `?` shows the complete keyboard reference inside the navigator pane.
 
+In the private presentation, `Ctrl+b "` creates and focuses one temporary
+utility shell below the currently attached provider, or focuses it when it
+already exists. The shell stays fixed to that Workstream's launch host and
+registered ProjectLocation root; `Ctrl+b %` gives bounded guidance instead of
+splitting.
+Selecting a different Workstream closes the shell before the provider changes,
+while reselecting the same Workstream retains it. Normal shell exit or `Ctrl+d`
+removes it. While the utility shell is focused, guarded `Ctrl+b x` does the same.
+`Ctrl+b ?` shows the curated presentation controls. WSNav stores no shell
+command, output, history, or terminal state.
+
 ## Add an SSH host
 
 Install the same reviewed `wsnav` build on the remote host at
@@ -162,8 +175,8 @@ automatic context transfer remain out of scope.
 
 ## Development
 
-The project requires Rust 1.88 or newer, Cargo Deny 0.20.x, Git, jq, Ruff
-0.16.x, and ShellCheck.
+The project requires Rust 1.88 or newer, Python 3, Cargo Deny 0.20.x, Git, jq,
+Ruff 0.16.x, and ShellCheck.
 
 ```console
 scripts/check
@@ -171,7 +184,8 @@ scripts/check
 
 `wsnav register <path>` and the explicit CLI lifecycle commands remain
 available for scripting, diagnostics, and break-glass use; ordinary operation
-is designed to stay within the two-pane navigator.
+uses the baseline Navigator/provider presentation, with the optional
+short-lived utility shell for short host-local work.
 
 ## License
 

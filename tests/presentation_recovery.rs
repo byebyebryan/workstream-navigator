@@ -1176,6 +1176,7 @@ fn attach_tmux_session_client(socket: &Path, session: &str) -> Child {
         shell_quote_for_test(Path::new(session)),
     );
     let child = Command::new("script")
+        .env("TERM", "xterm-256color")
         .args(["-qefc", &command, "/dev/null"])
         .stdin(Stdio::piped())
         .stdout(Stdio::null())

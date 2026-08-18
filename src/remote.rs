@@ -88,6 +88,7 @@ pub fn attach(root: &StateRoot, runtime_id: RuntimeId) -> Result<(), RemoteError
     if !matches!(runtime.probe()?, RuntimeProbe::Live { .. }) {
         return Err(RemoteError::RuntimeUnavailable);
     }
+    runtime.prepare_attach()?;
     let mut command = runtime.attach_command();
     command.stderr(Stdio::null());
     let status = command.status()?;

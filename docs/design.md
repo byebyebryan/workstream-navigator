@@ -262,10 +262,19 @@ server begins at a default size and proportionally redistributes panes when its
 first real client supplies the terminal dimensions. The private presentation
 therefore installs exact `client-attached` and `window-resized` hooks that
 resize only its Navigator pane; the Rust TUI also retains its resize correction
-as a defensive path. This applies the compact width at tmux's event boundary
-without addressing the nested provider Runtime or an ordinary tmux server.
-Individual renderers retain their compact fallbacks for explicitly narrowed
-panes.
+as a defensive path.
+
+Those outer hooks do not by themselves establish the native provider's initial
+geometry. Each provider starts inside a detached private Runtime tmux window,
+so its first render otherwise uses tmux's default dimensions and may race the
+first nested client resize. Immediately before attaching a real terminal, the
+presentation owner pre-sizes its exact owned window from that terminal and the
+Runtime owner pre-sizes its exact owned window from the provider attachment
+PTY. Each window then returns to tmux's `window-size latest` policy so later
+native resize propagation remains unchanged. This handshake stores no geometry,
+touches no ordinary tmux server, and neither captures nor injects provider
+terminal bytes. Individual renderers retain their compact fallbacks for
+explicitly narrowed panes.
 
 The presentation begins with exactly the Navigator and provider panes. The
 D12 utility-shell action may split only the provider region once,

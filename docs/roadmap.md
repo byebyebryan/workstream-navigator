@@ -188,9 +188,9 @@ historical only; it is not a current product commitment. Host schema 8 is a
 clean breaking boundary and requires explicit reset/re-registration instead of
 an automatic migration from the retired schema.
 
-Date: 2026-08-17
+Date: 2026-08-18
 
-Status: D0 through D12 are complete. V1 remains a source-installed operator
+Status: D0 through D13 are complete. V1 remains a source-installed operator
 beta.
 
 Roadmap organization note (2026-08-14): the completed checkpoints that
@@ -286,6 +286,7 @@ This document owns sequencing, exit gates, and progress.
 | D11.3 | Repository-first Project-directory ordering | Complete (2026-08-14) |
 | D11.4 | Directional Project-browser navigation | Complete (2026-08-14) |
 | D12 | Presentation-scoped ephemeral Workstream shell | Complete (2026-08-17) |
+| D13 | Initial native-agent geometry convergence | Complete (2026-08-18) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -3099,6 +3100,72 @@ Exit gate:
   ordinary tmux session. Evidence contains no provider or shell capture; and
 - one uninterrupted `scripts/check` run plus staged and unstaged
   `git diff --check` pass.
+
+## D13 - Initial native-agent geometry convergence
+
+Status: Complete on 2026-08-18.
+
+Daily use falsified the D10.2 assumption that converging only the outer
+Navigator width was sufficient for a correct initial native provider render.
+Each provider Runtime starts detached at tmux's default `80x24` dimensions. A
+disposable nested reproduction showed the inner client surface present first
+at 47 columns and then settle at 117 columns when a `150x40` presentation
+client attached. Native agent TUIs can remain visually stale after that
+transition until another operator-generated terminal resize forces a redraw.
+
+Scope:
+
+- immediately before attaching a terminal to the private presentation, read
+  that terminal's dimensions and pre-size only the exact owned presentation
+  window;
+- immediately before the local or SSH host attachment enters a private
+  Runtime, read the provider attachment PTY dimensions and pre-size only the
+  exact owned Runtime window;
+- return both windows to tmux's `window-size latest` policy before attaching so
+  later native terminal resizes retain their existing behavior; and
+- share the Runtime handshake across local and remote attachment paths while
+  keeping geometry transient and bounded to the current attach attempt.
+
+Non-goals and hard boundaries:
+
+- no terminal-size polling, timing delay, synthetic resize pulse, provider
+  process signal, manager-originated provider input, or provider-content
+  capture;
+- no default or ordinary tmux access, persisted geometry, presentation or
+  Runtime topology change, layout preference, provider command change, or
+  compatibility behavior; and
+- no lifecycle, state, schema, protocol, control ABI, SSH argument, terminal
+  capability, or completed-output retention change.
+
+Exit gate:
+
+- deterministic command coverage proves both handshakes target only the exact
+  owned window with direct `resize-window` arguments and restore
+  `window-size latest`, including bounded rejection behavior;
+- a disposable nested tmux regression starts from detached default dimensions,
+  attaches through a larger final PTY, and proves both private windows have the
+  final geometry without a second or manual resize;
+- existing presentation recovery, local and SSH attachment, native terminal
+  capability, D12 topology, and ordinary-tmux non-interference coverage remain
+  green; and
+- one uninterrupted `scripts/check` run plus staged and unstaged
+  `git diff --check` pass.
+
+Completion evidence (2026-08-18):
+
+- the presentation and Runtime attach boundaries now pre-size only their exact
+  owned window and restore `window-size latest` before the native attach. The
+  shared Runtime handshake covers local, SSH, and native trust-review paths;
+- eight deterministic geometry tests cover exact arguments, both bounded tmux
+  rejection points, and zero-dimension rejection without invoking tmux;
+- a disposable real nested-tmux regression proves detached `80x24` private
+  presentation and Runtime windows converge to the final PTY dimensions during
+  the first attach, without a second resize; and
+- all 430 library tests, 14 presentation-recovery tests, 5 transport tests,
+  package and dependency-policy checks, formatting, lint, the disposable
+  acceptance harnesses, and `git diff --check` pass through `scripts/check`.
+  No live provider or SSH acceptance was performed, and no provider content,
+  persistent geometry, state, schema, protocol, or ABI surface was added.
 
 ## Deferred beyond V1
 

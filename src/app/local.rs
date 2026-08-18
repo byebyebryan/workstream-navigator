@@ -149,6 +149,7 @@ pub(super) fn attach(
         &process_probe,
         RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
     );
+    runtime.prepare_attach()?;
     let mut command = runtime.attach_command();
     command.stderr(Stdio::null());
     let status = command.status().map_err(AppError::Io)?;

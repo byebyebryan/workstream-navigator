@@ -302,7 +302,10 @@ fn native_trust_review(root: &StateRoot) -> Result<(), AppError> {
         let _ = fs::remove_dir(&review_root);
         return Err(AppError::Runtime(error));
     }
-    let attach = runtime.attach_command().status().map_err(AppError::Io);
+    let attach = runtime
+        .prepare_attach()
+        .map_err(AppError::Runtime)
+        .and_then(|()| runtime.attach_command().status().map_err(AppError::Io));
     let park = runtime.park();
     let remove = fs::remove_dir_all(&review_cwd).map_err(AppError::Io);
     let _ = fs::remove_dir(&review_root);

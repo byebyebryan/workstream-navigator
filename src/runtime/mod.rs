@@ -1451,6 +1451,64 @@ impl<'a> PrivateRuntime<'a> {
         command
     }
 
+    /// Pre-sizes the exact private Runtime window from the invoking terminal,
+    /// then returns tmux to its native `latest` sizing policy.
+    ///
+    /// The Runtime is created detached, so tmux otherwise gives its first
+    /// provider client the server's default geometry. This handshake is
+    /// intentionally transient and must complete before the direct attach
+    /// command is spawned.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the invoking terminal has no valid geometry or
+    /// either exact private tmux command is rejected.
+    pub(crate) fn prepare_attach(&self) -> Result<(), RuntimeError> {
+        let (columns, rows) =
+            crossterm::terminal::size().map_err(|_| RuntimeError::TerminalGeometryUnavailable)?;
+        self.prepare_attach_with_size(columns, rows)
+    }
+
+    pub(crate) fn prepare_attach_with_size(
+        &self,
+        columns: u16,
+        rows: u16,
+    ) -> Result<(), RuntimeError> {
+        let (columns, rows) = validate_terminal_geometry(columns, rows)?;
+        let target = OsString::from(format!("{}:{PROVIDER_WINDOW}", self.paths.session_name));
+        let resized = self.tmux.invoke(&TmuxInvocation {
+            socket: self.paths.socket.clone(),
+            config: None,
+            arguments: vec![
+                OsString::from("resize-window"),
+                OsString::from("-t"),
+                target.clone(),
+                OsString::from("-x"),
+                OsString::from(columns.to_string()),
+                OsString::from("-y"),
+                OsString::from(rows.to_string()),
+            ],
+        })?;
+        if !resized.success {
+            return Err(RuntimeError::TmuxRejected(trim_diagnostic(&resized.stderr)));
+        }
+        let latest = self.tmux.invoke(&TmuxInvocation {
+            socket: self.paths.socket.clone(),
+            config: None,
+            arguments: vec![
+                OsString::from("set-window-option"),
+                OsString::from("-t"),
+                target,
+                OsString::from("window-size"),
+                OsString::from("latest"),
+            ],
+        })?;
+        if !latest.success {
+            return Err(RuntimeError::TmuxRejected(trim_diagnostic(&latest.stderr)));
+        }
+        Ok(())
+    }
+
     /// Delivers exactly one literal C-b to the owned provider pane through
     /// this Runtime's private tmux server. This bypasses the nested client's
     /// prefix table entirely; callers must complete authoritative attachment
@@ -1588,6 +1646,13 @@ fn write_tmux_config(path: &Path) -> Result<(), RuntimeError> {
     set_mode(path, 0o600)
 }
 
+fn validate_terminal_geometry(columns: u16, rows: u16) -> Result<(u16, u16), RuntimeError> {
+    if columns == 0 || rows == 0 {
+        return Err(RuntimeError::InvalidTerminalGeometry);
+    }
+    Ok((columns, rows))
+}
+
 fn create_launch_barrier(path: &Path) -> Result<(), RuntimeError> {
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -1685,6 +1750,10 @@ pub enum RuntimeError {
     LaunchBarrierTimedOut,
     #[error("private runtime session identity did not match its persisted record")]
     RuntimeSessionMismatch,
+    #[error("invoking terminal geometry is unavailable")]
+    TerminalGeometryUnavailable,
+    #[error("invoking terminal geometry is invalid")]
+    InvalidTerminalGeometry,
     #[error("I/O at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -2574,6 +2643,99 @@ mod tests {
                 paths.session_name,
             ]
         );
+    }
+
+    #[test]
+    fn attach_geometry_targets_exact_window_and_restores_latest() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let tmux = FakeTmux::with_responses([successful(), successful()]);
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
+
+        runtime.prepare_attach_with_size(150, 40).unwrap();
+
+        let calls = tmux.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].socket, paths.socket);
+        assert_eq!(calls[0].config, None);
+        assert_eq!(
+            calls[0].arguments,
+            vec![
+                OsString::from("resize-window"),
+                OsString::from("-t"),
+                OsString::from(format!("{}:provider", paths.session_name)),
+                OsString::from("-x"),
+                OsString::from("150"),
+                OsString::from("-y"),
+                OsString::from("40"),
+            ]
+        );
+        assert_eq!(
+            calls[1].arguments,
+            vec![
+                OsString::from("set-window-option"),
+                OsString::from("-t"),
+                OsString::from(format!("{}:provider", paths.session_name)),
+                OsString::from("window-size"),
+                OsString::from("latest"),
+            ]
+        );
+    }
+
+    #[test]
+    fn attach_geometry_rejection_stops_before_attach_or_restore() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let rejected = TmuxResponse {
+            success: false,
+            stdout: String::new(),
+            stderr: "resize rejected".to_owned(),
+        };
+        let tmux = FakeTmux::with_responses([rejected]);
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+
+        assert!(matches!(
+            runtime.prepare_attach_with_size(150, 40),
+            Err(RuntimeError::TmuxRejected(message)) if message == "resize rejected"
+        ));
+        assert_eq!(tmux.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn attach_geometry_latest_rejection_stops_before_native_attach() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let rejected = TmuxResponse {
+            success: false,
+            stdout: String::new(),
+            stderr: "latest rejected".to_owned(),
+        };
+        let tmux = FakeTmux::with_responses([successful(), rejected]);
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+
+        assert!(matches!(
+            runtime.prepare_attach_with_size(150, 40),
+            Err(RuntimeError::TmuxRejected(message)) if message == "latest rejected"
+        ));
+        assert_eq!(tmux.calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn attach_geometry_rejects_zero_dimensions_without_tmux_access() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let tmux = FakeTmux::default();
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+
+        assert!(matches!(
+            runtime.prepare_attach_with_size(0, 40),
+            Err(RuntimeError::InvalidTerminalGeometry)
+        ));
+        assert!(tmux.calls.borrow().is_empty());
     }
 
     #[test]

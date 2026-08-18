@@ -354,6 +354,7 @@ impl Presentation {
     ///
     /// Returns an error when tmux cannot attach to this exact private server.
     pub fn attach(&self) -> Result<(), PresentationError> {
+        self.prepare_attach()?;
         let status = Command::new("tmux")
             .env_remove("TMUX")
             .arg("-S")
@@ -371,6 +372,18 @@ impl Presentation {
         Err(PresentationError::TmuxRejected(
             "presentation attach failed".to_owned(),
         ))
+    }
+
+    fn prepare_attach(&self) -> Result<(), PresentationError> {
+        let (columns, rows) = crossterm::terminal::size()
+            .map_err(|_| PresentationError::TerminalGeometryUnavailable)?;
+        self.prepare_attach_with_size(columns, rows)
+    }
+
+    fn prepare_attach_with_size(&self, columns: u16, rows: u16) -> Result<(), PresentationError> {
+        prepare_attach_window_with_size(&self.paths.session_name, columns, rows, |arguments| {
+            self.invoke(None, arguments)
+        })
     }
 
     /// Replaces only the outer provider attachment helper. The managed Codex
@@ -2021,6 +2034,37 @@ fn topology_dimension(value: &str) -> Result<u16, PresentationError> {
         .map_err(|_| PresentationError::InvalidTopology)
 }
 
+fn prepare_attach_window_with_size<F>(
+    session_name: &str,
+    columns: u16,
+    rows: u16,
+    mut invoke: F,
+) -> Result<(), PresentationError>
+where
+    F: FnMut(Vec<OsString>) -> Result<(), PresentationError>,
+{
+    if columns == 0 || rows == 0 {
+        return Err(PresentationError::InvalidTerminalGeometry);
+    }
+    let target = format!("{session_name}:{NAVIGATOR_WINDOW}");
+    invoke(vec![
+        "resize-window".into(),
+        "-t".into(),
+        target.clone().into(),
+        "-x".into(),
+        columns.to_string().into(),
+        "-y".into(),
+        rows.to_string().into(),
+    ])?;
+    invoke(vec![
+        "set-window-option".into(),
+        "-t".into(),
+        target.into(),
+        "window-size".into(),
+        "latest".into(),
+    ])
+}
+
 fn validate_topology_shape(topology: &PresentationTopology) -> Result<(), PresentationError> {
     if topology.navigator().is_none()
         || topology.provider().is_none()
@@ -2226,6 +2270,10 @@ pub enum PresentationError {
     InvalidAttachmentStatus,
     #[error("provider attachment attempt is stale or already complete")]
     StaleAttachmentAttempt,
+    #[error("invoking terminal geometry is unavailable")]
+    TerminalGeometryUnavailable,
+    #[error("invoking terminal geometry is invalid")]
+    InvalidTerminalGeometry,
     #[error("I/O: {0}")]
     Io(std::io::Error),
     #[error("private tmux output exceeded the diagnostic limit")]
@@ -2249,6 +2297,53 @@ impl PresentationError {
 mod tests {
     use super::*;
 
+    struct DisposableTmuxServerGuard {
+        socket: PathBuf,
+        directory: Option<PathBuf>,
+    }
+
+    impl DisposableTmuxServerGuard {
+        fn new(socket: PathBuf, directory: Option<PathBuf>) -> Self {
+            Self { socket, directory }
+        }
+    }
+
+    impl Drop for DisposableTmuxServerGuard {
+        fn drop(&mut self) {
+            let _ = Command::new("tmux")
+                .env_remove("TMUX")
+                .args(["-f", "/dev/null", "-S"])
+                .arg(&self.socket)
+                .arg("kill-server")
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            let _ = fs::remove_file(&self.socket);
+            if let Some(directory) = &self.directory {
+                let _ = fs::remove_dir_all(directory);
+            }
+        }
+    }
+
+    struct DisposableChildGuard {
+        child: Option<std::process::Child>,
+    }
+
+    impl DisposableChildGuard {
+        fn new(child: std::process::Child) -> Self {
+            Self { child: Some(child) }
+        }
+    }
+
+    impl Drop for DisposableChildGuard {
+        fn drop(&mut self) {
+            if let Some(mut child) = self.child.take() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+        }
+    }
+
     #[test]
     fn failed_outer_attach_accepts_a_stopped_owned_presentation() {
         assert!(stopped_owned_presentation(false));
@@ -2257,6 +2352,359 @@ mod tests {
     #[test]
     fn failed_outer_attach_rejects_a_live_owned_presentation() {
         assert!(!stopped_owned_presentation(true));
+    }
+
+    #[test]
+    fn attach_geometry_targets_exact_window_and_restores_latest() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        prepare_attach_window_with_size(&paths.session_name, 150, 40, |arguments| {
+            calls.borrow_mut().push(arguments);
+            Ok(())
+        })
+        .unwrap();
+
+        let calls = calls.into_inner();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0],
+            vec![
+                OsString::from("resize-window"),
+                OsString::from("-t"),
+                OsString::from(format!("{}:navigator", paths.session_name)),
+                OsString::from("-x"),
+                OsString::from("150"),
+                OsString::from("-y"),
+                OsString::from("40"),
+            ]
+        );
+        assert_eq!(
+            calls[1],
+            vec![
+                OsString::from("set-window-option"),
+                OsString::from("-t"),
+                OsString::from(format!("{}:navigator", paths.session_name)),
+                OsString::from("window-size"),
+                OsString::from("latest"),
+            ]
+        );
+    }
+
+    #[test]
+    fn attach_geometry_rejection_stops_before_restore() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let result = prepare_attach_window_with_size(&paths.session_name, 150, 40, |arguments| {
+            calls.borrow_mut().push(arguments);
+            Err(PresentationError::TmuxRejected(
+                "resize rejected".to_owned(),
+            ))
+        });
+
+        assert!(matches!(
+            result,
+            Err(PresentationError::TmuxRejected(message)) if message == "resize rejected"
+        ));
+        assert_eq!(calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn attach_geometry_latest_rejection_stops_before_native_attach() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        let result = prepare_attach_window_with_size(&paths.session_name, 150, 40, |arguments| {
+            let call_number = calls.borrow().len();
+            calls.borrow_mut().push(arguments);
+            if call_number == 0 {
+                Ok(())
+            } else {
+                Err(PresentationError::TmuxRejected(
+                    "latest rejected".to_owned(),
+                ))
+            }
+        });
+
+        assert!(matches!(
+            result,
+            Err(PresentationError::TmuxRejected(message)) if message == "latest rejected"
+        ));
+        assert_eq!(calls.borrow().len(), 2);
+    }
+
+    #[test]
+    fn attach_geometry_rejects_zero_dimensions_without_tmux_access() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        let calls = std::cell::RefCell::new(Vec::new());
+
+        assert!(matches!(
+            prepare_attach_window_with_size(&paths.session_name, 0, 40, |arguments| {
+                calls.borrow_mut().push(arguments);
+                Ok(())
+            }),
+            Err(PresentationError::InvalidTerminalGeometry)
+        ));
+        assert!(calls.borrow().is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    #[allow(clippy::too_many_lines)]
+    fn detached_nested_private_windows_keep_final_geometry_on_latest() {
+        use std::{process::Stdio, time::Instant};
+
+        if Command::new("tmux")
+            .arg("-V")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_err()
+            || Command::new("script")
+                .arg("--version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_err()
+        {
+            eprintln!("skipped: tmux and script are required");
+            return;
+        }
+
+        let temporary = tempfile::tempdir().unwrap();
+        let fixture = temporary.path().join("fixture");
+        fs::write(&fixture, "#!/bin/sh\nexec /usr/bin/sleep 60\n").unwrap();
+        set_mode(&fixture, 0o700).unwrap();
+
+        let tmux = |socket: &Path| {
+            let mut command = Command::new("tmux");
+            command.env_remove("TMUX").arg("-S").arg(socket);
+            command
+        };
+        let output = |socket: &Path, arguments: &[&str]| -> String {
+            let mut command = tmux(socket);
+            command.args(arguments);
+            let output =
+                output_bounded(&mut command, MAX_TMUX_OUTPUT_BYTES, MAX_TMUX_OUTPUT_BYTES).unwrap();
+            assert!(output.status.success(), "tmux failed: {:?}", output.stderr);
+            String::from_utf8(output.stdout).unwrap()
+        };
+        let wait_for_clients = |socket: &Path| {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                let mut command = tmux(socket);
+                command.args(["list-clients", "-F", "#{client_name}"]);
+                if output_bounded(&mut command, MAX_TMUX_OUTPUT_BYTES, MAX_TMUX_OUTPUT_BYTES)
+                    .is_ok_and(|output| output.status.success() && !output.stdout.is_empty())
+                {
+                    return;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            panic!("private tmux client did not attach");
+        };
+        let assert_geometry = |socket: &Path, target: &str, geometry: &str| {
+            assert_eq!(
+                output(
+                    socket,
+                    [
+                        "display-message",
+                        "-p",
+                        "-t",
+                        target,
+                        "#{window_width}x#{window_height}",
+                    ]
+                    .as_slice(),
+                )
+                .trim(),
+                geometry
+            );
+        };
+        let assert_window = |socket: &Path, target: &str, geometry: &str| {
+            assert_geometry(socket, target, geometry);
+            assert_eq!(
+                output(
+                    socket,
+                    ["show-window-options", "-v", "-t", target, "window-size"].as_slice(),
+                )
+                .trim(),
+                "latest"
+            );
+        };
+
+        let presentation = Presentation::fresh_with_executable(temporary.path(), fixture);
+        presentation.start().unwrap();
+        let _presentation_guard = DisposableTmuxServerGuard::new(
+            presentation.paths().socket.clone(),
+            Some(presentation.paths().directory.clone()),
+        );
+        let presentation_socket = presentation.paths().socket.clone();
+        let presentation_target = format!("{}:navigator", presentation.paths().session_name);
+
+        let tmux_client = crate::runtime::SystemTmux::default();
+        let process_probe = crate::runtime::LinuxProcessProbe;
+        let runtime = crate::runtime::PrivateRuntime::new(
+            &tmux_client,
+            &process_probe,
+            crate::runtime::RuntimePaths::for_runtime(
+                temporary.path(),
+                crate::domain::RuntimeId::new(),
+            ),
+        );
+        runtime
+            .start(&crate::runtime::NativeLaunch {
+                cwd: temporary.path().to_path_buf(),
+                program: vec![
+                    OsString::from("/bin/sh"),
+                    OsString::from("-c"),
+                    OsString::from("sleep 60"),
+                ],
+                environment: std::collections::BTreeMap::new(),
+            })
+            .unwrap();
+        let _runtime_guard = DisposableTmuxServerGuard::new(
+            runtime.paths().socket.clone(),
+            Some(runtime.paths().directory.clone()),
+        );
+        let runtime_target = format!("{}:provider", runtime.paths().session_name);
+        assert_geometry(&presentation_socket, &presentation_target, "80x24");
+        assert_geometry(&runtime.paths().socket, &runtime_target, "80x24");
+
+        // This is the final outer PTY geometry used by the disposable nested
+        // client. Both private windows are still detached at this point.
+        let final_columns = 150;
+        let final_rows = 40;
+        presentation
+            .prepare_attach_with_size(final_columns, final_rows)
+            .unwrap();
+        assert_window(&presentation_socket, &presentation_target, "150x40");
+
+        let outer_socket = temporary.path().join("outer.sock");
+        let outer_session = format!("outer-{}", uuid::Uuid::new_v4().simple());
+        let status = tmux(&outer_socket)
+            .args([
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-s",
+                &outer_session,
+                "/usr/bin/sleep",
+                "60",
+            ])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let _outer_guard = DisposableTmuxServerGuard::new(outer_socket.clone(), None);
+        assert!(
+            tmux(&outer_socket)
+                .args(["set-option", "-g", "status", "off"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            tmux(&outer_socket)
+                .args(["resize-window", "-t", &format!("{outer_session}:0")])
+                .args(["-x", "150", "-y", "40"])
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(
+            tmux(&outer_socket)
+                .args([
+                    "set-window-option",
+                    "-t",
+                    &format!("{outer_session}:0"),
+                    "window-size",
+                    "latest",
+                ])
+                .status()
+                .unwrap()
+                .success()
+        );
+        let nested_presentation_attach = format!(
+            "env -u TMUX tmux -S {} attach-session -t {}",
+            shell_quote(presentation_socket.as_os_str()).unwrap(),
+            shell_quote(Path::new(&presentation.paths().session_name).as_os_str()).unwrap(),
+        );
+        assert!(
+            tmux(&outer_socket)
+                .args(["respawn-pane", "-k", "-t", &format!("{outer_session}:0.0")])
+                .arg(nested_presentation_attach)
+                .status()
+                .unwrap()
+                .success()
+        );
+
+        let outer_attach = format!(
+            "stty rows 40 cols 150; exec env -u TMUX tmux -S {} attach-session -t {}",
+            shell_quote(outer_socket.as_os_str()).unwrap(),
+            shell_quote(Path::new(&outer_session).as_os_str()).unwrap(),
+        );
+        let outer_client = Command::new("script")
+            .env("TERM", "xterm-256color")
+            .args(["-qefc", &outer_attach, "/dev/null"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let _outer_client_guard = DisposableChildGuard::new(outer_client);
+        wait_for_clients(&presentation_socket);
+        assert_window(&presentation_socket, &presentation_target, "150x40");
+
+        let panes = output(
+            &presentation_socket,
+            [
+                "list-panes",
+                "-t",
+                &presentation_target,
+                "-F",
+                "#{pane_id}\t#{@wsnav_role}\t#{pane_width}\t#{pane_height}",
+            ]
+            .as_slice(),
+        );
+        let provider = panes
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split('\t');
+                let pane_id = fields.next()?;
+                let role = fields.next()?;
+                let columns = fields.next()?.parse::<u16>().ok()?;
+                let rows = fields.next()?.parse::<u16>().ok()?;
+                (role == "provider").then_some((pane_id.to_owned(), columns, rows))
+            })
+            .expect("provider pane geometry");
+        assert!(provider.1 > 0 && provider.2 > 0);
+
+        runtime
+            .prepare_attach_with_size(provider.1, provider.2)
+            .unwrap();
+        let runtime_geometry = format!("{}x{}", provider.1, provider.2);
+        assert_window(&runtime.paths().socket, &runtime_target, &runtime_geometry);
+
+        let nested_runtime_attach = format!(
+            "env -u TMUX tmux -u -S {} attach-session -t {}",
+            shell_quote(runtime.paths().socket.as_os_str()).unwrap(),
+            shell_quote(Path::new(&runtime.paths().session_name).as_os_str()).unwrap(),
+        );
+        assert!(
+            tmux(&presentation_socket)
+                .args(["respawn-pane", "-k", "-t", &provider.0])
+                .arg(nested_runtime_attach)
+                .status()
+                .unwrap()
+                .success()
+        );
+        wait_for_clients(&runtime.paths().socket);
+        assert_window(&runtime.paths().socket, &runtime_target, &runtime_geometry);
     }
 
     #[test]

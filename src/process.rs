@@ -17,7 +17,8 @@ use std::{
 use thiserror::Error;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
-const WAIT_INTERVAL: Duration = Duration::from_millis(20);
+const FALLBACK_INITIAL_WAIT: Duration = Duration::from_millis(1);
+const FALLBACK_MAX_WAIT: Duration = Duration::from_millis(20);
 
 /// Runs a finite local child command while draining each output stream and
 /// retaining no more than its caller-provided cap. The child and, on Unix, its
@@ -118,17 +119,137 @@ fn output_bounded_with_timeout(
     })
 }
 
+#[cfg(target_os = "linux")]
 fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<ExitStatus, BoundedProcessError> {
+    wait_bounded_with_opener(child, timeout, open_pidfd)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn wait_bounded(child: &mut Child, timeout: Duration) -> Result<ExitStatus, BoundedProcessError> {
+    wait_with_adaptive_polling(child, Instant::now() + timeout)
+}
+
+#[cfg(target_os = "linux")]
+fn wait_bounded_with_opener<F>(
+    child: &mut Child,
+    timeout: Duration,
+    open_pidfd: F,
+) -> Result<ExitStatus, BoundedProcessError>
+where
+    F: FnMut(&Child) -> Result<rustix::fd::OwnedFd, rustix::io::Errno>,
+{
     let deadline = Instant::now() + timeout;
+    match wait_with_pidfd(child, deadline, open_pidfd)? {
+        PidfdWait::Completed(status) => Ok(status),
+        PidfdWait::Unavailable => wait_with_adaptive_polling(child, deadline),
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[derive(Debug)]
+enum PidfdWait {
+    Completed(ExitStatus),
+    Unavailable,
+}
+
+#[cfg(target_os = "linux")]
+fn wait_with_pidfd<F>(
+    child: &mut Child,
+    deadline: Instant,
+    mut open_pidfd: F,
+) -> Result<PidfdWait, BoundedProcessError>
+where
+    F: FnMut(&Child) -> Result<rustix::fd::OwnedFd, rustix::io::Errno>,
+{
+    // A pidfd is only an optional notification optimization. Any open
+    // failure keeps `Child::try_wait` as the completion authority.
+    let Ok(pidfd) = open_pidfd(child) else {
+        return Ok(PidfdWait::Unavailable);
+    };
+    let mut poll_fds = [rustix::event::PollFd::new(
+        &pidfd,
+        rustix::event::PollFlags::IN,
+    )];
+    loop {
+        if let Some(status) = child.try_wait().map_err(BoundedProcessError::Wait)? {
+            return Ok(PidfdWait::Completed(status));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(BoundedProcessError::TimedOut);
+        }
+        let timeout = poll_timeout(remaining);
+        match rustix::event::poll(&mut poll_fds, Some(&timeout)) {
+            Ok(0) => {}
+            Ok(_) => {
+                let ready = poll_fds[0].revents();
+                if ready.is_empty()
+                    || ready
+                        .intersects(rustix::event::PollFlags::ERR | rustix::event::PollFlags::NVAL)
+                {
+                    return Ok(PidfdWait::Unavailable);
+                }
+                // Readiness is only a notification. Re-check the direct child
+                // and fall back if the notification was spurious, avoiding a
+                // sticky-ready busy loop while preserving the deadline.
+                if let Some(status) = child.try_wait().map_err(BoundedProcessError::Wait)? {
+                    return Ok(PidfdWait::Completed(status));
+                }
+                return Ok(PidfdWait::Unavailable);
+            }
+            // EINTR and every other poll failure use the bounded fallback. A
+            // notification failure must not become a new public wait error.
+            Err(_) => return Ok(PidfdWait::Unavailable),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn open_pidfd(child: &Child) -> Result<rustix::fd::OwnedFd, rustix::io::Errno> {
+    rustix::process::pidfd_open(
+        rustix::process::Pid::from_child(child),
+        rustix::process::PidfdFlags::empty(),
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn poll_timeout(duration: Duration) -> rustix::event::Timespec {
+    let seconds = duration.as_secs();
+    if seconds >= i64::MAX as u64 {
+        return rustix::event::Timespec {
+            tv_sec: i64::MAX,
+            tv_nsec: 0,
+        };
+    }
+    rustix::event::Timespec {
+        tv_sec: i64::try_from(seconds).unwrap_or(i64::MAX),
+        tv_nsec: duration.subsec_nanos().into(),
+    }
+}
+
+fn wait_with_adaptive_polling(
+    child: &mut Child,
+    deadline: Instant,
+) -> Result<ExitStatus, BoundedProcessError> {
+    let mut interval = FALLBACK_INITIAL_WAIT;
     loop {
         if let Some(status) = child.try_wait().map_err(BoundedProcessError::Wait)? {
             return Ok(status);
         }
-        if Instant::now() >= deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
             return Err(BoundedProcessError::TimedOut);
         }
-        thread::sleep(WAIT_INTERVAL);
+        thread::sleep(interval.min(remaining));
+        interval = next_fallback_interval(interval);
     }
+}
+
+fn next_fallback_interval(interval: Duration) -> Duration {
+    interval
+        .checked_mul(2)
+        .unwrap_or(FALLBACK_MAX_WAIT)
+        .min(FALLBACK_MAX_WAIT)
 }
 
 #[derive(Debug)]
@@ -298,24 +419,77 @@ fn process_group_matches(group: OwnedProcessGroup, process_group_id: i32, sessio
     group.process_group_id == process_group_id && group.session_id == session_id
 }
 
-/// Proves the captured group still belongs to the original session before
-/// sending SIGKILL. ESRCH is treated as an already-completed cleanup.
+/// Probes whether the captured process group still exists without sending a
+/// signal. `EPERM` and every other probe failure remain errors: they cannot be
+/// treated as proof that cleanup is complete.
 #[cfg(unix)]
-fn signal_process_group(group: OwnedProcessGroup) -> Result<(), ProcessGroupError> {
+fn process_group_exists(group: OwnedProcessGroup) -> Result<bool, ProcessGroupError> {
+    use nix::{errno::Errno, sys::signal::killpg, unistd::Pid};
+
+    match killpg(Pid::from_raw(group.process_group_id), None) {
+        Ok(()) => Ok(true),
+        Err(Errno::ESRCH) => Ok(false),
+        Err(error) => Err(ProcessGroupError::Probe(io::Error::from_raw_os_error(
+            error as i32,
+        ))),
+    }
+}
+
+#[cfg(unix)]
+fn kill_process_group(group: OwnedProcessGroup) -> Result<(), ProcessGroupError> {
     use nix::{
         errno::Errno,
         sys::signal::{Signal, killpg},
         unistd::Pid,
     };
 
-    if !process_group_has_member(group)? {
-        return Ok(());
-    }
     match killpg(Pid::from_raw(group.process_group_id), Signal::SIGKILL) {
         Ok(()) | Err(Errno::ESRCH) => Ok(()),
         Err(error) => Err(ProcessGroupError::Signal(io::Error::from_raw_os_error(
             error as i32,
         ))),
+    }
+}
+
+/// Proves the captured group still belongs to the original session before
+/// sending SIGKILL. An empty group is the only fast-path success. When the
+/// existence probe cannot establish absence, the captured PGID+session scan
+/// remains authoritative and any probe error is retained fail-closed.
+#[cfg(unix)]
+fn signal_process_group(group: OwnedProcessGroup) -> Result<(), ProcessGroupError> {
+    signal_process_group_with(
+        group,
+        process_group_exists,
+        process_group_has_member,
+        kill_process_group,
+    )
+}
+
+#[cfg(unix)]
+fn signal_process_group_with<P, S, K>(
+    group: OwnedProcessGroup,
+    mut probe: P,
+    mut has_member: S,
+    mut kill: K,
+) -> Result<(), ProcessGroupError>
+where
+    P: FnMut(OwnedProcessGroup) -> Result<bool, ProcessGroupError>,
+    S: FnMut(OwnedProcessGroup) -> Result<bool, ProcessGroupError>,
+    K: FnMut(OwnedProcessGroup) -> Result<(), ProcessGroupError>,
+{
+    let probe_error = match probe(group) {
+        Ok(false) => return Ok(()),
+        Ok(true) => None,
+        Err(error) => Some(error),
+    };
+    if !has_member(group)? {
+        // A probe error is not converted into success merely because the
+        // scan found no member; fail closed on the uncertainty.
+        return probe_error.map_or(Ok(()), Err);
+    }
+    match kill(group) {
+        Ok(()) => probe_error.map_or(Ok(()), Err),
+        Err(error) => Err(error),
     }
 }
 
@@ -514,6 +688,63 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn empty_process_group_probe_skips_the_full_authority_scan() {
+        let group = OwnedProcessGroup {
+            process_group_id: 23,
+            session_id: 17,
+        };
+        let mut scan_called = false;
+        let mut kill_called = false;
+        let result = signal_process_group_with(
+            group,
+            |_| Ok(false),
+            |_| {
+                scan_called = true;
+                Ok(true)
+            },
+            |_| {
+                kill_called = true;
+                Ok(())
+            },
+        );
+        assert!(result.is_ok());
+        assert!(!scan_called);
+        assert!(!kill_called);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn process_group_probe_error_scans_and_fails_closed() {
+        let group = OwnedProcessGroup {
+            process_group_id: 23,
+            session_id: 17,
+        };
+        let mut scan_called = false;
+        let mut kill_called = false;
+        let result = signal_process_group_with(
+            group,
+            |_| {
+                Err(ProcessGroupError::Probe(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "probe denied",
+                )))
+            },
+            |_| {
+                scan_called = true;
+                Ok(true)
+            },
+            |_| {
+                kill_called = true;
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(ProcessGroupError::Probe(_))));
+        assert!(scan_called);
+        assert!(kill_called);
+    }
+
+    #[test]
     fn bounded_cleanup_mapping_preserves_precedence_and_categories() {
         let result = map_bounded_cleanup(ChildCleanup {
             direct_kill: Some(std::io::Error::other("direct")),
@@ -583,6 +814,69 @@ mod tests {
             Err(BoundedProcessError::TimedOut)
         ));
         assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn pidfd_completion_path_reaps_a_successful_child() {
+        let mut child = Command::new("sh").args(["-c", "exit 0"]).spawn().unwrap();
+        let mut opener_called = false;
+        let result = wait_with_pidfd(
+            &mut child,
+            Instant::now() + Duration::from_secs(1),
+            |child| {
+                opener_called = true;
+                open_pidfd(child)
+            },
+        )
+        .unwrap();
+        assert!(opener_called);
+        match result {
+            PidfdWait::Completed(status) => assert!(status.success()),
+            PidfdWait::Unavailable => {
+                // Old kernels or a restrictive seccomp profile use the same
+                // bounded fallback exercised below.
+                assert!(child.wait().unwrap().success());
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn any_pidfd_open_error_uses_the_adaptive_fallback() {
+        let mut child = Command::new("true").spawn().unwrap();
+        let status = wait_bounded_with_opener(&mut child, Duration::from_secs(1), |_| {
+            Err(rustix::io::Errno::ACCESS)
+        })
+        .unwrap();
+        assert!(status.success());
+    }
+
+    #[test]
+    fn adaptive_fallback_interval_is_bounded() {
+        let mut interval = FALLBACK_INITIAL_WAIT;
+        let mut observed = Vec::new();
+        for _ in 0..8 {
+            observed.push(interval);
+            interval = next_fallback_interval(interval);
+        }
+        assert_eq!(
+            observed,
+            vec![
+                Duration::from_millis(1),
+                Duration::from_millis(2),
+                Duration::from_millis(4),
+                Duration::from_millis(8),
+                Duration::from_millis(16),
+                Duration::from_millis(20),
+                Duration::from_millis(20),
+                Duration::from_millis(20),
+            ]
+        );
+        assert_eq!(
+            next_fallback_interval(Duration::from_millis(19)),
+            FALLBACK_MAX_WAIT
+        );
     }
 
     #[test]

@@ -31,7 +31,7 @@ uuid = { version = "1.21", features = ["serde", "v4"] }
 nix = { version = "0.31", features = ["process", "signal", "user"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-rustix = { version = "1.1", default-features = false, features = ["std", "process"] }
+rustix = { version = "1.1", default-features = false, features = ["std", "event", "process"] }
 
 [dev-dependencies]
 tempfile = "3.23"

@@ -190,7 +190,7 @@ an automatic migration from the retired schema.
 
 Date: 2026-08-18
 
-Status: D0 through D14 are complete. V1 remains a source-installed operator
+Status: D0 through D15 are complete. V1 remains a source-installed operator
 beta.
 
 Roadmap organization note (2026-08-14): the completed checkpoints that
@@ -288,6 +288,7 @@ This document owns sequencing, exit gates, and progress.
 | D12 | Presentation-scoped ephemeral Workstream shell | Complete (2026-08-17) |
 | D13 | Initial native-agent geometry convergence | Complete (2026-08-18) |
 | D14 | Private tmux copy-mode scroll convergence | Complete (2026-08-18) |
+| D15 | Fluid local Workstream switching | Complete |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -3241,6 +3242,155 @@ Completion evidence (2026-08-18):
   The D12 root and prefix allowlists remain byte-exact outside the added shared
   copy-mode fragment. No live provider or SSH acceptance was performed; the
   real-tmux regression used local tmux 3.7c.
+
+## D15 - Fluid local Workstream switching
+
+Status: Complete.
+
+Fast switching among independent live Workstreams is a fundamental daily-use
+path. Switching must replace only the outer presentation's temporary tmux
+client: the invisible Workstream's private tmux server, Runtime generation,
+provider process, and native session remain live until an explicit Park or an
+independent provider failure. Returning to that Workstream attaches to the same
+Runtime instead of restarting or resuming its provider session.
+
+A disposable local study on 2026-08-18 isolated a fixed control-process cost.
+`Command::output` completed `/bin/true` in 0.432 ms p50, while WSNav's bounded
+runner completed it in 24.053 ms p50 because successful short-lived children
+can wait for a fixed 20 ms completion poll before the existing mandatory
+process-group cleanup. A 40-switch private-presentation sample measured the
+outer attachment at 291.177 ms p50, post-attachment focus at 48.473 ms p50,
+and the complete synchronous outer switch at 339.585 ms p50 and 344.509 ms
+p95. The replacement helper then performs ten additional bounded Runtime tmux
+commands. Their roughly 240 ms contribution and the resulting 580-650 ms
+end-to-visible range are code-derived estimates, not an end-to-end
+measurement; D15 must establish that baseline before claiming improvement.
+
+Implementation order:
+
+1. Add a disposable warm local A-to-B-to-A timing study that separates
+   Navigator focus, outer presentation replacement, provider focus, exact
+   helper-start observation, and proof that the new nested tmux client attached.
+   Record aggregate timings and process metadata only; never read provider pane
+   content.
+2. Replace the bounded runner's fixed short-child completion quantum on Linux
+   with an event-driven process file descriptor (`pidfd`) wait. Retain a
+   bounded adaptive polling fallback when that facility is unavailable,
+   without changing the existing deadline, output-drain, process-group cleanup,
+   or error contract.
+3. Rerun the same study. Only if the measured target is still missed, remove
+   redundant bounded-command work. Any empty-process-group shortcut must use a
+   non-mutating proof; a live or uncertain group must retain the existing exact
+   PGID-plus-session authority, cleanup, and diagnostics.
+4. Run the full repository and disposable acceptance gates, then perform one
+   operator-gated installed-build confirmation without parking or rotating the
+   sampled Runtimes.
+
+Scope:
+
+- measure warm local switching from activation through metadata-only proof of
+  attachment to the destination Runtime, using the same disposable fixture
+  topology and one unchanged long-lived Runtime pair per measured build;
+- make successful finite control-child completion responsive without weakening
+  bounded output, timeouts, child and process-group authority, descendant
+  cleanup, or error precedence;
+- preserve exact local attachment preflight, D13 geometry convergence, D14
+  copy-mode convergence, presentation-shell exclusion, and attachment status;
+- prove that a provider continues working while invisible and that switching
+  away and back retains its exact Runtime ID, tmux generation, provider PID,
+  process-birth token, and native-session binding; and
+- keep performance thresholds in the controlled disposable study rather than
+  adding wall-clock-sensitive assertions to ordinary shared CI runners.
+
+Non-goals and hard boundaries:
+
+- no shared Runtime tmux server, ordinary tmux access, cross-server
+  `switch-client` workaround, replacement terminal emulator, provider-pane
+  proxy, or change to the one-private-server-per-live-Runtime invariant;
+- no provider restart, native Resume, Runtime rotation, Park, lifecycle
+  transition, background suspension, or completed-output loss during an
+  ordinary switch;
+- no skipped or optimistic attachment identity check, detached background
+  mutation after reporting success, weakened output cap or deadline, or
+  reduced child/process-group cleanup authority;
+- no provider input, pane capture, prompt, response, transcript, terminal
+  payload, raw provider payload, or credential storage or diagnostics;
+- no Navigator layout, card, focus-policy, keyboard, mouse, animation, or
+  broader UI/UX redesign; and
+- no schema, protocol, control ABI, provider command, SSH transport, remote
+  latency target, or selective user tmux configuration import.
+
+Exit gate:
+
+- the baseline and candidate use the same disposable fixture topology and
+  sampling procedure, keep each build's Runtime pair unchanged for the entire
+  run, and report p50 and p95 for each named phase; the candidate's warm local
+  activation-to-attached p95 is at most 150 ms and at least three times faster
+  than its immediately preceding baseline, while the synchronous outer phase
+  is at most 100 ms p95;
+- deterministic bounded-process coverage proves event-driven successful-child
+  completion, timeout cleanup, oversized-output draining, successful-parent
+  descendant cleanup, cleanup-error precedence, and the unsupported-pidfd
+  fallback without leaking a child, process group, pipe reader, or unbounded
+  diagnostic;
+- disposable switching coverage proves that both Workstreams retain their
+  exact Runtime and provider identities, the invisible provider fixture keeps
+  making progress, only the two initial provider starts plus the expected
+  attachment helpers are observed, and switching back exposes the same
+  still-running provider without capturing its terminal;
+- exact attachment tests retain the current ambiguity failures, geometry and
+  scroll reconciliation, utility-shell retirement, completed-output retention,
+  and local/SSH argument boundaries;
+- one uninterrupted `scripts/check` run plus staged and unstaged
+  `git diff --check` pass; and
+- installed local acceptance meets the same aggregate latency target closely
+  enough to feel immediate to the operator, while sanitized process metadata
+  proves that no sampled live Runtime was restarted, resumed, parked, or
+  rotated. Remote switching remains outside the performance claim.
+
+Implementation evidence (2026-08-18):
+
+- the controlled study now follows the local production sequence: focus the
+  Navigator, replace the outer provider helper, focus the provider pane,
+  observe the exact helper attempt, and prove the destination private-runtime
+  client through bounded tmux metadata. It records no pane or provider content;
+- the final harness was compiled once against the pre-D15 `403490a` runner in
+  a detached worktree and once against the candidate. Each 40-sample A-to-B-to-A
+  run used the same topology and retained its own exact two-Runtime pair. This
+  avoids adding a benchmark-only wait-strategy switch to production code while
+  keeping the compared workload identical;
+- the fixed-wait baseline measured 587.496/617.035 ms p50/p95 from activation
+  to attached and 292.875/294.688 ms for outer replacement. The candidate
+  measured 57.565/64.651 ms and 17.002/18.262 ms respectively: 9.5 times faster
+  end to end at p95 and well inside both absolute gates;
+- Linux finite-child completion now uses pidfd readiness with `Child::try_wait`
+  as authority and an adaptive 1-20 ms fallback for every pidfd open or poll
+  failure. After reaping, a non-mutating signal-zero probe skips the process
+  table scan only when the captured process group is absent; any live or
+  uncertain group still requires the existing captured PGID-plus-session proof
+  before `SIGKILL`, and probe uncertainty remains a fail-closed cleanup error;
+- all sampled switches retained both exact Runtime IDs, tmux generations,
+  sessions, provider PIDs, process-birth tokens, and fixture native-session
+  bindings. The invisible provider kept advancing, the fixture saw exactly two
+  provider starts and the expected 41 attachment helpers, and no terminal
+  capture was performed; and
+- one uninterrupted `scripts/check` run passed all 437 library tests, the D15
+  percentile test, 14 presentation-recovery tests, 5 transport tests, package
+  verification, dependency policy, formatting, lint, and disposable acceptance
+  suites. Staged and unstaged `git diff --check` also pass; and
+- after the operator closed only the outer presentation, the candidate was
+  installed at the canonical local path without parking a Runtime. All three
+  pre-install provider PID/process-birth pairs, Runtime IDs, tmux generations,
+  and private sessions remained exact after installation, after the switching
+  sample, and after the acceptance presentation closed; and
+- an output-discarding installed presentation completed 20 warm local A-to-B
+  and B-to-A switches in 62.862/69.075 ms p50/p95 (54.630 ms minimum, 71.396 ms
+  maximum). The in-process observer timed navigator key dispatch through exact
+  destination-client metadata, rejected an unexpected Workstream, verified the
+  source had no client, and never captured or sent input to a provider pane.
+  The final destination was the same recorded provider process, the third
+  provider remained live and untouched, and the headless presentation exited
+  cleanly without a start, Resume, Park, or Runtime rotation.
 
 ## Deferred beyond V1
 

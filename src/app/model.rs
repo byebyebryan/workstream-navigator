@@ -1,14 +1,4 @@
-use super::{
-    Error, FromStr, OperationId, PathBuf, Revision, RuntimeProbe, StateError, WorkstreamId, env,
-};
-
-pub(super) const fn runtime_probe_label(probe: &RuntimeProbe) -> &'static str {
-    match probe {
-        RuntimeProbe::Live { .. } => "live",
-        RuntimeProbe::Missing => "missing",
-        RuntimeProbe::Unknown { .. } => "unknown",
-    }
-}
+use super::{Error, FromStr, OperationId, PathBuf, Revision, StateError, WorkstreamId, env};
 
 pub(super) fn parse_workstream(value: &str) -> Result<WorkstreamId, AppError> {
     WorkstreamId::from_str(value).map_err(AppError::InvalidWorkstreamId)
@@ -47,8 +37,6 @@ pub(super) fn default_state_root() -> PathBuf {
 pub(crate) enum AppError {
     #[error("native tmux attach failed")]
     AttachFailed,
-    #[error("attention revision is invalid")]
-    InvalidAttentionRevision,
     #[error("invalid workstream ID")]
     InvalidWorkstreamId(uuid::Error),
     #[error("invalid operation ID")]
@@ -59,14 +47,6 @@ pub(crate) enum AppError {
     InvalidRuntimeId(uuid::Error),
     #[error("invalid provider attachment attempt")]
     InvalidAttachmentAttempt(uuid::Error),
-    #[error("host alias is not registered")]
-    UnknownHostAlias,
-    #[error("host alias is not an SSH host")]
-    HostIsNotSsh,
-    #[error("remote executable path is not valid UTF-8")]
-    RemoteExecutableNotUtf8,
-    #[error("remote Workstream has no live Runtime to attach")]
-    RemoteRuntimeUnavailable,
     #[error("I/O: {0}")]
     Io(std::io::Error),
     #[error("native provider exec failed")]
@@ -80,20 +60,12 @@ pub(crate) enum AppError {
     CodexHomeUnavailable,
     #[error("observer profile is not installed; open wsnav to activate it")]
     ObserverNotInstalled,
-    #[error(
-        "native hook trust remains pending; open wsnav and approve the exact observer hooks in Codex"
-    )]
-    NativeTrustReviewIncomplete,
     #[error("observer profile removal is refused while a managed runtime is live")]
     LiveRuntimePreventsRemoval,
-    #[error("observer profile update is refused while a managed runtime is live")]
-    LiveRuntimePreventsUpdate,
     #[error("observer activation is refused while a managed runtime is live")]
     LiveRuntimePreventsObserverActivation,
     #[error(transparent)]
     Repository(#[from] crate::repository::RepositoryError),
-    #[error(transparent)]
-    BuildInfo(#[from] crate::build_info::BuildInfoError),
     #[error(transparent)]
     Profile(#[from] crate::provider::codex::profile::ProfileError),
     #[error(transparent)]
@@ -109,17 +81,23 @@ pub(crate) enum AppError {
     #[error(transparent)]
     AppServer(#[from] crate::provider::codex::app_server::AppServerError),
     #[error(transparent)]
-    Navigator(#[from] crate::navigator::NavigatorError),
+    D16Navigator(#[from] crate::navigator::D16NavigatorError),
     #[error(transparent)]
     Presentation(#[from] crate::presentation::PresentationError),
     #[error(transparent)]
     Runtime(#[from] crate::runtime::RuntimeError),
     #[error(transparent)]
-    Remote(#[from] crate::remote::RemoteError),
-    #[error(transparent)]
     Action(#[from] crate::actions::ActionError),
     #[error(transparent)]
-    Transport(#[from] crate::transport::TransportError),
-    #[error(transparent)]
     State(#[from] crate::state::StateError),
+    #[error(transparent)]
+    Application(#[from] crate::application::ApplicationError),
+    #[error(transparent)]
+    Startup(#[from] crate::startup::StartupError),
+    #[error(transparent)]
+    Cutover(#[from] crate::cutover::CutoverError),
+    #[error("the local action requires the Navigator observer guide and native review")]
+    ObserverReadinessGuideRequired,
+    #[error("no eligible local provider is available for this action")]
+    NoEligibleLocalProvider,
 }

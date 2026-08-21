@@ -39,11 +39,10 @@ pub fn codex_recovery_program(
 
 /// Builds the environment owned by a managed Codex Runtime.
 ///
-/// Remote starts use one-shot non-interactive SSH commands. Those commands can
-/// have a POSIX locale even when the terminal that later attaches is UTF-8.
-/// Set the locale only for the owned Codex process (and its hook children), so
-/// its terminal renderer has a stable UTF-8 contract without changing the
-/// user's shell or an unmanaged provider session.
+/// A host-local launch can inherit a POSIX locale even when the terminal that
+/// later attaches is UTF-8. Set the locale only for the owned Codex process
+/// and its hook children, so its renderer has a stable UTF-8 contract without
+/// changing the user's shell or an unmanaged provider session.
 pub(super) fn managed_codex_environment() -> BTreeMap<OsString, OsString> {
     const UTF8_LOCALE: &str = "C.UTF-8";
 

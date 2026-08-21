@@ -4,20 +4,12 @@
 //! revisions. It never reads provider turns, terminal screens, prompts, or
 //! provider payloads.
 
-mod controller;
-mod model;
-mod render;
-mod snapshot;
-mod view;
+mod d16;
+mod d16_controller;
 
-#[cfg(test)]
-mod tests;
-
-pub use controller::run_local_navigator;
-pub use model::{
-    LocalNavigatorSnapshot, NavigatorError, NavigatorHost, NavigatorHostOverview,
-    NavigatorOperation, NavigatorRuntimeStatus, NavigatorWorkstream, RemoteHostIssue,
-    RemoteHostReachability,
+pub use d16::{
+    D16Command, D16ListGeometry, D16LocationRow, D16Modal, D16Model, D16Navigator, D16OperationRow,
+    D16Page, D16ProjectBrowser, D16ProjectHeader, D16ProviderChooser, D16ProviderRequest, D16Row,
+    D16RowId, D16WorkstreamRow,
 };
-pub use snapshot::local_snapshot;
-pub use view::NavigatorView;
+pub use d16_controller::{D16NavigatorError, run_local_navigator};

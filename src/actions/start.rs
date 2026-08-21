@@ -778,7 +778,7 @@ fn opencode_observer_command(
     command
         .arg("--state-root")
         .arg(&observer.root)
-        .arg("_opencode_observer")
+        .arg("_opencode_observer_d16")
         .arg(observer.runtime_id.to_string())
         .arg(&observer.generation)
         .arg(observer.endpoint.port.to_string())

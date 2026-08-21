@@ -10,10 +10,9 @@ use uuid::Uuid;
 
 use crate::domain::{
     AttentionState, CompoundOperation, DomainError, HostId, LocationId, OperationId, OperationKind,
-    OperationPhase, ProjectId, ProviderKind, ProviderSessionId, Revision, RuntimeId, RuntimeStatus,
+    OperationPhase, ProviderKind, ProviderSessionId, Revision, RuntimeId, RuntimeStatus,
     WorkstreamId, WorkstreamLifecycle, WorkstreamOrigin,
 };
-use crate::protocol::{Capabilities, HelloResponse};
 use crate::provider::codex::profile::ProfileOwnership;
 use crate::provider::lifecycle::LifecycleHint;
 use crate::provider::names::NameState;
@@ -22,8 +21,40 @@ use super::utils::{
     default_provider_kind, set_private_directory_permissions, validate_registry_text,
 };
 
+/// Maximum number of direct children returned by the host-local project
+/// browser.  Browser responses are state/application DTOs; they are not part
+/// of the retired framed host protocol.
+pub const MAX_PROJECT_BROWSER_ENTRIES: usize = 128;
+
+/// One bounded host-local project-browser listing.  The root is represented by
+/// a safe display label and a validated relative cursor; absolute paths never
+/// cross the state/application boundary.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectDirectoriesResponse {
+    pub root_label: String,
+    pub relative_path: String,
+    pub include_hidden: bool,
+    pub entries: Vec<ProjectDirectoryEntry>,
+}
+
+/// One direct child in a host-local project-browser listing.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct ProjectDirectoryEntry {
+    pub name: String,
+    pub is_git_repository: bool,
+}
+
 pub struct StateRoot {
     base: PathBuf,
+}
+
+impl std::fmt::Debug for StateRoot {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("StateRoot")
+            .field("base", &"<private>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Error)]
@@ -80,11 +111,7 @@ pub enum StateError {
     ForkBoundaryUnavailable,
     #[error("too many Workstreams for one bounded navigator snapshot")]
     NavigatorSnapshotTooLarge,
-    #[error("navigator Workstream page size is invalid")]
-    InvalidNavigatorPageSize,
-    #[error("navigator Workstream cursor overflowed")]
-    NavigatorCursorOverflow,
-    #[error("client project display name is invalid")]
+    #[error("project display name is invalid")]
     InvalidProjectDisplayName,
     #[error("repository fingerprint is invalid")]
     InvalidRepositoryFingerprint,
@@ -99,8 +126,6 @@ pub enum StateError {
     MissingOperation(String),
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
-    #[error("unsupported schema version {0}")]
-    UnsupportedSchemaVersion(i64),
     #[error(
         "host state schema {0} belongs to the retired worktree-managed design; reset this host state and re-register projects"
     )]
@@ -125,32 +150,61 @@ pub enum StateError {
     UnknownRuntime(RuntimeId),
     #[error("Codex observer ownership does not match the recorded profile")]
     IntegrationOwnershipMismatch,
-    #[error("local client catalog host identity does not match the host registry")]
-    ClientHostIdentityMismatch,
-    #[error("registered host generation no longer matches; reset and register the host again")]
-    ClientHostGenerationMismatch,
-    #[error("registered host capabilities no longer match; reset and register the host again")]
-    ClientHostCapabilitiesMismatch,
-    #[error("client host registration does not match the fixed recorded transport")]
-    ClientHostRegistrationMismatch,
-    #[error("this host identity is already registered under another alias")]
-    ClientHostAlreadyRegistered,
-    #[error("client host alias is invalid")]
-    InvalidClientHostAlias,
-    #[error("client host field {0} is invalid")]
-    InvalidClientHostField(&'static str),
-    #[error("persisted client host capabilities are invalid")]
-    InvalidPersistedCapabilities,
-    #[error("could not encode client host capabilities")]
-    ClientCapabilitiesEncoding(serde_json::Error),
-    #[error("client host is unknown")]
-    UnknownClientHost,
-    #[error("the local client host registration cannot be reset")]
-    ClientHostResetRefused,
+    #[error("state recovery required: {0:?}")]
+    StateRecoveryRequired(crate::state::d16::StateRecoveryReason),
+    #[error("fresh state root is not adoptable: {0:?}")]
+    FreshRootRejected(crate::state::d16::FreshRootRejection),
+    #[error("D16 cutover is required")]
+    CutoverRequired,
+    #[error("fresh state creation is required")]
+    FreshStateRequired,
+    #[error("malformed host schema evidence")]
+    MalformedHostSchema,
+    #[error("unsupported future host schema {0}")]
+    UnsupportedFutureHostSchema(i64),
+    #[error("observer database deadline exceeded")]
+    ObserverDatabaseDeadlineExceeded,
+    #[error("observer degraded marker is invalid")]
+    InvalidObserverDegradedMarker,
+    #[error("OpenCode observer handover journal is invalid")]
+    InvalidObserverHandoverJournal,
+    #[error("OpenCode observer handover journal phase transition is invalid")]
+    InvalidObserverHandoverTransition,
+    #[error("the requested state transition requires a held transition lease")]
+    TransitionLeaseRequired,
+    #[error("the held transition lease does not match the requested state root")]
+    TransitionLeaseRootMismatch,
+    #[error("the held transition lease is no longer valid")]
+    InvalidTransitionLease,
+}
+
+impl StateError {
+    pub(in crate::state) fn io(path: &Path, source: std::io::Error) -> Self {
+        Self::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
 }
 
 impl StateRoot {
-    /// Creates a private state root and applies the host permission policy.
+    /// Selects a state-root path without creating, chmodding, or otherwise
+    /// inspecting it.  D16 startup uses this before it has classified a root
+    /// as current, cutover, fresh, or recovery-only.
+    #[must_use]
+    pub fn select(base: impl AsRef<Path>) -> Self {
+        Self {
+            base: base.as_ref().to_path_buf(),
+        }
+    }
+
+    /// Creates a private, classified empty state-root directory for tests and
+    /// fresh-state orchestration.
+    ///
+    /// This helper never creates a database or adopts existing state. Callers
+    /// that need a usable registry must go through [`crate::state::fresh_create`]
+    /// (or an explicit current/cutover open), so root creation cannot bypass
+    /// D16's fresh-root classifier.
     ///
     /// # Errors
     ///
@@ -158,6 +212,13 @@ impl StateRoot {
     /// cannot be restricted.
     pub fn create(base: impl AsRef<Path>) -> Result<Self, StateError> {
         let base = base.as_ref().to_path_buf();
+        match crate::state::d16::classify_fresh_root(&base)? {
+            crate::state::d16::FreshRootClassification::Absent
+            | crate::state::d16::FreshRootClassification::Empty => {}
+            crate::state::d16::FreshRootClassification::TransitionLeaseOnly => {
+                return Err(StateError::FreshStateRequired);
+            }
+        }
         fs::create_dir_all(&base).map_err(|source| StateError::Io {
             path: base.clone(),
             source,
@@ -176,11 +237,6 @@ impl StateRoot {
     pub fn base(&self) -> &Path {
         &self.base
     }
-
-    #[must_use]
-    pub fn client_database_path(&self) -> PathBuf {
-        self.base.join("client.sqlite")
-    }
 }
 
 #[derive(Debug)]
@@ -194,59 +250,6 @@ pub struct HostIdentity {
     pub registry_generation: String,
 }
 
-/// Client-local project grouping for one registered host location. This is
-/// presentation metadata only; the host registry remains operation authority.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClientProjectLocation {
-    pub project_id: ProjectId,
-    pub display_name: String,
-    pub repository_fingerprint: Option<String>,
-}
-
-/// The transport chosen through an explicit client-side host registration.
-/// The host registry remains authoritative for every provider Runtime.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ClientHostTransport {
-    Local,
-    Ssh { destination: String },
-}
-
-/// The fixed client-side trust record for one local or SSH host. A changed
-/// host ID, registry generation, or capabilities is never silently adopted.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ClientHost {
-    pub alias: String,
-    pub host_id: HostId,
-    pub registry_generation: String,
-    pub executable_path: PathBuf,
-    pub transport: ClientHostTransport,
-    pub capabilities: Capabilities,
-    pub revision: Revision,
-}
-
-impl ClientHost {
-    /// Verifies a fresh host handshake against this fixed client registration.
-    /// The caller must leave the record untouched on a mismatch and require an
-    /// explicit reset/re-registration before any remote mutation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the remote host identity, generation, or
-    /// capabilities disagree with this registration.
-    pub fn verify_hello(&self, hello: &HelloResponse) -> Result<(), StateError> {
-        if self.host_id != hello.host_id {
-            return Err(StateError::ClientHostIdentityMismatch);
-        }
-        if self.registry_generation != hello.registry_generation {
-            return Err(StateError::ClientHostGenerationMismatch);
-        }
-        if self.capabilities != hello.capabilities {
-            return Err(StateError::ClientHostCapabilitiesMismatch);
-        }
-        Ok(())
-    }
-}
-
 /// One registered project root and its initial Workstream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalWorkstream {
@@ -254,18 +257,10 @@ pub struct ExternalWorkstream {
     pub workstream_id: WorkstreamId,
 }
 
-/// One registered `ProjectLocation` whose presentation metadata has not yet
-/// been inspected by a finite control path.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct PendingRepositoryMetadata {
-    pub location_id: LocationId,
-    pub repository_path: PathBuf,
-}
-
 /// The persisted target of one native provider fork.
 ///
 /// The project root is the exact launch directory for the destination. It is
-/// host-private and never returned by snapshots or the SSH protocol.
+/// host-private and never returned by application snapshots.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ForkPlan {
     pub operation: CompoundOperation,
@@ -339,6 +334,10 @@ pub(in crate::state) const OPENCODE_SESSION_CREATION_PLAN_SCHEMA_VERSION: u8 = 1
 pub struct OperationOverview {
     pub operation_id: OperationId,
     pub kind: OperationKind,
+    /// The provider captured by the typed private operation plan.  This is
+    /// decoded by the state projection and is never inferred by callers from
+    /// the operation kind.
+    pub provider: ProviderKind,
     pub source_workstream_id: Option<WorkstreamId>,
     pub phase: OperationPhase,
     pub revision: Revision,
@@ -643,13 +642,6 @@ pub(in crate::state) struct PersistedWorkstreamOverview {
     pub(in crate::state) activity_sequence: i64,
     pub(in crate::state) activity_at_millis: i64,
     pub(in crate::state) revision: i64,
-}
-
-/// One deterministic bounded page of navigator-safe host state.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkstreamOverviewPage {
-    pub workstreams: Vec<WorkstreamOverview>,
-    pub next_cursor: Option<u32>,
 }
 
 /// Persisted ownership and native-trust state for the only managed Codex profile.

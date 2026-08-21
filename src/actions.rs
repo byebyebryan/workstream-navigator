@@ -1,7 +1,7 @@
-//! Host-local lifecycle actions shared by direct CLI and remote protocol paths.
+//! Host-local lifecycle actions shared by the direct CLI and D16 application.
 //!
-//! These actions own native process effects. The CLI and SSH protocol only
-//! parse intent and render outcomes; neither gets to reimplement launch or
+//! These actions own native process effects. The CLI and application only parse
+//! intent and render outcomes; neither gets to reimplement launch or
 //! private-tmux authority.
 
 mod attachment;
@@ -15,18 +15,12 @@ mod start;
 #[cfg(test)]
 mod tests;
 
-pub use attachment::{preflight_attachment, preflight_attachment_runtime};
+pub use attachment::preflight_attachment;
 pub use creation::{fork_workstream, recover_managed_operation, start_independent_workstream};
 pub use lifecycle::{archive, await_deliberate_park, park, rename, restore};
 pub use model::{ActionError, StartOutcome, reconcile_observer_trust};
 pub use providers::{codex_launch_program, codex_recovery_program};
 pub use start::{reconcile_lost_runtimes, recover, start};
-
-#[allow(unused_imports)]
-pub(crate) use creation::{
-    start_independent_workstream_with_readiness,
-    start_independent_workstream_with_readiness_and_starter,
-};
 
 pub(super) use std::{
     collections::BTreeMap,

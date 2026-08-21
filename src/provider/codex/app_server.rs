@@ -19,7 +19,6 @@ use crate::process::{
 
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
-const HOOK_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
 const MAX_FORK_RECOVERY_CANDIDATES: usize = 20;
 const RECOVERY_THREAD_SOURCES: [&str; 10] = [
@@ -97,8 +96,17 @@ impl EphemeralAppServer {
     ///
     /// Returns an error if the provider-side thread cannot be corroborated
     /// before the hook's bounded execution deadline.
-    pub fn read_thread_for_hook(&self, thread_id: &str) -> Result<ThreadMetadata, AppServerError> {
-        self.read_thread_with_timeout(thread_id, HOOK_RESPONSE_TIMEOUT)
+    pub fn read_thread_for_hook(
+        &self,
+        thread_id: &str,
+        deadline: Instant,
+    ) -> Result<ThreadMetadata, AppServerError> {
+        let result = self.request_with_deadline(
+            "thread/read",
+            &json!({"threadId": thread_id, "includeTurns": false}),
+            deadline,
+        )?;
+        thread_metadata_from_result(&result, thread_id)
     }
 
     fn read_thread_with_timeout(
@@ -231,6 +239,35 @@ impl EphemeralAppServer {
         params: &Value,
         response_timeout: Duration,
     ) -> Result<Value, AppServerError> {
+        self.request_with_deadline_mode(method, params, Instant::now() + response_timeout, true)
+    }
+
+    fn request_with_deadline(
+        &self,
+        method: &str,
+        params: &Value,
+        deadline: Instant,
+    ) -> Result<Value, AppServerError> {
+        // Hook requests are the only App Server operations whose shutdown
+        // cleanup is part of an already-running outer deadline. They must not
+        // inherit the normal one-second graceful-exit tail.
+        self.request_with_deadline_mode(method, params, deadline, false)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The bounded stdio exchange keeps deadline checks adjacent to every write, receive, and cleanup branch."
+    )]
+    fn request_with_deadline_mode(
+        &self,
+        method: &str,
+        params: &Value,
+        deadline: Instant,
+        wait_for_exit: bool,
+    ) -> Result<Value, AppServerError> {
+        if deadline_expired(deadline) {
+            return Err(AppServerError::Timeout);
+        }
         let mut command = Command::new(&self.executable);
         command
             .args(["app-server", "--listen", "stdio://"])
@@ -253,6 +290,9 @@ impl EphemeralAppServer {
         };
         #[cfg(not(unix))]
         let process_group = None;
+        if deadline_expired(deadline) {
+            return cleanup_error(&mut child, process_group, AppServerError::Timeout);
+        }
         let Some(mut stdin) = child.stdin.take() else {
             return cleanup_error(&mut child, process_group, AppServerError::PipesUnavailable);
         };
@@ -267,12 +307,22 @@ impl EphemeralAppServer {
             let _ = sender.send(read_action_result(stdout));
         });
         for message in [initialize, initialized, action] {
+            if deadline_expired(deadline) {
+                return cleanup_with_reader(
+                    &mut child,
+                    process_group,
+                    reader,
+                    AppServerError::Timeout,
+                    wait_for_exit,
+                );
+            }
             if let Err(error) = serde_json::to_writer(&mut stdin, &message) {
                 return cleanup_with_reader(
                     &mut child,
                     process_group,
                     reader,
                     AppServerError::Encode(error),
+                    wait_for_exit,
                 );
             }
             if let Err(error) = stdin.write_all(b"\n") {
@@ -281,10 +331,21 @@ impl EphemeralAppServer {
                     process_group,
                     reader,
                     AppServerError::Write(error),
+                    wait_for_exit,
                 );
             }
         }
-        let action_result = match receiver.recv_timeout(response_timeout) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return cleanup_with_reader(
+                &mut child,
+                process_group,
+                reader,
+                AppServerError::Timeout,
+                wait_for_exit,
+            );
+        }
+        let action_result = match receiver.recv_timeout(remaining) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 return cleanup_with_reader(
@@ -292,6 +353,7 @@ impl EphemeralAppServer {
                     process_group,
                     reader,
                     AppServerError::Timeout,
+                    wait_for_exit,
                 );
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -300,25 +362,46 @@ impl EphemeralAppServer {
                     process_group,
                     reader,
                     AppServerError::Closed,
+                    wait_for_exit,
                 );
             }
         };
+        if deadline_expired(deadline) {
+            return cleanup_with_reader(
+                &mut child,
+                process_group,
+                reader,
+                AppServerError::Timeout,
+                wait_for_exit,
+            );
+        }
         // Keep stdin open until the action result arrives. Current Codex can
         // observe EOF before dispatching a queued request if the client closes
         // it immediately after writing JSONL.
         drop(stdin);
-        let wait_error = wait_for_child(&mut child);
+        let wait_error = wait_for_exit.then(|| wait_for_child(&mut child)).flatten();
         let cleanup = kill_and_reap(&mut child, process_group);
         if let Err(error) = cleanup {
             drop(reader);
             return Err(error);
         }
-        reader.join().map_err(|_| AppServerError::Closed)?;
+        if wait_for_exit {
+            reader.join().map_err(|_| AppServerError::Closed)?;
+        } else {
+            // The process group has already been terminated. Do not join a
+            // hook reader after its outer deadline; joining would turn a
+            // bounded observer operation into an unbounded cleanup tail.
+            drop(reader);
+        }
         if let Some(error) = wait_error {
             return Err(error);
         }
         action_result
     }
+}
+
+fn deadline_expired(deadline: Instant) -> bool {
+    Instant::now() >= deadline
 }
 
 fn wait_for_child(child: &mut Child) -> Option<AppServerError> {
@@ -351,13 +434,18 @@ fn cleanup_with_reader(
     process_group: Option<OwnedProcessGroup>,
     reader: thread::JoinHandle<()>,
     original: AppServerError,
+    join_reader: bool,
 ) -> Result<Value, AppServerError> {
     let cleanup = kill_and_reap(child, process_group);
     if let Err(error) = cleanup {
         drop(reader);
         return Err(error);
     }
-    reader.join().map_err(|_| AppServerError::Closed)?;
+    if join_reader {
+        reader.join().map_err(|_| AppServerError::Closed)?;
+    } else {
+        drop(reader);
+    }
     Err(original)
 }
 
@@ -628,6 +716,18 @@ mod tests {
             }),
             Err(AppServerError::Cleanup(error))
                 if error.to_string() == "invalid process ID"
+        ));
+    }
+
+    #[test]
+    fn hook_deadline_is_checked_before_launching_an_app_server() {
+        let server = EphemeralAppServer::new("/definitely/not-a-codex-executable");
+        let deadline = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .expect("one-second prior instant");
+        assert!(matches!(
+            server.read_thread_for_hook("thread", deadline),
+            Err(AppServerError::Timeout)
         ));
     }
 

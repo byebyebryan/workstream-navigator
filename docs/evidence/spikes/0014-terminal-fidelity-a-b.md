@@ -81,10 +81,11 @@ before synchronized output and `cnorm` (`CSI ?25 h`) after it, even when the
 pane cursor is visible. On terminals where cursor-state updates restart
 blinking (Ghostty included), repeated redraws during streaming visibly disrupt
 the blink phase. This is [tmux issue
-5419](https://github.com/tmux/tmux/issues/5419), filed against `next-3.8` and
-not fixed in any tmux currently available on Arch (`3.7b` is the latest
-released; the AUR `tmux-git` package is stale and upstream master lacks the
-fix).
+5419](https://github.com/tmux/tmux/issues/5419), filed against `next-3.8`. At
+the time of this follow-up, tmux `3.7b` was the latest Arch release, the AUR
+`tmux-git` package was stale, and the tested upstream master lacked the fix.
+Later D16 acceptance used tmux `3.7c`, but did not rerun this study or infer a
+fix from the newer version alone.
 
 The following WSNav-controllable candidates were each ruled out with the
 instrument; none changed the `civis`/`cnorm` emission:

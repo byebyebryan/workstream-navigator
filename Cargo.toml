@@ -3,7 +3,7 @@ name = "wsnav"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
-description = "A native-workflow terminal navigator for persistent coding workstreams across hosts."
+description = "A native-workflow terminal navigator for persistent host-local coding workstreams."
 repository = "https://github.com/byebyebryan/workstream-navigator"
 license = "MIT"
 publish = false
@@ -28,7 +28,7 @@ toml = "0.8"
 uuid = { version = "1.21", features = ["serde", "v4"] }
 
 [target.'cfg(unix)'.dependencies]
-nix = { version = "0.31", features = ["process", "signal", "user"] }
+nix = { version = "0.31", features = ["fs", "hostname", "process", "signal", "user"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "1.1", default-features = false, features = ["std", "event", "process"] }

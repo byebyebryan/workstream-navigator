@@ -10,13 +10,13 @@ use std::{
 };
 
 use wsnav::{
-    domain::{ProviderKind, RuntimeId, RuntimeStatus, WorkstreamId},
+    domain::{ProviderKind, RandomIdGenerator, RuntimeId, RuntimeStatus, WorkstreamId},
     presentation::{AttachmentPhase, Presentation, PresentationPaths},
     process::output_bounded,
     runtime::{
         LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
     },
-    state::{HostRegistry, RuntimeRecord, StateRoot},
+    state::{RuntimeRecord, StateRoot, fresh_create, open_current_only},
 };
 
 const SAMPLE_PAIRS: usize = 20;
@@ -104,7 +104,11 @@ fn d15_warm_local_switching_study() {
         return;
     }
     let workspace = tempfile::tempdir().unwrap();
-    let state_root = StateRoot::create(workspace.path().join("state")).unwrap();
+    let state_root = StateRoot::select(workspace.path().join("state"));
+    fresh_create(state_root.base(), &RandomIdGenerator)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
     let study_root = state_root.base().join("d15");
     fs::create_dir_all(&study_root).unwrap();
     let native_executable = workspace.path().join("d15-native-fixture.sh");
@@ -260,7 +264,10 @@ fn reserve_fixture_records(
     project_a: &Path,
     project_b: &Path,
 ) -> [RuntimeRecord; 2] {
-    let mut registry = HostRegistry::open(state).unwrap();
+    let mut registry = open_current_only(state)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
     let workstream_a = registry
         .register_project_root(project_a, ProviderKind::Codex)
         .unwrap();
@@ -330,7 +337,10 @@ fn record_fixture_identities(
     identity_a: &RuntimeIdentity,
     identity_b: &RuntimeIdentity,
 ) {
-    let mut registry = HostRegistry::open(state).unwrap();
+    let mut registry = open_current_only(state)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
     for identity in [identity_a, identity_b] {
         let record = registry
             .runtime_by_id(identity.runtime_id)
@@ -352,7 +362,10 @@ fn assert_registry_identities(
     fixture: &RuntimeFixture<'_>,
     identity: &RuntimeIdentity,
 ) {
-    let registry = HostRegistry::open(state).unwrap();
+    let registry = open_current_only(state)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
     let record = registry
         .runtime_by_id(fixture.record.runtime_id)
         .unwrap()

@@ -5,10 +5,7 @@ use uuid::Uuid;
 
 use crate::domain::{DomainError, LocationId, ProviderKind, Revision, RuntimeStatus, WorkstreamId};
 
-use super::models::{
-    HostRegistry, PersistedWorkstreamOverview, StateError, WorkstreamOverview,
-    WorkstreamOverviewPage,
-};
+use super::models::{HostRegistry, PersistedWorkstreamOverview, StateError, WorkstreamOverview};
 use super::schema::MAX_NAVIGATOR_WORKSTREAMS;
 use super::utils::{provider_kind_from_text, workstream_lifecycle_from_text};
 
@@ -22,16 +19,56 @@ impl HostRegistry {
     /// Returns an error when a persisted identity, lifecycle, or revision is
     /// malformed, or when the registry cannot be queried.
     pub fn workstream_overviews(&self) -> Result<Vec<WorkstreamOverview>, StateError> {
-        let mut workstreams = Vec::new();
-        let mut cursor = 0;
-        loop {
-            let page = self.workstream_overview_page(cursor, MAX_NAVIGATOR_WORKSTREAMS)?;
-            workstreams.extend(page.workstreams);
-            let Some(next_cursor) = page.next_cursor else {
-                return Ok(workstreams);
-            };
-            cursor = next_cursor;
+        let query_limit = i64::try_from(MAX_NAVIGATOR_WORKSTREAMS + 1)
+            .map_err(|_| StateError::NavigatorSnapshotTooLarge)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT workstreams.workstream_id, workstreams.location_id,
+                        workstreams.provider,
+                        project_locations.repository_path,
+                        project_locations.repository_display_name,
+                        project_locations.remote_identity_fingerprint,
+                        project_locations.remote_identity_display,
+                        workstreams.lifecycle,
+                        workstreams.archived_at_millis,
+                        workstreams.last_activity_sequence,
+                        workstreams.last_activity_at_millis, workstreams.revision
+                 FROM workstreams
+                 JOIN project_locations
+                   ON project_locations.location_id = workstreams.location_id
+                 ORDER BY workstreams.last_activity_sequence DESC,
+                          project_locations.repository_path, workstreams.workstream_id
+                 LIMIT ?1",
+            )
+            .map_err(StateError::Sqlite)?;
+        let mut bases = statement
+            .query_map([query_limit], |row| {
+                Ok(PersistedWorkstreamOverview {
+                    workstream_id: row.get(0)?,
+                    location_id: row.get(1)?,
+                    provider: row.get(2)?,
+                    project_repository_path: row.get(3)?,
+                    project_display_name: row.get(4)?,
+                    remote_identity_fingerprint: row.get(5)?,
+                    remote_identity_display: row.get(6)?,
+                    lifecycle: row.get(7)?,
+                    archived_at_millis: row.get(8)?,
+                    activity_sequence: row.get(9)?,
+                    activity_at_millis: row.get(10)?,
+                    revision: row.get(11)?,
+                })
+            })
+            .map_err(StateError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::Sqlite)?;
+        if bases.len() > MAX_NAVIGATOR_WORKSTREAMS {
+            return Err(StateError::NavigatorSnapshotTooLarge);
         }
+        bases
+            .drain(..)
+            .map(|base| self.hydrate_workstream_overview(base))
+            .collect()
     }
 
     /// Hides one exact Workstream from the active navigator scope without
@@ -123,85 +160,6 @@ impl HostRegistry {
         }
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(next_revision)
-    }
-
-    /// Returns one deterministic bounded Workstream page ordered by latest
-    /// activity, project root, and opaque Workstream identity.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for an invalid page size, cursor overflow, malformed
-    /// persisted state, or an unavailable registry.
-    pub fn workstream_overview_page(
-        &self,
-        cursor: u32,
-        page_size: usize,
-    ) -> Result<WorkstreamOverviewPage, StateError> {
-        if page_size == 0 || page_size > MAX_NAVIGATOR_WORKSTREAMS {
-            return Err(StateError::InvalidNavigatorPageSize);
-        }
-        let query_limit =
-            i64::try_from(page_size + 1).map_err(|_| StateError::InvalidNavigatorPageSize)?;
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT workstreams.workstream_id, workstreams.location_id,
-                        workstreams.provider,
-                        project_locations.repository_path,
-                        project_locations.repository_display_name,
-                        project_locations.remote_identity_fingerprint,
-                        project_locations.remote_identity_display,
-                        workstreams.lifecycle,
-                        workstreams.archived_at_millis,
-                        workstreams.last_activity_sequence,
-                        workstreams.last_activity_at_millis, workstreams.revision
-                 FROM workstreams
-                 JOIN project_locations
-                   ON project_locations.location_id = workstreams.location_id
-                 ORDER BY workstreams.last_activity_sequence DESC,
-                          project_locations.repository_path, workstreams.workstream_id
-                 LIMIT ?1 OFFSET ?2",
-            )
-            .map_err(StateError::Sqlite)?;
-        let mut bases = statement
-            .query_map(params![query_limit, i64::from(cursor)], |row| {
-                Ok(PersistedWorkstreamOverview {
-                    workstream_id: row.get(0)?,
-                    location_id: row.get(1)?,
-                    provider: row.get(2)?,
-                    project_repository_path: row.get(3)?,
-                    project_display_name: row.get(4)?,
-                    remote_identity_fingerprint: row.get(5)?,
-                    remote_identity_display: row.get(6)?,
-                    lifecycle: row.get(7)?,
-                    archived_at_millis: row.get(8)?,
-                    activity_sequence: row.get(9)?,
-                    activity_at_millis: row.get(10)?,
-                    revision: row.get(11)?,
-                })
-            })
-            .map_err(StateError::Sqlite)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StateError::Sqlite)?;
-        let has_more = bases.len() > page_size;
-        bases.truncate(page_size);
-        let page_len =
-            u32::try_from(bases.len()).map_err(|_| StateError::NavigatorCursorOverflow)?;
-        let next_cursor = has_more
-            .then(|| {
-                cursor
-                    .checked_add(page_len)
-                    .ok_or(StateError::NavigatorCursorOverflow)
-            })
-            .transpose()?;
-        let workstreams = bases
-            .into_iter()
-            .map(|base| self.hydrate_workstream_overview(base))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(WorkstreamOverviewPage {
-            workstreams,
-            next_cursor,
-        })
     }
 
     fn hydrate_workstream_overview(

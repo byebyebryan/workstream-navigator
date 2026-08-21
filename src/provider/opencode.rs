@@ -24,7 +24,8 @@ use std::process::{Child, Stdio};
 
 mod observer;
 pub use observer::{
-    OpenCodeObserverContext, OpenCodeObserverError, mark_unknown_handle, run_observer,
+    OpenCodeObserverContext, OpenCodeObserverError, OpenCodeObserverMode, StandbyEventBuffer,
+    mark_unknown_handle, run_observer, run_standby,
 };
 mod guardian;
 pub use guardian::{run as run_guardian, run_barrier};

@@ -2,15 +2,12 @@
 
 use std::process::Command;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::{
     domain::ProviderKind,
     process::output_bounded,
-    protocol::{
-        KNOWN_PROVIDER_KINDS, ProviderCapability, ProviderCapabilityReason,
-        ProviderCapabilityStatus,
-    },
     state::{HostRegistry, IntegrationLifecycle, StateError},
 };
 
@@ -18,6 +15,92 @@ pub mod codex;
 pub mod lifecycle;
 pub mod names;
 pub mod opencode;
+
+/// The fixed provider set supported by this build, in deterministic order.
+///
+/// Provider capability evidence belongs to the provider boundary rather than
+/// to the retired host protocol.  The application and state layers consume
+/// this typed evidence directly; protocol adapters, where still present for
+/// historical compatibility, merely serialize it.
+pub const KNOWN_PROVIDER_KINDS: [ProviderKind; 2] = [ProviderKind::Codex, ProviderKind::OpenCode];
+
+/// Dynamic provider availability observed by one host snapshot.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCapabilityStatus {
+    Available,
+    Unavailable,
+    Unknown,
+}
+
+/// Bounded reason for a provider's dynamic availability state.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderCapabilityReason {
+    None,
+    AdapterUnavailable,
+    NotInstalled,
+    UnsupportedVersion,
+    ObserverNotReady,
+    RuntimePrerequisiteMissing,
+    ProbeFailed,
+}
+
+/// One provider's bounded, read-only host capability evidence.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
+#[serde(deny_unknown_fields)]
+pub struct ProviderCapability {
+    pub kind: ProviderKind,
+    pub status: ProviderCapabilityStatus,
+    pub reason: ProviderCapabilityReason,
+    pub fresh_launch: bool,
+    pub exact_resume: bool,
+    pub observe: bool,
+    pub metadata_read: bool,
+    pub rename: bool,
+    pub fork: bool,
+}
+
+impl ProviderCapability {
+    /// Returns whether this provider may be selected for a recoverable New.
+    #[must_use]
+    pub const fn is_new_eligible(self) -> bool {
+        matches!(self.status, ProviderCapabilityStatus::Available)
+            && self.fresh_launch
+            && self.exact_resume
+            && self.observe
+    }
+}
+
+/// Returns the closed default capability set used when no provider probe has
+/// succeeded.  It is intentionally provider-owned so state/application code
+/// never needs to import the retired protocol module for capability records.
+#[must_use]
+pub fn default_provider_capabilities() -> Vec<ProviderCapability> {
+    KNOWN_PROVIDER_KINDS
+        .into_iter()
+        .map(|kind| ProviderCapability {
+            kind,
+            status: if kind == ProviderKind::Codex {
+                ProviderCapabilityStatus::Unknown
+            } else {
+                ProviderCapabilityStatus::Unavailable
+            },
+            reason: if kind == ProviderKind::Codex {
+                ProviderCapabilityReason::ProbeFailed
+            } else {
+                ProviderCapabilityReason::AdapterUnavailable
+            },
+            fresh_launch: false,
+            exact_resume: false,
+            observe: false,
+            metadata_read: false,
+            rename: false,
+            fork: false,
+        })
+        .collect()
+}
 
 /// Static executable evidence collected once for a navigator process.
 ///
@@ -270,7 +353,7 @@ pub enum ProviderSelectionError {
     },
 }
 
-/// Returns eligible providers in the protocol's fixed known-provider order.
+/// Returns eligible providers in the provider boundary's fixed known-provider order.
 /// Unknown or duplicate capability records are ignored rather than becoming a
 /// fallback provider; authoritative protocol validation rejects malformed
 /// wire sets before this helper is used.
@@ -391,9 +474,30 @@ fn capability_set_well_formed(capabilities: &[ProviderCapability]) -> bool {
                 .count()
                 == 1
         })
-        && capabilities
-            .iter()
-            .all(|capability| capability.validate().is_ok())
+        && capabilities.iter().all(capability_is_well_formed)
+}
+
+fn capability_is_well_formed(capability: &ProviderCapability) -> bool {
+    match (capability.status, capability.reason) {
+        (ProviderCapabilityStatus::Available, ProviderCapabilityReason::None)
+        | (
+            ProviderCapabilityStatus::Unavailable | ProviderCapabilityStatus::Unknown,
+            ProviderCapabilityReason::AdapterUnavailable
+            | ProviderCapabilityReason::NotInstalled
+            | ProviderCapabilityReason::UnsupportedVersion
+            | ProviderCapabilityReason::ObserverNotReady
+            | ProviderCapabilityReason::RuntimePrerequisiteMissing
+            | ProviderCapabilityReason::ProbeFailed,
+        ) => {}
+        _ => return false,
+    }
+    matches!(capability.status, ProviderCapabilityStatus::Available)
+        || !(capability.fresh_launch
+            || capability.exact_resume
+            || capability.observe
+            || capability.metadata_read
+            || capability.rename
+            || capability.fork)
 }
 
 /// Re-probes one provider immediately before a durable New/registration
@@ -521,8 +625,9 @@ mod tests {
 
     fn registry() -> (tempfile::TempDir, HostRegistry) {
         let temporary = tempfile::tempdir().unwrap();
-        let root = crate::state::StateRoot::create(temporary.path().join("state")).unwrap();
-        (temporary, HostRegistry::open(&root).unwrap())
+        let root = temporary.path().join("state");
+        let state = crate::state::fresh_create(&root, &crate::domain::RandomIdGenerator).unwrap();
+        (temporary, state.into_host_registry().unwrap())
     }
 
     fn eligible(kind: ProviderKind) -> ProviderCapability {

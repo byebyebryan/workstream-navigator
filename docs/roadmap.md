@@ -1,5 +1,16 @@
 # Workstream Navigator V1 Roadmap
 
+Date: 2026-08-20
+
+Status: D0-D16 complete; D16 host-local implementation, disposable repository
+gate, and operator-gated live local and SSH-entered-host acceptance complete;
+source-installed operator beta.
+
+The D0-D15 entries below preserve truthful historical implementation and
+acceptance evidence. D3 and later SSH, remote, cross-host, and combined
+local/remote descriptions document the former WSNav-managed surface and are
+retired or superseded by D16 for the current product contract.
+
 ## 2026-08-05 minimal multi-provider creation contract and D8 approval
 
 The [V1 design](design.md#multi-provider-and-multi-agent-design) now records a
@@ -104,13 +115,14 @@ continued blinking because its own TUI cursor policy remained enabled. Every
 override was restored to `default`; no cursor workaround entered WSNav,
 Ghostty, or ordinary tmux configuration.
 
-The fix is version-bound: tmux `3.7b` (current Arch `extra`) has the behavior,
-the AUR `tmux-git` package is stale, and upstream master does not yet contain
-the fix. WSNav therefore keeps its best-available private-server configuration
-and defers a fix until an upstream tmux release includes it. Revisit this note
-when tmux ships the `#5419` fix; the instrument's `nested_motion_not_amplified`
-and `nested_bytes_not_amplified` assertions are the objective confirmation
-gate.
+At the time of this version-bound study, tmux `3.7b` was current in Arch
+`extra`, the AUR `tmux-git` package was stale, and the tested upstream master
+did not contain a fix. D16 acceptance later ran on tmux `3.7c`, but did not
+rerun this cursor-fidelity study or infer a fix from the newer version alone.
+WSNav therefore keeps its best-available private-server configuration. Revisit
+this note when a candidate `#5419` fix is available; the instrument's
+`nested_motion_not_amplified` and `nested_bytes_not_amplified` assertions are
+the objective confirmation gate.
 
 ## 2026-08-02 deferred terminal-fidelity studies
 
@@ -188,10 +200,9 @@ historical only; it is not a current product commitment. Host schema 8 is a
 clean breaking boundary and requires explicit reset/re-registration instead of
 an automatic migration from the retired schema.
 
-Date: 2026-08-18
-
-Status: D0 through D15 are complete. V1 remains a source-installed operator
-beta.
+Historical status note (2026-08-18): D0 through D15 were complete and V1 was
+a source-installed operator beta. The current D16 status is at the top of this
+roadmap.
 
 Roadmap organization note (2026-08-14): the completed checkpoints that
 followed the original multi-provider outcome are grouped below by the product
@@ -241,15 +252,15 @@ This document owns sequencing, exit gates, and progress.
 | D1 | Local Codex CLI vertical slice | Complete (reconciled by D1.5) |
 | D1.5 | Reconcile native trust and same-workstream tip transitions | Complete |
 | D2 | Minimal directly interactive navigator | Complete |
-| D3 | Local and SSH hosts through one protocol | Complete |
+| D3 | Local and SSH hosts through one protocol | Complete (historical; retired by D16) |
 | D4 | Independent and conversation-forked Workstreams | Complete |
 | D5 | Recovery, combined acceptance, and V1 closure | Complete |
 | D5.1 | Operational closure for recovery, release diagnostics, and bounded I/O | Complete |
 | D5.2 | Correctness closure for release, identity, recovery, and presentation | Complete |
 | D6 | Source-installed operator-beta closure | Complete |
-| D6.1 | Repository identity and cross-host Project grouping polish | Complete |
+| D6.1 | Repository identity and cross-host Project grouping polish | Complete (historical; retired by D16) |
 | D6.2 | Navigator shortcut-reference polish | Complete |
-| D6.3 | Cross-host activity ordering polish | Complete |
+| D6.3 | Cross-host activity ordering polish | Complete (historical; retired by D16) |
 | D6.4 | Navigator grouping and visual-hierarchy polish | Complete |
 | D6.5 | Project-marker collision correction | Complete |
 | D6.6 | Project-label accent refinement | Complete |
@@ -289,6 +300,7 @@ This document owns sequencing, exit gates, and progress.
 | D13 | Initial native-agent geometry convergence | Complete (2026-08-18) |
 | D14 | Private tmux copy-mode scroll convergence | Complete (2026-08-18) |
 | D15 | Fluid local Workstream switching | Complete |
+| D16 | Host-local product simplification | Complete (2026-08-20) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -459,9 +471,11 @@ Exit gate:
   inactive Runtime; and
 - exiting the presentation leaves every host Runtime alive and recoverable.
 
-## D3 - SSH hosts
+## D3 - SSH hosts (historical; retired by D16)
 
-Extend the accepted local semantics across pre-registered hosts.
+Extend the accepted local semantics across pre-registered hosts. This was the
+former cross-host control surface; D16 preserves its evidence but retires its
+WSNav-managed SSH behavior from the current contract.
 
 Implementation status: complete. The bounded one-shot `_remote` service,
 strict shell-free SSH adapter, fixed client registration fingerprint, local
@@ -523,7 +537,7 @@ an in-progress turn, assert that the provider request names only the completed
 turn and keeps the registered root as its cwd, and compare the ordinary tmux
 fingerprint before and after cleanup.
 
-## D5 - Recovery and V1 acceptance
+## D5 - Recovery and V1 acceptance (historical; cross-host surface retired by D16)
 
 Close the V1 contract after all behavior exists.
 
@@ -561,6 +575,10 @@ full local repository gates. See the [D5.1 operational closure acceptance](evide
 
 Close the release-quality gaps found by the post-D5 broad review without
 expanding the approved V1 product.
+
+The remote release probe, SSH protocol, and unreachable-host diagnostics in
+this historical checkpoint are superseded by D16's host-local control
+boundary; their recorded acceptance remains unchanged.
 
 Scope:
 
@@ -606,6 +624,10 @@ Reopen V1 closure for the concrete contradictions found by the post-D5.1
 project-wide review. This is hardening of the approved product, not a new
 workflow layer.
 
+Remote project labels, local/remote parity, and SSH attachment references in
+this historical checkpoint remain evidence only; D16 supersedes them with
+host-local Project roots and operator-composed SSH.
+
 Scope:
 
 - declare and test an MSRV compatible with every locked production dependency;
@@ -637,7 +659,7 @@ Exit gate:
 - `scripts/check`, package verification, disposable acceptance, privacy audit,
   and `git diff --check` pass.
 
-## D6 - Source-installed operator-beta closure
+## D6 - Source-installed operator-beta closure (historical; SSH smoke retired by D16)
 
 Implementation status: complete. Present-tense documentation, the explicit
 source-installed distribution posture, exact-candidate local/SSH release
@@ -646,6 +668,10 @@ the [D6 operator-beta acceptance](evidence/acceptance/d6-operator-beta.md).
 
 Close the implemented V1 as an operator-ready beta without adding another
 workflow or changing the approved ownership boundaries.
+
+The local/SSH release parity and operator smoke in this historical entry are
+retired by D16. The source-installed posture and host-local acceptance gates
+remain applicable.
 
 Scope:
 
@@ -686,13 +712,14 @@ Exit gate:
 - the repository is clean, synchronized, and remains explicitly
   source-installed rather than presenting an unshipped release channel.
 
-## D6.1 - Repository identity and cross-host Project grouping polish
+## D6.1 - Repository identity and cross-host Project grouping polish (historical; retired by D16)
 
-Implementation status: revised. Canonical remote fingerprinting, safe origin
-labels, and client-side cross-host Project grouping remain current. Linked
-worktree input is normalized to the primary project root rather than retained
-as a separate workstream cwd; the development schema migration is superseded
-by the explicit host-state reset boundary.
+Implementation status: historical completion; its cross-host association is
+superseded by D16. Credential-free origin fingerprinting, safe origin labels,
+and exact unambiguous matching remain active only for locations on the current
+execution host. Linked-worktree input was normalized to the primary project
+root rather than retained as a separate workstream cwd; the development schema
+migration was superseded by the explicit host-state reset boundary.
 
 Refine the accepted operator beta without changing provider or Runtime
 ownership. Make the existing client-side Project concept useful when
@@ -762,11 +789,12 @@ Exit gate:
   visible; and
 - formatting, tests, lint, package checks, and `git diff --check` pass.
 
-## D6.3 - Cross-host activity ordering polish
+## D6.3 - Cross-host activity ordering polish (historical; retired by D16)
 
-Implementation status: complete. The combined navigator projection now orders
-known local and remote activity timestamps newest first, then uses stable
-identity fallbacks without changing host or provider authority.
+Implementation status: historical completion, superseded by D16. The former
+combined navigator projection ordered known local and remote activity
+timestamps newest first, then used stable identity fallbacks without changing
+host or provider authority.
 
 Make the navigator's global row order agree with its visible relative-activity
 labels. This is a client-side presentation correction only; it must not turn a
@@ -956,7 +984,7 @@ Exit gate:
   `/hooks` review, and records fresh lifecycle activity without provider-pane
   output.
 
-## D7 - Navigator workflow and lifecycle management
+## D7 - Navigator workflow and lifecycle management (historical; remote host surface retired by D16)
 
 Implementation status: D7.0 through D7.5 passed the bounded native
 local/SSH observer reviews and the integrated disposable/reversible navigator
@@ -974,6 +1002,11 @@ registers, prepares the observer, and opens native review; removal explicitly
 chooses client-only disconnect or guarded observer offboarding.
 D7 makes ordinary WSNav administration available through the navigator without
 turning it into a task manager or replacing the provider surface.
+
+The local/SSH and host-inventory behavior described in this historical D7
+summary remains evidence of the former surface. D16 supersedes it with one
+current-host Hosts setup page and host-local Projects; ordinary SSH composition
+is no longer a D7 or current WSNav operation.
 
 Scope:
 
@@ -1086,7 +1119,7 @@ Exit gate:
   through host-side resolution; and
 - formatting, tests, lint, package checks, and `git diff --check` pass.
 
-## D8 - Multi-provider Workstreams
+## D8 - Multi-provider Workstreams (historical SSH acceptance; provider contract retained)
 
 Implementation status: D8.0 completed on 2026-08-05, D8.1 completed on
 2026-08-06, and D8.2 completed on 2026-08-07 after its corrective cleanup,
@@ -1095,6 +1128,12 @@ local/loopback-SSH acceptance passed. The installed OpenCode release reported
 `1.18.11`; compatibility remains contract-based rather than version-gated. The
 [multi-provider design](design.md#multi-provider-and-multi-agent-design) is
 authoritative for the shared provider boundary and privacy invariants.
+
+The SSH and local/loopback-SSH acceptance named in this historical D8 record
+remains truthful evidence of the former cross-host implementation. D16 retires
+that transport and keeps the provider boundary host-local; any later D8
+references to remote adapters or remote acceptance are historical, not current
+scope.
 
 The product goal is deliberately narrower than provider orchestration. A user
 can start independent Workstreams at the same ProjectLocation, choose among
@@ -1505,6 +1544,10 @@ behavior-neutral architecture work, bounded process and tmux hardening, failed
 presentation recovery, and provider lifecycle reconciliation delivered after
 the D8 multi-provider outcome. The roadmap reclassification changes none of
 their original scope, delivery order, or completion evidence.
+
+Any remote-monitor, SSH, or cross-host references in these historical D9
+records describe the pre-D16 implementation and are not current architecture;
+D16 retires those surfaces while retaining the behavior-neutral local evidence.
 
 ## D9.0 - Internal architecture consolidation
 
@@ -2926,7 +2969,7 @@ Completion evidence (2026-08-14):
   acceptance harnesses, and staged and unstaged diff checks. No live provider,
   SSH, installation, state reset, or Runtime rotation was required.
 
-## D12 - Presentation-scoped ephemeral Workstream shell
+## D12 - Presentation-scoped ephemeral Workstream shell (historical; remote shell surface retired by D16)
 
 Status: Complete on 2026-08-17. Implementation, automated validation,
 explicitly authorized local plus real-SSH machine acceptance, and local
@@ -2940,6 +2983,10 @@ multiplexer. The normal presentation still begins with the Navigator and one
 native provider pane. One private tmux chord may temporarily add one ordinary
 shell below the provider for short host-local work such as inspecting or
 manually operating Git. The shell is never a Workstream or durable session.
+
+The remote-shell and SSH-helper portions of this completed checkpoint are
+historical evidence. D16 retains only the host-local utility-shell semantics;
+ordinary SSH composition is outside WSNav.
 
 Scope:
 
@@ -3392,6 +3439,535 @@ Implementation evidence (2026-08-18):
   provider remained live and untouched, and the headless presentation exited
   cleanly without a start, Resume, Park, or Runtime rotation.
 
+## D16 - Host-local simplification
+
+Status: Complete on 2026-08-20. The implementation, disposable repository gate,
+and explicitly authorized live local and ordinary-SSH-entered-host acceptance
+passed. D0-D15 remain complete historical checkpoints, and V1 remains a
+source-installed operator beta.
+
+Fresh current-tree evidence includes strict formatting and Clippy, 411 passing
+tests with one controlled D15 timing study ignored, package verification,
+Cargo Deny policy, shell/Python/fixture checks, the disposable D12 presentation
+harness, D16 retired-source/CLI acceptance, and staged plus unstaged diff
+checks. The five focused D16 integration suites contribute 89 of those passing
+tests. This current total includes the post-acceptance source correction that
+removed the redundant page banner, restored the established semantic colors
+and activity ages, then the card refinement that made Project headers
+name-only, removed repeated host labels, moved relative age beside provider,
+and gave the second line to lifecycle plus native thread name. It also includes
+the follow-up regression correction for wrapped guidance/status prose, parked
+marker precedence, Running-attachment replacement, and exact dead-helper-pane
+respawn after Park. The latest controller correction attaches an exact owned
+Runtime while its durable status is still `Starting`, avoiding a resume
+bootstrap cycle in which native SessionStart observation waited on the terminal
+attachment that the controller withheld. It also permits exactly one passive
+revision refresh when that lifecycle observation races attachment preflight,
+but only while the same Workstream ID and Runtime ID remain attachable; a
+second change or identity rotation still refuses. These changes affect the
+passive activity-time projection, navigator rendering/controller, and exact
+presentation-helper replacement; no schema, durable state model, provider
+Runtime ownership, or native provider interaction contract changed.
+An additional Park convergence correction atomically resolves an exact
+recovery-required, already-absent Runtime to `Workstream=parked` plus
+`Runtime=stopped`, preventing a deliberate second Park from creating the
+non-recoverable `recovery_required + stopped` pair while retaining native
+session binding and sticky attention.
+
+The explicitly authorized live gate predates that source correction and passed
+on the local machine and an ordinary-SSH-entered host, including confirmed
+schema-12-to-13 cutover, same-Runtime Codex continuity and reattachment across
+SSH disconnect/reconnect, atomic candidate installation, and complete
+acceptance cleanup. The first visual correction was later installed locally
+for operator inspection, but none of the later presentation refinements was
+installed or live-tested in that gate; the current corrected tree is not
+installed. The sanitized, content-free record retains the accepted executable
+hash and its exact 399-test repository evidence in [D16 host-local
+simplification acceptance](evidence/acceptance/d16-host-local.md).
+
+### Motivation and decision
+
+The former product let one Navigator register SSH hosts, exchange bounded
+snapshots and actions with them, and attach through SSH. That made host-local
+runtime authority look distributed and required client-side cross-host Project
+grouping, polling, cache, and unreachable-state behavior. D16 retires that
+surface. One wsnav instance controls only the machine on which it executes.
+
+Multi-host use is composition: terminal A runs host A's local `wsnav`; terminal
+B is an operator-established ordinary SSH session to host B and runs host B's
+`wsnav`. After SSH establishment, all WSNav control work for switching,
+contextual observer readiness, provider lifecycle, attention, recovery, and
+private-tmux attachment on host B is local to that instance. Terminal rendering
+and input still cross SSH and retain ordinary network latency. WSNav does not
+register SSH hosts, open or manage SSH, poll remote snapshots, issue remote
+mutations, attach through SSH, bridge remote utility shells, or present a
+unified multi-host catalog or attention view. Independent hosts require no
+cross-host WSNav release or protocol parity.
+
+### Scope
+
+- Make the product thesis and active architecture host-local while preserving
+  native provider UI, completed output, provider lifecycle, project-root-only
+  behavior, D12 shell semantics, D13 geometry, D14 scrolling, and D15 fast
+  local switching.
+- Preserve one current-host `HostRegistry`, host-local ProjectLocations and
+  Workstreams, Runtime generations, provider bindings, attention, private tmux
+  servers, and provider-owned history as the authority for that host.
+- Rebuild same-host Project grouping from authoritative ProjectLocations,
+  generating fresh Project IDs and a stable label-source location at the D16
+  cutover. Preserve that source's repository display name as the primary label
+  and the safe credential-free Git origin as separate secondary context and
+  grouping evidence. Origin metadata never associates separate hosts or grants
+  action authority. Remove Project-level hide/forget; Workstream archive and
+  restore remain the one visibility mechanism.
+- Reduce the active navigator to direct Workstreams, Projects, and Archived
+  pages. Workstreams always shows active Workstreams grouped by Project;
+  remove Recent, `ViewMode`, left/right view cycling, and Hosts. Archived is a
+  separate Project-grouped restore page. Page selection stays process-local and
+  is not persisted. This bounded structural reduction belongs to D16 so the
+  retired host/catalog UI is not carried into a later redesign.
+- Keep Projects as the host-local ProjectLocation surface. `n` on an exact
+  selected Location starts an independent Workstream, so a Project whose every
+  Workstream is archived remains usable. Empty active Workstreams routes to
+  registered Location selection before registration. `n` from a selected
+  active Workstream retains the exact same-Location fast path. Projects also
+  owns the typed registration-browser root action and explicit metadata
+  refresh; it has no Project hide/forget/remove action.
+- Detect Codex observer readiness read-only. Only an observer-dependent request
+  invokes a contextual guide, which captures the intent and revisions, asks
+  explicit consent before exact owned-profile creation or update, opens native
+  trust review without granting trust, and continues only after exact readiness
+  and revision revalidation. Decline cancels without mutation. Foreign,
+  modified, disabled, ambiguous, or live-Runtime-blocked integration changes
+  fail closed while existing Runtime attachment remains available. There is no
+  setup/settings page or public normal-workflow setup/update command; exact
+  removal remains an exceptional documented cleanup flow. Non-interactive CLI
+  actions never prepare or review a profile; they return typed readiness
+  guidance to interactive `wsnav`.
+- Derive the bounded current-host display from a valid sanitized operating-
+  system hostname, then `host-<HostId8>`, using the first eight lowercase
+  hexadecimal UUID digits. There is no configured label, `HostPresentation`
+  state, settings action, or label persistence. The derived display remains
+  bounded application metadata but is not repeated in ordinary navigator cards
+  or pages; the structurally host-local instance and its containing terminal or
+  SSH window already supply machine context. The renderer preserves the
+  established Project/provider/lifecycle/age color roles, with selection
+  changing only the row background; chromeless direct attach is exempt.
+- Remove remote-only JSON protocol and SSH transport, hidden remote endpoints,
+  remote release/capability handshakes, remote polling/cache/backoff/
+  unreachable state, host registration UI/CLI, cross-host grouping, and other
+  dead surfaces once implementation reaches this checkpoint. Host schema 13 is
+  the explicit consolidated state boundary; the client schema and catalog are
+  removed rather than revised.
+- Make current-host scope structural rather than a retained one-host variant:
+  remove client host/transport types, remote Navigator variants, host aliases,
+  host-plus-Workstream selection keys, and host fields from attachment status
+  or action DTOs. `HostId` remains once as registry identity and display-label
+  fallback evidence, never as an operator-selected action target.
+- Replace the generic local client/protocol boundary with one typed in-process
+  application facade used by both navigator and public CLI:
+  `snapshot`, `apply`, and `attach`. Delete `HostClient`, `LocalEndpoint`,
+  framed JSON, hidden local control endpoints, and the generic control ABI.
+  Replace cursor-paged snapshot framing with one deterministically ordered,
+  hard-bounded in-memory snapshot and a typed over-limit refusal.
+  Retain finite subprocess boundaries only for inherently external tmux, Git,
+  provider-helper, observer/hook, launch-barrier, and terminal-attachment work.
+
+### Breaking state-transition contract
+
+- D16 removes `ClientCatalog`, its schema, and its database. It reads no legacy
+  client row and provides no importer, client-state compatibility reader, dual
+  write, or automatic rollback. The exact retired files are `client.sqlite`,
+  `client.sqlite-wal`, and `client.sqlite-shm` under the selected state root.
+- An existing state root requires one launcher-owned, pre-presentation
+  confirmation from an ordinary interactive `wsnav` launch before current host
+  state or a retained presentation is opened. The confirmation names the
+  discarded remote registrations, aliases, Project IDs/grouping, hidden state,
+  cached capabilities, executable paths, preferences, and exact legacy
+  presentation, and separately names the preserved authoritative host/runtime
+  state.
+  Declining performs no mutation.
+  Hooks, observer sidecars, hidden helpers, and scripting commands cannot
+  confirm or start cutover.
+- Cutover enumerates the selected root's exact owned presentation sockets and
+  verifies session topology, pane roles, navigator PID/birth/executable,
+  attached-client count, and auxiliary-pane state. Ambiguous or foreign state
+  fails closed. An attached client, utility shell, or observer-review surface
+  blocks mutation and may be entered only through a no-state-open legacy drain
+  attachment so the operator can finish it and quit the old presentation.
+  After confirmation, cutover first takes an exclusive state-root transition
+  lease, repeats the proof, and may then retire one detached ordinary legacy
+  presentation. Its exact navigator and presentation artifacts must disappear
+  before the proof is repeated again; exact dead owned presentation artifacts
+  may be removed under the lease, while malformed or foreign artifacts refuse.
+  Runtime tmux servers and provider processes are never targeted. D16
+  control/open paths honor the lease; observer-transition bypasses it and
+  serializes only through SQLite so provider evidence is not blocked behind
+  presentation retirement.
+- Each new D16 presentation creates its bounded private `ownership.json`, fixed
+  configuration, and mode-`0700` directory before starting tmux, then records
+  the exact owned socket identity. Reopen and close revalidate those identities
+  plus the bounded artifact allowlist. Close unlinks only exact owned files and
+  socket and removes the empty directory; it never recursively deletes a
+  presentation tree, and foreign, malformed, symlinked, changed, or unknown
+  artifacts remain untouched.
+- Live provider Runtimes and their exact observer sidecars may remain active.
+  A narrow observer-transition state handle accepts exactly host schema 12 or
+  13, never creates or migrates, reads no client file, and exposes only the
+  unchanged lifecycle/binding/attention surface. Within the unchanged
+  three-second native Codex timeout, D16 bounds payload/provenance/App Server
+  work to 1.75 seconds, reserves 750 milliseconds for monotonic
+  `BUSY`/`LOCKED` database retry, 250 milliseconds for bounded failure
+  recording, and the final 250 milliseconds for outer scheduling and exit. If
+  an exact authorized event cannot commit, Codex hooks and OpenCode observers
+  atomically retain one exact
+  `run/<RuntimeId>/observer-degraded/<sha256-generation>` marker containing only
+  typed identity and a closed reason. Snapshot/action paths derive only the
+  current generation's filename; snapshots show `unknown` and
+  observer-dependent actions remain unavailable until exact reconciliation or
+  Runtime retirement. Migration prebuilds and validates its Project plan,
+  revalidates under the writer transaction, and rolls back if writer
+  acquisition plus work reaches 500 milliseconds. Other D16 entrypoints fail
+  with typed `cutover required`.
+- A pre-D16 OpenCode observer has no such retry contract. After confirmation
+  and before client-file deletion, cutover enumerates all live OpenCode
+  Runtimes in opaque RuntimeId order and corroborates each helper's recorded
+  PID/birth, executable identity, generation, endpoint, and status. Exact D16
+  observers are revalidated in place; ambiguous identity refuses before any
+  signal. For each pre-D16 helper, cutover establishes a D16 standby SSE stream
+  with only bounded parsed in-memory buffering and durably journals the old and
+  standby PID/birth/executable identities, expected handle revision, and phase
+  before signaling. It freezes the exact old helper, rechecks its stopped
+  identity and handle, compare-and-swaps only the observer handle, activates
+  the standby only from that committed assignment, and then terminates the
+  frozen old helper. Repeated status is idempotent and settled evidence
+  deduplicates by generation, session, and provider message ID. The exact
+  private `d16-observer-handover.json` and
+  `d16-observer-handover.json.tmp` paths support restore before the swap. After
+  exact buffer replay, the standby durably records the bounded private
+  `d16-observer-handover.ack` through its sole `.ack.tmp` path; the launcher
+  requires that post-activation proof and exact process recheck before old
+  cleanup, including after its original readiness pipe is lost. Malformed or
+  changed evidence signals nothing. Failure refuses before deletion; provider
+  process, Runtime, terminal, session, and completed output remain unchanged.
+  After all handovers and journal cleanup, remove only the three exact client
+  paths, sync the state directory, and transactionally migrate host schema 12
+  to 13 using only `host.sqlite`.
+- Preserve HostIdentity, provider/observer integration state,
+  ProjectLocations, the typed Project browser root, all Workstream provider and
+  activity fields, independent-creation requests, Runtime generations,
+  OpenCode Runtime handles, provider bindings, attention, compound operations,
+  private tmux servers, and native provider history. Generate fresh Projects
+  and label-source locations from current-host ProjectLocations. Create no
+  HostPresentation, configured label, page/view preference, or Project hidden
+  state.
+- Narrow production schema support to exact boundaries: current-only opens
+  schema 13, confirmed cutover migrates exact schema 12, observer-transition
+  accepts schema 12 or 13, and fresh-create writes schema 13. Schema 0 through
+  11, malformed or missing evidence, and every other unsupported version return
+  typed state-recovery/reset-required without mutation; a future version fails
+  closed. Remove production incremental pre-12 migrations and behavioral
+  migration tests, retaining only an exact schema-12 fixture for 12-to-13
+  coverage.
+- Group exact credential-free origin fingerprints only within this host;
+  missing, ambiguous, and local-path identities remain separate. The primary
+  Project label source initially comes from the lowest-LocationId group member.
+  Joins and merges preserve a surviving Project's source; only departure of the
+  exact source selects the lowest remaining member, and display changes update
+  the Project label only for that source. Matching Projects survive merges,
+  sole-member unmatched changes retain their Project ID, multi-member unmatched
+  changes split, and orphan Projects are deleted. Missing evidence never
+  dissolves an association. The safe origin label remains separate secondary
+  context.
+- Gather changed repository evidence only through the explicit Projects-page
+  metadata refresh. It reads the selected Project's locations in bounded
+  LocationId order outside SQLite, then revalidates all captured Project and
+  Location revisions and applies the complete result transactionally. One
+  failed or unsafe inspection or stale revision makes the whole action
+  non-mutating; a successful no-fingerprint observation preserves association.
+  No snapshot, redraw, attachment, or Workstream switch performs Git inspection.
+- The reset is restartable. Missing retired client files are success, partial
+  removal is retried, and a failed host migration leaves `host.sqlite` at
+  schema 12. Ordinary navigation remains blocked until schema 13 is complete.
+  No Start, Resume, Park, provider signal, Runtime rotation, or provider-input
+  action is part of cutover.
+- Fresh-create accepts only an absent state root or an existing private
+  directory that is empty or contains exactly the private, current-user-owned,
+  unlocked `transition.lock` regular file. It acquires that lease and repeats
+  the allowlist check before database creation. Host SQLite main/WAL/SHM, any
+  client file, `run/`, `presentation/`, either observer-handover journal path,
+  a malformed, foreign, non-regular, or locked lease, or any unknown entry
+  yields typed state-recovery-required without adoption or cleanup. A missing
+  host database beside any such artifact never creates a new HostIdentity.
+- Downgrade is unsupported after cutover. Operators who require rollback must
+  park or stop managed Runtimes, exit WSNav, and create a verified offline copy
+  of the complete state root before confirmation, then restore that complete
+  copy before running a pre-D16 binary. This optional procedure is outside D16;
+  D16 creates no backup and reverse-synchronizes no Project, label-source, or
+  preference state.
+- An outer SSH disconnect may end or detach that host's disposable presentation
+  but must not stop, park, rotate, or restart its private Runtime/provider.
+  Reconnect to the host, rerun `wsnav`, and reattach.
+
+### Non-goals
+
+D16 includes only the structural UI reduction needed to remove obsolete host
+and view concepts. It does not add a broader visual/daily-use redesign, SSH
+launcher, terminal/window manager integration, cross-host aggregator, daemon,
+state synchronization, session transfer, remote install/update, or provider
+behavior change. It does not change native provider workflow, add
+compatibility behavior for the retired remote protocol, or authorize arbitrary
+existing-session adoption. Broader UI/UX work remains a possible D17 after the
+smaller D16 surface is implemented and accepted.
+
+### Implementation slices
+
+Slices 1 through 8 are complete. The list retains the authority-preserving
+delivery order and the separation between disposable validation and explicitly
+authorized live local and SSH-entered-host acceptance.
+
+1. **Documentation-only design pass.** Reconcile `design.md` and
+   `roadmap.md`, mark D0-D15 SSH evidence historical, settle same-host Project
+   semantics, reduced navigation and dormant-Project creation, contextual
+   observer onboarding, derived host display, direct local facade, and the
+   explicit client-state reset and host-schema boundary.
+2. **State foundation.** Implement schema 13 Project state,
+   deterministic Project reconstruction, complete preservation of the typed
+   schema-12 host inventory, the merge/split/stable-label-source state machine,
+   explicit current-only, observer-transition, fresh-create, and cutover modes,
+   the exact fresh-root classifier, bounded observer database deadlines, the
+   privacy-bounded observer-degraded marker, and the restartable OpenCode
+   standby-handover journal. Remove production pre-12 migration paths behind
+   focused schema fixtures. This slice does not change `HostRegistry::open`,
+   activate schema 13, touch a real state root, delete a client file, signal a
+   process, or alter current product behavior.
+3. **Cutover orchestration.** Implement exact presentation discovery,
+   confirmation inputs, transition-lease ownership, repeated controller proof,
+   legacy-presentation drain/retirement planning, and OpenCode sidecar handover
+   execution behind disposable tests without routing the current product into
+   it or mutating an ordinary state root.
+4. **Local application surface.** Add the typed in-process
+   `snapshot`/`apply`/`attach` facade, the simplified Workstreams/Projects/
+   Archived controller and renderer, exact Location-based creation paths,
+   derived host display, and contextual Codex readiness guide behind typed
+   seams and focused tests. Preserve D12 shell behavior and D13-D15 local
+   interaction invariants.
+5. **Atomic activation.** In one cohesive cutover slice, add the
+   pre-presentation confirmation and safe drain/retirement, acquire and repeat
+   the transition proofs, complete any required observer handover, remove the
+   three exact client files, activate schema 13/current-only open, and route
+   navigator plus public CLI through the direct local facade and reduced page
+   model. No intermediate build may mix schema 13 or the new navigator with the
+   old client/catalog path.
+6. **Deep deletion.** Remove client catalog/schema, host registration, remote
+   monitor and picker, unreachable state, cross-host selectors, SSH attachment
+   and utility-shell bridging, remote observer barriers, `By host`, Recent,
+   `ViewMode`, Hosts, HostPresentation/configurable-label state, generic
+   `HostClient`/`LocalEndpoint`, framed JSON, hidden local/remote endpoints,
+   snapshot cursor/page/replay machinery, release/capability handshakes,
+   generic control ABI, public normal-workflow observer setup/update commands,
+   and their tests and fixtures. Keep only typed local domain/application DTOs,
+   exceptional exact cleanup/diagnostics, and bounded finite helpers required
+   for inherently external operations.
+7. **Operator documentation.** Update README, operator guidance, command help,
+   and transition notes to explain ordinary SSH composition, the confirmed
+   clean break, unsupported downgrade, contextual observer guidance and exact
+   cleanup, the three-page navigation model, and the host-local reconnect/
+   disconnect boundary.
+8. **Full acceptance.** Run the complete repository and content/privacy gates,
+   then perform operator-gated local and SSH-entered-host acceptance with
+   sanitized, content-free evidence and complete cleanup.
+
+Each implementation slice must be independently reviewable and run its focused
+tests plus diff checks. The final slice runs the complete repository gate; a
+large retirement diff is not accepted as one undifferentiated change.
+
+### Exit gate
+
+D16 closes only when all of the following are true:
+
+- host-local operation passes on the local machine and on a machine reached by
+  ordinary operator SSH, with WSNav running locally on each host;
+- on the SSH-entered host, starting wsnav over its existing registry reattaches
+  the same recorded live provider process and Runtime generation without a
+  Start, Resume, Park, or Runtime rotation;
+- every host preserves its HostIdentity, integrations, ProjectLocations,
+  Project browser root, Workstream provider/activity/lifecycle fields,
+  independent-creation requests, Runtime generations, OpenCode Runtime
+  handles, provider identities and bindings, attention, compound operations,
+  native history, and private tmux isolation;
+  no Workstream or provider session is copied or migrated between hosts;
+- no WSNav action spawns, manages, polls, or mutates SSH/network control for
+  another host, and remote-only surfaces are removed rather than left as
+  compatibility behavior;
+- an outer SSH disconnect may end/detach presentation but never stops, parks,
+  rotates, or restarts the host Runtime/provider; reconnect and rerun reattach
+  successfully;
+- an existing state root changes only after the exact pre-presentation
+  interactive confirmation;
+  declining, hook/sidecar invocation, hidden helpers, and scripting commands
+  perform no cutover mutation;
+- cutover verifies every owned presentation's exact topology, navigator
+  PID/birth/executable, client count, and auxiliary state; ambiguous, foreign,
+  attached, utility-shell, and observer-review cases mutate nothing, while the
+  bounded drain attachment opens no host state. One confirmed detached ordinary
+  legacy presentation is retired without targeting a Runtime only after an
+  exclusive transition lease and repeated proof; the proofs repeat again after
+  retirement and before any client-file deletion or migration;
+- a live provider retains the same process, Runtime generation, native session,
+  terminal, and completed output across accepted cutover. Newly spawned Codex
+  hooks use the schema-12/13 observer-transition handle, while a pre-D16
+  OpenCode sidecar is replaced only through the deterministic, journaled
+  standby handover. Every live helper's PID/birth, executable, generation,
+  endpoint, and status are corroborated first, and exact D16 observers remain
+  in place. The standby proves its stream but cannot mutate before assignment;
+  the exact old helper is frozen and reverified before the observer-handle
+  compare-and-swap, and only that frozen PID/birth is terminated. Inability to
+  establish every handover refuses before client-file deletion. The standby's
+  exact durable post-activation acknowledgement proves buffer replay and
+  survives loss of the original launcher pipe before old-helper cleanup;
+- the unchanged native Codex profile keeps its three-second timeout, D16 hook
+  preparation and App Server work finish within 1.75 seconds, the next 750
+  milliseconds are reserved for monotonic bounded retry of SQLite `BUSY` and
+  `LOCKED`, the next 250 milliseconds are reserved for failure recording, and
+  250 milliseconds remain as outer margin. Migration prebuilds its Project plan
+  and limits writer acquisition plus transactional work to 500 milliseconds,
+  rolling back to schema 12 at the deadline. Contention tests hold a competing
+  writer and prove an exact lifecycle or attention event commits wholly before
+  or after migration or leaves only the bounded generation-scoped degraded
+  marker. That marker exposes no event or error payload, makes snapshots
+  `unknown`, blocks observer-dependent actions, and emits no provider-pane
+  output. OpenCode handover tests prove bounded parsed buffering, idempotent
+  status, exact settled-message deduplication, and exact restore or completion
+  after interruption at every journal phase; malformed or changed evidence
+  signals nothing;
+- `ClientCatalog`, `src/state/client.rs`, client schema/migrations, importer,
+  client-state compatibility reader, dual write, and client-catalog behavioral
+  tests are absent from compiled source and active tests; only the three exact
+  legacy filenames remain in cutover cleanup and historical
+  documents/evidence, and those files are removed without being read, imported,
+  backed up, or renamed;
+- host schema 12 migrates transactionally to 13 using only `host.sqlite`;
+  interruption or partial client-file removal is retryable, a failed
+  transaction leaves host schema 12 intact, and ordinary navigation stays
+  blocked until schema 13 is complete. Current-only also rejects schema 13 when
+  any exact legacy client file has reappeared; confirmed cleanup removes only
+  those files and performs no redundant migration;
+- production contains no incremental schema-0-through-11 migration path:
+  current-only accepts exact schema 13, confirmed cutover exact schema 12,
+  observer-transition schema 12 or 13, and fresh-create writes 13. Older,
+  malformed, missing, future, or otherwise unsupported schema evidence fails
+  closed with the typed recovery/reset or future-state result and no mutation;
+  only an exact schema-12 migration fixture remains active;
+- ordinary state open never upgrades schema 12 implicitly: Navigator,
+  actions, helpers, and scripts receive the typed cutover-required result;
+  observer-transition accepts only schema 12 or 13 and exposes only unchanged
+  lifecycle/binding/attention operations without creating, migrating, or
+  reading client state; fresh-create accepts only an absent state root or an
+  existing private directory that is empty or contains exactly the private,
+  current-user-owned, unlocked `transition.lock` regular file. It acquires that
+  lease and repeats the complete allowlist check before creation. Any host
+  main/WAL/SHM, legacy client file, Runtime or presentation directory,
+  observer-handover journal or activation-ack path,
+  locked/malformed/foreign/non-regular lease,
+  or unknown artifact returns typed state recovery required without adoption,
+  signaling, cleanup, or a new HostIdentity; and only the confirmed interactive
+  transition entrypoint may invoke migration and reset;
+- fresh Project IDs and stable label-source locations are rebuilt from
+  current-host ProjectLocations with no Project hidden field or imported hidden
+  state. Exact fingerprints group only within this host; missing, ambiguous,
+  and local-path identities remain separate. Joins and merges preserve the
+  surviving Project's label source, display changes update its label only when
+  they belong to that source, and only departure of the exact source selects
+  the lowest remaining LocationId. The safe origin label remains separate
+  secondary context; later missing evidence preserves an existing association
+  while positive exact evidence follows the bounded same-host
+  merge/update/split rules, matching targets survive, orphan Projects disappear,
+  and a missing, foreign, or non-member label source fails closed;
+- repository reinspection occurs only through the explicit revision-checked,
+  network-free Projects action; one stale revision or failed/unsafe inspection
+  makes the complete action non-mutating, successful no-fingerprint evidence
+  preserves association, and ordinary snapshot, redraw, attachment, and D15
+  switching paths perform no Git subprocess or Project mutation;
+- no generic preferences, host label, or `HostPresentation` row is imported or
+  created, and D16 creates no automatic backup or downgrade path. A
+  pre-D16 binary fails closed on host schema 13 unless the operator first
+  restores a verified offline complete-state-root backup created outside D16;
+- the derived current-host display obeys validated hostname, then
+  `host-<HostId8>` precedence; the validator enforces the 64-scalar,
+  single-line, no-control-or-format-character bound. It remains bounded
+  application metadata, but no ordinary navigator card or page repeats it;
+  the containing terminal or SSH window supplies machine context. Direct
+  attach remains intentionally chromeless and exempt; no page or CLI mutates
+  that display;
+- Project-group headers render only the accented Project name, with no
+  disclosure glyph or Location/active/archived counts. Each Workstream is a
+  minimal two-line tree child: provider plus right-aligned relative age on the
+  first line, then lifecycle marker plus the native thread name using the full
+  remaining second line. The host label is absent, and a missing native name
+  falls back to the stable short Workstream ID without a `Workstream` prefix;
+- Parked lifecycle always renders `p` even while sticky attention remains
+  unseen. Status and guidance prose wraps by terminal cell width, with status
+  height and list/mouse geometry derived from the same wrapped layout;
+- a Running provider attachment is replaceable for ordinary A-to-B switching,
+  while AwaitRuntime Start remains serialized. An exact provider helper pane
+  left dead by detach or Park may be respawned in place only after the owned
+  single-window roles, live navigator, and bounded utility cleanup revalidate;
+  ambiguous or otherwise dead topology still refuses before provider mutation.
+  AwaitRuntime attaches as soon as the exact owned Runtime exists, including
+  while its durable lifecycle is `Starting`; native SessionStart observation
+  confirms lifecycle progress but is not a terminal-attachment prerequisite;
+- Workstreams, Projects, and Archived are the only ordinary navigator pages.
+  Workstreams and Archived are Project-grouped by descending durable
+  `last_activity_sequence` with opaque Project/Workstream ID tie-breakers;
+  Archived is a direct restore page, restore returns to and selects in
+  Workstreams without provider launch, and no page/view choice is persisted.
+  Recent, `ViewMode`, left/right cycling, and Hosts are absent;
+- `n` from an active Workstream retains its exact ProjectLocation fast path;
+  `n` from an exact Projects Location starts there even when the Project is
+  dormant; and an empty active page routes to existing Location selection
+  before registration. Project headers never supply ambiguous action authority,
+  and Projects owns the typed browser-root and revision-checked metadata actions;
+- navigator startup detects observer readiness without mutation. An
+  observer-dependent Codex request captures its exact intent/revisions and
+  offers explicit consent before owned profile creation or update, then opens
+  native trust review without granting trust and continues only after exact
+  readiness plus revision revalidation. Decline mutates nothing; incomplete
+  review remains accurately trust-pending; stale intent, foreign, modified,
+  disabled, ambiguous, or live-Runtime-blocked changes refuse without
+  retargeting or blocking existing Runtime attachment. No setup/settings page
+  or public normal setup/update command remains, and exceptional exact removal
+  preserves foreign/modified state and refuses with live Runtimes. A
+  non-interactive CLI request returns typed readiness guidance without profile
+  mutation or native review;
+- `By host`, remote host selectors, remote registration, remote unreachable
+  states, and cross-host grouping are absent from active TUI and CLI behavior;
+- Project hide, unhide, forget, remove, and `x` are absent from active TUI and
+  CLI behavior; Workstream archive/restore is the sole visibility mechanism;
+- client host/transport types, remote Navigator variants, host aliases,
+  host-plus-Workstream selection keys, and host fields in attachment/action
+  DTOs are absent; one registry `HostId` remains only as identity and display
+  fallback evidence;
+- `src/app/remote.rs`, `src/remote.rs`, SSH command construction, release
+  probes, remote protocol/version types, and remote-only tests/fixtures are
+  deleted. `HostClient`, `LocalEndpoint`, framed JSON, hidden local control
+  endpoints, and the generic control ABI are also absent; navigator and public
+  CLI call the typed in-process `snapshot`/`apply`/`attach` facade. Snapshot
+  cursor/page/replay state is absent; the facade returns one deterministically
+  ordered hard-bounded projection or a typed over-limit refusal. Any
+  surviving finite local-child DTOs belong only to inherently external work
+  and carry no retired transport compatibility shape;
+- provider UI, management-traffic, completed-output, and project-root-only
+  boundaries remain intact;
+- bounded metadata/privacy rules, fail-closed identity/effects, one private
+  tmux server per live Runtime, and D12-D15 local lifecycle/interaction
+  invariants remain green;
+- `scripts/check`, staged and unstaged `git diff --check`, and focused
+  D16 tests pass; and
+- any live real-host acceptance is explicitly operator-gated, sanitized, and
+  content-free, with complete cleanup. Historical D3-D15 evidence is not
+  rewritten as current validation.
+
 ## Deferred beyond V1
 
 The roadmap does not include arbitrary existing-session adoption, hard
@@ -3401,6 +3977,10 @@ automatic plan rollover, provider/model/role launch presets, provider filters
 or grouping, generalized provider onboarding, unproven OpenCode navigator
 Rename, profile composition, Claude parity, multiple-controller catalog
 synchronization, a public daemon, or a replacement provider UI.
+
+WSNav-managed cross-host/SSH operation is retired by D16, not deferred for a
+later aggregator. Ordinary SSH composition and one host-local wsnav instance
+per execution host are the supported multi-host workflow.
 
 One optional and undecided post-V1 expansion is a per-Workstream presentation
 surface that treats the native provider TUI and utility shell as one unit. It

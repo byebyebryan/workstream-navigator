@@ -28,6 +28,18 @@ pub struct ProfileOwnership {
     pub content_hash: String,
 }
 
+/// Read-only classification of the exact scoped observer profile.  Inspecting
+/// never creates, rewrites, trusts, or removes provider configuration.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProfileInspection {
+    Missing,
+    Foreign,
+    Modified,
+    UpdateRequired,
+    TrustPending,
+    Ready,
+}
+
 /// Creates, verifies, or removes only the exact scoped observer declaration
 /// and native trust, preserving any validated provider-owned prefix.
 #[derive(Clone, Debug)]
@@ -65,6 +77,76 @@ impl ObserverProfile {
         let command = hook_command(&self.hook_executable, &self.state_root);
         format!(
             "{PROFILE_MARKER}[features]\nhooks = true\n\n[[hooks.SessionStart]]\nmatcher = \"startup|resume|clear|compact\"\n[[hooks.SessionStart.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = 3\n\n[[hooks.UserPromptSubmit]]\n[[hooks.UserPromptSubmit.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = 3\n\n[[hooks.Stop]]\n[[hooks.Stop.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = 3\n\n[[hooks.SessionEnd]]\nmatcher = \"other\"\n[[hooks.SessionEnd.hooks]]\ntype = \"command\"\ncommand = {command}\ntimeout = 3\n"
+        )
+    }
+
+    /// Classifies the selected profile using only bounded file reads and the
+    /// retained ownership record.  This is the D16 readiness probe used before
+    /// an operation decides whether to offer contextual setup guidance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an I/O error when the bounded owned-profile inspection cannot
+    /// read metadata or content needed to classify the declaration.
+    pub fn inspect(
+        &self,
+        existing: Option<&ProfileOwnership>,
+    ) -> Result<ProfileInspection, ProfileError> {
+        let path = self.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => Some(metadata),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(ProfileError::Io(error)),
+        };
+        let Some(existing) = existing else {
+            return Ok(if metadata.is_some() {
+                ProfileInspection::Foreign
+            } else {
+                ProfileInspection::Missing
+            });
+        };
+        if existing.canonical_path != path {
+            return Ok(ProfileInspection::Foreign);
+        }
+        let Some(metadata) = metadata else {
+            return Ok(ProfileInspection::Missing);
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Ok(ProfileInspection::Modified);
+        }
+
+        let expected_hash = hash(&self.rendered());
+        let current_contract = existing.profile_schema_version == OBSERVER_PROFILE_SCHEMA_VERSION
+            && existing.hook_executable == self.hook_executable
+            && existing.content_hash == expected_hash;
+        if !current_contract {
+            let previous = Self::new(
+                self.codex_home.clone(),
+                existing.hook_executable.clone(),
+                self.state_root.clone(),
+            );
+            let Ok(previous_declaration) = previous.declaration_for(existing) else {
+                return Ok(ProfileInspection::Modified);
+            };
+            return Ok(
+                match previous.read_owned_document(existing, &hash(&previous_declaration)) {
+                    Ok(_) => ProfileInspection::UpdateRequired,
+                    Err(ProfileError::Io(error)) => return Err(ProfileError::Io(error)),
+                    Err(_) => ProfileInspection::Modified,
+                },
+            );
+        }
+        let suffix = match self.owned_native_suffix(existing, &expected_hash) {
+            Ok(suffix) => suffix,
+            Err(ProfileError::Io(error)) => return Err(ProfileError::Io(error)),
+            Err(_) => return Ok(ProfileInspection::Modified),
+        };
+        Ok(
+            if suffix.is_some_and(|suffix| has_complete_hook_trust(&suffix, &path)) {
+                ProfileInspection::Ready
+            } else {
+                ProfileInspection::TrustPending
+            },
         )
     }
 
@@ -535,6 +617,40 @@ mod tests {
         )
         .unwrap();
         ownership
+    }
+
+    #[test]
+    fn read_only_inspection_distinguishes_missing_foreign_modified_and_trust() {
+        let temporary = tempfile::tempdir().unwrap();
+        let manager = manager(temporary.path());
+        assert_eq!(manager.inspect(None).unwrap(), ProfileInspection::Missing);
+
+        fs::create_dir_all(manager.path().parent().unwrap()).unwrap();
+        fs::write(manager.path(), "provider-owned = true\n").unwrap();
+        assert_eq!(manager.inspect(None).unwrap(), ProfileInspection::Foreign);
+        fs::remove_file(manager.path()).unwrap();
+
+        let ownership = manager.install("owner".to_owned(), None).unwrap();
+        assert_eq!(
+            manager.inspect(Some(&ownership)).unwrap(),
+            ProfileInspection::TrustPending
+        );
+        fs::write(manager.path(), "changed\n").unwrap();
+        assert_eq!(
+            manager.inspect(Some(&ownership)).unwrap(),
+            ProfileInspection::Modified
+        );
+    }
+
+    #[test]
+    fn read_only_inspection_recognizes_complete_native_trust() {
+        let temporary = tempfile::tempdir().unwrap();
+        let manager = manager(temporary.path());
+        let ownership = write_owned_document(&manager, "", &complete_native_hook_suffix(&manager));
+        assert_eq!(
+            manager.inspect(Some(&ownership)).unwrap(),
+            ProfileInspection::Ready
+        );
     }
 
     #[test]

@@ -11,9 +11,10 @@ use std::{
 };
 
 use wsnav::{
-    domain::WorkstreamId,
+    domain::{RandomIdGenerator, WorkstreamId},
     presentation::{AttachmentPhase, Presentation, PresentationAction, PresentationPaths},
     runtime::{LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, SystemTmux},
+    state,
 };
 
 const NAVIGATOR_PANE: &str = "0.0";
@@ -23,6 +24,19 @@ const SLEEP_PROGRAM: &str = "/usr/bin/sleep";
 const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 const READINESS_POLL: Duration = Duration::from_millis(10);
 const DEFAULT_NAVIGATOR_PANE_WIDTH: u16 = 32;
+
+fn current_state_root() -> tempfile::TempDir {
+    let root = tempfile::tempdir().expect("temporary state root");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
+            .expect("private state root");
+    }
+    drop(state::fresh_create(root.path(), &RandomIdGenerator).expect("fresh schema-13 state root"));
+    root
+}
 
 struct PrivateTmuxGuard {
     directory: PathBuf,
@@ -38,7 +52,7 @@ impl Drop for PrivateTmuxGuard {
 }
 
 #[test]
-fn open_or_create_retires_a_live_session_with_a_dead_navigator_pane() {
+fn open_or_create_refuses_an_unmarked_path_shaped_presentation() {
     if !tmux_available() {
         eprintln!("skipped: tmux is unavailable");
         return;
@@ -46,7 +60,7 @@ fn open_or_create_retires_a_live_session_with_a_dead_navigator_pane() {
     assert!(Path::new(FALSE_PROGRAM).is_file());
     assert!(Path::new(SLEEP_PROGRAM).is_file());
 
-    let state_root = tempfile::tempdir().unwrap();
+    let state_root = current_state_root();
     let paths = PresentationPaths::fresh(state_root.path());
     let presentation_root = paths.directory.parent().unwrap();
     fs::create_dir_all(presentation_root).unwrap();
@@ -113,12 +127,71 @@ fn open_or_create_retires_a_live_session_with_a_dead_navigator_pane() {
     );
 
     let failed_directory = paths.directory.clone();
-    let (fresh, created) = Presentation::open_or_create(state_root.path()).unwrap();
+    let result = Presentation::open_or_create(state_root.path());
 
-    assert!(created);
-    assert_ne!(fresh.paths().directory, failed_directory);
-    assert!(!failed_directory.exists());
-    assert!(!session_exists(&paths.socket, &paths.session_name));
+    assert!(matches!(
+        result,
+        Err(wsnav::presentation::PresentationError::ControlRefused(message))
+            if message.contains("ownership") || message.contains("foreign")
+    ));
+    assert!(failed_directory.exists());
+    assert!(session_exists(&paths.socket, &paths.session_name));
+}
+
+#[test]
+fn navigator_stop_leaves_cleanup_to_the_outer_owner() {
+    if !tmux_available() {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+
+    let state_root = current_state_root();
+    let presentation = Presentation::fresh_with_executable(
+        state_root.path(),
+        PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
+    );
+    let paths = presentation.paths().clone();
+    let _guard = PrivateTmuxGuard {
+        directory: paths.directory.clone(),
+        socket: paths.socket.clone(),
+    };
+    presentation.start().unwrap();
+
+    let mut client = attach_tmux_client(&paths);
+    assert!(
+        tmux_command(&paths.socket)
+            .args(["send-keys", "-t"])
+            .arg(format!("{}:{NAVIGATOR_PANE}", paths.session_name))
+            .arg("q")
+            .status()
+            .unwrap()
+            .success()
+    );
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    while Instant::now() < deadline
+        && (client.try_wait().unwrap().is_none()
+            || pane_dead(&paths.socket, &paths.session_name, NAVIGATOR_PANE) != Some(true))
+    {
+        thread::sleep(READINESS_POLL);
+    }
+    let navigator_target = format!("{}:{NAVIGATOR_PANE}", paths.session_name);
+    let navigator_output = tmux_output(
+        &paths.socket,
+        ["capture-pane", "-p", "-J", "-t", &navigator_target],
+    );
+    assert!(
+        client.try_wait().unwrap().is_some(),
+        "navigator pane: {navigator_output}"
+    );
+    assert_eq!(
+        pane_dead(&paths.socket, &paths.session_name, NAVIGATOR_PANE),
+        Some(true)
+    );
+    assert!(session_exists(&paths.socket, &paths.session_name));
+    assert!(paths.directory.exists());
+
+    presentation.close().unwrap();
+    assert!(!paths.directory.exists());
 }
 
 #[test]
@@ -128,7 +201,7 @@ fn private_presentation_restores_navigator_width_when_the_window_resizes() {
         return;
     }
 
-    let state_root = tempfile::tempdir().unwrap();
+    let state_root = current_state_root();
     let presentation = Presentation::fresh_with_executable(
         state_root.path(),
         PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
@@ -184,7 +257,7 @@ fn private_presentation_has_only_owned_roles_and_bounded_key_tables() {
         eprintln!("skipped: tmux is unavailable");
         return;
     }
-    let state_root = tempfile::tempdir().unwrap();
+    let state_root = current_state_root();
     let presentation = Presentation::fresh_with_executable(
         state_root.path(),
         PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
@@ -273,7 +346,7 @@ fn mutated_private_geometry_fails_closed_without_rearranging_panes() {
         eprintln!("skipped: tmux is unavailable");
         return;
     }
-    let state_root = tempfile::tempdir().unwrap();
+    let state_root = current_state_root();
     let presentation = Presentation::fresh_with_executable(
         state_root.path(),
         PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
@@ -294,7 +367,6 @@ fn mutated_private_geometry_fails_closed_without_rearranging_panes() {
     let utility = String::from_utf8(output.stdout).unwrap().trim().to_owned();
     for (option, value) in [
         ("@wsnav_role", "utility".to_owned()),
-        ("@wsnav_host_alias", "local".to_owned()),
         ("@wsnav_workstream_id", WorkstreamId::new().to_string()),
     ] {
         let status = tmux_command(&paths.socket)
@@ -315,7 +387,7 @@ fn local_shell_create_is_idempotent_and_failed_launch_restores_two_panes() {
         eprintln!("skipped: tmux is unavailable");
         return;
     }
-    let state_root = tempfile::tempdir().unwrap();
+    let state_root = current_state_root();
     let project_root = tempfile::tempdir().unwrap();
     let presentation = Presentation::fresh_with_executable(
         state_root.path(),
@@ -331,7 +403,7 @@ fn local_shell_create_is_idempotent_and_failed_launch_restores_two_panes() {
     exercise_local_shell(&presentation, &paths, workstream_id, project_root.path());
     presentation.close().unwrap();
 
-    let failed_root = tempfile::tempdir().unwrap();
+    let failed_root = current_state_root();
     let failed = Presentation::fresh_with_executable(
         failed_root.path(),
         PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
@@ -351,7 +423,7 @@ fn guarded_close_targets_the_attached_client_and_only_utility_pane() {
         eprintln!("skipped: tmux is unavailable");
         return;
     }
-    let state_root = tempfile::tempdir().unwrap();
+    let state_root = current_state_root();
     let project_root = tempfile::tempdir().unwrap();
     let presentation = Presentation::fresh_with_executable(
         state_root.path(),
@@ -369,7 +441,6 @@ fn guarded_close_targets_the_attached_client_and_only_utility_pane() {
     presentation
         .create_or_focus_shell(
             "%0",
-            "local",
             workstream_id,
             project_root.path(),
             Path::new("/bin/sh"),
@@ -511,13 +582,7 @@ fn exercise_local_shell(
             let cwd = project_root.to_path_buf();
             thread::spawn(move || {
                 gate.wait();
-                presentation.create_or_focus_shell(
-                    "%0",
-                    "local",
-                    workstream_id,
-                    &cwd,
-                    Path::new("/bin/sh"),
-                )
+                presentation.create_or_focus_shell("%0", workstream_id, &cwd, Path::new("/bin/sh"))
             })
         })
         .collect();
@@ -531,9 +596,11 @@ fn exercise_local_shell(
     let utility_top = pane_field(paths, "utility", "#{pane_top}");
     let provider_top = pane_field(paths, "provider", "#{pane_top}");
     assert!(utility_top > provider_top);
-    assert_eq!(
-        pane_value(paths, "utility", "#{pane_current_path}"),
-        project_root.display().to_string()
+    wait_for_pane_value(
+        paths,
+        "utility",
+        "#{pane_current_path}",
+        &project_root.display().to_string(),
     );
     assert_eq!(pane_option(paths, "utility", "remain-on-exit"), "off");
 
@@ -548,13 +615,7 @@ fn exercise_local_shell(
         assert!(owned_panes.contains(&active_pane(paths)));
     }
     presentation
-        .create_or_focus_shell(
-            "%1",
-            "local",
-            workstream_id,
-            project_root,
-            Path::new("/bin/sh"),
-        )
+        .create_or_focus_shell("%1", workstream_id, project_root, Path::new("/bin/sh"))
         .unwrap();
     assert_eq!(pane_snapshot(paths).len(), 3);
     for source in ["navigator", "provider"] {
@@ -587,25 +648,7 @@ fn exercise_failed_shell(
     set_provider_context(paths, workstream_id);
     assert!(
         presentation
-            .create_or_focus_shell(
-                "%0",
-                "remote",
-                workstream_id,
-                project_root,
-                Path::new("/bin/sh"),
-            )
-            .is_err()
-    );
-    assert_eq!(pane_snapshot(paths).len(), 2);
-    assert!(
-        presentation
-            .create_or_focus_shell(
-                "%999",
-                "local",
-                workstream_id,
-                project_root,
-                Path::new("/bin/sh"),
-            )
+            .create_or_focus_shell("%999", workstream_id, project_root, Path::new("/bin/sh"),)
             .is_err()
     );
     assert_eq!(pane_snapshot(paths).len(), 2);
@@ -613,7 +656,6 @@ fn exercise_failed_shell(
         presentation
             .create_or_focus_shell(
                 "%0",
-                "local",
                 workstream_id,
                 project_root,
                 Path::new("/bin/sh invalid"),
@@ -622,138 +664,10 @@ fn exercise_failed_shell(
     );
     assert_eq!(pane_snapshot(paths).len(), 2);
     presentation
-        .create_or_focus_shell(
-            "%0",
-            "local",
-            workstream_id,
-            project_root,
-            Path::new(FALSE_PROGRAM),
-        )
+        .create_or_focus_shell("%0", workstream_id, project_root, Path::new(FALSE_PROGRAM))
         .unwrap();
     wait_for_pane_count(paths, 2);
     assert_eq!(pane_snapshot(paths).len(), 2);
-}
-
-#[test]
-fn failed_remote_barrier_restores_the_exact_two_pane_layout() {
-    if !tmux_available() {
-        eprintln!("skipped: tmux is unavailable");
-        return;
-    }
-    let state_root = tempfile::tempdir().unwrap();
-    let fake = state_root.path().join("failed-remote-barrier");
-    let counter = state_root.path().join("failed-remote-barrier.count");
-    let script = format!(
-        "#!/bin/sh\ncount=$(cat {} 2>/dev/null || echo 0)\ncount=$((count + 1))\necho \"$count\" > {}\nif [ \"$count\" -ge 3 ]; then exit 1; fi\nexec /usr/bin/sleep 60\n",
-        shell_quote_for_test(&counter),
-        shell_quote_for_test(&counter),
-    );
-    fs::write(&fake, script).unwrap();
-    make_executable(&fake);
-    let presentation = Presentation::fresh_with_executable(state_root.path(), fake);
-    let paths = presentation.paths().clone();
-    let _guard = PrivateTmuxGuard {
-        directory: paths.directory.clone(),
-        socket: paths.socket.clone(),
-    };
-    presentation.start().unwrap();
-    let workstream_id = WorkstreamId::new();
-    set_provider_context_for_host(&paths, "snap", workstream_id);
-
-    let result = presentation.create_or_focus_remote_shell(
-        "%1",
-        "snap",
-        workstream_id,
-        "snap",
-        "/home/user/.local/bin/wsnav",
-    );
-    assert!(
-        result.is_ok(),
-        "failed remote barrier should be cleaned up without a control error: {result:?}"
-    );
-    wait_for_pane_count(&paths, 2);
-    let deadline = Instant::now() + READINESS_TIMEOUT;
-    while Instant::now() < deadline {
-        if fs::read_to_string(&counter).is_ok_and(|contents| contents.trim() == "3") {
-            break;
-        }
-        thread::sleep(READINESS_POLL);
-    }
-    assert_eq!(fs::read_to_string(&counter).unwrap().trim(), "3");
-    assert!(pane_value_if_present(&paths, "utility", "#{pane_id}").is_none());
-    assert_eq!(pane_option(&paths, "navigator", "remain-on-exit"), "on");
-    assert_eq!(pane_option(&paths, "provider", "remain-on-exit"), "on");
-}
-
-#[test]
-fn remote_create_or_focus_shell_does_not_retarget_under_corrupted_provider_tags() {
-    if !tmux_available() {
-        eprintln!("skipped: tmux is unavailable");
-        return;
-    }
-    let state_root = tempfile::tempdir().unwrap();
-    let fake = state_root.path().join("live-remote-barrier");
-    fs::write(&fake, "#!/bin/sh\nexec /usr/bin/sleep 60\n").unwrap();
-    make_executable(&fake);
-    let presentation = Presentation::fresh_with_executable(state_root.path(), fake);
-    let paths = presentation.paths().clone();
-    let _guard = PrivateTmuxGuard {
-        directory: paths.directory.clone(),
-        socket: paths.socket.clone(),
-    };
-    presentation.start().unwrap();
-    let first_workstream = WorkstreamId::new();
-    set_provider_context_for_host(&paths, "snap", first_workstream);
-    presentation
-        .create_or_focus_remote_shell(
-            "%1",
-            "snap",
-            first_workstream,
-            "snap",
-            "/home/user/.local/bin/wsnav",
-        )
-        .unwrap();
-    wait_for_pane_count(&paths, 3);
-    let utility = pane_value(&paths, "utility", "#{pane_id}");
-    let utility_pid = pane_value(&paths, "utility", "#{pane_pid}");
-    let utility_command = pane_value(&paths, "utility", "#{pane_current_command}");
-    let utility_host = pane_value(&paths, "utility", "#{@wsnav_host_alias}");
-    let utility_workstream = pane_value(&paths, "utility", "#{@wsnav_workstream_id}");
-
-    let second_workstream = WorkstreamId::new();
-    set_provider_context_for_host(&paths, "other", second_workstream);
-    presentation
-        .create_or_focus_remote_shell(
-            "%1",
-            "other",
-            second_workstream,
-            "other",
-            "/home/other/.local/bin/wsnav",
-        )
-        .unwrap();
-
-    assert_eq!(pane_value(&paths, "utility", "#{pane_id}"), utility);
-    assert_eq!(pane_value(&paths, "utility", "#{pane_pid}"), utility_pid);
-    assert_eq!(
-        pane_value(&paths, "utility", "#{pane_current_command}"),
-        utility_command
-    );
-    assert_eq!(
-        pane_value(&paths, "utility", "#{@wsnav_host_alias}"),
-        utility_host
-    );
-    assert_eq!(
-        pane_value(&paths, "utility", "#{@wsnav_workstream_id}"),
-        utility_workstream
-    );
-    assert_eq!(
-        pane_value(&paths, "provider", "#{@wsnav_host_alias}"),
-        "other"
-    );
-    assert_eq!(
-        pane_value(&paths, "provider", "#{@wsnav_workstream_id}"),
-        second_workstream.to_string()
-    );
 }
 
 #[test]
@@ -780,7 +694,6 @@ fn local_attachment_switch_closes_only_a_different_workstream_shell() {
     presentation
         .create_or_focus_shell(
             "%1",
-            "local",
             first_workstream,
             project_root.path(),
             Path::new("/bin/sh"),
@@ -803,10 +716,6 @@ fn local_attachment_switch_closes_only_a_different_workstream_shell() {
     wait_for_pid_exit(&utility_pid);
     assert!(pane_value_if_present(&paths, "utility", "#{pane_id}").is_none());
     assert_eq!(
-        pane_value(&paths, "provider", "#{@wsnav_host_alias}"),
-        "local"
-    );
-    assert_eq!(
         pane_value(&paths, "provider", "#{@wsnav_workstream_id}"),
         second_workstream.to_string()
     );
@@ -815,7 +724,7 @@ fn local_attachment_switch_closes_only_a_different_workstream_shell() {
 }
 
 #[test]
-fn remote_attachment_switch_repairs_a_stale_mixed_shell_context() {
+fn completed_attachment_pane_can_be_replaced_by_another_workstream() {
     if !tmux_available() {
         eprintln!("skipped: tmux is unavailable");
         return;
@@ -833,73 +742,27 @@ fn remote_attachment_switch_repairs_a_stale_mixed_shell_context() {
     presentation.start().unwrap();
 
     let first_workstream = WorkstreamId::new();
-    presentation
-        .attach_remote_workstream("snap", first_workstream)
+    presentation.attach_workstream(first_workstream).unwrap();
+    let provider = pane_value(&paths, "provider", "#{pane_id}");
+    let status = tmux_command(&paths.socket)
+        .args(["respawn-pane", "-k", "-t", &provider, FALSE_PROGRAM])
+        .status()
         .unwrap();
-    presentation
-        .create_or_focus_remote_shell(
-            "%1",
-            "snap",
-            first_workstream,
-            "snap",
-            "/home/user/.local/bin/wsnav",
-        )
-        .unwrap();
-    wait_for_pane_count(&paths, 3);
-    let utility_pid = pane_value(&paths, "utility", "#{pane_pid}");
-
-    // Simulate the stale mixed context left by the pre-D12 switching path:
-    // the provider is tagged for another Workstream while the utility still
-    // carries its exact original identity.
-    set_provider_context_for_host(&paths, "other", WorkstreamId::new());
-    presentation
-        .attach_remote_workstream("snap", first_workstream)
-        .unwrap();
-    wait_for_pane_count(&paths, 2);
-    wait_for_pid_exit(&utility_pid);
-    assert!(pane_value_if_present(&paths, "utility", "#{pane_id}").is_none());
+    assert!(status.success());
+    wait_for_pane_state(&paths, PROVIDER_PANE, true);
     assert_eq!(
-        pane_value(&paths, "provider", "#{@wsnav_host_alias}"),
-        "snap"
-    );
-    assert_eq!(
-        pane_value(&paths, "provider", "#{@wsnav_workstream_id}"),
-        first_workstream.to_string()
+        presentation.attachment_status().unwrap().unwrap().phase,
+        AttachmentPhase::Failed
     );
 
-    // A normal remote cross-Workstream switch closes the shell tagged for the
-    // prior exact host/Workstream as well.
-    presentation
-        .create_or_focus_remote_shell(
-            "%1",
-            "snap",
-            first_workstream,
-            "snap",
-            "/home/user/.local/bin/wsnav",
-        )
-        .unwrap();
-    wait_for_pane_count(&paths, 3);
-    let utility = pane_value(&paths, "utility", "#{pane_id}");
-    let utility_pid = pane_value(&paths, "utility", "#{pane_pid}");
     let second_workstream = WorkstreamId::new();
-    presentation
-        .attach_remote_workstream("other", second_workstream)
-        .unwrap();
-
-    wait_for_pane_count(&paths, 2);
-    wait_for_pid_exit(&utility_pid);
-    assert!(pane_value_if_present(&paths, "utility", "#{pane_id}").is_none());
-    assert_ne!(pane_value(&paths, "provider", "#{pane_id}"), utility);
-    assert_eq!(
-        pane_value(&paths, "provider", "#{@wsnav_host_alias}"),
-        "other"
-    );
+    presentation.attach_workstream(second_workstream).unwrap();
+    wait_for_pane_state(&paths, PROVIDER_PANE, false);
+    assert_eq!(pane_value(&paths, "provider", "#{pane_id}"), provider);
     assert_eq!(
         pane_value(&paths, "provider", "#{@wsnav_workstream_id}"),
         second_workstream.to_string()
     );
-    assert_eq!(pane_field(&paths, "navigator", "#{pane_top}"), 0);
-    assert_eq!(pane_field(&paths, "provider", "#{pane_top}"), 0);
 }
 
 #[test]
@@ -926,7 +789,6 @@ fn ambiguous_attachment_topology_refuses_switch_before_provider_mutation() {
     presentation
         .create_or_focus_shell(
             "%1",
-            "local",
             first_workstream,
             project_root.path(),
             Path::new("/bin/sh"),
@@ -991,7 +853,6 @@ fn extra_presentation_window_refuses_cross_workstream_attachment_without_mutatio
     presentation
         .create_or_focus_shell(
             "%1",
-            "local",
             first_workstream,
             project_root.path(),
             Path::new("/bin/sh"),
@@ -1305,6 +1166,34 @@ fn wait_for_fixture(paths: &PresentationPaths) {
     }
 }
 
+fn wait_for_pane_value(paths: &PresentationPaths, role: &str, format: &str, expected: &str) {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    loop {
+        if pane_value(paths, role, format) == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "private tmux pane value did not become ready"
+        );
+        thread::sleep(READINESS_POLL);
+    }
+}
+
+fn wait_for_pane_state(paths: &PresentationPaths, pane: &str, expected_dead: bool) {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    loop {
+        if pane_dead(&paths.socket, &paths.session_name, pane) == Some(expected_dead) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "private tmux pane {pane} did not reach dead={expected_dead}"
+        );
+        thread::sleep(READINESS_POLL);
+    }
+}
+
 fn pane_dead(socket: &Path, session: &str, target: &str) -> Option<bool> {
     let mut command = tmux_command(socket);
     let output = command
@@ -1361,25 +1250,20 @@ fn tmux_output<const N: usize>(socket: &Path, arguments: [&str; N]) -> String {
 }
 
 fn set_provider_context(paths: &PresentationPaths, workstream_id: WorkstreamId) {
-    set_provider_context_for_host(paths, "local", workstream_id);
-}
-
-fn set_provider_context_for_host(
-    paths: &PresentationPaths,
-    host_alias: &str,
-    workstream_id: WorkstreamId,
-) {
     let target = format!("{}:{PROVIDER_PANE}", paths.session_name);
-    for (option, value) in [
-        ("@wsnav_host_alias", host_alias.to_owned()),
-        ("@wsnav_workstream_id", workstream_id.to_string()),
-    ] {
-        let status = tmux_command(&paths.socket)
-            .args(["set-option", "-p", "-t", &target, option, &value])
-            .status()
-            .unwrap();
-        assert!(status.success());
-    }
+    let value = workstream_id.to_string();
+    let status = tmux_command(&paths.socket)
+        .args([
+            "set-option",
+            "-p",
+            "-t",
+            &target,
+            "@wsnav_workstream_id",
+            &value,
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success());
 }
 
 fn respawn_fixture_panes(paths: &PresentationPaths) {
@@ -1402,7 +1286,7 @@ fn pane_snapshot(paths: &PresentationPaths) -> Vec<String> {
             "-t",
             &format!("{}:navigator", paths.session_name),
             "-F",
-            "#{pane_id}\t#{@wsnav_role}\t#{@wsnav_host_alias}\t#{@wsnav_workstream_id}\t#{pane_top}",
+            "#{pane_id}\t#{@wsnav_role}\t#{@wsnav_workstream_id}\t#{pane_top}",
         ],
     )
     .lines()

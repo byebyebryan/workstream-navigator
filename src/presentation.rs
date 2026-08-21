@@ -1,9 +1,10 @@
 //! Disposable private tmux ownership for the local navigator presentation.
 
 use std::{
+    collections::BTreeSet,
     ffi::OsString,
     fs::{self, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::Command,
     str::FromStr,
@@ -12,12 +13,14 @@ use std::{
 };
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
     domain::WorkstreamId,
     private_tmux::{TERMINAL_CAPABILITY_CONFIG, copy_mode_scroll_config},
     process::{BoundedProcessError, output_bounded},
+    state::TransitionLease,
 };
 
 const PRESENTATION_DIRECTORY: &str = "presentation";
@@ -31,14 +34,30 @@ const DEFAULT_NAVIGATOR_PANE_WIDTH: u16 = 32;
 const PREFERRED_PROVIDER_PANE_WIDTH: u16 = 96;
 const MAX_TMUX_OUTPUT_BYTES: usize = 16 * 1024;
 const MAX_ATTACHMENT_STATUS_BYTES: u64 = 4 * 1024;
+const MAX_LEGACY_PRESENTATION_ENTRIES: usize = 32;
+const MAX_LEGACY_PANES: usize = 3;
+const MAX_LEGACY_CLIENTS: usize = 32;
+const MAX_LEGACY_PROCESS_ARGUMENT_BYTES: usize = 16 * 1024;
+const MAX_LEGACY_CONFIG_BYTES: usize = 64 * 1024;
+const MAX_ATTACHMENT_STATUS_BYTES_USIZE: usize = 4 * 1024;
+const MAX_LEGACY_RETIREMENT_MARKER_BYTES: usize = 8 * 1024;
+const MAX_LEGACY_RETIREMENT_ATTEMPTS: usize = 20;
 const ATTACHMENT_STATUS_FILE: &str = "attachment.json";
+const PRESENTATION_OWNERSHIP_MARKER_FILE: &str = "ownership.json";
+const MAX_PRESENTATION_OWNERSHIP_MARKER_BYTES: usize = 4 * 1024;
+const LEGACY_RETIREMENT_MARKER_FILE: &str = "d16-retirement.json";
 const ROLE_OPTION: &str = "@wsnav_role";
-const HOST_OPTION: &str = "@wsnav_host_alias";
 const WORKSTREAM_OPTION: &str = "@wsnav_workstream_id";
 const SHELL_CLAIM_OPTION: &str = "@wsnav_shell_claim";
 const SHELL_CLAIM_ATTEMPTS: usize = 20;
 const SHELL_CLAIM_RETRY: Duration = Duration::from_millis(5);
-const TOPOLOGY_FORMAT: &str = "#{pane_id}\t#{@wsnav_role}\t#{@wsnav_host_alias}\t#{@wsnav_workstream_id}\t#{pane_dead}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{window_width}\t#{window_height}";
+const NAVIGATOR_STOP_ATTEMPTS: usize = 20;
+const NAVIGATOR_STOP_RETRY: Duration = Duration::from_millis(5);
+const TOPOLOGY_FORMAT: &str = "#{pane_id}\t#{@wsnav_role}\t#{@wsnav_workstream_id}\t#{pane_dead}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{window_width}\t#{window_height}";
+// This value is intentionally confined to the explicit schema-12 cutover
+// proof path below. Current presentation topology never reads or writes a host
+// alias, but cutover still needs to recognize the old layout exactly.
+const LEGACY_PROOF_TOPOLOGY_FORMAT: &str = "#{pane_id}\t#{@wsnav_role}\t#{@wsnav_host_alias}\t#{@wsnav_workstream_id}\t#{pane_dead}\t#{pane_pid}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_title}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{window_width}\t#{window_height}";
 const PRESENTATION_TMUX_CONFIG_PREFIX: &str = concat!(
     "set -g status off\n",
     "set -g mouse on\n",
@@ -65,6 +84,40 @@ fn presentation_tmux_config() -> String {
         PRESENTATION_TMUX_CONFIG_SUFFIX,
     ]
     .concat()
+}
+
+fn private_tmux_command() -> Command {
+    let mut command = Command::new("tmux");
+    command.env_remove("TMUX").arg("-u");
+    command
+}
+
+fn expected_presentation_config_identity() -> LegacyFileIdentity {
+    let config = presentation_tmux_config();
+    let mut digest = Sha256::new();
+    digest.update(config.as_bytes());
+    LegacyFileIdentity {
+        size: config.len() as u64,
+        mode: 0o600,
+        device: 0,
+        inode: 0,
+        digest: Some(digest.finalize().into()),
+    }
+}
+
+fn config_content_matches(identity: &LegacyFileIdentity) -> bool {
+    let expected = expected_presentation_config_identity();
+    identity.size == expected.size && identity.digest == expected.digest
+}
+
+/// Returns the exact private D15 presentation configuration for disposable
+/// classifier fixtures.  This is hidden from generated API documentation so
+/// production callers cannot treat the configuration as a customization
+/// surface.
+#[doc(hidden)]
+#[must_use]
+pub fn legacy_presentation_config_for_test() -> String {
+    presentation_tmux_config()
 }
 
 /// Actions exposed by the private presentation prefix table. The strings are
@@ -130,9 +183,19 @@ pub enum PresentationPaneRole {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct AttachmentStatus {
     pub attempt_id: uuid::Uuid,
-    pub host_alias: String,
     pub workstream_id: WorkstreamId,
     pub phase: AttachmentPhase,
+}
+
+/// Schema-12 attachment metadata retained only for private legacy proof.
+/// Current attachment status is deliberately host-local and uses
+/// [`AttachmentStatus`] above.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct LegacyAttachmentStatus {
+    attempt_id: uuid::Uuid,
+    host_alias: String,
+    workstream_id: WorkstreamId,
+    phase: AttachmentPhase,
 }
 
 /// Observable provider attachment phases. These never enter durable host state.
@@ -153,6 +216,306 @@ pub struct PresentationPaths {
     pub config: PathBuf,
     pub attachment_status: PathBuf,
     pub session_name: String,
+}
+
+/// The result of the read-only legacy presentation classifier.
+///
+/// The launcher uses this value to decide whether it may present the D16
+/// confirmation or must first offer a drain-only attachment.  In particular,
+/// the classifier never adopts, closes, removes, or otherwise mutates the
+/// presentation it describes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LegacyPresentationState {
+    /// No presentation directory exists below the selected state root.
+    None,
+    /// One exact, live, detached, two-pane presentation was proven.
+    DetachedOrdinary,
+    /// One exact presentation has one or more attached clients.
+    Attached,
+    /// One exact presentation has a live utility shell pane.
+    UtilityShell,
+    /// One exact presentation has a provider pane running the exact native
+    /// observer-review helper command.
+    ObserverReview,
+    /// Exact private artifacts remain but their tmux session or navigator is
+    /// no longer live.  This state is still owned evidence and is never
+    /// removed by classification.
+    DeadOwned,
+    /// The selected presentation contains malformed topology or unknown
+    /// private-directory entries.
+    Malformed,
+    /// The evidence belongs to another owner, executable, state root, or
+    /// presentation session.
+    Foreign,
+    /// The evidence could not be read safely (for example, permissions or a
+    /// process table that cannot be inspected).
+    Inaccessible,
+}
+
+impl LegacyPresentationState {
+    const fn into_probe(self) -> LegacyProbeFailure {
+        match self {
+            Self::Inaccessible => LegacyProbeFailure::Inaccessible,
+            Self::Foreign => LegacyProbeFailure::Foreign,
+            _ => LegacyProbeFailure::Malformed,
+        }
+    }
+}
+
+/// A read-only classification of the selected state's presentation directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyPresentationAssessment {
+    state: LegacyPresentationState,
+    proof: Option<LegacyPresentationProof>,
+}
+
+impl LegacyPresentationAssessment {
+    #[must_use]
+    pub const fn state(&self) -> LegacyPresentationState {
+        self.state
+    }
+
+    /// Returns the exact proof only for owned evidence.  Malformed, foreign,
+    /// and inaccessible outcomes intentionally carry no mutation authority.
+    #[must_use]
+    pub const fn proof(&self) -> Option<&LegacyPresentationProof> {
+        self.proof.as_ref()
+    }
+
+    const fn none() -> Self {
+        Self {
+            state: LegacyPresentationState::None,
+            proof: None,
+        }
+    }
+
+    const fn classified(state: LegacyPresentationState) -> Self {
+        Self { state, proof: None }
+    }
+}
+
+/// All identity evidence needed to repeat a legacy presentation comparison
+/// under a D16 transition lease.  The type contains no terminal bytes,
+/// provider output, or process-control capability.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyPresentationProof {
+    directory: PathBuf,
+    directory_identity: LegacyFileIdentity,
+    socket: PathBuf,
+    socket_identity: Option<LegacyFileIdentity>,
+    config_identity: LegacyFileIdentity,
+    attachment_identity: Option<LegacyFileIdentity>,
+    session_name: String,
+    session_id: Option<String>,
+    window_id: Option<String>,
+    navigator: Option<LegacyPaneProof>,
+    provider: Option<LegacyPaneProof>,
+    utility: Option<LegacyPaneProof>,
+    clients: Vec<LegacyClientProof>,
+    shell_claim_present: bool,
+    legacy_executable: Option<LegacyExecutableProof>,
+    attachment_status: Option<LegacyAttachmentStatus>,
+}
+
+impl LegacyPresentationProof {
+    #[must_use]
+    pub fn directory(&self) -> &Path {
+        &self.directory
+    }
+
+    #[must_use]
+    pub fn socket(&self) -> &Path {
+        &self.socket
+    }
+
+    #[must_use]
+    pub fn session_name(&self) -> &str {
+        &self.session_name
+    }
+
+    #[must_use]
+    pub fn attached_client_count(&self) -> usize {
+        self.clients.len()
+    }
+
+    #[must_use]
+    pub fn navigator_pid(&self) -> Option<u32> {
+        self.navigator
+            .as_ref()
+            .and_then(|pane| pane.process.as_ref())
+            .map(|process| process.pid)
+    }
+
+    #[must_use]
+    pub fn navigator_process_birth(&self) -> Option<u64> {
+        self.navigator
+            .as_ref()
+            .and_then(|pane| pane.process.as_ref())
+            .map(|process| process.birth)
+    }
+
+    /// Returns the legacy controller executable identity established by the
+    /// exact navigator process.  This is intentionally independent from the
+    /// executable currently running the D16 launcher.
+    #[must_use]
+    pub fn legacy_executable_identity(&self) -> Option<LegacyFileIdentity> {
+        self.legacy_executable
+            .as_ref()
+            .map(|executable| executable.identity)
+    }
+
+    #[must_use]
+    pub fn legacy_executable_path(&self) -> Option<&Path> {
+        self.legacy_executable
+            .as_ref()
+            .map(|executable| executable.path.as_path())
+    }
+
+    /// Returns whether the exact navigator and provider controller processes
+    /// were both proven from one stable legacy executable identity.
+    #[must_use]
+    pub fn controller_proven(&self) -> bool {
+        self.navigator.is_some() && self.provider.is_some() && self.legacy_executable.is_some()
+    }
+
+    #[must_use]
+    pub fn utility_present(&self) -> bool {
+        self.utility.is_some()
+    }
+
+    #[must_use]
+    pub fn observer_review_present(&self) -> bool {
+        self.provider
+            .as_ref()
+            .is_some_and(|pane| pane.command == LegacyPaneCommand::ObserverReview)
+    }
+
+    #[must_use]
+    pub fn shell_claim_present(&self) -> bool {
+        self.shell_claim_present
+    }
+}
+
+/// Stable identity for one owned regular file or private socket.  Device and
+/// inode are populated on Unix; size/mode remain useful on other platforms.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LegacyFileIdentity {
+    pub size: u64,
+    pub mode: u32,
+    pub device: u64,
+    pub inode: u64,
+    pub digest: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+struct LegacyRetirementMarker {
+    version: u8,
+    directory: PathBuf,
+    directory_identity: LegacyFileIdentity,
+    socket: PathBuf,
+    session_name: String,
+    config_identity: LegacyFileIdentity,
+    socket_identity: Option<LegacyFileIdentity>,
+    attachment_identity: Option<LegacyFileIdentity>,
+}
+
+/// Exact ownership evidence written before a private presentation server is
+/// started. A path-shaped directory is never enough authority for normal
+/// presentation cleanup: the marker, its private artifact identities, and the
+/// bounded directory allowlist must all still match.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct PresentationOwnershipMarker {
+    version: u8,
+    directory: PathBuf,
+    socket: PathBuf,
+    session_name: String,
+    directory_identity: LegacyFileIdentity,
+    config_identity: LegacyFileIdentity,
+    socket_identity: Option<LegacyFileIdentity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PresentationOwnershipProof {
+    marker: PresentationOwnershipMarker,
+    marker_identity: LegacyFileIdentity,
+    socket_identity: Option<LegacyFileIdentity>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegacyExecutableProof {
+    path: PathBuf,
+    identity: LegacyFileIdentity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegacyProcessProof {
+    pid: u32,
+    birth: u64,
+    executable: LegacyExecutableProof,
+    arguments: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegacyPaneProof {
+    id: String,
+    role: PresentationPaneRole,
+    dead: bool,
+    process: Option<LegacyProcessProof>,
+    command: LegacyPaneCommand,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegacyPaneCommand {
+    Navigator,
+    ProviderWait,
+    ProviderAttach,
+    ObserverReview,
+    PresentationShell,
+    Other,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegacyClientProof {
+    name: String,
+    window_name: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegacyPaneEvidence {
+    pane: LegacyOwnedPane,
+    pid: Option<u32>,
+    current_command: String,
+    start_command: String,
+    process: Option<LegacyProcessProof>,
+    process_stable: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegacyOwnedPane {
+    id: String,
+    role: PresentationPaneRole,
+    host_alias: Option<String>,
+    workstream_id: Option<WorkstreamId>,
+    dead: bool,
+    left: u16,
+    top: u16,
+    width: u16,
+    height: u16,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LegacyPresentationEvidence {
+    directory: LegacyFileIdentity,
+    socket: Option<LegacyFileIdentity>,
+    config: LegacyFileIdentity,
+    attachment: Option<LegacyFileIdentity>,
+    attachment_status: Option<LegacyAttachmentStatus>,
+    session_id: Option<String>,
+    window_id: Option<String>,
+    panes: Vec<LegacyPaneEvidence>,
+    clients: Vec<LegacyClientProof>,
+    shell_claim_present: bool,
 }
 
 impl PresentationPaths {
@@ -300,17 +663,13 @@ impl Presentation {
         ];
         arguments.extend(self.navigator_command());
         let result = self.invoke(Some(&self.paths.config), arguments);
-        if let Err(error) = result {
-            let _ = self.close();
-            return Err(error);
-        }
-        if let Err(error) = self
+        self.complete_start_stage("server creation", result)?;
+        let result = self.capture_ownership_socket_identity();
+        self.complete_start_stage("socket ownership capture", result)?;
+        let result = self
             .set_pane_role(NAVIGATOR_PANE, PresentationPaneRole::Navigator, None)
-            .and_then(|()| self.set_pane_remain_on_exit(NAVIGATOR_PANE, true))
-        {
-            let _ = self.close();
-            return Err(error);
-        }
+            .and_then(|()| self.set_pane_remain_on_exit(NAVIGATOR_PANE, true));
+        self.complete_start_stage("navigator pane setup", result)?;
         let wait = self.provider_wait_command();
         let result = self.invoke(
             None,
@@ -328,26 +687,31 @@ impl Presentation {
                 wait[3].clone(),
             ],
         );
-        if let Err(error) = result {
-            let _ = self.close();
-            return Err(error);
-        }
-        if let Err(error) = self
+        self.complete_start_stage("provider pane creation", result)?;
+        let result = self
             .set_pane_role(PROVIDER_PANE, PresentationPaneRole::Provider, None)
             .and_then(|()| self.set_pane_remain_on_exit(PROVIDER_PANE, true))
-            .and_then(|()| self.install_control_bindings())
-        {
-            let _ = self.close();
-            return Err(error);
-        }
-        if let Err(error) = self
-            .set_default_navigator_width()
-            .and_then(|()| self.install_navigator_width_hooks())
-        {
-            let _ = self.close();
-            return Err(error);
-        }
+            .and_then(|()| self.install_control_bindings());
+        self.complete_start_stage("provider pane setup", result)?;
+        let result = self.set_default_navigator_width();
+        self.complete_start_stage("default navigator width", result)?;
+        let result = self.install_navigator_width_hooks();
+        self.complete_start_stage("navigator width hooks", result)?;
         Ok(())
+    }
+
+    fn complete_start_stage<T>(
+        &self,
+        stage: &'static str,
+        result: Result<T, PresentationError>,
+    ) -> Result<T, PresentationError> {
+        result.map_err(|source| {
+            let _ = self.close();
+            PresentationError::StartupFailed {
+                stage,
+                source: Box::new(source),
+            }
+        })
     }
 
     /// Directly attaches the caller's terminal to this private presentation.
@@ -357,17 +721,27 @@ impl Presentation {
     /// Returns an error when tmux cannot attach to this exact private server.
     pub fn attach(&self) -> Result<(), PresentationError> {
         self.prepare_attach()?;
-        let status = Command::new("tmux")
-            .env_remove("TMUX")
+        let status = private_tmux_command()
             .arg("-S")
             .arg(&self.paths.socket)
             .args(["attach-session", "-t", &self.paths.session_name])
             .status()
             .map_err(PresentationError::Io)?;
-        if status.success() {
+        if stopped_owned_presentation(self.is_live()?) {
+            self.close()?;
             return Ok(());
         }
-        if stopped_owned_presentation(self.is_live()?) {
+        if status.success() {
+            for _ in 0..NAVIGATOR_STOP_ATTEMPTS {
+                if self.navigator_pane_is_dead()? {
+                    self.close()?;
+                    return Ok(());
+                }
+                thread::sleep(NAVIGATOR_STOP_RETRY);
+            }
+            return Ok(());
+        }
+        if self.navigator_pane_is_dead()? {
             self.close()?;
             return Ok(());
         }
@@ -399,14 +773,14 @@ impl Presentation {
         workstream_id: WorkstreamId,
     ) -> Result<AttachmentStatus, PresentationError> {
         self.with_attachment_claim(|| {
-            let status = self.prepare_attachment("local", workstream_id)?;
+            let status = self.prepare_attachment(workstream_id)?;
             let result = (|| {
-                self.retire_utility_for_attachment("local", workstream_id)?;
-                let provider = self.provider_target()?;
+                self.retire_utility_for_attachment(workstream_id)?;
+                let provider = self.provider_target_for_attachment()?;
                 self.set_pane_role(
                     &provider,
                     PresentationPaneRole::Provider,
-                    Some((&status.host_alias, status.workstream_id)),
+                    Some(status.workstream_id),
                 )?;
                 self.invoke(
                     None,
@@ -417,46 +791,9 @@ impl Presentation {
         })
     }
 
-    /// Replaces only the outer provider attachment helper with an interactive
-    /// SSH attachment command. The remote native Runtime remains owned by its
-    /// remote private tmux server; this local presentation owns no remote
-    /// process or provider output.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when tmux rejects replacement of the exact owned pane.
-    pub fn attach_remote_workstream(
-        &self,
-        host_alias: &str,
-        workstream_id: WorkstreamId,
-    ) -> Result<AttachmentStatus, PresentationError> {
-        self.with_attachment_claim(|| {
-            let status = self.prepare_attachment(host_alias, workstream_id)?;
-            let result = (|| {
-                self.retire_utility_for_attachment(host_alias, workstream_id)?;
-                let provider = self.provider_target()?;
-                self.set_pane_role(
-                    &provider,
-                    PresentationPaneRole::Provider,
-                    Some((&status.host_alias, status.workstream_id)),
-                )?;
-                self.invoke(
-                    None,
-                    self.provider_remote_respawn_arguments(
-                        &provider,
-                        host_alias,
-                        workstream_id,
-                        status.attempt_id,
-                    ),
-                )
-            })();
-            self.finish_attachment_start(status, result)
-        })
-    }
-
     /// Retires the exact utility pane before a different Workstream can
     /// replace the provider attachment. A shell tagged for the requested
-    /// host/Workstream is retained so same-Workstream reconnects preserve its
+    /// Workstream is retained so same-Workstream reconnects preserve its
     /// launch context.
     ///
     /// This deliberately performs no provider mutation. The topology is
@@ -471,31 +808,27 @@ impl Presentation {
     /// cannot be proven.
     fn retire_utility_for_attachment(
         &self,
-        host_alias: &str,
         workstream_id: WorkstreamId,
     ) -> Result<(), PresentationError> {
-        validate_host_alias(host_alias)?;
         self.validate_single_presentation_window()?;
-        let topology = self.read_topology()?;
+        let topology = self.attachment_topology()?;
         let Some(utility) = topology.utility() else {
             return Ok(());
         };
         let provider = topology
             .provider()
             .ok_or(PresentationError::InvalidTopology)?;
-        let provider_matches = (provider.host_alias.is_none() && provider.workstream_id.is_none())
-            || (provider.host_alias.as_deref() == Some(host_alias)
-                && provider.workstream_id == Some(workstream_id));
-        let utility_matches = utility.host_alias.as_deref() == Some(host_alias)
-            && utility.workstream_id == Some(workstream_id);
-        if provider_matches && utility_matches {
+        let provider_matches =
+            provider.workstream_id.is_none() || provider.workstream_id == Some(workstream_id);
+        let utility_matches = utility.workstream_id == Some(workstream_id);
+        if !utility.dead && provider_matches && utility_matches {
             return Ok(());
         }
 
         let utility_id = utility.id.clone();
         self.kill_exact_pane(&utility_id)?;
         self.validate_single_presentation_window()?;
-        let topology = self.read_topology()?;
+        let topology = self.attachment_topology()?;
         if topology.utility().is_some() {
             return Err(PresentationError::ControlRefused(
                 "utility shell cleanup could not be proven",
@@ -504,41 +837,63 @@ impl Presentation {
         Ok(())
     }
 
+    /// Retires every exact utility pane before the provider is replaced by
+    /// observer review. Unlike Workstream attachment, observer review has no
+    /// Workstream context that could authorize retaining an existing shell.
+    /// The same presentation-wide claim is held by the caller through this
+    /// check, kill, and post-respawn topology validation.
+    fn retire_utility_for_observer_review(&self) -> Result<(), PresentationError> {
+        self.validate_single_presentation_window()?;
+        let topology = self.read_topology()?;
+        topology
+            .provider()
+            .ok_or(PresentationError::InvalidTopology)?;
+        let Some(utility) = topology.utility() else {
+            return Ok(());
+        };
+        let utility_id = utility.id.clone();
+        self.kill_exact_pane(&utility_id)?;
+        self.validate_single_presentation_window()?;
+        let topology = self.read_topology()?;
+        if topology.utility().is_some() {
+            return Err(PresentationError::ControlRefused(
+                "utility shell cleanup could not be proven before observer review",
+            ));
+        }
+        validate_observer_review_topology(&topology).map(|_| ())
+    }
+
+    fn observer_review_provider_target(&self) -> Result<String, PresentationError> {
+        self.validate_single_presentation_window()?;
+        let topology = self.read_topology()?;
+        validate_observer_review_topology(&topology)
+    }
+
     /// Replaces the blank provider pane with the local temporary native Codex
     /// observer-review surface. This is not a Workstream attachment and never
-    /// records provider output in presentation state.
+    /// records provider output in presentation state. The presentation-wide
+    /// claim is held while any utility pane is retired and through the final
+    /// two-pane topology check.
     ///
     /// # Errors
     ///
     /// Returns an error when the exact owned presentation pane cannot be
     /// replaced.
     pub fn start_observer_review(&self) -> Result<(), PresentationError> {
-        let provider = self.provider_target()?;
-        self.clear_pane_context(&provider)?;
-        self.invoke(
-            None,
-            self.provider_respawn_for_command(&provider, self.observer_review_command()),
-        )
-    }
-
-    /// Replaces the provider pane with the native observer-review surface on
-    /// one registered remote host. The local presentation still owns only its
-    /// own pane and never stores or writes provider terminal bytes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the exact owned presentation pane cannot be
-    /// replaced.
-    pub fn start_remote_observer_review(&self, host_alias: &str) -> Result<(), PresentationError> {
-        let provider = self.provider_target()?;
-        self.clear_pane_context(&provider)?;
-        self.invoke(
-            None,
-            self.provider_respawn_for_command(
-                &provider,
-                self.remote_observer_review_command(host_alias),
-            ),
-        )
+        self.with_attachment_claim(|| {
+            self.retire_utility_for_observer_review()?;
+            let provider = self.observer_review_provider_target()?;
+            self.clear_pane_context(&provider)?;
+            self.invoke(
+                None,
+                self.provider_respawn_for_command(&provider, self.observer_review_command()),
+            )?;
+            // The presentation-wide claim prevents WSNav's own shell action
+            // from splitting concurrently. Re-read the exact topology after
+            // respawn as a final guard against an external/stale split.
+            self.observer_review_provider_target()?;
+            Ok(())
+        })
     }
 
     fn provider_respawn_arguments(
@@ -548,30 +903,6 @@ impl Presentation {
         attempt_id: uuid::Uuid,
     ) -> Vec<OsString> {
         let command = self.provider_attach_command(workstream_id, attempt_id);
-        self.provider_respawn_for_command(provider, command)
-    }
-
-    fn provider_remote_respawn_arguments(
-        &self,
-        provider: &str,
-        host_alias: &str,
-        workstream_id: WorkstreamId,
-        attempt_id: uuid::Uuid,
-    ) -> Vec<OsString> {
-        let command = vec![
-            self.executable.clone().into_os_string(),
-            "--state-root".into(),
-            self.state_root.clone().into_os_string(),
-            "_provider_remote_attach".into(),
-            host_alias.into(),
-            workstream_id.to_string().into(),
-            "--presentation-socket".into(),
-            self.paths.socket.clone().into_os_string(),
-            "--presentation-session".into(),
-            self.paths.session_name.clone().into(),
-            "--attempt-id".into(),
-            attempt_id.to_string().into(),
-        ];
         self.provider_respawn_for_command(provider, command)
     }
 
@@ -640,15 +971,12 @@ impl Presentation {
     pub fn validate_provider_context(
         &self,
         workstream_id: WorkstreamId,
-        host_alias: &str,
     ) -> Result<(), PresentationError> {
         let topology = self.read_topology()?;
         let provider = topology
             .provider()
             .ok_or(PresentationError::InvalidTopology)?;
-        if provider.host_alias.as_deref() != Some(host_alias)
-            || provider.workstream_id != Some(workstream_id)
-        {
+        if provider.workstream_id != Some(workstream_id) {
             return Err(PresentationError::InvalidTopology);
         }
         Ok(())
@@ -727,17 +1055,10 @@ impl Presentation {
     pub fn create_or_focus_shell(
         &self,
         source_pane: &str,
-        host_alias: &str,
         workstream_id: WorkstreamId,
         cwd: &Path,
         shell: &Path,
     ) -> Result<(), PresentationError> {
-        validate_host_alias(host_alias)?;
-        if host_alias != "local" {
-            return Err(PresentationError::ControlRefused(
-                "remote presentation shell requires an SSH endpoint",
-            ));
-        }
         validate_shell_path(shell)?;
         if !cwd.is_dir() {
             return Err(PresentationError::ControlRefused(
@@ -759,68 +1080,12 @@ impl Presentation {
             "--cwd".into(),
             cwd.to_path_buf().into_os_string(),
         ];
-        self.create_or_focus_shell_command(source_pane, host_alias, workstream_id, &shell_command)
-    }
-
-    /// Creates one remote utility shell below the exact provider, or focuses
-    /// an existing utility. The local pane receives only the fixed SSH
-    /// endpoint values and opaque Workstream ID; the remote host resolves its
-    /// own authoritative project root and account shell.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the endpoint, role topology, or bounded tmux
-    /// mutation is not exact.
-    pub fn create_or_focus_remote_shell(
-        &self,
-        source_pane: &str,
-        host_alias: &str,
-        workstream_id: WorkstreamId,
-        destination: &str,
-        executable: &str,
-    ) -> Result<(), PresentationError> {
-        validate_host_alias(host_alias)?;
-        if host_alias == "local" {
-            return Err(PresentationError::ControlRefused(
-                "local presentation shell requires local preflight",
-            ));
-        }
-        crate::transport::SshDestination::parse(destination)
-            .map_err(|_| PresentationError::ControlRefused("remote SSH endpoint is invalid"))?;
-        crate::transport::RemoteExecutable::parse(executable)
-            .map_err(|_| PresentationError::ControlRefused("remote SSH endpoint is invalid"))?;
-        let shell_command = self.remote_shell_command(destination, executable, workstream_id);
-        self.create_or_focus_shell_command(source_pane, host_alias, workstream_id, &shell_command)
-    }
-
-    fn remote_shell_command(
-        &self,
-        destination: &str,
-        executable: &str,
-        workstream_id: WorkstreamId,
-    ) -> Vec<OsString> {
-        vec![
-            self.executable.clone().into_os_string(),
-            "--state-root".into(),
-            self.state_root.clone().into_os_string(),
-            "_presentation_ssh_shell".into(),
-            "--presentation-socket".into(),
-            self.paths.socket.clone().into_os_string(),
-            "--presentation-session".into(),
-            self.paths.session_name.clone().into(),
-            "--destination".into(),
-            destination.into(),
-            "--executable".into(),
-            executable.into(),
-            "--workstream-id".into(),
-            workstream_id.to_string().into(),
-        ]
+        self.create_or_focus_shell_command(source_pane, workstream_id, &shell_command)
     }
 
     fn create_or_focus_shell_command(
         &self,
         source_pane: &str,
-        host_alias: &str,
         workstream_id: WorkstreamId,
         shell_command: &[OsString],
     ) -> Result<(), PresentationError> {
@@ -843,9 +1108,7 @@ impl Presentation {
             let provider = topology
                 .provider()
                 .ok_or(PresentationError::InvalidTopology)?;
-            if provider.host_alias.as_deref() != Some(host_alias)
-                || provider.workstream_id != Some(workstream_id)
-            {
+            if provider.workstream_id != Some(workstream_id) {
                 return Err(PresentationError::InvalidTopology);
             }
 
@@ -856,7 +1119,6 @@ impl Presentation {
             }
             let result = self.create_shell_after_claim(
                 &topology,
-                host_alias,
                 workstream_id,
                 provider.id.as_str(),
                 shell_command,
@@ -872,7 +1134,6 @@ impl Presentation {
     fn create_shell_after_claim(
         &self,
         topology: &PresentationTopology,
-        host_alias: &str,
         workstream_id: WorkstreamId,
         provider: &str,
         shell_command: &[OsString],
@@ -899,7 +1160,7 @@ impl Presentation {
             self.set_pane_role(
                 &utility_id,
                 PresentationPaneRole::Utility,
-                Some((host_alias, workstream_id)),
+                Some(workstream_id),
             )?;
             self.select_owned_pane(&utility_id)?;
             if self.pane_is_dead(&utility_id)? {
@@ -910,8 +1171,15 @@ impl Presentation {
         match setup {
             Ok(()) => Ok(()),
             Err(error) => {
-                let _ = self.kill_exact_pane(&utility_id);
-                if pane_disappeared(&error) {
+                let cleanup = self.kill_exact_pane(&utility_id);
+                let restored = cleanup.is_ok()
+                    && self.read_topology().is_ok_and(|current| {
+                        base_topology_preserved(topology, &current, &utility_id)
+                    });
+                if restored
+                    && (pane_disappeared(&error)
+                        || matches!(error, PresentationError::InvalidTopology))
+                {
                     Ok(())
                 } else {
                     Err(error)
@@ -1286,7 +1554,7 @@ impl Presentation {
         &self,
         pane: &str,
         role: PresentationPaneRole,
-        context: Option<(&str, WorkstreamId)>,
+        context: Option<WorkstreamId>,
     ) -> Result<(), PresentationError> {
         let role_name = match role {
             PresentationPaneRole::Navigator => "navigator",
@@ -1306,19 +1574,7 @@ impl Presentation {
             ],
         )?;
         self.clear_pane_context(pane)?;
-        if let Some((host_alias, workstream_id)) = context {
-            validate_host_alias(host_alias)?;
-            self.invoke(
-                None,
-                vec![
-                    "set-option".into(),
-                    "-p".into(),
-                    "-t".into(),
-                    target.clone().into(),
-                    HOST_OPTION.into(),
-                    host_alias.into(),
-                ],
-            )?;
+        if let Some(workstream_id) = context {
             self.invoke(
                 None,
                 vec![
@@ -1336,19 +1592,17 @@ impl Presentation {
 
     fn clear_pane_context(&self, pane: &str) -> Result<(), PresentationError> {
         let target = self.pane_target(pane);
-        for option in [HOST_OPTION, WORKSTREAM_OPTION] {
-            self.invoke(
-                None,
-                vec![
-                    "set-option".into(),
-                    "-p".into(),
-                    "-u".into(),
-                    "-t".into(),
-                    target.clone().into(),
-                    option.into(),
-                ],
-            )?;
-        }
+        self.invoke(
+            None,
+            vec![
+                "set-option".into(),
+                "-p".into(),
+                "-u".into(),
+                "-t".into(),
+                target.into(),
+                WORKSTREAM_OPTION.into(),
+            ],
+        )?;
         Ok(())
     }
 
@@ -1369,6 +1623,26 @@ impl Presentation {
 
     fn provider_target(&self) -> Result<String, PresentationError> {
         self.read_topology()?
+            .provider()
+            .map(|pane| pane.id.clone())
+            .ok_or(PresentationError::InvalidTopology)
+    }
+
+    /// Attachment replacement is the one active path that may accept an exact
+    /// dead provider helper pane: tmux retains that owned pane specifically so
+    /// `respawn-pane -k` can reconnect another live Runtime in place. A dead
+    /// navigator remains a hard refusal, and all ordinary topology reads keep
+    /// rejecting dead panes.
+    fn attachment_topology(&self) -> Result<PresentationTopology, PresentationError> {
+        let topology = self.read_topology_allow_dead()?;
+        if topology.navigator().is_none_or(|pane| pane.dead) || topology.provider().is_none() {
+            return Err(PresentationError::InvalidTopology);
+        }
+        Ok(topology)
+    }
+
+    fn provider_target_for_attachment(&self) -> Result<String, PresentationError> {
+        self.attachment_topology()?
             .provider()
             .map(|pane| pane.id.clone())
             .ok_or(PresentationError::InvalidTopology)
@@ -1460,6 +1734,46 @@ impl Presentation {
         Ok(Some(status))
     }
 
+    /// Detaches clients from this exact presentation so the navigator can
+    /// exit without trying to kill its own controlling tmux server. The outer
+    /// launcher observes the dead navigator after `attach-session` returns and
+    /// removes the already-proven private server and files. Provider Runtimes
+    /// live on separate servers and are never targeted.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when stable private ownership cannot be proven or tmux
+    /// rejects detaching clients from the exact presentation session.
+    pub fn stop_session(&self) -> Result<(), PresentationError> {
+        let ownership = read_presentation_ownership(&self.paths)?.ok_or(
+            PresentationError::ControlRefused("presentation ownership marker is missing"),
+        )?;
+        let current =
+            read_presentation_ownership(&self.paths)?.ok_or(PresentationError::ControlRefused(
+                "presentation ownership disappeared before session stop",
+            ))?;
+        if current.marker != ownership.marker
+            || current.marker_identity != ownership.marker_identity
+            || current.socket_identity.is_none()
+            || !optional_socket_identity_compatible(
+                ownership.socket_identity.as_ref(),
+                current.socket_identity.as_ref(),
+            )
+        {
+            return Err(PresentationError::ControlRefused(
+                "presentation ownership changed before session stop",
+            ));
+        }
+        self.invoke(
+            None,
+            vec![
+                "detach-client".into(),
+                "-s".into(),
+                self.paths.session_name.clone().into(),
+            ],
+        )
+    }
+
     /// Advances only the currently recorded exact attachment attempt.
     ///
     /// # Errors
@@ -1500,6 +1814,33 @@ impl Presentation {
     /// Returns an error when a live private presentation cannot be stopped or
     /// its owned directory cannot be removed.
     pub fn close(&self) -> Result<(), PresentationError> {
+        let Some(ownership) = read_presentation_ownership(&self.paths)? else {
+            // A fresh owner that was never started has no artifacts to clean.
+            // Any existing path without our marker is foreign or malformed;
+            // in particular, socket absence is not deletion authority.
+            if fs::symlink_metadata(&self.paths.directory).is_ok() {
+                return Err(PresentationError::ControlRefused(
+                    "presentation ownership marker is missing or invalid",
+                ));
+            }
+            return Ok(());
+        };
+        let current = read_presentation_ownership(&self.paths)?.ok_or(
+            PresentationError::ControlRefused("presentation ownership disappeared before close"),
+        )?;
+        if current.marker != ownership.marker
+            || current.marker_identity != ownership.marker_identity
+            || (current.socket_identity.is_some()
+                && (ownership.socket_identity.is_none()
+                    || !optional_socket_identity_compatible(
+                        ownership.socket_identity.as_ref(),
+                        current.socket_identity.as_ref(),
+                    )))
+        {
+            return Err(PresentationError::ControlRefused(
+                "presentation ownership changed before close",
+            ));
+        }
         let result = self.invoke(None, vec!["kill-server".into()]);
         if let Err(PresentationError::TmuxRejected(message)) = &result
             && !message.contains("no server running")
@@ -1507,10 +1848,7 @@ impl Presentation {
         {
             return Err(PresentationError::TmuxRejected(message.clone()));
         }
-        if self.paths.directory.exists() {
-            fs::remove_dir_all(&self.paths.directory).map_err(PresentationError::Io)?;
-        }
-        Ok(())
+        remove_owned_presentation(&self.paths, &ownership)
     }
 
     fn discover_live(state_root: &Path) -> Result<Vec<Self>, PresentationError> {
@@ -1542,12 +1880,12 @@ impl Presentation {
     }
 
     fn is_live(&self) -> Result<bool, PresentationError> {
-        let mut command = Command::new("tmux");
-        command
-            .env_remove("TMUX")
-            .arg("-S")
-            .arg(&self.paths.socket)
-            .args(["has-session", "-t", &self.paths.session_name]);
+        let mut command = private_tmux_command();
+        command.arg("-S").arg(&self.paths.socket).args([
+            "has-session",
+            "-t",
+            &self.paths.session_name,
+        ]);
         let output = output_bounded(&mut command, MAX_TMUX_OUTPUT_BYTES, MAX_TMUX_OUTPUT_BYTES)
             .map_err(PresentationError::from_bounded_tmux)?;
         if output.status.success() {
@@ -1596,16 +1934,6 @@ impl Presentation {
         ]
     }
 
-    fn remote_observer_review_command(&self, host_alias: &str) -> Vec<OsString> {
-        vec![
-            self.executable.clone().into_os_string(),
-            "--state-root".into(),
-            self.state_root.clone().into_os_string(),
-            "_provider_remote_observer_review".into(),
-            host_alias.into(),
-        ]
-    }
-
     fn provider_attach_command(
         &self,
         workstream_id: WorkstreamId,
@@ -1628,13 +1956,10 @@ impl Presentation {
 
     fn prepare_attachment(
         &self,
-        host_alias: &str,
         workstream_id: WorkstreamId,
     ) -> Result<AttachmentStatus, PresentationError> {
-        validate_host_alias(host_alias)?;
         let status = AttachmentStatus {
             attempt_id: uuid::Uuid::new_v4(),
-            host_alias: host_alias.to_owned(),
             workstream_id,
             phase: AttachmentPhase::Pending,
         };
@@ -1653,6 +1978,25 @@ impl Presentation {
             return Err(error);
         }
         Ok(status)
+    }
+
+    fn capture_ownership_socket_identity(&self) -> Result<(), PresentationError> {
+        let Some(mut ownership) = read_presentation_ownership(&self.paths)? else {
+            return Err(PresentationError::ControlRefused(
+                "presentation ownership marker disappeared",
+            ));
+        };
+        let socket = inspect_private_socket(&self.paths.socket)
+            .map_err(map_presentation_ownership_probe)?
+            .ok_or(PresentationError::ControlRefused(
+                "private presentation socket is missing",
+            ))?;
+        ownership.marker.socket_identity = Some(socket);
+        write_presentation_ownership_marker(
+            &self.paths,
+            &ownership.marker,
+            Some(&ownership.marker_identity),
+        )
     }
 
     fn read_attachment_status(&self) -> Result<Option<AttachmentStatus>, PresentationError> {
@@ -1674,12 +2018,10 @@ impl Presentation {
         }
         let status: AttachmentStatus = serde_json::from_slice(&bytes)
             .map_err(|_| PresentationError::InvalidAttachmentStatus)?;
-        validate_host_alias(&status.host_alias)?;
         Ok(Some(status))
     }
 
     fn write_attachment_status(&self, status: &AttachmentStatus) -> Result<(), PresentationError> {
-        validate_host_alias(&status.host_alias)?;
         let bytes =
             serde_json::to_vec(status).map_err(|_| PresentationError::InvalidAttachmentStatus)?;
         if bytes.len() > usize::try_from(MAX_ATTACHMENT_STATUS_BYTES).unwrap_or(usize::MAX) {
@@ -1798,8 +2140,7 @@ impl Presentation {
         config: Option<&Path>,
         arguments: Vec<OsString>,
     ) -> Result<String, PresentationError> {
-        let mut command = Command::new("tmux");
-        command.env_remove("TMUX");
+        let mut command = private_tmux_command();
         if let Some(config) = config {
             command.arg("-f").arg(config);
         }
@@ -1820,6 +2161,2311 @@ impl Presentation {
     }
 }
 
+/// Classifies legacy presentation ownership without opening host state or
+/// invoking any mutating presentation helper.  This is intentionally separate
+/// from [`Presentation::open_or_create`]: a cutover launcher must be
+/// able to inspect and prove the old presentation before it is allowed to
+/// acquire a transition lease or present confirmation.
+///
+/// The only live process inspected here is the navigator pane itself.  No
+/// signal, provider Runtime socket, tmux kill, or directory removal is ever
+/// attempted.  A second presentation is always refused, even when its tmux
+/// server is already dead.
+///
+/// # Errors
+///
+/// Returns [`PresentationError::AmbiguousLegacyPresentations`] when more than
+/// one exact presentation directory is present.  Other unsafe evidence is
+/// returned as a typed [`LegacyPresentationState`] so the launcher can provide
+/// bounded drain/recovery guidance without guessing.
+#[allow(
+    clippy::too_many_lines,
+    reason = "The classifier keeps its fail-closed root inventory and ambiguity gate in one auditable boundary."
+)]
+pub fn classify_legacy_presentations(
+    state_root: &Path,
+) -> Result<LegacyPresentationAssessment, PresentationError> {
+    let state_metadata = match fs::symlink_metadata(state_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LegacyPresentationAssessment::none());
+        }
+        Err(error) => {
+            return Ok(LegacyPresentationAssessment::classified(classify_fs_error(
+                &error,
+            )));
+        }
+    };
+    if state_metadata.file_type().is_symlink() {
+        return Ok(LegacyPresentationAssessment::classified(
+            LegacyPresentationState::Foreign,
+        ));
+    }
+    if !state_metadata.is_dir() {
+        return Ok(LegacyPresentationAssessment::classified(
+            LegacyPresentationState::Malformed,
+        ));
+    }
+    if !is_private_owner_directory(&state_metadata) {
+        return Ok(LegacyPresentationAssessment::classified(
+            LegacyPresentationState::Foreign,
+        ));
+    }
+    let Some(presentation_root) = inspect_private_presentation_root(state_root)? else {
+        return Ok(LegacyPresentationAssessment::none());
+    };
+    let presentation_metadata = match fs::symlink_metadata(&presentation_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(LegacyPresentationAssessment::none());
+        }
+        Err(error) => {
+            return Ok(LegacyPresentationAssessment::classified(classify_fs_error(
+                &error,
+            )));
+        }
+    };
+    if presentation_metadata.file_type().is_symlink() {
+        return Ok(LegacyPresentationAssessment::classified(
+            LegacyPresentationState::Foreign,
+        ));
+    }
+    if !presentation_metadata.is_dir() {
+        return Ok(LegacyPresentationAssessment::classified(
+            LegacyPresentationState::Malformed,
+        ));
+    }
+    if !is_private_owner_directory(&presentation_metadata) {
+        return Ok(LegacyPresentationAssessment::classified(
+            LegacyPresentationState::Foreign,
+        ));
+    }
+    let entries = match fs::read_dir(&presentation_root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return Ok(LegacyPresentationAssessment::classified(classify_fs_error(
+                &error,
+            )));
+        }
+    };
+    let mut candidate_directories = Vec::new();
+    let mut unknown_entry = false;
+    for entry in bounded_directory_entries(entries) {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                return Ok(LegacyPresentationAssessment::classified(classify_fs_error(
+                    &error,
+                )));
+            }
+        };
+        let path = entry.path();
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                return Ok(LegacyPresentationAssessment::classified(classify_fs_error(
+                    &error,
+                )));
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            return Ok(LegacyPresentationAssessment::classified(
+                LegacyPresentationState::Foreign,
+            ));
+        }
+        if !metadata.is_dir() {
+            unknown_entry = true;
+            continue;
+        }
+        if presentation_session_name(&path).is_some() {
+            candidate_directories.push(path);
+        } else {
+            unknown_entry = true;
+        }
+    }
+
+    if candidate_directories.len() > 1 {
+        return Err(PresentationError::AmbiguousLegacyPresentations);
+    }
+    let Some(directory) = candidate_directories.pop() else {
+        return Ok(if unknown_entry {
+            LegacyPresentationAssessment::classified(LegacyPresentationState::Malformed)
+        } else {
+            LegacyPresentationAssessment::none()
+        });
+    };
+    if unknown_entry {
+        return Ok(LegacyPresentationAssessment::classified(
+            LegacyPresentationState::Malformed,
+        ));
+    }
+
+    if retirement_marker_is_present(&directory) {
+        return Ok(classify_retirement_marker(state_root, &directory));
+    }
+
+    match inspect_legacy_presentation(&directory) {
+        Ok(evidence) => Ok(classify_legacy_evidence_internal(
+            &directory, state_root, &evidence,
+        )),
+        Err(LegacyProbeFailure::Malformed) => Ok(LegacyPresentationAssessment::classified(
+            LegacyPresentationState::Malformed,
+        )),
+        Err(LegacyProbeFailure::Foreign) => Ok(LegacyPresentationAssessment::classified(
+            LegacyPresentationState::Foreign,
+        )),
+        Err(LegacyProbeFailure::Inaccessible) => Ok(LegacyPresentationAssessment::classified(
+            LegacyPresentationState::Inaccessible,
+        )),
+    }
+}
+
+/// Classifies an already captured evidence set without filesystem, process,
+/// or tmux access.  It is public so deterministic launcher tests can
+/// inject process/tmux evidence without needing a live tmux server.
+#[must_use]
+pub fn classify_legacy_evidence(
+    directory: &Path,
+    state_root: &Path,
+    evidence: LegacyPresentationEvidenceForTest,
+) -> LegacyPresentationAssessment {
+    let evidence = evidence.into_internal();
+    classify_legacy_evidence_internal(directory, state_root, &evidence)
+}
+
+/// Reclassifies one supplied proof and requires byte-for-byte equality with
+/// fresh bounded evidence.  This is the only proof comparison authority used
+/// by the D16 cutover mutation helpers.
+///
+/// # Errors
+///
+/// Returns [`PresentationError::LegacyProofChanged`] when the presentation
+/// disappeared, changed identity, or can no longer be proven exactly.
+pub fn revalidate_legacy_presentation(
+    state_root: &Path,
+    expected: &LegacyPresentationProof,
+) -> Result<LegacyPresentationAssessment, PresentationError> {
+    let fresh = classify_legacy_presentations(state_root)?;
+    if fresh.proof().is_some_and(|proof| proof == expected) {
+        Ok(fresh)
+    } else {
+        Err(PresentationError::LegacyProofChanged)
+    }
+}
+
+/// Attaches to an already-running exact private presentation for drain-only
+/// review.  No host registry, provider Runtime socket, or process-control
+/// path is opened.  The attached/utility/observer surface must also carry a
+/// fully proven navigator/controller pair; an attached presentation whose
+/// pane evidence is incomplete is refused without invoking tmux attach.
+///
+/// # Errors
+///
+/// Returns [`PresentationError::LegacyProofChanged`] when the supplied proof
+/// no longer matches, or [`PresentationError::LegacyMutationRefused`] when
+/// the presentation is not an eligible, fully proven drain surface.
+pub fn drain_attach_legacy_presentation(
+    state_root: &Path,
+    expected: &LegacyPresentationProof,
+) -> Result<(), PresentationError> {
+    let root = state_root.to_path_buf();
+    drain_attach_legacy_presentation_with(
+        expected,
+        || classify_legacy_presentations(&root),
+        |proof| legacy_tmux_attach(&root, proof),
+    )
+}
+
+/// Retires one freshly revalidated detached legacy presentation.  Retirement
+/// targets only the exact private tmux socket recorded in the proof, waits for
+/// the old server/navigator to disappear, then performs strict known-artifact
+/// cleanup and independently proves the root is empty.
+///
+/// # Errors
+///
+/// Returns [`PresentationError::LegacyProofChanged`] before any kill/remove
+/// effect when the supplied proof is stale or changed.
+pub fn retire_legacy_presentation(
+    state_root: &Path,
+    expected: &LegacyPresentationProof,
+    lease: &TransitionLease,
+) -> Result<(), PresentationError> {
+    ensure_transition_lease(state_root, lease)?;
+    let root = state_root.to_path_buf();
+    retire_legacy_presentation_with(
+        expected,
+        || classify_legacy_presentations(&root),
+        |proof| legacy_tmux_kill_server(&root, proof),
+        |dead_proof| remove_dead_legacy_presentation(&root, dead_proof, lease),
+        legacy_tmux_server_is_live,
+    )
+}
+
+/// Removes only exact, freshly revalidated dead-owned presentation artifacts.
+/// The operation never recursively removes a directory: it validates the
+/// bounded allowlist, removes only `attachment.json`, `tmux.conf`, and
+/// `tmux.sock` when their recorded identities still match, then removes the
+/// exact presentation directory only when empty.
+///
+/// A second call after complete or partial known-artifact disappearance is
+/// idempotent; an unknown/new entry, symlink, changed identity, or live server
+/// refuses before it is removed.
+///
+/// # Errors
+///
+/// Returns [`PresentationError::LegacyProofChanged`] when the proof or exact
+/// private artifacts no longer match, and a typed refusal for live,
+/// ambiguous, malformed, or inaccessible evidence.
+pub fn remove_dead_legacy_presentation(
+    state_root: &Path,
+    expected: &LegacyPresentationProof,
+    lease: &TransitionLease,
+) -> Result<(), PresentationError> {
+    ensure_transition_lease(state_root, lease)?;
+    let root = state_root.to_path_buf();
+    let fresh = classify_legacy_presentations(&root)?;
+    if fresh.state() == LegacyPresentationState::None {
+        return Ok(());
+    }
+    let marker = if fresh.state() == LegacyPresentationState::DeadOwned {
+        let actual = fresh.proof().ok_or(PresentationError::LegacyProofChanged)?;
+        if !dead_cleanup_proof_matches(expected, actual) {
+            return Err(PresentationError::LegacyProofChanged);
+        }
+        ensure_retirement_marker(&root, expected)?
+    } else {
+        read_retirement_marker(&root, expected)?.ok_or(PresentationError::LegacyProofChanged)?
+    };
+    if legacy_tmux_server_is_live(expected)? {
+        return Err(PresentationError::LegacyMutationRefused(
+            "dead-owned cleanup found a live private tmux server",
+        ));
+    }
+    remove_exact_legacy_artifacts(&root, expected, &marker)?;
+    let final_assessment = classify_legacy_presentations(&root)?;
+    if final_assessment.state() == LegacyPresentationState::None
+        && final_assessment.proof().is_none()
+    {
+        Ok(())
+    } else {
+        Err(PresentationError::LegacyNotRetired)
+    }
+}
+
+fn ensure_transition_lease(
+    state_root: &Path,
+    lease: &TransitionLease,
+) -> Result<(), PresentationError> {
+    lease
+        .revalidate_for_mutation(state_root)
+        .map_err(|error| match error {
+            crate::state::StateError::TransitionLeaseRootMismatch => {
+                PresentationError::LegacyMutationRefused(
+                    "transition lease root does not match presentation root",
+                )
+            }
+            _ => PresentationError::LegacyMutationRefused(
+                "transition lease is no longer valid for presentation mutation",
+            ),
+        })
+}
+
+fn drain_attach_legacy_presentation_with<F, A>(
+    expected: &LegacyPresentationProof,
+    mut fresh: F,
+    mut attach: A,
+) -> Result<(), PresentationError>
+where
+    F: FnMut() -> Result<LegacyPresentationAssessment, PresentationError>,
+    A: FnMut(&LegacyPresentationProof) -> Result<(), PresentationError>,
+{
+    let assessment = fresh()?;
+    let proof = exact_revalidated_proof(expected, &assessment)?;
+    if !matches!(
+        assessment.state(),
+        LegacyPresentationState::Attached
+            | LegacyPresentationState::UtilityShell
+            | LegacyPresentationState::ObserverReview
+    ) {
+        return Err(PresentationError::LegacyMutationRefused(
+            "presentation is not a drain-only surface",
+        ));
+    }
+    if !proof.controller_proven() {
+        return Err(PresentationError::LegacyMutationRefused(
+            "navigator/controller evidence is incomplete",
+        ));
+    }
+    attach(proof)
+}
+
+fn retire_legacy_presentation_with<F, K, C, L>(
+    expected: &LegacyPresentationProof,
+    mut fresh: F,
+    mut kill: K,
+    mut cleanup: C,
+    mut server_live: L,
+) -> Result<(), PresentationError>
+where
+    F: FnMut() -> Result<LegacyPresentationAssessment, PresentationError>,
+    K: FnMut(&LegacyPresentationProof) -> Result<(), PresentationError>,
+    C: FnMut(&LegacyPresentationProof) -> Result<(), PresentationError>,
+    L: FnMut(&LegacyPresentationProof) -> Result<bool, PresentationError>,
+{
+    let assessment = fresh()?;
+    let proof = exact_revalidated_proof(expected, &assessment)?;
+    if assessment.state() != LegacyPresentationState::DetachedOrdinary {
+        return Err(PresentationError::LegacyMutationRefused(
+            "only a detached ordinary presentation may be retired",
+        ));
+    }
+    kill(proof)?;
+
+    for _ in 0..MAX_LEGACY_RETIREMENT_ATTEMPTS {
+        let after = fresh()?;
+        if server_live(expected)? {
+            thread::sleep(SHELL_CLAIM_RETRY);
+            continue;
+        }
+        match after.state() {
+            LegacyPresentationState::None => return Ok(()),
+            LegacyPresentationState::DeadOwned => {
+                let dead_proof = after.proof().ok_or(PresentationError::LegacyProofChanged)?;
+                cleanup(dead_proof)?;
+                let final_assessment = fresh()?;
+                if final_assessment.state() == LegacyPresentationState::None
+                    && final_assessment.proof().is_none()
+                {
+                    return Ok(());
+                }
+                return Err(PresentationError::LegacyNotRetired);
+            }
+            _ => thread::sleep(SHELL_CLAIM_RETRY),
+        }
+    }
+    Err(PresentationError::LegacyNotRetired)
+}
+
+fn exact_revalidated_proof<'a>(
+    expected: &LegacyPresentationProof,
+    assessment: &'a LegacyPresentationAssessment,
+) -> Result<&'a LegacyPresentationProof, PresentationError> {
+    assessment
+        .proof()
+        .filter(|proof| *proof == expected)
+        .ok_or(PresentationError::LegacyProofChanged)
+}
+
+fn dead_cleanup_proof_matches(
+    expected: &LegacyPresentationProof,
+    actual: &LegacyPresentationProof,
+) -> bool {
+    expected.directory == actual.directory
+        && directory_identity_compatible(&expected.directory_identity, &actual.directory_identity)
+        && expected.socket == actual.socket
+        && expected.session_name == actual.session_name
+        && expected.config_identity == actual.config_identity
+        && optional_socket_identity_compatible(
+            expected.socket_identity.as_ref(),
+            actual.socket_identity.as_ref(),
+        )
+        && optional_identity_compatible(
+            expected.attachment_identity.as_ref(),
+            actual.attachment_identity.as_ref(),
+        )
+        && optional_status_compatible(
+            expected.attachment_status.as_ref(),
+            actual.attachment_status.as_ref(),
+        )
+}
+
+fn directory_identity_compatible(
+    expected: &LegacyFileIdentity,
+    actual: &LegacyFileIdentity,
+) -> bool {
+    // Directory size is allowed to change as known artifacts disappear; the
+    // owner/mode and device/inode identity must remain exact.
+    expected.mode == actual.mode
+        && expected.device == actual.device
+        && expected.inode == actual.inode
+}
+
+fn optional_identity_compatible(
+    expected: Option<&LegacyFileIdentity>,
+    actual: Option<&LegacyFileIdentity>,
+) -> bool {
+    actual.is_none() || actual == expected
+}
+
+fn socket_identity_compatible(expected: &LegacyFileIdentity, actual: &LegacyFileIdentity) -> bool {
+    private_socket_mode(expected.mode)
+        && private_socket_mode(actual.mode)
+        && expected.size == actual.size
+        && expected.device == actual.device
+        && expected.inode == actual.inode
+        && expected.digest == actual.digest
+}
+
+fn optional_socket_identity_compatible(
+    expected: Option<&LegacyFileIdentity>,
+    actual: Option<&LegacyFileIdentity>,
+) -> bool {
+    match (expected, actual) {
+        (_, None) => true,
+        (Some(expected), Some(actual)) => socket_identity_compatible(expected, actual),
+        (None, Some(_)) => false,
+    }
+}
+
+fn socket_identity_options_match(
+    left: Option<&LegacyFileIdentity>,
+    right: Option<&LegacyFileIdentity>,
+) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => socket_identity_compatible(left, right),
+        _ => false,
+    }
+}
+
+fn optional_status_compatible(
+    expected: Option<&LegacyAttachmentStatus>,
+    actual: Option<&LegacyAttachmentStatus>,
+) -> bool {
+    actual.is_none() || actual == expected
+}
+
+fn exact_legacy_paths(
+    state_root: &Path,
+    proof: &LegacyPresentationProof,
+) -> Result<PresentationPaths, PresentationError> {
+    let paths = PresentationPaths::from_control(
+        state_root,
+        proof.socket.clone(),
+        proof.session_name.clone(),
+    )
+    .map_err(|_| PresentationError::LegacyMutationRefused("presentation path is not exact"))?;
+    if paths.directory != proof.directory || paths.socket != proof.socket {
+        return Err(PresentationError::LegacyProofChanged);
+    }
+    let metadata = fs::symlink_metadata(&paths.directory).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            PresentationError::LegacyProofChanged
+        } else {
+            PresentationError::Io(error)
+        }
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || !is_private_owner_directory(&metadata)
+    {
+        return Err(PresentationError::LegacyMutationRefused(
+            "presentation directory is not private and regular",
+        ));
+    }
+    let actual_identity = legacy_file_identity(&metadata, None);
+    if !directory_identity_compatible(&proof.directory_identity, &actual_identity) {
+        return Err(PresentationError::LegacyProofChanged);
+    }
+    Ok(paths)
+}
+
+fn validate_exact_socket(
+    paths: &PresentationPaths,
+    expected: Option<&LegacyFileIdentity>,
+) -> Result<Option<LegacyFileIdentity>, PresentationError> {
+    let actual = inspect_private_socket(&paths.socket).map_err(map_cleanup_probe_failure)?;
+    if !optional_socket_identity_compatible(expected, actual.as_ref()) {
+        return Err(PresentationError::LegacyProofChanged);
+    }
+    Ok(actual)
+}
+
+fn legacy_tmux_attach(
+    state_root: &Path,
+    proof: &LegacyPresentationProof,
+) -> Result<(), PresentationError> {
+    let paths = exact_legacy_paths(state_root, proof)?;
+    let actual = validate_exact_socket(&paths, proof.socket_identity.as_ref())?;
+    if actual.is_none() {
+        return Err(PresentationError::LegacyMutationRefused(
+            "presentation socket disappeared before drain attach",
+        ));
+    }
+    let status = private_tmux_command()
+        .args(["-f", "/dev/null", "-S"])
+        .arg(&paths.socket)
+        .args(["attach-session", "-t", paths.session_name.as_str()])
+        .status()
+        .map_err(PresentationError::Io)?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(PresentationError::TmuxRejected(
+            "legacy presentation drain attach failed".to_owned(),
+        ))
+    }
+}
+
+fn legacy_tmux_kill_server(
+    state_root: &Path,
+    proof: &LegacyPresentationProof,
+) -> Result<(), PresentationError> {
+    let paths = exact_legacy_paths(state_root, proof)?;
+    let config = inspect_regular_file(&paths.config, true, MAX_LEGACY_CONFIG_BYTES)
+        .map_err(map_cleanup_probe_failure)?
+        .ok_or(PresentationError::LegacyProofChanged)?;
+    if config != proof.config_identity {
+        return Err(PresentationError::LegacyProofChanged);
+    }
+    let actual = validate_exact_socket(&paths, proof.socket_identity.as_ref())?;
+    if actual.is_none() {
+        return Ok(());
+    }
+    let mut command = private_tmux_command();
+    command
+        .args(["-f", "/dev/null", "-S"])
+        .arg(&paths.socket)
+        .arg("kill-server");
+    let output = output_bounded(&mut command, MAX_TMUX_OUTPUT_BYTES, MAX_TMUX_OUTPUT_BYTES)
+        .map_err(PresentationError::from_bounded_tmux)?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    if diagnostic.contains("no server running")
+        || diagnostic.contains("No such file")
+        || diagnostic.contains("no sessions")
+    {
+        Ok(())
+    } else {
+        Err(PresentationError::TmuxRejected(sanitize_diagnostic(
+            &diagnostic,
+        )))
+    }
+}
+
+fn legacy_tmux_server_is_live(proof: &LegacyPresentationProof) -> Result<bool, PresentationError> {
+    let actual = inspect_private_socket(&proof.socket).map_err(map_cleanup_probe_failure)?;
+    if !optional_socket_identity_compatible(proof.socket_identity.as_ref(), actual.as_ref()) {
+        return Err(PresentationError::LegacyProofChanged);
+    }
+    if actual.is_none() {
+        return Ok(false);
+    }
+    let mut command = private_tmux_command();
+    command
+        .args(["-f", "/dev/null", "-S"])
+        .arg(&proof.socket)
+        .args(["has-session", "-t", proof.session_name.as_str()]);
+    let output = output_bounded(&mut command, MAX_TMUX_OUTPUT_BYTES, MAX_TMUX_OUTPUT_BYTES)
+        .map_err(PresentationError::from_bounded_tmux)?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    if diagnostic.contains("no server running")
+        || diagnostic.contains("No such file")
+        || diagnostic.contains("no sessions")
+    {
+        Ok(false)
+    } else if diagnostic.contains("can't find session") {
+        legacy_tmux_server_has_any_session(&proof.socket)
+    } else {
+        Err(PresentationError::TmuxRejected(sanitize_diagnostic(
+            &diagnostic,
+        )))
+    }
+}
+
+fn legacy_tmux_server_has_any_session(socket: &Path) -> Result<bool, PresentationError> {
+    let mut command = private_tmux_command();
+    command.args(["-f", "/dev/null", "-S"]).arg(socket).args([
+        "list-sessions",
+        "-F",
+        "#{session_name}",
+    ]);
+    let output = output_bounded(&mut command, MAX_TMUX_OUTPUT_BYTES, MAX_TMUX_OUTPUT_BYTES)
+        .map_err(PresentationError::from_bounded_tmux)?;
+    if output.status.success() {
+        return Ok(!output.stdout.is_empty());
+    }
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    if diagnostic.contains("no server running")
+        || diagnostic.contains("No such file")
+        || diagnostic.contains("no sessions")
+    {
+        Ok(false)
+    } else {
+        Err(PresentationError::TmuxRejected(sanitize_diagnostic(
+            &diagnostic,
+        )))
+    }
+}
+
+fn retirement_marker_is_present(directory: &Path) -> bool {
+    fs::symlink_metadata(directory.join(LEGACY_RETIREMENT_MARKER_FILE)).is_ok()
+}
+
+fn classify_retirement_marker(state_root: &Path, directory: &Path) -> LegacyPresentationAssessment {
+    let marker = match read_retirement_marker_for_discovery(directory) {
+        Ok(Some(marker)) => marker,
+        Ok(None) => {
+            return LegacyPresentationAssessment::classified(LegacyPresentationState::Malformed);
+        }
+        Err(failure) => return assessment_for_legacy_probe_failure(failure),
+    };
+    let Some(expected_session) = presentation_session_name(directory) else {
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign);
+    };
+    if marker.version != 1
+        || marker.directory != directory
+        || marker.socket != directory.join("tmux.sock")
+        || marker.session_name != expected_session
+        || marker.config_identity.mode != 0o600
+        || !config_content_matches(&marker.config_identity)
+    {
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign);
+    }
+    let directory_metadata = match fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) => return assessment_for_fs_error(&error),
+    };
+    if directory_metadata.file_type().is_symlink() {
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign);
+    }
+    if !directory_metadata.is_dir() || !is_private_owner_directory(&directory_metadata) {
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign);
+    }
+    let directory_identity = legacy_file_identity(&directory_metadata, None);
+    if !directory_identity_compatible(&marker.directory_identity, &directory_identity) {
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign);
+    }
+    let paths = match PresentationPaths::from_control(
+        state_root,
+        marker.socket.clone(),
+        marker.session_name.clone(),
+    ) {
+        Ok(paths) if paths.directory == directory => paths,
+        _ => return LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign),
+    };
+    if let Err(error) = validate_legacy_artifact_entries(&paths.directory, true) {
+        return assessment_for_cleanup_error(error);
+    }
+    let config = match inspect_regular_file(&paths.config, false, MAX_LEGACY_CONFIG_BYTES) {
+        Ok(config) => config,
+        Err(failure) => return assessment_for_legacy_probe_failure(failure),
+    };
+    if config.is_some() && config != Some(marker.config_identity) {
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign);
+    }
+    let attachment = match inspect_regular_file(
+        &paths.attachment_status,
+        false,
+        MAX_ATTACHMENT_STATUS_BYTES_USIZE,
+    ) {
+        Ok(attachment) => attachment,
+        Err(failure) => return assessment_for_legacy_probe_failure(failure),
+    };
+    if !optional_identity_compatible(marker.attachment_identity.as_ref(), attachment.as_ref()) {
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign);
+    }
+    let socket = match inspect_private_socket(&paths.socket) {
+        Ok(socket) => socket,
+        Err(failure) => return assessment_for_legacy_probe_failure(failure),
+    };
+    if !optional_socket_identity_compatible(marker.socket_identity.as_ref(), socket.as_ref()) {
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign);
+    }
+    let proof = legacy_proof_from_retirement_marker(&marker);
+    match legacy_tmux_server_is_live(&proof) {
+        Ok(false) => LegacyPresentationAssessment {
+            state: LegacyPresentationState::DeadOwned,
+            proof: Some(proof),
+        },
+        Ok(true) => LegacyPresentationAssessment::classified(LegacyPresentationState::Malformed),
+        Err(
+            PresentationError::LegacyProofChanged | PresentationError::LegacyMutationRefused(_),
+        ) => LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign),
+        Err(_) => LegacyPresentationAssessment::classified(LegacyPresentationState::Inaccessible),
+    }
+}
+
+fn assessment_for_cleanup_error(error: PresentationError) -> LegacyPresentationAssessment {
+    match error {
+        PresentationError::LegacyMutationRefused(_) => {
+            LegacyPresentationAssessment::classified(LegacyPresentationState::Malformed)
+        }
+        PresentationError::LegacyProofChanged => {
+            LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign)
+        }
+        PresentationError::Io(error) => assessment_for_fs_error(&error),
+        _ => LegacyPresentationAssessment::classified(LegacyPresentationState::Inaccessible),
+    }
+}
+
+fn assessment_for_legacy_probe_failure(
+    failure: LegacyProbeFailure,
+) -> LegacyPresentationAssessment {
+    LegacyPresentationAssessment::classified(match failure {
+        LegacyProbeFailure::Malformed => LegacyPresentationState::Malformed,
+        LegacyProbeFailure::Foreign => LegacyPresentationState::Foreign,
+        LegacyProbeFailure::Inaccessible => LegacyPresentationState::Inaccessible,
+    })
+}
+
+fn assessment_for_fs_error(error: &std::io::Error) -> LegacyPresentationAssessment {
+    LegacyPresentationAssessment::classified(classify_fs_error(error))
+}
+
+fn legacy_proof_from_retirement_marker(marker: &LegacyRetirementMarker) -> LegacyPresentationProof {
+    LegacyPresentationProof {
+        directory: marker.directory.clone(),
+        directory_identity: marker.directory_identity,
+        socket: marker.socket.clone(),
+        socket_identity: marker.socket_identity,
+        config_identity: marker.config_identity,
+        attachment_identity: marker.attachment_identity,
+        session_name: marker.session_name.clone(),
+        session_id: None,
+        window_id: None,
+        navigator: None,
+        provider: None,
+        utility: None,
+        clients: Vec::new(),
+        shell_claim_present: false,
+        legacy_executable: None,
+        attachment_status: None,
+    }
+}
+
+fn read_retirement_marker_for_discovery(
+    directory: &Path,
+) -> Result<Option<LegacyRetirementMarker>, LegacyProbeFailure> {
+    let marker_path = directory.join(LEGACY_RETIREMENT_MARKER_FILE);
+    let Some(identity) =
+        inspect_regular_file(&marker_path, false, MAX_LEGACY_RETIREMENT_MARKER_BYTES)?
+    else {
+        return Ok(None);
+    };
+    let bytes = read_private_file(&marker_path, MAX_LEGACY_RETIREMENT_MARKER_BYTES)?
+        .ok_or(LegacyProbeFailure::Inaccessible)?;
+    let marker = serde_json::from_slice::<LegacyRetirementMarker>(&bytes)
+        .map_err(|_| LegacyProbeFailure::Malformed)?;
+    let mut digest = Sha256::new();
+    digest.update(&bytes);
+    let expected_digest: [u8; 32] = digest.finalize().into();
+    if identity.size != bytes.len() as u64 || identity.digest != Some(expected_digest) {
+        return Err(LegacyProbeFailure::Foreign);
+    }
+    Ok(Some(marker))
+}
+
+fn retirement_marker_for(proof: &LegacyPresentationProof) -> LegacyRetirementMarker {
+    LegacyRetirementMarker {
+        version: 1,
+        directory: proof.directory.clone(),
+        directory_identity: proof.directory_identity,
+        socket: proof.socket.clone(),
+        session_name: proof.session_name.clone(),
+        config_identity: proof.config_identity,
+        socket_identity: proof.socket_identity,
+        attachment_identity: proof.attachment_identity,
+    }
+}
+
+fn marker_matches_proof(marker: &LegacyRetirementMarker, proof: &LegacyPresentationProof) -> bool {
+    marker.version == 1
+        && marker.directory == proof.directory
+        && directory_identity_compatible(&marker.directory_identity, &proof.directory_identity)
+        && marker.socket == proof.socket
+        && marker.session_name == proof.session_name
+        && marker.config_identity == proof.config_identity
+        && socket_identity_options_match(
+            marker.socket_identity.as_ref(),
+            proof.socket_identity.as_ref(),
+        )
+        && marker.attachment_identity == proof.attachment_identity
+}
+
+fn ensure_retirement_marker(
+    state_root: &Path,
+    proof: &LegacyPresentationProof,
+) -> Result<LegacyRetirementMarker, PresentationError> {
+    let paths = exact_legacy_paths(state_root, proof)?;
+    let marker_path = paths.directory.join(LEGACY_RETIREMENT_MARKER_FILE);
+    if marker_path.exists() {
+        return read_retirement_marker(state_root, proof)?.ok_or(
+            PresentationError::LegacyMutationRefused("retirement marker disappeared"),
+        );
+    }
+    validate_legacy_artifact_entries(&paths.directory, false)?;
+    let marker = retirement_marker_for(proof);
+    let bytes = serde_json::to_vec(&marker).map_err(|_| {
+        PresentationError::LegacyMutationRefused("retirement marker could not be encoded")
+    })?;
+    if bytes.len() > MAX_LEGACY_RETIREMENT_MARKER_BYTES {
+        return Err(PresentationError::LegacyMutationRefused(
+            "retirement marker exceeded bound",
+        ));
+    }
+    let mut file = match OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return read_retirement_marker(state_root, proof)?.ok_or(
+                PresentationError::LegacyMutationRefused("retirement marker is invalid"),
+            );
+        }
+        Err(error) => return Err(PresentationError::Io(error)),
+    };
+    set_mode(&marker_path, 0o600)?;
+    file.write_all(&bytes).map_err(PresentationError::Io)?;
+    file.sync_all().map_err(PresentationError::Io)?;
+    sync_directory(&paths.directory)?;
+    Ok(marker)
+}
+
+fn read_retirement_marker(
+    state_root: &Path,
+    proof: &LegacyPresentationProof,
+) -> Result<Option<LegacyRetirementMarker>, PresentationError> {
+    let paths = exact_legacy_paths(state_root, proof)?;
+    let marker_path = paths.directory.join(LEGACY_RETIREMENT_MARKER_FILE);
+    let Some(identity) =
+        inspect_regular_file(&marker_path, false, MAX_LEGACY_RETIREMENT_MARKER_BYTES)
+            .map_err(map_cleanup_probe_failure)?
+    else {
+        return Ok(None);
+    };
+    let bytes = read_private_file(&marker_path, MAX_LEGACY_RETIREMENT_MARKER_BYTES)
+        .map_err(map_cleanup_probe_failure)?
+        .ok_or(PresentationError::LegacyMutationRefused(
+            "retirement marker disappeared",
+        ))?;
+    let marker = serde_json::from_slice::<LegacyRetirementMarker>(&bytes)
+        .map_err(|_| PresentationError::LegacyMutationRefused("retirement marker is malformed"))?;
+    let mut digest = Sha256::new();
+    digest.update(&bytes);
+    let expected_digest: [u8; 32] = digest.finalize().into();
+    if !marker_matches_proof(&marker, proof)
+        || identity.size != bytes.len() as u64
+        || identity.digest != Some(expected_digest)
+    {
+        return Err(PresentationError::LegacyProofChanged);
+    }
+    Ok(Some(marker))
+}
+
+fn remove_exact_legacy_artifacts(
+    state_root: &Path,
+    proof: &LegacyPresentationProof,
+    marker: &LegacyRetirementMarker,
+) -> Result<(), PresentationError> {
+    remove_exact_legacy_artifacts_with(state_root, proof, marker, |_| Ok(()))
+}
+
+fn remove_exact_legacy_artifacts_with<F>(
+    state_root: &Path,
+    proof: &LegacyPresentationProof,
+    marker: &LegacyRetirementMarker,
+    mut after_remove: F,
+) -> Result<(), PresentationError>
+where
+    F: FnMut(&Path) -> Result<(), PresentationError>,
+{
+    let paths = exact_legacy_paths(state_root, proof)?;
+    if !marker_matches_proof(marker, proof) {
+        return Err(PresentationError::LegacyProofChanged);
+    }
+    let current_marker =
+        read_retirement_marker(state_root, proof)?.ok_or(PresentationError::LegacyProofChanged)?;
+    if current_marker != *marker {
+        return Err(PresentationError::LegacyProofChanged);
+    }
+    let _ = validate_exact_socket(&paths, proof.socket_identity.as_ref())?;
+    validate_legacy_artifact_entries(&paths.directory, true)?;
+
+    let config = inspect_regular_file(&paths.config, false, MAX_LEGACY_CONFIG_BYTES)
+        .map_err(map_cleanup_probe_failure)?;
+    if config.is_some() && config != Some(proof.config_identity) {
+        return Err(PresentationError::LegacyProofChanged);
+    }
+    let attachment = inspect_regular_file(
+        &paths.attachment_status,
+        false,
+        MAX_ATTACHMENT_STATUS_BYTES_USIZE,
+    )
+    .map_err(map_cleanup_probe_failure)?;
+    if !optional_identity_compatible(proof.attachment_identity.as_ref(), attachment.as_ref()) {
+        return Err(PresentationError::LegacyProofChanged);
+    }
+    let socket = inspect_private_socket(&paths.socket).map_err(map_cleanup_probe_failure)?;
+    if !optional_socket_identity_compatible(proof.socket_identity.as_ref(), socket.as_ref()) {
+        return Err(PresentationError::LegacyProofChanged);
+    }
+
+    // Recheck the bounded name allowlist immediately before mutation so a
+    // newly appearing sibling is refused rather than removed around.
+    validate_legacy_artifact_entries(&paths.directory, true)?;
+    remove_exact_regular_artifact(
+        &paths.attachment_status,
+        proof.attachment_identity.as_ref(),
+        MAX_ATTACHMENT_STATUS_BYTES_USIZE,
+        &mut after_remove,
+    )?;
+    remove_exact_regular_artifact(
+        &paths.config,
+        Some(&proof.config_identity),
+        MAX_LEGACY_CONFIG_BYTES,
+        &mut after_remove,
+    )?;
+    remove_exact_socket_artifact(
+        &paths.socket,
+        proof.socket_identity.as_ref(),
+        &mut after_remove,
+    )?;
+    let marker_path = paths.directory.join(LEGACY_RETIREMENT_MARKER_FILE);
+    let current_marker =
+        read_retirement_marker(state_root, proof)?.ok_or(PresentationError::LegacyProofChanged)?;
+    if current_marker != *marker {
+        return Err(PresentationError::LegacyProofChanged);
+    }
+    match fs::remove_file(marker_path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(PresentationError::Io(error)),
+    }
+    sync_directory(&paths.directory)?;
+    match fs::remove_dir(&paths.directory) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+            return Err(PresentationError::LegacyMutationRefused(
+                "presentation directory gained an entry during cleanup",
+            ));
+        }
+        Err(error) => return Err(PresentationError::Io(error)),
+    }
+    if let Some(parent) = paths.directory.parent() {
+        sync_directory(parent)?;
+        if let Some(root) = parent.parent() {
+            sync_directory(root)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_exact_regular_artifact<F>(
+    path: &Path,
+    expected: Option<&LegacyFileIdentity>,
+    max_bytes: usize,
+    after_remove: &mut F,
+) -> Result<(), PresentationError>
+where
+    F: FnMut(&Path) -> Result<(), PresentationError>,
+{
+    // This is deliberately repeated for each unlink.  An interruption hook
+    // or another actor may replace a later artifact after an earlier unlink;
+    // the replacement must fail identity validation before it is touched.
+    let actual = inspect_regular_file(path, false, max_bytes).map_err(map_cleanup_probe_failure)?;
+    if !optional_socket_identity_compatible(expected, actual.as_ref()) {
+        return Err(PresentationError::LegacyProofChanged);
+    }
+    if actual.is_none() {
+        return Ok(());
+    }
+    match fs::remove_file(path) {
+        Ok(()) => after_remove(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(PresentationError::Io(error)),
+    }
+}
+
+fn remove_exact_socket_artifact<F>(
+    path: &Path,
+    expected: Option<&LegacyFileIdentity>,
+    after_remove: &mut F,
+) -> Result<(), PresentationError>
+where
+    F: FnMut(&Path) -> Result<(), PresentationError>,
+{
+    let actual = inspect_private_socket(path).map_err(map_cleanup_probe_failure)?;
+    if !optional_identity_compatible(expected, actual.as_ref()) {
+        return Err(PresentationError::LegacyProofChanged);
+    }
+    if actual.is_none() {
+        return Ok(());
+    }
+    match fs::remove_file(path) {
+        Ok(()) => after_remove(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(PresentationError::Io(error)),
+    }
+}
+
+fn validate_legacy_artifact_entries(
+    directory: &Path,
+    allow_marker: bool,
+) -> Result<(), PresentationError> {
+    let entries = fs::read_dir(directory).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            PresentationError::LegacyProofChanged
+        } else {
+            PresentationError::Io(error)
+        }
+    })?;
+    let mut count = 0;
+    for entry in entries.take(MAX_LEGACY_PRESENTATION_ENTRIES + 1) {
+        count += 1;
+        if count > MAX_LEGACY_PRESENTATION_ENTRIES {
+            return Err(PresentationError::LegacyMutationRefused(
+                "presentation artifact count exceeded bound",
+            ));
+        }
+        let entry = entry.map_err(PresentationError::Io)?;
+        let name = entry.file_name();
+        if name != ATTACHMENT_STATUS_FILE
+            && name != "tmux.conf"
+            && name != "tmux.sock"
+            && (!allow_marker || name != LEGACY_RETIREMENT_MARKER_FILE)
+        {
+            return Err(PresentationError::LegacyMutationRefused(
+                "unknown presentation artifact",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn map_cleanup_probe_failure(failure: LegacyProbeFailure) -> PresentationError {
+    match failure {
+        LegacyProbeFailure::Inaccessible => PresentationError::LegacyMutationRefused(
+            "presentation artifact could not be inspected safely",
+        ),
+        LegacyProbeFailure::Foreign => PresentationError::LegacyMutationRefused(
+            "presentation artifact is foreign or symlinked",
+        ),
+        LegacyProbeFailure::Malformed => {
+            PresentationError::LegacyMutationRefused("presentation artifact is malformed")
+        }
+    }
+}
+
+fn sync_directory(path: &Path) -> Result<(), PresentationError> {
+    let directory = OpenOptions::new()
+        .read(true)
+        .open(path)
+        .map_err(PresentationError::Io)?;
+    directory.sync_all().map_err(PresentationError::Io)
+}
+
+/// A small deterministic evidence seam for focused presentation-proof tests.
+/// It deliberately contains only bounded tmux/process identity, never pane
+/// output.  Production code uses the private collector below.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyPresentationEvidenceForTest {
+    pub executable_path: PathBuf,
+    pub config_identity: Option<LegacyFileIdentity>,
+    pub session_id: Option<String>,
+    pub window_id: Option<String>,
+    pub panes: Vec<LegacyPresentationPaneEvidenceForTest>,
+    pub clients: Vec<String>,
+    pub shell_claim_present: bool,
+    pub attachment_status: Option<LegacyAttachmentStatusForTest>,
+}
+
+/// Schema-12 attachment metadata accepted by the deterministic legacy proof
+/// fixture. It is separate from the active host-local [`AttachmentStatus`].
+#[doc(hidden)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct LegacyAttachmentStatusForTest {
+    pub attempt_id: uuid::Uuid,
+    pub host_alias: String,
+    pub workstream_id: WorkstreamId,
+    pub phase: AttachmentPhase,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LegacyPresentationPaneEvidenceForTest {
+    pub id: String,
+    pub role: PresentationPaneRole,
+    pub dead: bool,
+    pub pid: Option<u32>,
+    pub process_pid: Option<u32>,
+    pub birth: Option<u64>,
+    pub process_stable: bool,
+    pub executable_path: Option<PathBuf>,
+    pub executable_identity: Option<LegacyFileIdentity>,
+    pub arguments: Vec<String>,
+    pub left: u16,
+    pub top: u16,
+    pub width: u16,
+    pub height: u16,
+    pub window_width: u16,
+    pub window_height: u16,
+}
+
+impl LegacyPresentationEvidenceForTest {
+    fn into_internal(self) -> LegacyPresentationEvidence {
+        let panes = self
+            .panes
+            .into_iter()
+            .map(|pane| {
+                let process =
+                    pane.process_pid
+                        .or(pane.pid)
+                        .zip(pane.birth)
+                        .and_then(|(pid, birth)| {
+                            pane.executable_path.zip(pane.executable_identity).map(
+                                |(path, identity)| LegacyProcessProof {
+                                    pid,
+                                    birth,
+                                    executable: LegacyExecutableProof {
+                                        path: normalize_deleted_executable_path(path),
+                                        identity,
+                                    },
+                                    arguments: pane.arguments.clone(),
+                                },
+                            )
+                        });
+                LegacyPaneEvidence {
+                    pane: LegacyOwnedPane {
+                        id: pane.id,
+                        role: pane.role,
+                        host_alias: None,
+                        workstream_id: None,
+                        dead: pane.dead,
+                        left: pane.left,
+                        top: pane.top,
+                        width: pane.width,
+                        height: pane.height,
+                    },
+                    pid: pane.pid,
+                    current_command: String::new(),
+                    start_command: String::new(),
+                    process,
+                    process_stable: pane.process_stable,
+                }
+            })
+            .collect();
+        LegacyPresentationEvidence {
+            directory: LegacyFileIdentity {
+                size: 0,
+                mode: 0o700,
+                device: 0,
+                inode: 0,
+                digest: None,
+            },
+            socket: Some(LegacyFileIdentity {
+                size: 0,
+                mode: 0o600,
+                device: 0,
+                inode: 0,
+                digest: None,
+            }),
+            config: self
+                .config_identity
+                .unwrap_or_else(expected_presentation_config_identity),
+            attachment: self.attachment_status.as_ref().map(|_| LegacyFileIdentity {
+                size: 0,
+                mode: 0o600,
+                device: 0,
+                inode: 0,
+                digest: None,
+            }),
+            attachment_status: self.attachment_status.map(|status| LegacyAttachmentStatus {
+                attempt_id: status.attempt_id,
+                host_alias: status.host_alias,
+                workstream_id: status.workstream_id,
+                phase: status.phase,
+            }),
+            session_id: self.session_id,
+            window_id: self.window_id,
+            panes,
+            clients: self
+                .clients
+                .into_iter()
+                .map(|name| LegacyClientProof {
+                    name,
+                    window_name: NAVIGATOR_WINDOW.to_owned(),
+                })
+                .collect(),
+            shell_claim_present: self.shell_claim_present,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegacyProbeFailure {
+    Malformed,
+    Foreign,
+    Inaccessible,
+}
+
+fn classify_fs_error(error: &std::io::Error) -> LegacyPresentationState {
+    match error.kind() {
+        std::io::ErrorKind::PermissionDenied
+        | std::io::ErrorKind::ConnectionRefused
+        | std::io::ErrorKind::TimedOut => LegacyPresentationState::Inaccessible,
+        _ => LegacyPresentationState::Malformed,
+    }
+}
+
+fn inspect_private_presentation_root(
+    state_root: &Path,
+) -> Result<Option<PathBuf>, PresentationError> {
+    let metadata = match fs::symlink_metadata(state_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(PresentationError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(Some(state_root.join(PRESENTATION_DIRECTORY)));
+    }
+    let presentation_root = state_root.join(PRESENTATION_DIRECTORY);
+    let metadata = match fs::symlink_metadata(&presentation_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(PresentationError::Io(error)),
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Ok(Some(presentation_root));
+    }
+    if !is_private_owner_directory(&metadata) {
+        return Ok(Some(presentation_root));
+    }
+    Ok(Some(presentation_root))
+}
+
+fn bounded_directory_entries(
+    entries: fs::ReadDir,
+) -> impl Iterator<Item = Result<fs::DirEntry, std::io::Error>> {
+    entries.take(MAX_LEGACY_PRESENTATION_ENTRIES + 1)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "The filesystem/tmux collector keeps the exact allowlist and bounded query sequence together."
+)]
+fn inspect_legacy_presentation(
+    directory: &Path,
+) -> Result<LegacyPresentationEvidence, LegacyProbeFailure> {
+    let directory_metadata = fs::symlink_metadata(directory).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::PermissionDenied {
+            LegacyProbeFailure::Inaccessible
+        } else {
+            LegacyProbeFailure::Foreign
+        }
+    })?;
+    if directory_metadata.file_type().is_symlink() {
+        return Err(LegacyProbeFailure::Foreign);
+    }
+    if !directory_metadata.is_dir() {
+        return Err(LegacyProbeFailure::Malformed);
+    }
+    if !is_private_owner_directory(&directory_metadata) {
+        return Err(LegacyProbeFailure::Foreign);
+    }
+
+    let mut names = BTreeSet::new();
+    let entries =
+        fs::read_dir(directory).map_err(|error| classify_fs_error(&error).into_probe())?;
+    for entry in bounded_directory_entries(entries) {
+        let entry = entry.map_err(|error| classify_fs_error(&error).into_probe())?;
+        if !names.insert(entry.file_name()) {
+            return Err(LegacyProbeFailure::Malformed);
+        }
+    }
+    if names.len() > MAX_LEGACY_PRESENTATION_ENTRIES {
+        return Err(LegacyProbeFailure::Malformed);
+    }
+    for name in &names {
+        let known = name == "tmux.sock" || name == "tmux.conf" || name == ATTACHMENT_STATUS_FILE;
+        if !known {
+            return Err(LegacyProbeFailure::Malformed);
+        }
+    }
+
+    let config = inspect_regular_file(&directory.join("tmux.conf"), true, MAX_LEGACY_CONFIG_BYTES)?
+        .ok_or(LegacyProbeFailure::Malformed)?;
+    let socket = inspect_private_socket(&directory.join("tmux.sock"))?;
+    let (attachment, attachment_status) = match inspect_regular_file(
+        &directory.join(ATTACHMENT_STATUS_FILE),
+        false,
+        MAX_ATTACHMENT_STATUS_BYTES_USIZE,
+    )? {
+        Some(file) => {
+            let bytes = read_private_file(
+                &directory.join(ATTACHMENT_STATUS_FILE),
+                MAX_ATTACHMENT_STATUS_BYTES_USIZE,
+            )?
+            .ok_or(LegacyProbeFailure::Inaccessible)?;
+            let status = serde_json::from_slice::<LegacyAttachmentStatus>(&bytes)
+                .map_err(|_| LegacyProbeFailure::Malformed)?;
+            validate_legacy_host_alias(&status.host_alias)
+                .map_err(|_| LegacyProbeFailure::Malformed)?;
+            (Some(file), Some(status))
+        }
+        None => (None, None),
+    };
+
+    let mut evidence = LegacyPresentationEvidence {
+        directory: legacy_file_identity(&directory_metadata, None),
+        socket,
+        config,
+        attachment,
+        attachment_status,
+        session_id: None,
+        window_id: None,
+        panes: Vec::new(),
+        clients: Vec::new(),
+        shell_claim_present: false,
+    };
+    if evidence.socket.is_none() {
+        return Ok(evidence);
+    }
+    let socket_path = directory.join("tmux.sock");
+    let Some(session_output) = legacy_tmux_query(
+        &socket_path,
+        ["list-sessions", "-F", "#{session_name}\t#{session_id}"],
+    )?
+    else {
+        return Ok(evidence);
+    };
+    let sessions = parse_session_rows(&session_output)?;
+    if sessions.is_empty() {
+        return Ok(evidence);
+    }
+    if sessions.len() != 1 {
+        return Err(LegacyProbeFailure::Malformed);
+    }
+    let (session_name, session_id) = &sessions[0];
+    let expected_session = presentation_session_name(directory)
+        .ok_or(LegacyProbeFailure::Malformed)?
+        .clone();
+    if session_name != &expected_session {
+        return Err(LegacyProbeFailure::Foreign);
+    }
+    evidence.session_id = Some(session_id.clone());
+
+    // An attached client is the strongest refusal signal.  Capture it before
+    // probing pane topology so a dead/malformed pane cannot turn an attached
+    // presentation into cleanup-eligible evidence.  The client query is
+    // exact: every row must name this session and the navigator window.
+    let clients = legacy_tmux_query(
+        &socket_path,
+        [
+            "list-clients",
+            "-F",
+            "#{client_name}\t#{session_name}\t#{window_name}",
+        ],
+    )?
+    .ok_or(LegacyProbeFailure::Inaccessible)?;
+    evidence.clients = parse_client_rows(&clients, session_name)?;
+    let attached = !evidence.clients.is_empty();
+
+    let windows_output = match legacy_tmux_query(
+        &socket_path,
+        [
+            "list-windows",
+            "-t",
+            session_name.as_str(),
+            "-F",
+            "#{window_name}\t#{window_id}",
+        ],
+    ) {
+        Ok(Some(output)) => output,
+        Ok(None) | Err(_) if attached => return Ok(evidence),
+        Ok(None) => return Err(LegacyProbeFailure::Inaccessible),
+        Err(error) => return Err(error),
+    };
+    let windows = match parse_window_rows(&windows_output) {
+        Ok(windows) => windows,
+        Err(_) if attached => return Ok(evidence),
+        Err(error) => return Err(error),
+    };
+    if windows.len() != 1 {
+        if attached {
+            return Ok(evidence);
+        }
+        return Err(LegacyProbeFailure::Malformed);
+    }
+    let (window_name, window_id) = &windows[0];
+    if window_name != NAVIGATOR_WINDOW {
+        if attached {
+            return Ok(evidence);
+        }
+        return Err(LegacyProbeFailure::Foreign);
+    }
+    evidence.window_id = Some(window_id.clone());
+
+    let panes_output = match legacy_tmux_query(
+        &socket_path,
+        [
+            "list-panes",
+            "-t",
+            format!("{session_name}:{NAVIGATOR_WINDOW}").as_str(),
+            "-F",
+            LEGACY_PROOF_TOPOLOGY_FORMAT,
+        ],
+    ) {
+        Ok(Some(output)) => output,
+        Ok(None) | Err(_) if attached => return Ok(evidence),
+        Ok(None) => return Err(LegacyProbeFailure::Inaccessible),
+        Err(error) => return Err(error),
+    };
+    evidence.panes = match parse_legacy_panes(&panes_output) {
+        Ok(panes) => panes,
+        Err(_) if attached => return Ok(evidence),
+        Err(error) => return Err(error),
+    };
+    if !(2..=MAX_LEGACY_PANES).contains(&evidence.panes.len()) {
+        if attached {
+            return Ok(evidence);
+        }
+        return Err(LegacyProbeFailure::Malformed);
+    }
+    let legacy_topology_panes = evidence
+        .panes
+        .iter()
+        .map(|pane| pane.pane.clone())
+        .collect::<Vec<_>>();
+    let (window_width, window_height) = legacy_topology_dimensions(&legacy_topology_panes);
+    let topology_panes = legacy_topology_panes
+        .iter()
+        .map(|pane| OwnedPane {
+            id: pane.id.clone(),
+            role: pane.role,
+            workstream_id: pane.workstream_id,
+            dead: pane.dead,
+            left: pane.left,
+            top: pane.top,
+            width: pane.width,
+            height: pane.height,
+        })
+        .collect::<Vec<_>>();
+    let topology = PresentationTopology {
+        panes: topology_panes,
+        window_width,
+        window_height,
+    };
+    if validate_topology_shape(&topology).is_err() {
+        if attached {
+            return Ok(evidence);
+        }
+        return Err(LegacyProbeFailure::Malformed);
+    }
+
+    let claim = match legacy_tmux_query(&socket_path, ["show-options", "-gqv", SHELL_CLAIM_OPTION])
+    {
+        Ok(Some(claim)) => claim,
+        Ok(None) => String::new(),
+        Err(_) if attached => return Ok(evidence),
+        Err(error) => return Err(error),
+    };
+    evidence.shell_claim_present = !claim.trim().is_empty();
+    Ok(evidence)
+}
+
+fn inspect_regular_file(
+    path: &Path,
+    required: bool,
+    max_bytes: usize,
+) -> Result<Option<LegacyFileIdentity>, LegacyProbeFailure> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !required => return Ok(None),
+        Err(error) => return Err(classify_fs_error(&error).into_probe()),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(LegacyProbeFailure::Foreign);
+    }
+    if !metadata.is_file() {
+        return Err(LegacyProbeFailure::Malformed);
+    }
+    if !is_private_owner_file(&metadata) {
+        return Err(LegacyProbeFailure::Foreign);
+    }
+    let bytes = read_private_file(path, max_bytes)?.ok_or(LegacyProbeFailure::Inaccessible)?;
+    Ok(Some(legacy_file_identity(&metadata, Some(&bytes))))
+}
+
+fn inspect_private_socket(path: &Path) -> Result<Option<LegacyFileIdentity>, LegacyProbeFailure> {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(classify_fs_error(&error).into_probe()),
+    };
+    if metadata.file_type().is_symlink() {
+        return Err(LegacyProbeFailure::Foreign);
+    }
+    if !file_type_is_socket(&metadata) {
+        return Err(LegacyProbeFailure::Malformed);
+    }
+    if !is_private_owner_socket(&metadata) {
+        return Err(LegacyProbeFailure::Foreign);
+    }
+    Ok(Some(legacy_file_identity(&metadata, None)))
+}
+
+fn read_private_file(path: &Path, maximum: usize) -> Result<Option<Vec<u8>>, LegacyProbeFailure> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(classify_fs_error(&error).into_probe()),
+    };
+    let mut bytes = Vec::new();
+    file.take(u64::try_from(maximum).unwrap_or(u64::MAX).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| classify_fs_error(&error).into_probe())?;
+    if bytes.len() > maximum {
+        return Err(LegacyProbeFailure::Malformed);
+    }
+    Ok(Some(bytes))
+}
+
+fn legacy_file_identity(metadata: &fs::Metadata, bytes: Option<&[u8]>) -> LegacyFileIdentity {
+    LegacyFileIdentity {
+        size: metadata.len(),
+        mode: file_mode(metadata),
+        device: file_device(metadata),
+        inode: file_inode(metadata),
+        digest: bytes.map(|bytes| {
+            let mut digest = Sha256::new();
+            digest.update(bytes);
+            digest.finalize().into()
+        }),
+    }
+}
+
+fn is_private_owner_directory(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.mode() & 0o777) == 0o700 && metadata.uid() == nix::unistd::geteuid().as_raw()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        true
+    }
+}
+
+fn file_type_is_socket(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        metadata.file_type().is_socket()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        false
+    }
+}
+
+fn is_private_owner_file(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.mode() & 0o777) == 0o600 && metadata.uid() == nix::unistd::geteuid().as_raw()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        true
+    }
+}
+
+fn private_socket_mode(mode: u32) -> bool {
+    matches!(mode, 0o600 | 0o700)
+}
+
+fn is_private_owner_socket(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        private_socket_mode(metadata.mode() & 0o777)
+            && metadata.uid() == nix::unistd::geteuid().as_raw()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        true
+    }
+}
+
+fn file_mode(metadata: &fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.mode() & 0o777
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
+fn file_device(metadata: &fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.dev()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
+fn file_inode(metadata: &fs::Metadata) -> u64 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.ino()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        0
+    }
+}
+
+fn executable_matches(left: &LegacyExecutableProof, right: &LegacyExecutableProof) -> bool {
+    // The inode/device identity is authoritative.  The `/proc/<pid>/exe`
+    // readlink is only a display hint and may differ after an upgrade has
+    // unlinked the old executable.
+    left.identity == right.identity
+}
+
+fn normalize_deleted_executable_path(path: PathBuf) -> PathBuf {
+    const DELETED_SUFFIX: &str = " (deleted)";
+    let Some(value) = path.to_str() else {
+        return path;
+    };
+    value
+        .strip_suffix(DELETED_SUFFIX)
+        .map_or_else(|| path.clone(), PathBuf::from)
+}
+
+fn process_executable_proof(
+    proc_executable: &Path,
+    display_path: PathBuf,
+) -> Result<LegacyExecutableProof, LegacyProcessFailure> {
+    let metadata = fs::metadata(proc_executable).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            LegacyProcessFailure::Gone
+        } else {
+            LegacyProcessFailure::Inaccessible
+        }
+    })?;
+    if !metadata.is_file() {
+        return Err(LegacyProcessFailure::Malformed);
+    }
+    Ok(LegacyExecutableProof {
+        path: normalize_deleted_executable_path(display_path),
+        identity: legacy_file_identity(&metadata, None),
+    })
+}
+
+fn legacy_tmux_query<const N: usize>(
+    socket: &Path,
+    arguments: [&str; N],
+) -> Result<Option<String>, LegacyProbeFailure> {
+    let mut command = private_tmux_command();
+    command
+        .args(["-f", "/dev/null", "-S"])
+        .arg(socket)
+        .args(arguments);
+    let output = output_bounded(&mut command, MAX_TMUX_OUTPUT_BYTES, MAX_TMUX_OUTPUT_BYTES)
+        .map_err(|_| LegacyProbeFailure::Inaccessible)?;
+    if output.status.success() {
+        return String::from_utf8(output.stdout)
+            .map(Some)
+            .map_err(|_| LegacyProbeFailure::Malformed);
+    }
+    let diagnostic = String::from_utf8_lossy(&output.stderr);
+    if diagnostic.contains("no server running")
+        || diagnostic.contains("No such file")
+        || diagnostic.contains("no sessions")
+    {
+        return Ok(None);
+    }
+    Err(LegacyProbeFailure::Inaccessible)
+}
+
+fn parse_session_rows(output: &str) -> Result<Vec<(String, String)>, LegacyProbeFailure> {
+    let mut rows = Vec::new();
+    for line in output.lines() {
+        if line.is_empty() || rows.len() >= 2 {
+            return Err(LegacyProbeFailure::Malformed);
+        }
+        let mut fields = line.split('\t');
+        let Some(name) = fields.next() else {
+            return Err(LegacyProbeFailure::Malformed);
+        };
+        let Some(id) = fields.next() else {
+            return Err(LegacyProbeFailure::Malformed);
+        };
+        if fields.next().is_some()
+            || name.is_empty()
+            || name.chars().any(char::is_control)
+            || !parse_session_id(id)
+        {
+            return Err(LegacyProbeFailure::Malformed);
+        }
+        rows.push((name.to_owned(), id.to_owned()));
+    }
+    Ok(rows)
+}
+
+fn parse_window_rows(output: &str) -> Result<Vec<(String, String)>, LegacyProbeFailure> {
+    let mut rows = Vec::new();
+    for line in output.lines() {
+        if line.is_empty() || rows.len() >= 2 {
+            return Err(LegacyProbeFailure::Malformed);
+        }
+        let mut fields = line.split('\t');
+        let Some(name) = fields.next() else {
+            return Err(LegacyProbeFailure::Malformed);
+        };
+        let Some(id) = fields.next() else {
+            return Err(LegacyProbeFailure::Malformed);
+        };
+        if fields.next().is_some() || name.is_empty() || !parse_window_id(id) {
+            return Err(LegacyProbeFailure::Malformed);
+        }
+        rows.push((name.to_owned(), id.to_owned()));
+    }
+    Ok(rows)
+}
+
+fn parse_client_rows(
+    output: &str,
+    expected_session: &str,
+) -> Result<Vec<LegacyClientProof>, LegacyProbeFailure> {
+    let mut clients = Vec::new();
+    for line in output.lines() {
+        if line.is_empty() || clients.len() >= MAX_LEGACY_CLIENTS {
+            return Err(LegacyProbeFailure::Malformed);
+        }
+        let mut fields = line.split('\t');
+        let Some(name) = fields.next() else {
+            return Err(LegacyProbeFailure::Malformed);
+        };
+        let Some(session) = fields.next() else {
+            return Err(LegacyProbeFailure::Malformed);
+        };
+        let Some(window_name) = fields.next() else {
+            return Err(LegacyProbeFailure::Malformed);
+        };
+        if fields.next().is_some()
+            || name.is_empty()
+            || session != expected_session
+            || window_name != NAVIGATOR_WINDOW
+        {
+            return Err(LegacyProbeFailure::Malformed);
+        }
+        clients.push(LegacyClientProof {
+            name: name.to_owned(),
+            window_name: window_name.to_owned(),
+        });
+    }
+    clients.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(clients)
+}
+
+fn parse_session_id(value: &str) -> bool {
+    value.strip_prefix('$').is_some_and(|digits| {
+        !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit())
+    })
+}
+
+fn parse_legacy_panes(output: &str) -> Result<Vec<LegacyPaneEvidence>, LegacyProbeFailure> {
+    let mut panes = Vec::new();
+    let mut window_size = None;
+    for line in output.lines() {
+        if line.is_empty() || panes.len() >= MAX_LEGACY_PANES {
+            return Err(LegacyProbeFailure::Malformed);
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        if fields.len() != 15 {
+            return Err(LegacyProbeFailure::Malformed);
+        }
+        let base_line = [
+            fields[0], fields[1], fields[2], fields[3], fields[4], fields[9], fields[10],
+            fields[11], fields[12], fields[13], fields[14],
+        ]
+        .join("\t");
+        let existing_panes = panes
+            .iter()
+            .map(|pane: &LegacyPaneEvidence| pane.pane.clone())
+            .collect::<Vec<_>>();
+        let pane = parse_legacy_topology_line(&base_line, true, &mut window_size, &existing_panes)
+            .map_err(|_| LegacyProbeFailure::Malformed)?;
+        if fields[5] == "0" {
+            return Err(LegacyProbeFailure::Malformed);
+        }
+        let pid = fields[5]
+            .parse::<u32>()
+            .map_err(|_| LegacyProbeFailure::Malformed)?;
+        for value in [fields[6], fields[7], fields[8]] {
+            if value.chars().any(char::is_control) || value.len() > 1024 {
+                return Err(LegacyProbeFailure::Malformed);
+            }
+        }
+        let process = if pane.dead {
+            None
+        } else {
+            stable_process_proof(pid).map_err(|error| match error {
+                LegacyProcessFailure::Gone | LegacyProcessFailure::Malformed => {
+                    LegacyProbeFailure::Malformed
+                }
+                LegacyProcessFailure::Inaccessible => LegacyProbeFailure::Inaccessible,
+            })?
+        };
+        panes.push(LegacyPaneEvidence {
+            pane,
+            pid: Some(pid),
+            current_command: fields[6].to_owned(),
+            start_command: fields[7].to_owned(),
+            process,
+            process_stable: true,
+        });
+    }
+    if panes.is_empty() {
+        return Err(LegacyProbeFailure::Malformed);
+    }
+    if panes
+        .iter()
+        .filter(|pane| pane.pane.role == PresentationPaneRole::Navigator)
+        .count()
+        != 1
+        || panes
+            .iter()
+            .filter(|pane| pane.pane.role == PresentationPaneRole::Provider)
+            .count()
+            != 1
+        || panes
+            .iter()
+            .filter(|pane| pane.pane.role == PresentationPaneRole::Utility)
+            .count()
+            > 1
+    {
+        return Err(LegacyProbeFailure::Malformed);
+    }
+    Ok(panes)
+}
+
+fn legacy_topology_dimensions(panes: &[LegacyOwnedPane]) -> (u16, u16) {
+    let window_width = panes
+        .iter()
+        .map(|pane| pane.left.saturating_add(pane.width))
+        .max()
+        .unwrap_or(0);
+    let window_height = panes
+        .iter()
+        .map(|pane| pane.top.saturating_add(pane.height))
+        .max()
+        .unwrap_or(0);
+    (window_width, window_height)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegacyProcessFailure {
+    Gone,
+    Inaccessible,
+    Malformed,
+}
+
+fn stable_process_proof(pid: u32) -> Result<Option<LegacyProcessProof>, LegacyProcessFailure> {
+    let first = read_process_proof(pid)?;
+    let Some(first) = first else {
+        return Ok(None);
+    };
+    let second = read_process_proof(pid)?.ok_or(LegacyProcessFailure::Gone)?;
+    if first != second {
+        return Err(LegacyProcessFailure::Gone);
+    }
+    Ok(Some(first))
+}
+
+fn read_process_proof(pid: u32) -> Result<Option<LegacyProcessProof>, LegacyProcessFailure> {
+    #[cfg(target_os = "linux")]
+    {
+        let proc_root = Path::new("/proc");
+        let process_root = proc_root.join(pid.to_string());
+        let stat = match fs::read_to_string(process_root.join("stat")) {
+            Ok(stat) => stat,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(LegacyProcessFailure::Inaccessible),
+        };
+        let birth = parse_process_birth(&stat)?;
+        let proc_executable = process_root.join("exe");
+        let executable_link = match fs::read_link(&proc_executable) {
+            Ok(path) => path,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(LegacyProcessFailure::Inaccessible),
+        };
+        let executable = process_executable_proof(&proc_executable, executable_link)?;
+        let bytes = match fs::read(process_root.join("cmdline")) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(LegacyProcessFailure::Inaccessible),
+        };
+        if bytes.len() > MAX_LEGACY_PROCESS_ARGUMENT_BYTES {
+            return Err(LegacyProcessFailure::Malformed);
+        }
+        let mut arguments = Vec::new();
+        for argument in bytes
+            .split(|byte| *byte == 0)
+            .filter(|argument| !argument.is_empty())
+        {
+            let argument =
+                std::str::from_utf8(argument).map_err(|_| LegacyProcessFailure::Malformed)?;
+            if argument.chars().any(char::is_control) {
+                return Err(LegacyProcessFailure::Malformed);
+            }
+            arguments.push(argument.to_owned());
+        }
+        if arguments.is_empty() {
+            return Err(LegacyProcessFailure::Malformed);
+        }
+        Ok(Some(LegacyProcessProof {
+            pid,
+            birth,
+            executable,
+            arguments,
+        }))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = pid;
+        Err(LegacyProcessFailure::Inaccessible)
+    }
+}
+
+fn parse_process_birth(stat: &str) -> Result<u64, LegacyProcessFailure> {
+    let Some(close_paren) = stat.rfind(')') else {
+        return Err(LegacyProcessFailure::Malformed);
+    };
+    let fields = stat
+        .get(close_paren + 2..)
+        .ok_or(LegacyProcessFailure::Malformed)?
+        .split_whitespace()
+        .collect::<Vec<_>>();
+    fields
+        .get(19)
+        .ok_or(LegacyProcessFailure::Malformed)?
+        .parse::<u64>()
+        .map_err(|_| LegacyProcessFailure::Malformed)
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "The pure classifier orders each independent fail-closed proof check before deriving the launcher state."
+)]
+fn classify_legacy_evidence_internal(
+    directory: &Path,
+    state_root: &Path,
+    evidence: &LegacyPresentationEvidence,
+) -> LegacyPresentationAssessment {
+    let socket = directory.join("tmux.sock");
+    let session_name = presentation_session_name(directory).unwrap_or_default();
+    let mut proof = LegacyPresentationProof {
+        directory: directory.to_path_buf(),
+        directory_identity: evidence.directory,
+        socket,
+        socket_identity: evidence.socket,
+        config_identity: evidence.config,
+        attachment_identity: evidence.attachment,
+        session_name: session_name.clone(),
+        session_id: evidence.session_id.clone(),
+        window_id: evidence.window_id.clone(),
+        navigator: None,
+        provider: None,
+        utility: None,
+        clients: evidence.clients.clone(),
+        shell_claim_present: evidence.shell_claim_present,
+        legacy_executable: None,
+        attachment_status: evidence.attachment_status.clone(),
+    };
+
+    if !config_content_matches(&evidence.config) {
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign);
+    }
+    if evidence.socket.is_none() || evidence.session_id.is_none() {
+        return LegacyPresentationAssessment {
+            state: LegacyPresentationState::DeadOwned,
+            proof: Some(proof),
+        };
+    }
+    // Exact attached-client evidence outranks every pane-local failure.  A
+    // client may remain attached while a pane is dead or its private options
+    // are no longer readable; that presentation must never be mistaken for
+    // detached cleanup-eligible ownership.  When all pane evidence is
+    // available we still prove the navigator/controller so a later drain
+    // attach can require the strongest evidence without downgrading this
+    // refusal when a pane is malformed.
+    let attached = !proof.clients.is_empty();
+    if evidence.shell_claim_present && !attached {
+        return LegacyPresentationAssessment {
+            state: LegacyPresentationState::Malformed,
+            proof: None,
+        };
+    }
+    let Some(navigator) = evidence
+        .panes
+        .iter()
+        .find(|pane| pane.pane.role == PresentationPaneRole::Navigator)
+    else {
+        if attached {
+            return attached_assessment(proof);
+        }
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Malformed);
+    };
+    let Some(provider) = evidence
+        .panes
+        .iter()
+        .find(|pane| pane.pane.role == PresentationPaneRole::Provider)
+    else {
+        if attached {
+            return attached_assessment(proof);
+        }
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Malformed);
+    };
+    if navigator.pane.dead || provider.pane.dead {
+        if attached {
+            return attached_assessment(proof);
+        }
+        return LegacyPresentationAssessment {
+            state: LegacyPresentationState::DeadOwned,
+            proof: Some(proof),
+        };
+    }
+    let Some(navigator_process) = &navigator.process else {
+        if attached {
+            return attached_assessment(proof);
+        }
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Inaccessible);
+    };
+    let expected_navigator_arguments = [
+        "--state-root",
+        state_root.to_str().unwrap_or_default(),
+        "_navigator",
+        "--presentation-socket",
+        proof.socket.to_str().unwrap_or_default(),
+        "--presentation-session",
+        session_name.as_str(),
+    ];
+    if !navigator.process_stable
+        || navigator_process.pid != navigator.pid.unwrap_or_default()
+        || !arguments_after_executable_match(
+            &navigator_process.arguments,
+            &expected_navigator_arguments,
+        )
+    {
+        if attached {
+            return attached_assessment(proof);
+        }
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign);
+    }
+    proof.navigator = Some(LegacyPaneProof {
+        id: navigator.pane.id.clone(),
+        role: navigator.pane.role,
+        dead: navigator.pane.dead,
+        process: Some(navigator_process.clone()),
+        command: LegacyPaneCommand::Navigator,
+    });
+    // The exact, stable navigator process establishes the legacy controller
+    // executable.  This intentionally does not compare it with the current
+    // D16 executable: an upgrade may leave the old inode running in place.
+    let legacy_executable = navigator_process.executable.clone();
+    proof.legacy_executable = Some(legacy_executable.clone());
+
+    let Some(provider_process) = &provider.process else {
+        if attached {
+            return attached_assessment(proof);
+        }
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign);
+    };
+    if !provider.process_stable
+        || provider_process.pid != provider.pid.unwrap_or_default()
+        || !executable_matches(&provider_process.executable, &legacy_executable)
+    {
+        if attached {
+            return attached_assessment(proof);
+        }
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign);
+    }
+    let provider_command = classify_provider_command(
+        provider_process,
+        state_root,
+        &proof.socket,
+        &session_name,
+        &legacy_executable,
+    );
+    if matches!(provider_command, LegacyPaneCommand::Other) {
+        if attached {
+            return attached_assessment(proof);
+        }
+        return LegacyPresentationAssessment::classified(LegacyPresentationState::Foreign);
+    }
+    proof.provider = Some(LegacyPaneProof {
+        id: provider.pane.id.clone(),
+        role: provider.pane.role,
+        dead: provider.pane.dead,
+        process: provider.process.clone(),
+        command: provider_command,
+    });
+    if let Some(utility) = evidence
+        .panes
+        .iter()
+        .find(|pane| pane.pane.role == PresentationPaneRole::Utility)
+    {
+        if utility.pane.dead {
+            if attached {
+                return attached_assessment(proof);
+            }
+            return LegacyPresentationAssessment {
+                state: LegacyPresentationState::DeadOwned,
+                proof: Some(proof),
+            };
+        }
+        proof.utility = Some(LegacyPaneProof {
+            id: utility.pane.id.clone(),
+            role: utility.pane.role,
+            dead: utility.pane.dead,
+            process: utility.process.clone(),
+            command: classify_utility_command(utility.process.as_ref()),
+        });
+    }
+
+    let state = if attached {
+        LegacyPresentationState::Attached
+    } else if proof.utility.is_some() {
+        LegacyPresentationState::UtilityShell
+    } else if provider_command == LegacyPaneCommand::ObserverReview {
+        LegacyPresentationState::ObserverReview
+    } else {
+        LegacyPresentationState::DetachedOrdinary
+    };
+    LegacyPresentationAssessment {
+        state,
+        proof: Some(proof),
+    }
+}
+
+fn attached_assessment(proof: LegacyPresentationProof) -> LegacyPresentationAssessment {
+    LegacyPresentationAssessment {
+        state: LegacyPresentationState::Attached,
+        proof: Some(proof),
+    }
+}
+
+fn arguments_after_executable_match(arguments: &[String], expected: &[&str]) -> bool {
+    arguments.len() == expected.len() + 1
+        && arguments.get(1..).is_some_and(|actual| {
+            actual
+                .iter()
+                .map(String::as_str)
+                .eq(expected.iter().copied())
+        })
+}
+
+fn classify_provider_command(
+    process: &LegacyProcessProof,
+    state_root: &Path,
+    socket: &Path,
+    session_name: &str,
+    executable: &LegacyExecutableProof,
+) -> LegacyPaneCommand {
+    let (Some(expected_root), Some(expected_socket)) = (state_root.to_str(), socket.to_str())
+    else {
+        return LegacyPaneCommand::Other;
+    };
+    let same_executable = executable_matches(&process.executable, executable);
+    let helper = |name: &str| {
+        same_executable
+            && arguments_after_executable_match(
+                &process.arguments,
+                &["--state-root", expected_root, name],
+            )
+    };
+    let legacy_remote_observer = same_executable
+        && process.arguments.len() == 5
+        && process.arguments.get(1).map(String::as_str) == Some("--state-root")
+        && process.arguments.get(2).map(String::as_str) == Some(expected_root)
+        && process.arguments.get(3).map(String::as_str) == Some("_provider_remote_observer_review")
+        && process
+            .arguments
+            .get(4)
+            .is_some_and(|alias| !alias.is_empty() && !alias.chars().any(char::is_control));
+    if helper("_observer_review") || legacy_remote_observer {
+        LegacyPaneCommand::ObserverReview
+    } else if helper("_provider_wait") {
+        LegacyPaneCommand::ProviderWait
+    } else if exact_provider_attach_arguments(
+        process,
+        expected_root,
+        expected_socket,
+        session_name,
+        same_executable,
+    ) {
+        LegacyPaneCommand::ProviderAttach
+    } else {
+        LegacyPaneCommand::Other
+    }
+}
+
+fn exact_provider_attach_arguments(
+    process: &LegacyProcessProof,
+    expected_root: &str,
+    expected_socket: &str,
+    expected_session: &str,
+    same_executable: bool,
+) -> bool {
+    let arguments = &process.arguments;
+    same_executable
+        && arguments.len() == 11
+        && arguments.get(1).map(String::as_str) == Some("--state-root")
+        && arguments.get(2).map(String::as_str) == Some(expected_root)
+        && arguments.get(3).map(String::as_str) == Some("_provider_attach")
+        && arguments
+            .get(4)
+            .is_some_and(|value| WorkstreamId::from_str(value).is_ok())
+        && arguments.get(5).map(String::as_str) == Some("--presentation-socket")
+        && arguments.get(6).map(String::as_str) == Some(expected_socket)
+        && arguments.get(7).map(String::as_str) == Some("--presentation-session")
+        && arguments.get(8).map(String::as_str) == Some(expected_session)
+        && arguments.get(9).map(String::as_str) == Some("--attempt-id")
+        && arguments
+            .get(10)
+            .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok())
+}
+
+fn classify_utility_command(process: Option<&LegacyProcessProof>) -> LegacyPaneCommand {
+    let Some(process) = process else {
+        return LegacyPaneCommand::Other;
+    };
+    if process
+        .arguments
+        .iter()
+        .any(|argument| argument == "_presentation_shell")
+    {
+        LegacyPaneCommand::PresentationShell
+    } else {
+        LegacyPaneCommand::Other
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Direction {
     Up,
@@ -1832,7 +4478,6 @@ enum Direction {
 struct OwnedPane {
     id: String,
     role: PresentationPaneRole,
-    host_alias: Option<String>,
     workstream_id: Option<WorkstreamId>,
     dead: bool,
     left: u16,
@@ -1952,6 +4597,92 @@ fn parse_topology_line(
         return Err(PresentationError::InvalidTopology);
     }
     let fields: Vec<&str> = line.split('\t').collect();
+    if fields.len() != 10 {
+        return Err(PresentationError::InvalidTopology);
+    }
+    let id = parse_pane_id(fields[0]).ok_or(PresentationError::InvalidTopology)?;
+    if panes.iter().any(|pane| pane.id == id) {
+        return Err(PresentationError::InvalidTopology);
+    }
+    let role = match fields[1] {
+        "navigator" => PresentationPaneRole::Navigator,
+        "provider" => PresentationPaneRole::Provider,
+        "utility" => PresentationPaneRole::Utility,
+        _ => return Err(PresentationError::InvalidTopology),
+    };
+    let workstream_id = if fields[2].is_empty() {
+        None
+    } else {
+        Some(
+            fields[2]
+                .parse()
+                .map_err(|_| PresentationError::InvalidTopology)?,
+        )
+    };
+    if (role == PresentationPaneRole::Navigator && workstream_id.is_some())
+        || (role == PresentationPaneRole::Utility && workstream_id.is_none())
+    {
+        return Err(PresentationError::InvalidTopology);
+    }
+    let dead = match fields[3] {
+        "0" => false,
+        "1" if allow_dead => true,
+        _ => return Err(PresentationError::InvalidTopology),
+    };
+    let window_width = topology_dimension(fields[8])?;
+    let window_height = topology_dimension(fields[9])?;
+    if window_width == 0 || window_height == 0 {
+        return Err(PresentationError::InvalidTopology);
+    }
+    if let Some((expected_width, expected_height)) = window_size {
+        if (*expected_width, *expected_height) != (window_width, window_height) {
+            return Err(PresentationError::InvalidTopology);
+        }
+    } else {
+        *window_size = Some((window_width, window_height));
+    }
+    let left = topology_dimension(fields[4])?;
+    let top = topology_dimension(fields[5])?;
+    let width = topology_dimension(fields[6])?;
+    let height = topology_dimension(fields[7])?;
+    if width == 0
+        || height == 0
+        || u32::from(left) + u32::from(width) > u32::from(window_width)
+        || u32::from(top) + u32::from(height) > u32::from(window_height)
+    {
+        return Err(PresentationError::InvalidTopology);
+    }
+    Ok(OwnedPane {
+        id,
+        role,
+        workstream_id,
+        dead,
+        left,
+        top,
+        width,
+        height,
+    })
+}
+
+fn topology_dimension(value: &str) -> Result<u16, PresentationError> {
+    value
+        .parse::<u16>()
+        .map_err(|_| PresentationError::InvalidTopology)
+}
+
+/// Parses the schema-12 topology format used only by the explicit cutover
+/// proof collector. Host identity is retained in this private shape and is
+/// never exposed through the active [`OwnedPane`] topology.
+fn parse_legacy_topology_line(
+    line: &str,
+    allow_dead: bool,
+    window_size: &mut Option<(u16, u16)>,
+    panes: &[LegacyOwnedPane],
+) -> Result<LegacyOwnedPane, PresentationError> {
+    if line.is_empty() {
+        return Err(PresentationError::InvalidTopology);
+    }
+    let fields: Vec<&str> = line.split('\t').collect();
     if fields.len() != 11 {
         return Err(PresentationError::InvalidTopology);
     }
@@ -1973,7 +4704,7 @@ fn parse_topology_line(
     let host_alias = if fields[2].is_empty() {
         None
     } else {
-        validate_host_alias(fields[2])?;
+        validate_legacy_host_alias(fields[2])?;
         Some(fields[2].to_owned())
     };
     let workstream_id = if fields[3].is_empty() {
@@ -2017,7 +4748,7 @@ fn parse_topology_line(
     {
         return Err(PresentationError::InvalidTopology);
     }
-    Ok(OwnedPane {
+    Ok(LegacyOwnedPane {
         id,
         role,
         host_alias,
@@ -2028,12 +4759,6 @@ fn parse_topology_line(
         width,
         height,
     })
-}
-
-fn topology_dimension(value: &str) -> Result<u16, PresentationError> {
-    value
-        .parse::<u16>()
-        .map_err(|_| PresentationError::InvalidTopology)
 }
 
 fn prepare_attach_window_with_size<F>(
@@ -2126,6 +4851,21 @@ fn validate_topology_shape(topology: &PresentationTopology) -> Result<(), Presen
     Ok(())
 }
 
+fn validate_observer_review_topology(
+    topology: &PresentationTopology,
+) -> Result<String, PresentationError> {
+    validate_topology_shape(topology)?;
+    if topology.utility().is_some() {
+        return Err(PresentationError::ControlRefused(
+            "observer review requires an exact two-pane presentation",
+        ));
+    }
+    topology
+        .provider()
+        .map(|pane| pane.id.clone())
+        .ok_or(PresentationError::InvalidTopology)
+}
+
 fn parse_pane_id(value: &str) -> Option<String> {
     value
         .strip_prefix('%')
@@ -2211,10 +4951,45 @@ fn sanitize_diagnostic(diagnostic: &str) -> String {
 }
 
 fn pane_disappeared(error: &PresentationError) -> bool {
-    matches!(error, PresentationError::TmuxRejected(message) if message.contains("no such pane") || message.contains("pane not found"))
+    matches!(
+        error,
+        PresentationError::TmuxRejected(message)
+            if message.contains("no such pane")
+                || message.contains("pane not found")
+                || message.contains("can't find pane")
+    )
 }
 
-fn validate_host_alias(host_alias: &str) -> Result<(), PresentationError> {
+fn base_topology_preserved(
+    before: &PresentationTopology,
+    after: &PresentationTopology,
+    removed_utility: &str,
+) -> bool {
+    if after.panes.len() != 2 || after.utility().is_some() || after.pane(removed_utility).is_some()
+    {
+        return false;
+    }
+    let (
+        Some(before_navigator),
+        Some(before_provider),
+        Some(after_navigator),
+        Some(after_provider),
+    ) = (
+        before.navigator(),
+        before.provider(),
+        after.navigator(),
+        after.provider(),
+    )
+    else {
+        return false;
+    };
+    before_navigator.id == after_navigator.id
+        && before_navigator.workstream_id == after_navigator.workstream_id
+        && before_provider.id == after_provider.id
+        && before_provider.workstream_id == after_provider.workstream_id
+}
+
+fn validate_legacy_host_alias(host_alias: &str) -> Result<(), PresentationError> {
     if host_alias.is_empty() || host_alias.len() > 128 || host_alias.chars().any(char::is_control) {
         return Err(PresentationError::InvalidAttachmentStatus);
     }
@@ -2230,8 +5005,317 @@ fn create_paths(paths: &PresentationPaths) -> Result<(), PresentationError> {
     set_mode(parent, 0o700)?;
     fs::create_dir(&paths.directory).map_err(PresentationError::Io)?;
     set_mode(&paths.directory, 0o700)?;
-    fs::write(&paths.config, presentation_tmux_config()).map_err(PresentationError::Io)?;
-    set_mode(&paths.config, 0o600)
+    let config = presentation_tmux_config();
+    fs::write(&paths.config, &config).map_err(PresentationError::Io)?;
+    set_mode(&paths.config, 0o600)?;
+
+    let directory_metadata =
+        fs::symlink_metadata(&paths.directory).map_err(PresentationError::Io)?;
+    let config_metadata = fs::symlink_metadata(&paths.config).map_err(PresentationError::Io)?;
+    let marker = PresentationOwnershipMarker {
+        version: 1,
+        directory: paths.directory.clone(),
+        socket: paths.socket.clone(),
+        session_name: paths.session_name.clone(),
+        directory_identity: legacy_file_identity(&directory_metadata, None),
+        config_identity: legacy_file_identity(&config_metadata, Some(config.as_bytes())),
+        socket_identity: None,
+    };
+    write_presentation_ownership_marker(paths, &marker, None)
+}
+
+fn presentation_ownership_marker_path(paths: &PresentationPaths) -> PathBuf {
+    paths.directory.join(PRESENTATION_OWNERSHIP_MARKER_FILE)
+}
+
+fn write_presentation_ownership_marker(
+    paths: &PresentationPaths,
+    marker: &PresentationOwnershipMarker,
+    expected_identity: Option<&LegacyFileIdentity>,
+) -> Result<(), PresentationError> {
+    let bytes = serde_json::to_vec(marker).map_err(|_| {
+        PresentationError::ControlRefused("presentation ownership marker could not be encoded")
+    })?;
+    if bytes.len() > MAX_PRESENTATION_OWNERSHIP_MARKER_BYTES {
+        return Err(PresentationError::ControlRefused(
+            "presentation ownership marker exceeded its bound",
+        ));
+    }
+    let marker_path = presentation_ownership_marker_path(paths);
+    let Some(expected_identity) = expected_identity else {
+        let mut options = OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut file = options.open(&marker_path).map_err(PresentationError::Io)?;
+        file.write_all(&bytes).map_err(PresentationError::Io)?;
+        file.sync_all().map_err(PresentationError::Io)?;
+        set_mode(&marker_path, 0o600)?;
+        return sync_directory(&paths.directory);
+    };
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(&marker_path).map_err(PresentationError::Io)?;
+    let opened = file.metadata().map_err(PresentationError::Io)?;
+    let mut before_bytes = Vec::new();
+    (&mut file)
+        .take((MAX_PRESENTATION_OWNERSHIP_MARKER_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut before_bytes)
+        .map_err(PresentationError::Io)?;
+    if before_bytes.len() > MAX_PRESENTATION_OWNERSHIP_MARKER_BYTES
+        || legacy_file_identity(&opened, Some(&before_bytes)) != *expected_identity
+        || !opened.is_file()
+        || !is_private_owner_file(&opened)
+    {
+        return Err(PresentationError::ControlRefused(
+            "presentation ownership changed before marker update",
+        ));
+    }
+    file.set_len(0).map_err(PresentationError::Io)?;
+    file.seek(SeekFrom::Start(0))
+        .map_err(PresentationError::Io)?;
+    file.write_all(&bytes).map_err(PresentationError::Io)?;
+    file.sync_all().map_err(PresentationError::Io)?;
+    let after = fs::symlink_metadata(&marker_path).map_err(PresentationError::Io)?;
+    if file_device(&after) != expected_identity.device
+        || file_inode(&after) != expected_identity.inode
+        || !after.is_file()
+        || !is_private_owner_file(&after)
+    {
+        return Err(PresentationError::ControlRefused(
+            "presentation ownership changed during marker update",
+        ));
+    }
+    sync_directory(&paths.directory)
+}
+
+fn read_presentation_ownership(
+    paths: &PresentationPaths,
+) -> Result<Option<PresentationOwnershipProof>, PresentationError> {
+    let directory_metadata = match fs::symlink_metadata(&paths.directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(PresentationError::Io(error)),
+    };
+    if directory_metadata.file_type().is_symlink()
+        || !directory_metadata.is_dir()
+        || !is_private_owner_directory(&directory_metadata)
+    {
+        return Err(PresentationError::ControlRefused(
+            "presentation ownership directory is foreign or malformed",
+        ));
+    }
+    validate_presentation_artifact_entries(&paths.directory)?;
+    let marker_path = presentation_ownership_marker_path(paths);
+    let marker_metadata = match fs::symlink_metadata(&marker_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(PresentationError::Io(error)),
+    };
+    if marker_metadata.file_type().is_symlink()
+        || !marker_metadata.is_file()
+        || !is_private_owner_file(&marker_metadata)
+        || marker_metadata.len() > MAX_PRESENTATION_OWNERSHIP_MARKER_BYTES as u64
+    {
+        return Err(PresentationError::ControlRefused(
+            "presentation ownership marker is foreign or malformed",
+        ));
+    }
+    let bytes = read_private_file(&marker_path, MAX_PRESENTATION_OWNERSHIP_MARKER_BYTES)
+        .map_err(map_presentation_ownership_probe)?
+        .ok_or(PresentationError::ControlRefused(
+            "presentation ownership marker disappeared",
+        ))?;
+    let marker_after = fs::symlink_metadata(&marker_path).map_err(PresentationError::Io)?;
+    if marker_after.file_type().is_symlink()
+        || !marker_after.is_file()
+        || !is_private_owner_file(&marker_after)
+        || marker_after.len() != marker_metadata.len()
+        || file_device(&marker_after) != file_device(&marker_metadata)
+        || file_inode(&marker_after) != file_inode(&marker_metadata)
+    {
+        return Err(PresentationError::ControlRefused(
+            "presentation ownership marker changed during inspection",
+        ));
+    }
+    let marker: PresentationOwnershipMarker = serde_json::from_slice(&bytes).map_err(|_| {
+        PresentationError::ControlRefused("presentation ownership marker is malformed")
+    })?;
+    if marker.version != 1
+        || marker.directory != paths.directory
+        || marker.socket != paths.socket
+        || marker.session_name != paths.session_name
+        || marker.config_identity.mode != 0o600
+        || marker.directory_identity.mode != 0o700
+        || !directory_identity_compatible(
+            &marker.directory_identity,
+            &legacy_file_identity(&directory_metadata, None),
+        )
+    {
+        return Err(PresentationError::ControlRefused(
+            "presentation ownership marker does not prove this directory",
+        ));
+    }
+    let config = inspect_regular_file(&paths.config, true, MAX_LEGACY_CONFIG_BYTES)
+        .map_err(map_presentation_ownership_probe)?
+        .ok_or(PresentationError::ControlRefused(
+            "presentation configuration is missing",
+        ))?;
+    if config != marker.config_identity || !config_content_matches(&config) {
+        return Err(PresentationError::ControlRefused(
+            "presentation configuration is foreign or modified",
+        ));
+    }
+    let socket = inspect_private_socket(&paths.socket).map_err(map_presentation_ownership_probe)?;
+    if socket.is_some()
+        && marker.socket_identity.is_some()
+        && !optional_socket_identity_compatible(marker.socket_identity.as_ref(), socket.as_ref())
+    {
+        return Err(PresentationError::ControlRefused(
+            "presentation socket identity changed",
+        ));
+    }
+    if let Some(attachment) = inspect_regular_file(
+        &paths.attachment_status,
+        false,
+        MAX_ATTACHMENT_STATUS_BYTES_USIZE,
+    )
+    .map_err(map_presentation_ownership_probe)?
+    {
+        let _ = attachment;
+    }
+    let marker_identity = legacy_file_identity(&marker_after, Some(&bytes));
+    Ok(Some(PresentationOwnershipProof {
+        marker,
+        marker_identity,
+        socket_identity: socket,
+    }))
+}
+
+fn map_presentation_ownership_probe(failure: LegacyProbeFailure) -> PresentationError {
+    match failure {
+        LegacyProbeFailure::Inaccessible => PresentationError::ControlRefused(
+            "presentation ownership artifact could not be inspected safely",
+        ),
+        LegacyProbeFailure::Foreign => PresentationError::ControlRefused(
+            "presentation ownership artifact is foreign or symlinked",
+        ),
+        LegacyProbeFailure::Malformed => {
+            PresentationError::ControlRefused("presentation ownership artifact is malformed")
+        }
+    }
+}
+
+fn validate_presentation_artifact_entries(directory: &Path) -> Result<(), PresentationError> {
+    let entries = fs::read_dir(directory).map_err(PresentationError::Io)?;
+    for (count, entry) in entries
+        .take(MAX_LEGACY_PRESENTATION_ENTRIES + 1)
+        .enumerate()
+    {
+        if count >= MAX_LEGACY_PRESENTATION_ENTRIES {
+            return Err(PresentationError::ControlRefused(
+                "presentation directory contains too many artifacts",
+            ));
+        }
+        let entry = entry.map_err(PresentationError::Io)?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(PresentationError::Io)?;
+        if metadata.file_type().is_symlink() {
+            return Err(PresentationError::ControlRefused(
+                "presentation directory contains a symlink",
+            ));
+        }
+        let name = entry.file_name();
+        if name != PRESENTATION_OWNERSHIP_MARKER_FILE
+            && name != ATTACHMENT_STATUS_FILE
+            && name != "tmux.conf"
+            && name != "tmux.sock"
+        {
+            return Err(PresentationError::ControlRefused(
+                "presentation directory contains an unknown artifact",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn remove_owned_presentation(
+    paths: &PresentationPaths,
+    expected: &PresentationOwnershipProof,
+) -> Result<(), PresentationError> {
+    let actual = read_presentation_ownership(paths)?.ok_or(PresentationError::ControlRefused(
+        "presentation ownership disappeared",
+    ))?;
+    if actual.marker != expected.marker || actual.marker_identity != expected.marker_identity {
+        return Err(PresentationError::ControlRefused(
+            "presentation ownership changed during close",
+        ));
+    }
+
+    // Recheck the bounded allowlist before each unlink. This never recursively
+    // removes the directory, and an unknown/sentinel entry therefore remains
+    // untouched even if it appears during cleanup.
+    validate_presentation_artifact_entries(&paths.directory)?;
+    let attachment = inspect_regular_file(
+        &paths.attachment_status,
+        false,
+        MAX_ATTACHMENT_STATUS_BYTES_USIZE,
+    )
+    .map_err(map_presentation_ownership_probe)?;
+    if let Some(identity) = attachment.as_ref() {
+        remove_exact_regular_artifact(
+            &paths.attachment_status,
+            Some(identity),
+            MAX_ATTACHMENT_STATUS_BYTES_USIZE,
+            &mut |_| Ok(()),
+        )?;
+    }
+
+    validate_presentation_artifact_entries(&paths.directory)?;
+    remove_exact_regular_artifact(
+        &paths.config,
+        Some(&expected.marker.config_identity),
+        MAX_LEGACY_CONFIG_BYTES,
+        &mut |_| Ok(()),
+    )?;
+
+    validate_presentation_artifact_entries(&paths.directory)?;
+    let socket = inspect_private_socket(&paths.socket).map_err(map_presentation_ownership_probe)?;
+    if socket.is_some()
+        && !optional_socket_identity_compatible(expected.socket_identity.as_ref(), socket.as_ref())
+    {
+        return Err(PresentationError::ControlRefused(
+            "presentation socket identity changed during close",
+        ));
+    }
+    if let Some(identity) = socket.as_ref() {
+        remove_exact_socket_artifact(&paths.socket, Some(identity), &mut |_| Ok(()))?;
+    }
+
+    validate_presentation_artifact_entries(&paths.directory)?;
+    remove_exact_regular_artifact(
+        &presentation_ownership_marker_path(paths),
+        Some(&expected.marker_identity),
+        MAX_PRESENTATION_OWNERSHIP_MARKER_BYTES,
+        &mut |_| Ok(()),
+    )?;
+    match fs::remove_dir(&paths.directory) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+            Err(PresentationError::ControlRefused(
+                "presentation directory gained an entry during close",
+            ))
+        }
+        Err(error) => Err(PresentationError::Io(error)),
+    }
 }
 
 #[cfg(unix)]
@@ -2260,12 +5344,26 @@ fn should_reuse_presentation(session_live: bool, navigator_pane_dead: bool) -> b
 pub enum PresentationError {
     #[error("multiple private navigator presentations are live; close one before reconnecting")]
     AmbiguousPresentations,
+    #[error("multiple legacy navigator presentations require cutover refusal")]
+    AmbiguousLegacyPresentations,
+    #[error("legacy presentation proof changed during revalidation")]
+    LegacyProofChanged,
+    #[error("legacy presentation mutation refused: {0}")]
+    LegacyMutationRefused(&'static str),
+    #[error("legacy presentation did not disappear after bounded retirement")]
+    LegacyNotRetired,
     #[error("invalid private presentation control path {0}")]
     InvalidControlPath(PathBuf),
     #[error("invalid private presentation control action")]
     InvalidControlAction,
     #[error("private presentation pane topology is ambiguous")]
     InvalidTopology,
+    #[error("private presentation startup failed during {stage}: {source}")]
+    StartupFailed {
+        stage: &'static str,
+        #[source]
+        source: Box<PresentationError>,
+    },
     #[error("presentation control refused: {0}")]
     ControlRefused(&'static str),
     #[error("invalid private provider attachment status")]
@@ -2298,6 +5396,39 @@ impl PresentationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_private_tmux_command_forces_utf8_format_semantics() {
+        let command = private_tmux_command();
+        assert_eq!(command.get_args().next(), Some(std::ffi::OsStr::new("-u")));
+        assert!(
+            command
+                .get_envs()
+                .any(|(name, value)| name == "TMUX" && value.is_none())
+        );
+    }
+
+    #[test]
+    fn tmux_socket_identity_accepts_only_its_owner_only_live_mode_transition() {
+        let detached = LegacyFileIdentity {
+            size: 0,
+            mode: 0o600,
+            device: 7,
+            inode: 11,
+            digest: None,
+        };
+        let mut attached = detached;
+        attached.mode = 0o700;
+        assert!(socket_identity_compatible(&detached, &attached));
+
+        let mut group_accessible = attached;
+        group_accessible.mode = 0o770;
+        assert!(!socket_identity_compatible(&detached, &group_accessible));
+
+        let mut replacement = attached;
+        replacement.inode += 1;
+        assert!(!socket_identity_compatible(&detached, &replacement));
+    }
 
     struct DisposableTmuxServerGuard {
         socket: PathBuf,
@@ -2774,6 +5905,66 @@ mod tests {
     }
 
     #[test]
+    fn close_refuses_a_path_shaped_directory_without_our_marker() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        fs::create_dir_all(&paths.directory).unwrap();
+        set_mode(&paths.directory, 0o700).unwrap();
+        let sentinel = paths.directory.join("foreign-sentinel");
+        fs::write(&sentinel, b"leave me alone").unwrap();
+        let presentation = Presentation {
+            paths: paths.clone(),
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        let result = presentation.close();
+        assert!(matches!(
+            result,
+            Err(PresentationError::ControlRefused(message))
+                if message.contains("ownership marker") || message.contains("unknown artifact")
+        ));
+        assert!(paths.directory.exists());
+        assert!(sentinel.exists());
+    }
+
+    #[test]
+    fn close_removes_only_a_directory_with_our_ownership_proof() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        create_paths(&paths).unwrap();
+        let presentation = Presentation {
+            paths: paths.clone(),
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        presentation.close().unwrap();
+        assert!(!paths.directory.exists());
+    }
+
+    #[test]
+    fn close_leaves_unknown_artifacts_when_owned_directory_is_tampered() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        create_paths(&paths).unwrap();
+        let sentinel = paths.directory.join("foreign-sentinel");
+        fs::write(&sentinel, b"leave me alone").unwrap();
+        let presentation = Presentation {
+            paths: paths.clone(),
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        let result = presentation.close();
+        assert!(matches!(
+            result,
+            Err(PresentationError::ControlRefused(message))
+                if message.contains("unknown artifact")
+        ));
+        assert!(paths.directory.exists());
+        assert!(sentinel.exists());
+        assert!(paths.config.exists());
+    }
+
+    #[test]
     fn navigator_liveness_probe_targets_only_the_exact_owned_pane() {
         let temporary = tempfile::tempdir().unwrap();
         let presentation = Presentation {
@@ -2834,8 +6025,8 @@ mod tests {
     #[test]
     fn topology_parser_rejects_dead_duplicate_and_unknown_roles() {
         let valid = concat!(
-            "%0\tnavigator\t\t\t0\t0\t0\t32\t24\t128\t24\n",
-            "%1\tprovider\tlocal\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t0\t95\t24\t128\t24\n",
+            "%0\tnavigator\t\t0\t0\t0\t32\t24\t128\t24\n",
+            "%1\tprovider\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t0\t95\t24\t128\t24\n",
         );
         assert!(parse_topology(valid).is_ok());
         assert!(matches!(
@@ -2870,8 +6061,8 @@ mod tests {
     #[test]
     fn topology_parser_rejects_unsupported_geometry() {
         let valid = concat!(
-            "%0\tnavigator\t\t\t0\t0\t0\t32\t24\t128\t24\n",
-            "%1\tprovider\tlocal\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t0\t95\t24\t128\t24\n",
+            "%0\tnavigator\t\t0\t0\t0\t32\t24\t128\t24\n",
+            "%1\tprovider\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t0\t95\t24\t128\t24\n",
         );
         assert!(parse_topology(valid).is_ok());
         assert!(parse_topology(&valid.replace("\t33\t0\t95\t24", "\t34\t0\t94\t24")).is_err());
@@ -2881,9 +6072,9 @@ mod tests {
         assert!(parse_topology(&valid.replace("\t128\t24", "\t127\t24")).is_err());
 
         let three_pane = concat!(
-            "%0\tnavigator\t\t\t0\t0\t0\t32\t24\t128\t24\n",
-            "%1\tprovider\tlocal\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t0\t95\t11\t128\t24\n",
-            "%2\tutility\tlocal\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t12\t95\t12\t128\t24\n",
+            "%0\tnavigator\t\t0\t0\t0\t32\t24\t128\t24\n",
+            "%1\tprovider\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t0\t95\t11\t128\t24\n",
+            "%2\tutility\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t12\t95\t12\t128\t24\n",
         );
         assert!(parse_topology(three_pane).is_ok());
         assert!(
@@ -2892,6 +6083,34 @@ mod tests {
         assert!(
             parse_topology(&three_pane.replace("\t33\t12\t95\t12", "\t34\t12\t94\t12")).is_err()
         );
+    }
+
+    #[test]
+    fn observer_review_topology_retires_utility_and_rejects_external_splits() {
+        let two_pane = concat!(
+            "%0\tnavigator\t\t0\t0\t0\t32\t24\t128\t24\n",
+            "%1\tprovider\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t0\t95\t24\t128\t24\n",
+        );
+        let topology = parse_topology(two_pane).unwrap();
+        assert_eq!(validate_observer_review_topology(&topology).unwrap(), "%1");
+
+        let utility = concat!(
+            "%0\tnavigator\t\t0\t0\t0\t32\t24\t128\t24\n",
+            "%1\tprovider\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t0\t95\t11\t128\t24\n",
+            "%2\tutility\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t12\t95\t12\t128\t24\n",
+        );
+        let topology = parse_topology(utility).unwrap();
+        assert!(matches!(
+            validate_observer_review_topology(&topology),
+            Err(PresentationError::ControlRefused(message))
+                if message.contains("two-pane")
+        ));
+
+        let external = utility.replace("utility", "external");
+        assert!(matches!(
+            parse_topology(&external),
+            Err(PresentationError::InvalidTopology)
+        ));
     }
 
     #[test]
@@ -3001,9 +6220,7 @@ mod tests {
             state_root: temporary.path().to_path_buf(),
         };
         let workstream_id = WorkstreamId::new();
-        let pending = presentation
-            .prepare_attachment("snap", workstream_id)
-            .unwrap();
+        let pending = presentation.prepare_attachment(workstream_id).unwrap();
 
         assert_eq!(
             presentation.read_attachment_status().unwrap(),
@@ -3022,7 +6239,6 @@ mod tests {
             .unwrap();
         let failed = presentation.read_attachment_status().unwrap().unwrap();
         assert_eq!(failed.phase, AttachmentPhase::Failed);
-        assert_eq!(failed.host_alias, "snap");
         assert_eq!(failed.workstream_id, workstream_id);
         assert!(matches!(
             presentation.report_attachment_phase(pending.attempt_id, AttachmentPhase::Running),
@@ -3041,7 +6257,7 @@ mod tests {
             state_root: temporary.path().to_path_buf(),
         };
         let pending = presentation
-            .prepare_attachment("local", WorkstreamId::new())
+            .prepare_attachment(WorkstreamId::new())
             .unwrap();
         presentation
             .report_attachment_phase(pending.attempt_id, AttachmentPhase::Running)
@@ -3067,7 +6283,7 @@ mod tests {
             state_root: temporary.path().to_path_buf(),
         };
         presentation
-            .prepare_attachment("local", WorkstreamId::new())
+            .prepare_attachment(WorkstreamId::new())
             .unwrap();
 
         assert_eq!(
@@ -3127,23 +6343,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_observer_review_uses_a_direct_provider_pane_command() {
-        let temporary = tempfile::tempdir().unwrap();
-        let presentation = Presentation {
-            paths: PresentationPaths::fresh(temporary.path()),
-            executable: PathBuf::from("/workspace/wsnav"),
-            state_root: temporary.path().to_path_buf(),
-        };
-
-        let command = presentation.remote_observer_review_command("snap");
-
-        assert_eq!(command[0], "/workspace/wsnav");
-        assert_eq!(command[3], "_provider_remote_observer_review");
-        assert_eq!(command[4], "snap");
-        assert!(command.iter().all(|argument| argument != "sh"));
-    }
-
-    #[test]
     fn provider_respawn_forwards_the_complete_direct_attachment_command() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = PresentationPaths::fresh(temporary.path());
@@ -3166,60 +6365,6 @@ mod tests {
         assert_eq!(arguments[8], OsString::from(workstream_id.to_string()));
         assert_eq!(arguments[9], "--presentation-socket");
         assert_eq!(arguments[13], "--attempt-id");
-    }
-
-    #[test]
-    fn remote_provider_attachment_uses_only_fixed_host_command_arguments() {
-        let temporary = tempfile::tempdir().unwrap();
-        let paths = PresentationPaths::fresh(temporary.path());
-        let presentation = Presentation {
-            paths,
-            executable: PathBuf::from("/workspace/wsnav"),
-            state_root: temporary.path().to_path_buf(),
-        };
-        let workstream_id = WorkstreamId::new();
-
-        let arguments = presentation.provider_remote_respawn_arguments(
-            PROVIDER_PANE,
-            "snap",
-            workstream_id,
-            uuid::Uuid::new_v4(),
-        );
-
-        assert_eq!(arguments[4], "/workspace/wsnav");
-        assert_eq!(arguments[5], "--state-root");
-        assert_eq!(arguments[7], "_provider_remote_attach");
-        assert_eq!(arguments[8], "snap");
-        assert_eq!(arguments[9], OsString::from(workstream_id.to_string()));
-        assert_eq!(arguments[10], "--presentation-socket");
-        assert_eq!(arguments[14], "--attempt-id");
-    }
-
-    #[test]
-    fn remote_shell_barrier_carries_only_endpoint_and_opaque_workstream_id() {
-        let temporary = tempfile::tempdir().unwrap();
-        let presentation = Presentation {
-            paths: PresentationPaths::fresh(temporary.path()),
-            executable: PathBuf::from("/workspace/wsnav"),
-            state_root: temporary.path().join("state's root/#(marker)"),
-        };
-        let workstream_id = WorkstreamId::new();
-        let command =
-            presentation.remote_shell_command("snap", "/home/user/.local/bin/wsnav", workstream_id);
-        let values = command
-            .iter()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-
-        assert_eq!(values[3], "_presentation_ssh_shell");
-        assert_eq!(values[8], "--destination");
-        assert_eq!(values[9], "snap");
-        assert_eq!(values[10], "--executable");
-        assert_eq!(values[11], "/home/user/.local/bin/wsnav");
-        assert_eq!(values[12], "--workstream-id");
-        assert_eq!(values[13], workstream_id.to_string());
-        assert!(!values.iter().any(|value| value == "/private/project"));
-        assert!(!values.iter().any(|value| value.contains("cwd")));
     }
 
     #[test]
@@ -3247,5 +6392,698 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn proof_identity() -> LegacyFileIdentity {
+        LegacyFileIdentity {
+            size: 42,
+            mode: 0o755,
+            device: 1,
+            inode: 2,
+            digest: None,
+        }
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "the fixture spells every independently falsifiable pane proof field"
+    )]
+    fn proof_pane(
+        paths: &PresentationPaths,
+        state_root: &Path,
+        role: PresentationPaneRole,
+        id: &str,
+        pid: Option<u32>,
+        process_pid: Option<u32>,
+        birth: Option<u64>,
+        process_stable: bool,
+        arguments: &[&str],
+        left: u16,
+        top: u16,
+        width: u16,
+        height: u16,
+    ) -> LegacyPresentationPaneEvidenceForTest {
+        let _ = (paths, state_root);
+        LegacyPresentationPaneEvidenceForTest {
+            id: id.to_owned(),
+            role,
+            dead: false,
+            pid,
+            process_pid,
+            birth,
+            process_stable,
+            executable_path: Some(PathBuf::from("/workspace/wsnav")),
+            executable_identity: Some(proof_identity()),
+            arguments: arguments.iter().map(|value| (*value).to_owned()).collect(),
+            left,
+            top,
+            width,
+            height,
+            window_width: 128,
+            window_height: 24,
+        }
+    }
+
+    fn proof_evidence(
+        temporary: &tempfile::TempDir,
+        provider_arguments: &[&str],
+        utility: bool,
+        clients: &[&str],
+    ) -> (PresentationPaths, LegacyPresentationEvidenceForTest) {
+        let paths = PresentationPaths::fresh(temporary.path());
+        let root = temporary.path();
+        let navigator_arguments = [
+            "/workspace/wsnav",
+            "--state-root",
+            root.to_str().unwrap(),
+            "_navigator",
+            "--presentation-socket",
+            paths.socket.to_str().unwrap(),
+            "--presentation-session",
+            paths.session_name.as_str(),
+        ];
+        let navigator = proof_pane(
+            &paths,
+            root,
+            PresentationPaneRole::Navigator,
+            "%0",
+            Some(101),
+            None,
+            Some(11),
+            true,
+            &navigator_arguments,
+            0,
+            0,
+            32,
+            24,
+        );
+        let provider_height = if utility { 11 } else { 24 };
+        let provider = proof_pane(
+            &paths,
+            root,
+            PresentationPaneRole::Provider,
+            "%1",
+            Some(102),
+            None,
+            Some(12),
+            true,
+            provider_arguments,
+            33,
+            0,
+            95,
+            provider_height,
+        );
+        let utility_pane = utility.then(|| {
+            proof_pane(
+                &paths,
+                root,
+                PresentationPaneRole::Utility,
+                "%2",
+                None,
+                None,
+                None,
+                true,
+                &[],
+                33,
+                12,
+                95,
+                12,
+            )
+        });
+        let mut panes = vec![navigator, provider];
+        if let Some(utility) = utility_pane {
+            panes.push(utility);
+        }
+        (
+            paths,
+            LegacyPresentationEvidenceForTest {
+                executable_path: PathBuf::from("/workspace/wsnav"),
+                config_identity: None,
+                session_id: Some("$0".to_owned()),
+                window_id: Some("@0".to_owned()),
+                panes,
+                clients: clients.iter().map(|value| (*value).to_owned()).collect(),
+                shell_claim_present: false,
+                attachment_status: None,
+            },
+        )
+    }
+
+    #[test]
+    fn legacy_topology_width_uses_rightmost_pane_extent() {
+        let panes = vec![
+            LegacyOwnedPane {
+                id: "%0".to_owned(),
+                role: PresentationPaneRole::Navigator,
+                host_alias: None,
+                workstream_id: None,
+                dead: false,
+                left: 0,
+                top: 0,
+                width: 32,
+                height: 24,
+            },
+            LegacyOwnedPane {
+                id: "%1".to_owned(),
+                role: PresentationPaneRole::Provider,
+                host_alias: None,
+                workstream_id: None,
+                dead: false,
+                left: 33,
+                top: 0,
+                width: 95,
+                height: 24,
+            },
+        ];
+        assert_eq!(legacy_topology_dimensions(&panes), (128, 24));
+    }
+
+    #[test]
+    fn legacy_proof_classifies_detached_ordinary_presentation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let provider = [
+            "/workspace/wsnav",
+            "--state-root",
+            temporary.path().to_str().unwrap(),
+            "_provider_wait",
+        ];
+        let (paths, evidence) = proof_evidence(&temporary, &provider, false, &[]);
+        let assessment = classify_legacy_evidence(&paths.directory, temporary.path(), evidence);
+        assert_eq!(
+            assessment.state(),
+            LegacyPresentationState::DetachedOrdinary
+        );
+        let proof = assessment.proof().expect("exact detached proof");
+        assert_eq!(proof.navigator_pid(), Some(101));
+        assert_eq!(proof.navigator_process_birth(), Some(11));
+        assert_eq!(proof.attached_client_count(), 0);
+        assert!(!proof.utility_present());
+        assert!(!proof.observer_review_present());
+    }
+
+    #[test]
+    fn legacy_proof_refuses_attached_presentation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let provider = [
+            "/workspace/wsnav",
+            "--state-root",
+            temporary.path().to_str().unwrap(),
+            "_provider_wait",
+        ];
+        let (paths, evidence) = proof_evidence(&temporary, &provider, false, &["/dev/pts/9"]);
+        let assessment = classify_legacy_evidence(&paths.directory, temporary.path(), evidence);
+        assert_eq!(assessment.state(), LegacyPresentationState::Attached);
+        assert_eq!(assessment.proof().unwrap().attached_client_count(), 1);
+    }
+
+    #[test]
+    fn legacy_proof_distinguishes_utility_shell_presence() {
+        let temporary = tempfile::tempdir().unwrap();
+        let provider = [
+            "/workspace/wsnav",
+            "--state-root",
+            temporary.path().to_str().unwrap(),
+            "_provider_wait",
+        ];
+        let (paths, evidence) = proof_evidence(&temporary, &provider, true, &[]);
+        let assessment = classify_legacy_evidence(&paths.directory, temporary.path(), evidence);
+        assert_eq!(assessment.state(), LegacyPresentationState::UtilityShell);
+        assert!(assessment.proof().unwrap().utility_present());
+    }
+
+    #[test]
+    fn legacy_proof_requires_exact_observer_review_command() {
+        let temporary = tempfile::tempdir().unwrap();
+        let provider = [
+            "/workspace/wsnav",
+            "--state-root",
+            temporary.path().to_str().unwrap(),
+            "_observer_review",
+        ];
+        let (paths, evidence) = proof_evidence(&temporary, &provider, false, &[]);
+        let assessment = classify_legacy_evidence(&paths.directory, temporary.path(), evidence);
+        assert_eq!(assessment.state(), LegacyPresentationState::ObserverReview);
+        assert!(assessment.proof().unwrap().observer_review_present());
+    }
+
+    #[test]
+    fn legacy_proof_rejects_pid_birth_and_executable_mismatch() {
+        let temporary = tempfile::tempdir().unwrap();
+        let provider = [
+            "/workspace/wsnav",
+            "--state-root",
+            temporary.path().to_str().unwrap(),
+            "_provider_wait",
+        ];
+        let (paths, mut evidence) = proof_evidence(&temporary, &provider, false, &[]);
+        evidence.panes[0].process_pid = Some(999);
+        let assessment =
+            classify_legacy_evidence(&paths.directory, temporary.path(), evidence.clone());
+        assert_eq!(assessment.state(), LegacyPresentationState::Foreign);
+
+        evidence.panes[0].process_pid = None;
+        evidence.panes[0].process_stable = false;
+        let assessment =
+            classify_legacy_evidence(&paths.directory, temporary.path(), evidence.clone());
+        assert_eq!(assessment.state(), LegacyPresentationState::Foreign);
+
+        evidence.panes[0].process_stable = true;
+        evidence.panes[0].executable_identity = Some(LegacyFileIdentity {
+            inode: 999,
+            ..proof_identity()
+        });
+        let assessment = classify_legacy_evidence(&paths.directory, temporary.path(), evidence);
+        assert_eq!(assessment.state(), LegacyPresentationState::Foreign);
+    }
+
+    #[test]
+    fn legacy_proof_rejects_malformed_topology() {
+        let temporary = tempfile::tempdir().unwrap();
+        let provider = [
+            "/workspace/wsnav",
+            "--state-root",
+            temporary.path().to_str().unwrap(),
+            "_provider_wait",
+        ];
+        let (paths, mut evidence) = proof_evidence(&temporary, &provider, false, &[]);
+        evidence.panes.pop();
+        let assessment = classify_legacy_evidence(&paths.directory, temporary.path(), evidence);
+        assert_eq!(assessment.state(), LegacyPresentationState::Malformed);
+        assert!(assessment.proof().is_none());
+    }
+
+    #[test]
+    fn legacy_drain_attach_requires_a_fully_proven_controller_without_state_access() {
+        let temporary = tempfile::tempdir().unwrap();
+        let provider = [
+            "/workspace/wsnav",
+            "--state-root",
+            temporary.path().to_str().unwrap(),
+            "_provider_wait",
+        ];
+        let (paths, evidence) = proof_evidence(&temporary, &provider, false, &["/dev/pts/9"]);
+        let attached = classify_legacy_evidence(&paths.directory, temporary.path(), evidence);
+        let expected = attached.proof().expect("attached proof").clone();
+        assert!(expected.controller_proven());
+
+        let called = std::cell::Cell::new(false);
+        drain_attach_legacy_presentation_with(
+            &expected,
+            || Ok(attached.clone()),
+            |proof| {
+                called.set(true);
+                assert!(proof.controller_proven());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert!(called.get());
+
+        let (paths, mut evidence) = proof_evidence(&temporary, &provider, false, &["/dev/pts/9"]);
+        evidence.panes[0].dead = true;
+        let unproven = classify_legacy_evidence(&paths.directory, temporary.path(), evidence);
+        let expected = unproven.proof().expect("attached proof").clone();
+        assert!(!expected.controller_proven());
+        let called = std::cell::Cell::new(false);
+        let result = drain_attach_legacy_presentation_with(
+            &expected,
+            || Ok(unproven.clone()),
+            |_| {
+                called.set(true);
+                Ok(())
+            },
+        );
+        assert!(matches!(
+            result,
+            Err(PresentationError::LegacyMutationRefused(
+                "navigator/controller evidence is incomplete"
+            ))
+        ));
+        assert!(!called.get());
+    }
+
+    #[test]
+    fn legacy_retirement_refuses_changed_proof_before_kill() {
+        let temporary = tempfile::tempdir().unwrap();
+        let provider = [
+            "/workspace/wsnav",
+            "--state-root",
+            temporary.path().to_str().unwrap(),
+            "_provider_wait",
+        ];
+        let (paths, evidence) = proof_evidence(&temporary, &provider, false, &[]);
+        let original = classify_legacy_evidence(&paths.directory, temporary.path(), evidence);
+        let expected = original.proof().expect("detached proof").clone();
+        let (paths, mut changed_evidence) = proof_evidence(&temporary, &provider, false, &[]);
+        changed_evidence.panes[1].process_stable = false;
+        let changed =
+            classify_legacy_evidence(&paths.directory, temporary.path(), changed_evidence);
+        let killed = std::cell::Cell::new(false);
+        let result = retire_legacy_presentation_with(
+            &expected,
+            || Ok(changed.clone()),
+            |_| {
+                killed.set(true);
+                Ok(())
+            },
+            |_| Ok(()),
+            |_| Ok(false),
+        );
+        assert!(matches!(result, Err(PresentationError::LegacyProofChanged)));
+        assert!(!killed.get());
+    }
+
+    #[test]
+    fn legacy_retirement_refuses_all_drain_surfaces_without_kill() {
+        let temporary = tempfile::tempdir().unwrap();
+        let provider = [
+            "/workspace/wsnav",
+            "--state-root",
+            temporary.path().to_str().unwrap(),
+            "_provider_wait",
+        ];
+        for (utility, clients, provider_arguments) in [
+            (
+                false,
+                vec!["/dev/pts/9"],
+                provider
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                true,
+                Vec::new(),
+                provider
+                    .iter()
+                    .map(|value| (*value).to_owned())
+                    .collect::<Vec<_>>(),
+            ),
+            (
+                false,
+                Vec::new(),
+                vec![
+                    "/workspace/wsnav",
+                    "--state-root",
+                    temporary.path().to_str().unwrap(),
+                    "_observer_review",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            ),
+        ] {
+            let provider_arguments = provider_arguments
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            let (paths, evidence) =
+                proof_evidence(&temporary, &provider_arguments, utility, &clients);
+            let assessment = classify_legacy_evidence(&paths.directory, temporary.path(), evidence);
+            let expected = assessment.proof().expect("drain proof").clone();
+            let killed = std::cell::Cell::new(false);
+            let result = retire_legacy_presentation_with(
+                &expected,
+                || Ok(assessment.clone()),
+                |_| {
+                    killed.set(true);
+                    Ok(())
+                },
+                |_| Ok(()),
+                |_| Ok(false),
+            );
+            assert!(matches!(
+                result,
+                Err(PresentationError::LegacyMutationRefused(
+                    "only a detached ordinary presentation may be retired"
+                ))
+            ));
+            assert!(!killed.get());
+        }
+    }
+
+    #[test]
+    fn legacy_classifier_refuses_multiple_directories_even_when_dead() {
+        let temporary = tempfile::tempdir().unwrap();
+        set_mode(temporary.path(), 0o700).unwrap();
+        let presentation_root = temporary.path().join(PRESENTATION_DIRECTORY);
+        fs::create_dir(&presentation_root).unwrap();
+        set_mode(&presentation_root, 0o700).unwrap();
+        let first = presentation_root.join("presentation-0123456789ab");
+        let second = presentation_root.join("presentation-abcdefabcdef");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        set_mode(&first, 0o700).unwrap();
+        set_mode(&second, 0o700).unwrap();
+
+        assert!(matches!(
+            classify_legacy_presentations(temporary.path()),
+            Err(PresentationError::AmbiguousLegacyPresentations)
+        ));
+        assert!(first.exists());
+        assert!(second.exists());
+    }
+
+    #[test]
+    fn legacy_classifier_never_removes_exact_dead_owned_artifacts() {
+        let temporary = tempfile::tempdir().unwrap();
+        set_mode(temporary.path(), 0o700).unwrap();
+        let presentation_root = temporary.path().join(PRESENTATION_DIRECTORY);
+        fs::create_dir(&presentation_root).unwrap();
+        set_mode(&presentation_root, 0o700).unwrap();
+        let directory = presentation_root.join("presentation-0123456789ab");
+        fs::create_dir(&directory).unwrap();
+        set_mode(&directory, 0o700).unwrap();
+        let config = directory.join("tmux.conf");
+        fs::write(&config, presentation_tmux_config()).unwrap();
+        set_mode(&config, 0o600).unwrap();
+
+        let assessment = classify_legacy_presentations(temporary.path()).unwrap();
+        assert_eq!(assessment.state(), LegacyPresentationState::DeadOwned);
+        assert!(directory.exists());
+        assert!(config.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_cleanup_restart_survives_interruption_after_each_known_artifact() {
+        use std::os::unix::net::UnixListener;
+
+        for interrupted_name in [ATTACHMENT_STATUS_FILE, "tmux.conf", "tmux.sock"] {
+            let temporary = tempfile::tempdir().unwrap();
+            set_mode(temporary.path(), 0o700).unwrap();
+            let presentation_root = temporary.path().join(PRESENTATION_DIRECTORY);
+            fs::create_dir(&presentation_root).unwrap();
+            set_mode(&presentation_root, 0o700).unwrap();
+            let paths = PresentationPaths::fresh(temporary.path());
+            fs::create_dir(&paths.directory).unwrap();
+            set_mode(&paths.directory, 0o700).unwrap();
+            fs::write(&paths.config, presentation_tmux_config()).unwrap();
+            set_mode(&paths.config, 0o600).unwrap();
+            let status = LegacyAttachmentStatus {
+                attempt_id: uuid::Uuid::new_v4(),
+                host_alias: "local".to_owned(),
+                workstream_id: WorkstreamId::new(),
+                phase: AttachmentPhase::Pending,
+            };
+            fs::write(
+                &paths.attachment_status,
+                serde_json::to_vec(&status).unwrap(),
+            )
+            .unwrap();
+            set_mode(&paths.attachment_status, 0o600).unwrap();
+
+            let assessment = classify_legacy_presentations(temporary.path()).unwrap();
+            assert_eq!(assessment.state(), LegacyPresentationState::DeadOwned);
+            let mut proof = assessment.proof().unwrap().clone();
+            let _socket = if interrupted_name == "tmux.sock" {
+                let socket = UnixListener::bind(&paths.socket).unwrap();
+                set_mode(&paths.socket, 0o600).unwrap();
+                proof.socket_identity = inspect_private_socket(&paths.socket).unwrap();
+                Some(socket)
+            } else {
+                None
+            };
+            let marker = ensure_retirement_marker(temporary.path(), &proof).unwrap();
+            let interruption =
+                remove_exact_legacy_artifacts_with(temporary.path(), &proof, &marker, |path| {
+                    if path.file_name().and_then(|name| name.to_str()) == Some(interrupted_name) {
+                        Err(PresentationError::LegacyMutationRefused(
+                            "test interruption after artifact removal",
+                        ))
+                    } else {
+                        Ok(())
+                    }
+                });
+            assert!(matches!(
+                interruption,
+                Err(PresentationError::LegacyMutationRefused(
+                    "test interruption after artifact removal"
+                ))
+            ));
+            assert!(paths.directory.join(LEGACY_RETIREMENT_MARKER_FILE).exists());
+
+            remove_exact_legacy_artifacts(temporary.path(), &proof, &marker).unwrap();
+            assert!(matches!(
+                classify_legacy_presentations(temporary.path()),
+                Ok(assessment) if assessment.state() == LegacyPresentationState::None
+            ));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn legacy_cleanup_discovers_marker_after_process_restart() {
+        use std::os::unix::net::UnixListener;
+
+        for interrupted_name in [ATTACHMENT_STATUS_FILE, "tmux.conf", "tmux.sock"] {
+            let temporary = tempfile::tempdir().unwrap();
+            set_mode(temporary.path(), 0o700).unwrap();
+            let presentation_root = temporary.path().join(PRESENTATION_DIRECTORY);
+            fs::create_dir(&presentation_root).unwrap();
+            set_mode(&presentation_root, 0o700).unwrap();
+            let paths = PresentationPaths::fresh(temporary.path());
+            fs::create_dir(&paths.directory).unwrap();
+            set_mode(&paths.directory, 0o700).unwrap();
+            fs::write(&paths.config, presentation_tmux_config()).unwrap();
+            set_mode(&paths.config, 0o600).unwrap();
+            let status = LegacyAttachmentStatus {
+                attempt_id: uuid::Uuid::new_v4(),
+                host_alias: "local".to_owned(),
+                workstream_id: WorkstreamId::new(),
+                phase: AttachmentPhase::Pending,
+            };
+            fs::write(
+                &paths.attachment_status,
+                serde_json::to_vec(&status).unwrap(),
+            )
+            .unwrap();
+            set_mode(&paths.attachment_status, 0o600).unwrap();
+
+            let assessment = classify_legacy_presentations(temporary.path()).unwrap();
+            assert_eq!(assessment.state(), LegacyPresentationState::DeadOwned);
+            let mut proof = assessment.proof().unwrap().clone();
+            let _socket = if interrupted_name == "tmux.sock" {
+                let socket = UnixListener::bind(&paths.socket).unwrap();
+                set_mode(&paths.socket, 0o600).unwrap();
+                proof.socket_identity = inspect_private_socket(&paths.socket).unwrap();
+                Some(socket)
+            } else {
+                None
+            };
+            let marker = ensure_retirement_marker(temporary.path(), &proof).unwrap();
+            match interrupted_name {
+                ATTACHMENT_STATUS_FILE => fs::remove_file(&paths.attachment_status).unwrap(),
+                "tmux.conf" => fs::remove_file(&paths.config).unwrap(),
+                "tmux.sock" => fs::remove_file(&paths.socket).unwrap(),
+                _ => unreachable!(),
+            }
+            drop(marker);
+            drop(proof);
+
+            let restarted = classify_legacy_presentations(temporary.path()).unwrap();
+            assert_eq!(restarted.state(), LegacyPresentationState::DeadOwned);
+            let restarted_proof = restarted.proof().unwrap().clone();
+            let lock = temporary.path().join("transition.lock");
+            fs::write(&lock, b"").unwrap();
+            set_mode(&lock, 0o600).unwrap();
+            let lease = crate::state::acquire_transition_lease(temporary.path()).unwrap();
+            remove_dead_legacy_presentation(temporary.path(), &restarted_proof, &lease).unwrap();
+            assert!(matches!(
+                classify_legacy_presentations(temporary.path()),
+                Ok(assessment) if assessment.state() == LegacyPresentationState::None
+            ));
+        }
+    }
+
+    #[test]
+    fn legacy_marker_malformed_or_replaced_refuses_without_cleanup() {
+        for replaced in [false, true] {
+            let temporary = tempfile::tempdir().unwrap();
+            set_mode(temporary.path(), 0o700).unwrap();
+            let presentation_root = temporary.path().join(PRESENTATION_DIRECTORY);
+            fs::create_dir(&presentation_root).unwrap();
+            set_mode(&presentation_root, 0o700).unwrap();
+            let paths = PresentationPaths::fresh(temporary.path());
+            fs::create_dir(&paths.directory).unwrap();
+            set_mode(&paths.directory, 0o700).unwrap();
+            fs::write(&paths.config, presentation_tmux_config()).unwrap();
+            set_mode(&paths.config, 0o600).unwrap();
+            let assessment = classify_legacy_presentations(temporary.path()).unwrap();
+            let proof = assessment.proof().unwrap().clone();
+            let marker = ensure_retirement_marker(temporary.path(), &proof).unwrap();
+            let marker_path = paths.directory.join(LEGACY_RETIREMENT_MARKER_FILE);
+            if replaced {
+                let mut replacement = marker;
+                replacement.directory = temporary.path().join("foreign");
+                fs::write(&marker_path, serde_json::to_vec(&replacement).unwrap()).unwrap();
+            } else {
+                fs::write(&marker_path, b"not-json").unwrap();
+            }
+            set_mode(&marker_path, 0o600).unwrap();
+
+            let classified = classify_legacy_presentations(temporary.path()).unwrap();
+            assert_eq!(
+                classified.state(),
+                if replaced {
+                    LegacyPresentationState::Foreign
+                } else {
+                    LegacyPresentationState::Malformed
+                }
+            );
+            assert!(classified.proof().is_none());
+            let lock = temporary.path().join("transition.lock");
+            fs::write(&lock, b"").unwrap();
+            set_mode(&lock, 0o600).unwrap();
+            let lease = crate::state::acquire_transition_lease(temporary.path()).unwrap();
+            let result = remove_dead_legacy_presentation(temporary.path(), &proof, &lease);
+            assert!(result.is_err());
+            assert!(paths.directory.exists());
+            assert!(paths.config.exists());
+        }
+    }
+
+    #[test]
+    fn legacy_cleanup_rechecks_the_next_artifact_after_an_earlier_unlink() {
+        let temporary = tempfile::tempdir().unwrap();
+        set_mode(temporary.path(), 0o700).unwrap();
+        let presentation_root = temporary.path().join(PRESENTATION_DIRECTORY);
+        fs::create_dir(&presentation_root).unwrap();
+        set_mode(&presentation_root, 0o700).unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        fs::create_dir(&paths.directory).unwrap();
+        set_mode(&paths.directory, 0o700).unwrap();
+        fs::write(&paths.config, presentation_tmux_config()).unwrap();
+        set_mode(&paths.config, 0o600).unwrap();
+        let status = LegacyAttachmentStatus {
+            attempt_id: uuid::Uuid::new_v4(),
+            host_alias: "local".to_owned(),
+            workstream_id: WorkstreamId::new(),
+            phase: AttachmentPhase::Pending,
+        };
+        fs::write(
+            &paths.attachment_status,
+            serde_json::to_vec(&status).unwrap(),
+        )
+        .unwrap();
+        set_mode(&paths.attachment_status, 0o600).unwrap();
+
+        let assessment = classify_legacy_presentations(temporary.path()).unwrap();
+        assert_eq!(assessment.state(), LegacyPresentationState::DeadOwned);
+        let proof = assessment.proof().unwrap().clone();
+        let marker = ensure_retirement_marker(temporary.path(), &proof).unwrap();
+        let replacement = b"set -g status on\n";
+        let result =
+            remove_exact_legacy_artifacts_with(temporary.path(), &proof, &marker, |path| {
+                if path == paths.attachment_status.as_path() {
+                    fs::write(&paths.config, replacement).unwrap();
+                    set_mode(&paths.config, 0o600).unwrap();
+                }
+                Ok(())
+            });
+        assert!(matches!(result, Err(PresentationError::LegacyProofChanged)));
+        assert!(!paths.attachment_status.exists());
+        assert_eq!(fs::read(&paths.config).unwrap(), replacement);
+        assert!(paths.directory.join(LEGACY_RETIREMENT_MARKER_FILE).exists());
     }
 }

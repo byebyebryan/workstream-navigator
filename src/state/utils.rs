@@ -74,7 +74,6 @@ pub(in crate::state) fn runtime_status_from_text(value: &str) -> Result<RuntimeS
         "attention" => Ok(RuntimeStatus::Attention),
         "stopped" => Ok(RuntimeStatus::Stopped),
         "unknown" => Ok(RuntimeStatus::Unknown),
-        "unreachable" => Ok(RuntimeStatus::Unreachable),
         _ => Err(StateError::InvalidPersistedValue(value.to_owned())),
     }
 }
@@ -192,28 +191,6 @@ pub(in crate::state) fn validate_repository_fingerprint(
     Ok(())
 }
 
-pub(in crate::state) fn validate_client_host_alias(value: &str) -> Result<(), StateError> {
-    if value.is_empty()
-        || value.len() > 64
-        || !value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
-    {
-        return Err(StateError::InvalidClientHostAlias);
-    }
-    Ok(())
-}
-
-pub(in crate::state) fn validate_client_host_text(
-    name: &'static str,
-    value: &str,
-) -> Result<(), StateError> {
-    if value.is_empty() || value.len() > 1024 || value.contains(['\0', '\n', '\r']) {
-        return Err(StateError::InvalidClientHostField(name));
-    }
-    Ok(())
-}
-
 pub(in crate::state) fn default_project_browser_root() -> Result<PathBuf, StateError> {
     let home = env::var_os("HOME").ok_or(StateError::ProjectBrowserRootUnavailable)?;
     Ok(PathBuf::from(home))
@@ -322,7 +299,7 @@ pub(in crate::state) fn set_private_directory_permissions(_path: &Path) -> Resul
     Ok(())
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, test))]
 pub(in crate::state) fn set_private_file_permissions(path: &Path) -> Result<(), StateError> {
     use std::os::unix::fs::PermissionsExt;
 

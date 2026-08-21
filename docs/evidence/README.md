@@ -10,11 +10,22 @@ product contract:
   limitations stated in each file. Its historical versions, test counts, and
   UI details are not current behavior by themselves.
 
+## D3-D15 SSH and remote evidence is historical
+
+D3 through D15 were completed against earlier product surfaces. Any SSH,
+remote-host, cross-host, host-registration, remote-attachment, or combined
+catalog behavior described by those checkpoints is historical evidence for the
+candidate that was tested. D16 retires WSNav-managed SSH and cross-host
+operation from the current contract: the supported multi-host composition is
+ordinary operator SSH followed by a host-local `wsnav` instance, with separate
+terminal windows per host. The historical files are intentionally not rewritten
+to make their old procedures appear current.
+
 ## Acceptance records
 
 - [D1 local Codex](acceptance/d1-local-codex.md)
 - [D2 local navigator](acceptance/d2-local-navigator.md)
-- [D3 SSH control plane](acceptance/d3-control-plane.md)
+- [D3 SSH control plane — historical; retired by D16](acceptance/d3-control-plane.md)
 - [D4 independent and forked Workstreams](acceptance/d4-workstreams.md)
 - [D5 V1 closure](acceptance/d5-v1-closure.md)
 - [D5.1 operational closure](acceptance/d5.1-operational-closure.md)
@@ -25,6 +36,7 @@ product contract:
 - [D8.1 real multi-provider acceptance](acceptance/d8.1-multi-provider.md)
 - [D8.2 OpenCode Fork and recovery acceptance](acceptance/d8.2-opencode-fork-recovery.md)
 - [D12 ephemeral Workstream shell](acceptance/d12-ephemeral-shell.md)
+- [D16 host-local simplification](acceptance/d16-host-local.md)
 
 ## Design spikes
 

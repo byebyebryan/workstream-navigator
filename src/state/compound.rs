@@ -6,8 +6,8 @@ use uuid::Uuid;
 
 use crate::domain::{
     Clock, CompoundOperation, DomainError, IdGenerator, LocationId, OperationId, OperationKind,
-    OperationPhase, ProviderKind, ProviderSessionId, RandomIdGenerator, Revision, RuntimeId,
-    SystemClock, WorkstreamId, WorkstreamOrigin,
+    OperationPhase, ProjectId, ProviderKind, ProviderSessionId, RandomIdGenerator, Revision,
+    RuntimeId, SystemClock, WorkstreamId, WorkstreamOrigin,
 };
 
 use super::attention::ensure_recovery_attention_in_transaction;
@@ -30,7 +30,7 @@ impl HostRegistry {
     /// Creates a fresh Workstream at the source Project's registered root.
     /// The destination provider is explicit and may differ from the source;
     /// replaying a request with a different provider is rejected.
-    /// The request key deduplicates an interrupted remote request without
+    /// The request key deduplicates an interrupted host-local request without
     /// creating a branch, worktree, or repository side effect.
     ///
     /// An archived source is still a retained `ProjectLocation` and may seed a
@@ -128,6 +128,196 @@ impl HostRegistry {
         let created = CreatedWorkstream {
             workstream_id,
             location_id: source.location_id,
+            provider,
+            origin: WorkstreamOrigin::Independent,
+            source_workstream_id,
+            revision: Revision::INITIAL,
+        };
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(created)
+    }
+
+    /// Creates an independent Workstream at one exact schema-13 Location.
+    ///
+    /// Registration creates exactly one external Workstream for a Location;
+    /// that retained row is the stable source anchor even after it is
+    /// archived. Project and Location revisions are revalidated in the same
+    /// transaction that records the independent Workstream and its replay
+    /// key. An already-recorded request returns its original result even when
+    /// later presentation metadata has changed.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for stale Project or Location evidence, a missing or
+    /// ambiguous external source anchor, conflicting request-key reuse, or a
+    /// failed atomic write.
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the exact Project, Location, revisions, request key, and provider are independent authority inputs"
+    )]
+    pub fn create_independent_workstream_at_location(
+        &mut self,
+        project_id: ProjectId,
+        location_id: LocationId,
+        expected_project_revision: Revision,
+        expected_location_revision: Revision,
+        request_key: &str,
+        provider: ProviderKind,
+    ) -> Result<CreatedWorkstream, StateError> {
+        validate_registry_text("request key", request_key)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+
+        if let Some(existing) = transaction
+            .query_row(
+                "SELECT request.source_workstream_id, request.source_revision,
+                        request.workstream_id, source.location_id, source.origin,
+                        locations.project_id, destination.location_id, destination.provider
+                 FROM independent_creation_requests AS request
+                 JOIN workstreams AS source
+                   ON source.workstream_id = request.source_workstream_id
+                 JOIN project_locations AS locations
+                   ON locations.location_id = source.location_id
+                 JOIN workstreams AS destination
+                   ON destination.workstream_id = request.workstream_id
+                 WHERE request.request_key = ?1",
+                [request_key],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, String>(6)?,
+                        row.get::<_, String>(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+        {
+            let source_workstream_id = Uuid::parse_str(&existing.0)
+                .map(WorkstreamId::from)
+                .map_err(StateError::InvalidPersistedUuid)?;
+            let source_revision = Revision::try_from(existing.1)?;
+            let existing_location_id = Uuid::parse_str(&existing.3)
+                .map(LocationId::from)
+                .map_err(StateError::InvalidPersistedUuid)?;
+            let existing_project_id = existing
+                .5
+                .as_deref()
+                .ok_or(StateError::MalformedHostSchema)?
+                .parse::<ProjectId>()
+                .map_err(|_| StateError::MalformedHostSchema)?;
+            let destination_location_id = Uuid::parse_str(&existing.6)
+                .map(LocationId::from)
+                .map_err(StateError::InvalidPersistedUuid)?;
+            let destination_provider = provider_kind_from_text(&existing.7)?;
+            if existing.4 != "external"
+                || existing_location_id != location_id
+                || destination_location_id != location_id
+                || existing_project_id != project_id
+                || destination_provider != provider
+            {
+                return Err(StateError::OperationRequestMismatch);
+            }
+            let created = created_workstream_from_record(
+                &transaction,
+                Uuid::parse_str(&existing.2)
+                    .map(WorkstreamId::from)
+                    .map_err(StateError::InvalidPersistedUuid)?,
+            )?;
+            if created.source_workstream_id != source_workstream_id
+                || created.provider != provider
+                || created.location_id != location_id
+                || created.origin != WorkstreamOrigin::Independent
+            {
+                return Err(StateError::OperationRequestMismatch);
+            }
+            let _ = source_revision;
+            transaction.commit().map_err(StateError::Sqlite)?;
+            return Ok(created);
+        }
+
+        let revisions = transaction
+            .query_row(
+                "SELECT projects.revision, project_locations.revision
+                 FROM project_locations
+                 JOIN projects ON projects.project_id = project_locations.project_id
+                 WHERE projects.project_id = ?1 AND project_locations.location_id = ?2",
+                params![project_id.to_string(), location_id.to_string()],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .ok_or(StateError::ConcurrentWrite)?;
+        if Revision::try_from(revisions.0)? != expected_project_revision
+            || Revision::try_from(revisions.1)? != expected_location_revision
+        {
+            return Err(StateError::ConcurrentWrite);
+        }
+
+        let mut statement = transaction
+            .prepare(
+                "SELECT workstream_id, revision FROM workstreams
+                 WHERE location_id = ?1 AND origin = 'external'
+                 ORDER BY workstream_id LIMIT 2",
+            )
+            .map_err(StateError::Sqlite)?;
+        let anchors = statement
+            .query_map([location_id.to_string()], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .map_err(StateError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::Sqlite)?;
+        drop(statement);
+        let [(source_workstream, source_revision)] = anchors.as_slice() else {
+            return Err(StateError::MalformedHostSchema);
+        };
+        let source_workstream_id = Uuid::parse_str(source_workstream)
+            .map(WorkstreamId::from)
+            .map_err(StateError::InvalidPersistedUuid)?;
+        let source_revision = Revision::try_from(*source_revision)?;
+        let workstream_id = WorkstreamId::new();
+        let activity_sequence = next_activity_sequence(&transaction)?;
+        transaction
+            .execute(
+                "INSERT INTO workstreams (
+                    workstream_id, location_id, provider, origin, source_workstream_id,
+                    lifecycle, archived_at_millis, last_activity_sequence,
+                    last_activity_at_millis, revision
+                 ) VALUES (?1, ?2, ?3, 'independent', ?4, 'open', NULL, ?5, 0, 1)",
+                params![
+                    workstream_id.to_string(),
+                    location_id.to_string(),
+                    provider.as_str(),
+                    source_workstream_id.to_string(),
+                    activity_sequence,
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        transaction
+            .execute(
+                "INSERT INTO independent_creation_requests (
+                    request_key, source_workstream_id, source_revision, workstream_id
+                 ) VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    request_key,
+                    source_workstream_id.to_string(),
+                    source_revision.value(),
+                    workstream_id.to_string(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        let created = CreatedWorkstream {
+            workstream_id,
+            location_id,
             provider,
             origin: WorkstreamOrigin::Independent,
             source_workstream_id,
@@ -510,6 +700,15 @@ impl HostRegistry {
             .into_iter()
             .map(|(operation_id, kind, phase, effect_watermark, revision)| {
                 let kind = operation_kind_from_text(&kind)?;
+                let provider = match kind {
+                    OperationKind::Fork => {
+                        PersistedForkPlan::decode(effect_watermark.as_deref())?.provider
+                    }
+                    OperationKind::Start => {
+                        PersistedOpenCodeSessionCreationPlan::decode(effect_watermark.as_deref())?
+                            .provider
+                    }
+                };
                 let source_workstream_id = if kind == OperationKind::Fork {
                     effect_watermark
                         .as_deref()
@@ -524,6 +723,7 @@ impl HostRegistry {
                         .map(OperationId::from)
                         .map_err(StateError::InvalidPersistedUuid)?,
                     kind,
+                    provider,
                     source_workstream_id,
                     phase: operation_phase_from_text(&phase)?,
                     revision: Revision::try_from(revision)?,

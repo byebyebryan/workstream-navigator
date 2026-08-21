@@ -10,6 +10,7 @@ use crate::provider::lifecycle::{LifecycleEvent, LifecycleHint, LifecycleObserva
 use super::attention::{
     clear_recovery_attention_in_transaction, mark_result_attention_in_transaction,
 };
+use super::d16::{D16_HOST_SCHEMA_VERSION, D16_SCHEMA_12_VERSION};
 use super::models::{
     HostRegistry, OpenCodeLifecycleObservation, OpenCodeObserverStatus, ProviderBinding, StateError,
 };
@@ -188,7 +189,7 @@ pub(in crate::state) fn apply_opencode_lifecycle_transition(
     lifecycle: &str,
     workstream_id: WorkstreamId,
     observation: &OpenCodeLifecycleObservation,
-) -> Result<(), StateError> {
+) -> Result<bool, StateError> {
     match &observation.hint {
         LifecycleHint::Started => {
             if lifecycle != "starting" {
@@ -214,12 +215,17 @@ pub(in crate::state) fn apply_opencode_lifecycle_transition(
                 reopen_recovery_workstream(transaction, workstream_id)?;
                 clear_recovery_attention_in_transaction(transaction, workstream_id)?;
             }
+            Ok(true)
         }
         LifecycleHint::Working => {
             if !matches!(lifecycle, "starting" | "idle" | "working" | "attention") {
                 return Err(StateError::HookEvidenceMismatch);
             }
+            if lifecycle == "working" {
+                return Ok(false);
+            }
             update_runtime_lifecycle(transaction, runtime_id, runtime_revision, "working")?;
+            Ok(true)
         }
         LifecycleHint::Settled { message_id } => {
             if !matches!(lifecycle, "starting" | "idle" | "working" | "attention") {
@@ -229,6 +235,11 @@ pub(in crate::state) fn apply_opencode_lifecycle_transition(
                 .as_deref()
                 .ok_or(StateError::HookEvidenceMismatch)?;
             validate_provider_metadata(message_id)?;
+            if !record_opencode_settled_message(transaction, runtime_id, observation, message_id)? {
+                // A delayed duplicate must not touch the binding, Runtime,
+                // Workstream activity, or sticky attention revision.
+                return Ok(false);
+            }
             let changed = transaction
                 .execute(
                     "UPDATE provider_bindings SET last_settled_turn_id = ?1,
@@ -253,28 +264,92 @@ pub(in crate::state) fn apply_opencode_lifecycle_transition(
                 observation.session.clone(),
                 message_id.to_owned(),
             )?;
+            Ok(true)
         }
         LifecycleHint::Ended => {
             if !matches!(lifecycle, "starting" | "idle" | "working" | "attention") {
                 return Err(StateError::HookEvidenceMismatch);
             }
             update_runtime_lifecycle(transaction, runtime_id, runtime_revision, "stopped")?;
+            Ok(true)
         }
     }
-    Ok(())
+}
+
+/// Persists one exact `OpenCode` settled-message identity before applying its
+/// lifecycle effects. Schema 13 records the complete retained identity set,
+/// so reconnect/retry delivery remains idempotent for the lifetime of the
+/// Runtime generation/session. Exact schema 12 has no durable identity table;
+/// its existing binding value still makes a repeated latest settled event a
+/// safe no-op without querying a schema-13-only table.
+fn record_opencode_settled_message(
+    transaction: &rusqlite::Transaction<'_>,
+    runtime_id: RuntimeId,
+    observation: &OpenCodeLifecycleObservation,
+    message_id: &str,
+) -> Result<bool, StateError> {
+    let schema_version: i64 = transaction
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .map_err(StateError::Sqlite)?;
+    if !matches!(
+        schema_version,
+        D16_SCHEMA_12_VERSION | D16_HOST_SCHEMA_VERSION
+    ) {
+        return Err(StateError::MalformedHostSchema);
+    }
+    let previous = transaction
+        .query_row(
+            "SELECT last_settled_turn_id
+             FROM provider_bindings
+             WHERE runtime_id = ?1 AND provider = 'opencode'
+               AND native_session_id = ?2 AND runtime_generation = ?3",
+            params![
+                runtime_id.to_string(),
+                observation.session.native_id(),
+                observation.generation,
+            ],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?
+        .ok_or(StateError::HookEvidenceMismatch)?;
+    if previous.as_deref() == Some(message_id) {
+        return Ok(false);
+    }
+    if schema_version == D16_SCHEMA_12_VERSION {
+        return Ok(true);
+    }
+
+    let changed = transaction
+        .execute(
+            "INSERT OR IGNORE INTO opencode_settled_messages (
+                runtime_id, runtime_generation, native_session_id, message_id
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                runtime_id.to_string(),
+                observation.generation,
+                observation.session.native_id(),
+                message_id,
+            ],
+        )
+        .map_err(StateError::Sqlite)?;
+    if changed == 0 {
+        return Ok(false);
+    }
+    Ok(true)
 }
 
 pub(in crate::state) struct LifecycleEventContext<'tx, 'db> {
-    transaction: &'tx rusqlite::Transaction<'db>,
-    runtime_id: RuntimeId,
-    provider: ProviderKind,
-    runtime_status: &'tx str,
-    runtime_revision: Revision,
-    generation: &'tx str,
-    workstream_id: WorkstreamId,
-    workstream_lifecycle: WorkstreamLifecycle,
-    existing: Option<ProviderBinding>,
-    observed_session: ProviderSessionId,
+    pub(in crate::state) transaction: &'tx rusqlite::Transaction<'db>,
+    pub(in crate::state) runtime_id: RuntimeId,
+    pub(in crate::state) provider: ProviderKind,
+    pub(in crate::state) runtime_status: &'tx str,
+    pub(in crate::state) runtime_revision: Revision,
+    pub(in crate::state) generation: &'tx str,
+    pub(in crate::state) workstream_id: WorkstreamId,
+    pub(in crate::state) workstream_lifecycle: WorkstreamLifecycle,
+    pub(in crate::state) existing: Option<ProviderBinding>,
+    pub(in crate::state) observed_session: ProviderSessionId,
 }
 
 pub(in crate::state) fn apply_lifecycle_event(

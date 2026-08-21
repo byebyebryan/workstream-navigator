@@ -1,7 +1,7 @@
 use super::{
     ActionError, HostRegistry, LinuxProcessProbe, OpenCodeClient, OpenCodeEndpoint, OpenCodeError,
-    PrivateRuntime, ProcessProbe, ProviderKind, ProviderSessionId, RuntimeId, RuntimePaths,
-    RuntimeProbe, SystemTmux, WorkstreamId, endpoint_owned_by_process, opencode,
+    PrivateRuntime, ProcessProbe, ProviderKind, ProviderSessionId, RuntimePaths, RuntimeProbe,
+    SystemTmux, WorkstreamId, endpoint_owned_by_process, opencode,
 };
 use super::{
     cleanup::{
@@ -162,8 +162,8 @@ pub(super) fn validate_opencode_live_runtime(
 /// Performs the authoritative, provider-aware checks required immediately
 /// before attaching a native provider pane.
 ///
-/// The local presentation path and the remote interactive `_attach` endpoint
-/// both call this function.  A private tmux pane is never enough evidence for
+/// The local presentation path calls this function. A private tmux pane is
+/// never enough evidence for
 /// `OpenCode`: the exact Runtime generation, provider process birth, binding,
 /// observer identity/status, loopback ownership, health, and root-session
 /// status must corroborate the persisted handle.  Codex likewise requires a
@@ -224,31 +224,6 @@ pub fn preflight_attachment(
         validate_opencode_live_runtime(registry, &runtime_record, &probe)?;
     }
     Ok(runtime_record)
-}
-
-/// Runtime-ID form of [`preflight_attachment`] used by the SSH `_attach`
-/// endpoint.  The requested opaque Runtime identity is part of the authority
-/// boundary: if the Workstream has rotated to another generation between the
-/// control lookup and this preflight, refuse rather than silently attaching
-/// the replacement.
-///
-/// # Errors
-///
-/// Returns a bounded action error when the Runtime is unknown, no longer the
-/// Workstream's current generation, or fails provider-specific preflight.
-pub fn preflight_attachment_runtime(
-    root: &crate::state::StateRoot,
-    registry: &mut HostRegistry,
-    runtime_id: RuntimeId,
-) -> Result<crate::state::RuntimeRecord, ActionError> {
-    let requested = registry
-        .runtime_by_id(runtime_id)?
-        .ok_or(ActionError::RuntimeProbeAmbiguous)?;
-    let current = preflight_attachment(root, registry, requested.workstream_id)?;
-    if current.runtime_id != runtime_id {
-        return Err(ActionError::RuntimeProbeAmbiguous);
-    }
-    Ok(current)
 }
 
 pub(super) fn prepare_opencode_runtime(

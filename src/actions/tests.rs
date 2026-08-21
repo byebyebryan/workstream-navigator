@@ -27,10 +27,22 @@ use std::{
     path::{Path, PathBuf},
 };
 
+fn private_existing_root(path: &Path) -> crate::state::StateRoot {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    crate::state::StateRoot::create(path).unwrap()
+}
+
 fn registry() -> (tempfile::TempDir, crate::state::HostRegistry, WorkstreamId) {
     let temporary = tempfile::tempdir().unwrap();
-    let root = crate::state::StateRoot::create(temporary.path()).unwrap();
-    let mut registry = crate::state::HostRegistry::open(&root).unwrap();
+    let root = private_existing_root(temporary.path());
+    let mut registry = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
     let registered = registry
         .register_project_root(
             Path::new("/disposable/repository"),
@@ -43,8 +55,11 @@ fn registry() -> (tempfile::TempDir, crate::state::HostRegistry, WorkstreamId) {
 #[test]
 fn completed_native_review_promotes_pending_observer_before_a_managed_action() {
     let temporary = tempfile::tempdir().unwrap();
-    let root = crate::state::StateRoot::create(temporary.path().join("state")).unwrap();
-    let mut registry = crate::state::HostRegistry::open(&root).unwrap();
+    let root = crate::state::StateRoot::select(temporary.path().join("state"));
+    let mut registry = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
     let manager = ObserverProfile::new(
         temporary.path().join("codex-home"),
         temporary.path().join("bin/wsnav"),
@@ -83,7 +98,7 @@ fn completed_native_review_promotes_pending_observer_before_a_managed_action() {
 #[test]
 fn archive_and_restore_without_a_runtime_never_start_codex() {
     let (temporary, mut registry, workstream_id) = registry();
-    let root = crate::state::StateRoot::create(temporary.path()).unwrap();
+    let root = crate::state::StateRoot::select(temporary.path());
 
     let archived_revision =
         archive(&root, &mut registry, workstream_id, Revision::INITIAL).unwrap();
@@ -136,8 +151,11 @@ fn managed_codex_environment_has_only_the_explicit_utf8_locale() {
 #[test]
 fn opencode_helper_cleanup_failure_marks_pre_effect_creation_for_recovery() {
     let temporary = tempfile::tempdir().unwrap();
-    let root = crate::state::StateRoot::create(temporary.path()).unwrap();
-    let mut registry = crate::state::HostRegistry::open(&root).unwrap();
+    let root = private_existing_root(temporary.path());
+    let mut registry = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
     let registered = registry
         .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
         .unwrap();
@@ -163,8 +181,11 @@ fn opencode_helper_cleanup_failure_marks_pre_effect_creation_for_recovery() {
 #[test]
 fn abandoned_prepared_opencode_creation_on_missing_runtime_requires_recovery() {
     let temporary = tempfile::tempdir().unwrap();
-    let root = crate::state::StateRoot::create(temporary.path()).unwrap();
-    let mut registry = crate::state::HostRegistry::open(&root).unwrap();
+    let root = private_existing_root(temporary.path());
+    let mut registry = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
     let registered = registry
         .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
         .unwrap();
@@ -299,8 +320,11 @@ fn native_provider_is_wrapped_by_the_private_launch_barrier() {
 #[test]
 fn conclusive_private_runtime_loss_becomes_recovery_required_before_snapshot() {
     let temporary = tempfile::tempdir().unwrap();
-    let root = crate::state::StateRoot::create(temporary.path()).unwrap();
-    let mut registry = crate::state::HostRegistry::open(&root).unwrap();
+    let root = private_existing_root(temporary.path());
+    let mut registry = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
     let registered = registry
         .register_project_root(
             Path::new("/disposable/repository"),
@@ -417,10 +441,13 @@ fn codex_attachment_requires_a_complete_recorded_process_identity() {
 }
 
 #[test]
-fn exact_live_probe_backfills_a_schema_eleven_provider_pid() {
+fn exact_live_probe_backfills_a_missing_provider_pid() {
     let temporary = tempfile::tempdir().unwrap();
-    let root = crate::state::StateRoot::create(temporary.path()).unwrap();
-    let mut registry = crate::state::HostRegistry::open(&root).unwrap();
+    let root = private_existing_root(temporary.path());
+    let mut registry = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
     let registered = registry
         .register_project_root(
             Path::new("/disposable/repository"),
@@ -437,7 +464,10 @@ fn exact_live_probe_backfills_a_schema_eleven_provider_pid() {
         )
         .unwrap();
     drop(connection);
-    let mut registry = crate::state::HostRegistry::open(&root).unwrap();
+    let mut registry = crate::state::open_current_only(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
     let legacy = registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap();
     let probe = RuntimeProbe::Live {
         pane_id: "%1".to_owned(),
@@ -494,8 +524,11 @@ fn independent_creation_keeps_the_project_root_without_touching_files() {
     fs::create_dir(&repository).unwrap();
     fs::write(repository.join("source-only.txt"), "do not copy\n").unwrap();
 
-    let root = crate::state::StateRoot::create(temporary.path().join("state")).unwrap();
-    let mut registry = crate::state::HostRegistry::open(&root).unwrap();
+    let root = crate::state::StateRoot::select(temporary.path().join("state"));
+    let mut registry = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
     let registered = registry
         .register_project_root(&repository, crate::domain::ProviderKind::Codex)
         .unwrap();
@@ -523,7 +556,7 @@ fn independent_creation_keeps_the_project_root_without_touching_files() {
 #[test]
 fn independent_creation_survives_one_provider_start_failure_without_fallback() {
     let (temporary, mut registry, source_workstream_id) = registry();
-    let root = crate::state::StateRoot::create(temporary.path()).unwrap();
+    let root = crate::state::StateRoot::select(temporary.path());
     let readiness_calls = Cell::new(0);
     let starter_calls = Cell::new(0);
     let starter_provider = Cell::new(None);

@@ -232,7 +232,6 @@ pub enum RuntimeStatus {
     Attention,
     Stopped,
     Unknown,
-    Unreachable,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]

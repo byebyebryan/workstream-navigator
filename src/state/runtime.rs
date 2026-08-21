@@ -296,8 +296,8 @@ impl HostRegistry {
 
     /// Reads one exact persisted Runtime by its opaque identity.
     ///
-    /// This is used only to validate an explicit native terminal attachment.
-    /// It does not expose project paths or tmux details to a remote caller.
+    /// This is used only to validate an explicit native terminal attachment
+    /// or another exact host-local lifecycle transition.
     ///
     /// # Errors
     ///
@@ -843,7 +843,7 @@ impl HostRegistry {
             | crate::provider::lifecycle::LifecycleHint::Working
             | crate::provider::lifecycle::LifecycleHint::Ended => None,
         };
-        apply_opencode_lifecycle_transition(
+        let accepted = apply_opencode_lifecycle_transition(
             &transaction,
             runtime_id,
             observation.runtime_revision,
@@ -851,9 +851,15 @@ impl HostRegistry {
             workstream_id,
             observation,
         )?;
-        touch_workstream(&transaction, &workstream_id.to_string(), activity_at_millis)?;
+        if accepted {
+            touch_workstream(&transaction, &workstream_id.to_string(), activity_at_millis)?;
+        }
         transaction.commit().map_err(StateError::Sqlite)?;
-        Ok(observation.runtime_revision.next())
+        Ok(if accepted {
+            observation.runtime_revision.next()
+        } else {
+            observation.runtime_revision
+        })
     }
 
     /// Removes only the exact private `OpenCode` handle after its observer has
@@ -920,10 +926,11 @@ impl HostRegistry {
         }
     }
 
-    /// Repairs a schema-11 Runtime that has a persisted birth token but no
-    /// provider PID. The caller must have freshly probed the exact private
-    /// pane: the supplied birth must still match the durable record, the
-    /// Runtime must not be stopped, and the optimistic revision must be exact.
+    /// Repairs a retained Runtime that has a persisted birth token but no
+    /// provider PID. This is field-level reconciliation, not a schema
+    /// migration. The caller must have freshly probed the exact private pane:
+    /// the supplied birth must still match the durable record, the Runtime must
+    /// not be stopped, and the optimistic revision must be exact.
     ///
     /// # Errors
     ///
@@ -1191,11 +1198,11 @@ impl HostRegistry {
         let activity_sequence = next_activity_sequence(&transaction)?;
         let workstream_changed = transaction
             .execute(
-                "UPDATE workstreams SET lifecycle = CASE
-                    WHEN lifecycle = 'open' THEN 'parked' ELSE lifecycle END,
+                "UPDATE workstreams SET lifecycle = 'parked',
                     last_activity_sequence = ?1,
                     revision = revision + 1
-                 WHERE workstream_id = ?2",
+                 WHERE workstream_id = ?2
+                   AND lifecycle IN ('open', 'parked', 'recovery_required')",
                 params![activity_sequence, workstream_id],
             )
             .map_err(StateError::Sqlite)?;

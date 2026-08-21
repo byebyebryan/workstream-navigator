@@ -223,7 +223,7 @@ pub fn await_deliberate_park(
 ) -> Result<bool, StateError> {
     let deadline = Instant::now() + PARK_CONFIRM_TIMEOUT;
     loop {
-        let registry = HostRegistry::open(root)?;
+        let registry = crate::state::open_current_only(root)?.into_host_registry()?;
         if registry.runtime_is_deliberately_parked(runtime_id, workstream_id)? {
             return Ok(true);
         }

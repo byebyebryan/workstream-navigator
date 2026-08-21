@@ -3,67 +3,26 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
-use crate::domain::{
-    HostId, IdGenerator, LocationId, ProviderKind, RandomIdGenerator, Revision, WorkstreamId,
-};
-use crate::protocol::{
-    MAX_PROJECT_BROWSER_ENTRIES, ProjectDirectoriesResponse, ProjectDirectoryEntry,
-};
+use crate::domain::{HostId, LocationId, ProviderKind, Revision, WorkstreamId};
 use crate::provider::codex::profile::{OBSERVER_PROFILE_NAME, ProfileOwnership};
 
 use super::models::{
     CodexIntegration, ExternalWorkstream, HostIdentity, HostRegistry, IntegrationLifecycle,
-    PendingRepositoryMetadata, StateError, StateRoot,
-};
-use super::schema::{
-    MAX_NAVIGATOR_WORKSTREAM_QUERY, configure_connection, initialize_host_identity,
-    migrate_host_schema,
+    MAX_PROJECT_BROWSER_ENTRIES, ProjectDirectoriesResponse, ProjectDirectoryEntry, StateError,
 };
 use super::utils::{
     default_project_browser_root, integration_lifecycle_from_text, integration_lifecycle_text,
     project_browser_directory, project_browser_root_label, resolve_project_browser_root,
-    safe_project_browser_entry_name, set_private_file_permissions, to_from_sql_error,
-    validate_project_browser_relative_path, validate_project_display_name,
-    validate_remote_identity_display, validate_repository_fingerprint,
+    safe_project_browser_entry_name, to_from_sql_error, validate_project_browser_relative_path,
+    validate_project_display_name, validate_remote_identity_display,
+    validate_repository_fingerprint,
 };
 use super::workstream::next_activity_sequence;
 
 impl HostRegistry {
-    /// Opens the host registry, applying only known development migrations.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for I/O, `SQLite`, permission, or unsupported-schema
-    /// failures.
-    pub fn open(root: &StateRoot) -> Result<Self, StateError> {
-        Self::open_with_id_generator(root, &RandomIdGenerator)
-    }
-
-    /// Opens the host registry with an injected identity source.
-    ///
-    /// This is a deterministic seam for fresh-registry tests. Production
-    /// callers should use [`Self::open`].
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for I/O, `SQLite`, permission, or unsupported-schema
-    /// failures.
-    pub fn open_with_id_generator(
-        root: &StateRoot,
-        id_generator: &dyn IdGenerator,
-    ) -> Result<Self, StateError> {
-        let path = root.host_database_path();
-        let mut connection = Connection::open(&path).map_err(StateError::Sqlite)?;
-        set_private_file_permissions(&path)?;
-        configure_connection(&connection)?;
-        migrate_host_schema(&mut connection, root.base())?;
-        initialize_host_identity(&connection, id_generator)?;
-        Ok(Self { connection })
-    }
-
     /// Returns the stable identity and generation of this host registry.
     ///
     /// # Errors
@@ -105,8 +64,8 @@ impl HostRegistry {
     }
 
     /// Lists bounded direct child directories beneath this host's configured
-    /// browser root. Paths stay host-private; the protocol receives only a
-    /// safe root label, a relative cursor, and child names.
+    /// browser root. Paths stay host-private; the DTO contains only a safe
+    /// root label, a relative cursor, and child names.
     ///
     /// # Errors
     ///
@@ -158,8 +117,8 @@ impl HostRegistry {
     }
 
     /// Resolves one host-private browser cursor to a directory beneath the
-    /// configured root. This is deliberately not exposed through snapshots or
-    /// the control response: it exists only for local host-side registration.
+    /// configured root. This is deliberately not exposed through snapshots;
+    /// it exists only for local host-side registration.
     ///
     /// # Errors
     ///
@@ -398,24 +357,7 @@ impl HostRegistry {
             .filter(|name| !name.trim().is_empty())
             .unwrap_or("local project")
             .to_owned();
-        self.register_external_workstream_with_metadata(
-            project_root,
-            &display_name,
-            None,
-            None,
-            provider,
-        )
-    }
-
-    #[cfg(test)]
-    #[allow(clippy::needless_pass_by_value, clippy::missing_errors_doc)]
-    pub fn register_external_workstream(
-        &mut self,
-        project_root: PathBuf,
-        _legacy_repository_identity: String,
-        _legacy_base_ref: String,
-    ) -> Result<ExternalWorkstream, StateError> {
-        self.register_project_root(&project_root, ProviderKind::Codex)
+        self.register_project_root_with_metadata(project_root, &display_name, None, None, provider)
     }
 
     /// Registers a project root with separately discovered project-level
@@ -425,8 +367,8 @@ impl HostRegistry {
     ///
     /// Returns an error if an input field is unsafe, the project path already
     /// exists in registry state, or the transaction cannot be committed.
-    #[allow(clippy::too_many_arguments)]
-    pub fn register_external_workstream_with_metadata(
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn register_project_root_with_metadata(
         &mut self,
         project_root: &Path,
         repository_display_name: &str,
@@ -447,13 +389,17 @@ impl HostRegistry {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
         let activity_sequence = next_activity_sequence(&transaction)?;
+        // Schema 13 requires every Location to belong to exactly one Project.
+        // Use the same two-phase Location/Project insertion as the D16 state
+        // seam: the nullable foreign key is filled only after the Project row
+        // can refer back to its label Location.
         transaction
             .execute(
                 "INSERT INTO project_locations (
                     location_id, repository_path,
                     repository_display_name, remote_identity_fingerprint,
-                    remote_identity_display, revision
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+                    remote_identity_display, revision, project_id
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 1, NULL)",
                 params![
                     registration.location_id.to_string(),
                     project_root.to_string_lossy(),
@@ -461,6 +407,69 @@ impl HostRegistry {
                     remote_identity_fingerprint.unwrap_or(""),
                     remote_identity_display.unwrap_or(""),
                 ],
+            )
+            .map_err(StateError::Sqlite)?;
+        let project_id: String = if let Some(fingerprint) =
+            remote_identity_fingerprint.filter(|value| !value.is_empty())
+        {
+            let existing = transaction
+                .query_row(
+                    "SELECT project_id FROM projects
+                     WHERE repository_fingerprint = ?1",
+                    [fingerprint],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(StateError::Sqlite)?;
+            if let Some(project_id) = existing {
+                transaction
+                    .execute(
+                        "UPDATE projects SET revision = revision + 1
+                         WHERE project_id = ?1",
+                        [&project_id],
+                    )
+                    .map_err(StateError::Sqlite)?;
+                project_id
+            } else {
+                let project_id = Uuid::new_v4().to_string();
+                transaction
+                    .execute(
+                        "INSERT INTO projects (
+                            project_id, label_location_id, display_name,
+                            repository_fingerprint, revision
+                         ) VALUES (?1, ?2, ?3, ?4, 1)",
+                        params![
+                            project_id,
+                            registration.location_id.to_string(),
+                            repository_display_name,
+                            fingerprint,
+                        ],
+                    )
+                    .map_err(StateError::Sqlite)?;
+                project_id
+            }
+        } else {
+            let project_id = Uuid::new_v4().to_string();
+            transaction
+                .execute(
+                    "INSERT INTO projects (
+                        project_id, label_location_id, display_name,
+                        repository_fingerprint, revision
+                     ) VALUES (?1, ?2, ?3, NULL, 1)",
+                    params![
+                        project_id,
+                        registration.location_id.to_string(),
+                        repository_display_name,
+                    ],
+                )
+                .map_err(StateError::Sqlite)?;
+            project_id
+        };
+        transaction
+            .execute(
+                "UPDATE project_locations SET project_id = ?1
+                 WHERE location_id = ?2",
+                params![project_id, registration.location_id.to_string()],
             )
             .map_err(StateError::Sqlite)?;
         transaction
@@ -481,87 +490,6 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?;
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(registration)
-    }
-
-    /// Returns legacy `ProjectLocations` that still need one bounded metadata
-    /// refresh after the D6.1 development-schema migration.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for malformed persisted identities or an unavailable
-    /// registry.
-    pub fn pending_repository_metadata(
-        &self,
-    ) -> Result<Vec<PendingRepositoryMetadata>, StateError> {
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT location_id, repository_path FROM project_locations
-                 WHERE repository_display_name = '' OR remote_identity_fingerprint IS NULL
-                    OR remote_identity_display IS NULL
-                 ORDER BY location_id LIMIT ?1",
-            )
-            .map_err(StateError::Sqlite)?;
-        statement
-            .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(StateError::Sqlite)?
-            .map(|row| {
-                let (location_id, repository_path) = row.map_err(StateError::Sqlite)?;
-                Ok(PendingRepositoryMetadata {
-                    location_id: Uuid::parse_str(&location_id)
-                        .map(LocationId::from)
-                        .map_err(StateError::InvalidPersistedUuid)?,
-                    repository_path: PathBuf::from(repository_path),
-                })
-            })
-            .collect()
-    }
-
-    /// Records one bounded metadata observation for an existing location.
-    /// `None` is persisted as an explicit unavailable fingerprint so snapshots
-    /// do not repeatedly spawn Git for repositories without a canonical remote.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for unsafe metadata, a stale location, or a failed
-    /// atomic update.
-    pub fn record_repository_metadata(
-        &mut self,
-        location_id: LocationId,
-        repository_path: &Path,
-        display_name: &str,
-        remote_identity_fingerprint: Option<&str>,
-        remote_identity_display: Option<&str>,
-    ) -> Result<(), StateError> {
-        validate_project_display_name(display_name)?;
-        validate_repository_fingerprint(remote_identity_fingerprint)?;
-        validate_remote_identity_display(remote_identity_display)?;
-        let changed = self
-            .connection
-            .execute(
-                "UPDATE project_locations
-                 SET repository_path = ?1, repository_display_name = ?2,
-                     remote_identity_fingerprint = ?3, remote_identity_display = ?4,
-                     revision = revision + 1
-                 WHERE location_id = ?5
-                   AND (repository_display_name = '' OR remote_identity_fingerprint IS NULL
-                        OR remote_identity_display IS NULL)",
-                params![
-                    repository_path.to_string_lossy(),
-                    display_name,
-                    remote_identity_fingerprint.unwrap_or(""),
-                    remote_identity_display.unwrap_or(""),
-                    location_id.to_string(),
-                ],
-            )
-            .map_err(StateError::Sqlite)?;
-        if changed == 1 {
-            Ok(())
-        } else {
-            Err(StateError::ConcurrentWrite)
-        }
     }
 }
 

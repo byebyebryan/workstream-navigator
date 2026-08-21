@@ -1,13 +1,11 @@
-//! Thin provider-aware CLI orchestration for local and SSH Workstreams.
+//! Thin provider-aware CLI orchestration for local Workstreams.
 
 mod cli;
 mod dispatch;
 mod launch;
-mod lifecycle;
 mod local;
 mod model;
 mod observer;
-mod remote;
 
 #[cfg(test)]
 mod tests;
@@ -15,7 +13,6 @@ mod tests;
 use std::process::ExitCode;
 
 pub(super) use std::{
-    collections::BTreeMap,
     env, fs,
     path::{Path, PathBuf},
     process::{Command, Stdio},
@@ -26,26 +23,17 @@ pub(super) use clap::{Parser, Subcommand};
 pub(super) use thiserror::Error;
 
 pub(super) use crate::{
-    actions::{self},
     domain::{OperationId, ProviderSessionId, Revision, RuntimeId, WorkstreamId},
     navigator::run_local_navigator,
     presentation::{AttachmentPhase, Presentation},
     provider::codex::app_server::EphemeralAppServer,
-    provider::codex::hooks::drain_and_parse,
     provider::codex::profile::{OBSERVER_PROFILE_SCHEMA_VERSION, ObserverProfile},
     provider::lifecycle::LifecycleEvent,
     runtime::{
-        LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
+        LinuxProcessProbe, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux,
         await_launch_release, is_direct_provider_hook,
     },
-    state::{
-        ClientCatalog, ClientHostTransport, HostIdentity, HostRegistry, IntegrationLifecycle,
-        StateError, StateRoot,
-    },
-    transport::{
-        CommandRunner, HostClient, RemoteExecutable, STANDARD_REMOTE_EXECUTABLE, SshDestination,
-        SshEndpoint, SystemCommandRunner, attach_ssh,
-    },
+    state::{HostRegistry, IntegrationLifecycle, StateError, StateRoot},
 };
 
 #[allow(unused_imports)]

@@ -69,7 +69,7 @@ where
 ///
 /// # Errors
 ///
-/// Returns an error when the source revision is stale or observer setup
+/// Returns an error when the source revision is stale or observer readiness
 /// prevents the native start.
 pub fn start_independent_workstream(
     root: &crate::state::StateRoot,
@@ -98,75 +98,6 @@ pub fn start_independent_workstream(
     )
 }
 
-/// Provider-readiness seam for the remote control path. Production callers use
-/// this wrapper to perform the live capability re-probe; deterministic tests
-/// use the adjacent injected-starter variant so they exercise the exact same
-/// revision/request-key/provider path without launching a real provider.
-pub(crate) fn start_independent_workstream_with_readiness<F>(
-    root: &crate::state::StateRoot,
-    registry: &mut HostRegistry,
-    source_workstream_id: WorkstreamId,
-    expected_revision: Option<Revision>,
-    request_key: &str,
-    provider: ProviderKind,
-    readiness: F,
-) -> Result<WorkstreamId, ActionError>
-where
-    F: FnOnce(&HostRegistry, ProviderKind) -> Result<(), crate::provider::ProviderReadinessError>,
-{
-    start_independent_workstream_with_readiness_and_starter(
-        root,
-        registry,
-        source_workstream_id,
-        expected_revision,
-        request_key,
-        provider,
-        readiness,
-        |root, registry, workstream_id, expected_revision, _provider| {
-            start(root, registry, workstream_id, expected_revision)
-        },
-    )
-}
-
-/// Provider-readiness seam with an injected native starter for bounded
-/// protocol tests. Production callers should use
-/// [`start_independent_workstream_with_readiness`], which supplies the real
-/// provider-scoped start action.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn start_independent_workstream_with_readiness_and_starter<F, S>(
-    root: &crate::state::StateRoot,
-    registry: &mut HostRegistry,
-    source_workstream_id: WorkstreamId,
-    expected_revision: Option<Revision>,
-    request_key: &str,
-    provider: ProviderKind,
-    readiness: F,
-    starter: S,
-) -> Result<WorkstreamId, ActionError>
-where
-    F: FnOnce(&HostRegistry, ProviderKind) -> Result<(), crate::provider::ProviderReadinessError>,
-    S: FnOnce(
-        &crate::state::StateRoot,
-        &mut HostRegistry,
-        WorkstreamId,
-        Option<Revision>,
-        ProviderKind,
-    ) -> Result<StartOutcome, ActionError>,
-{
-    start_independent_workstream_with(
-        root,
-        registry,
-        IndependentStartSpec {
-            source_workstream_id,
-            expected_revision,
-            request_key,
-            provider,
-        },
-        |registry, provider| readiness(registry, provider).map_err(ActionError::ProviderReadiness),
-        starter,
-    )
-}
-
 /// Forks an active Workstream at its last completed provider turn without
 /// interrupting or waiting for the source's current turn. The destination
 /// starts at the same registered project root; this action never creates or
@@ -176,7 +107,7 @@ where
 /// # Errors
 ///
 /// Returns an error when the selected source lacks a live settled boundary,
-/// provider evidence is not exact, observer setup prevents the destination
+/// provider evidence is not exact, observer readiness prevents the destination
 /// launch, or recovery is required instead of a retry.
 pub fn fork_workstream(
     root: &crate::state::StateRoot,

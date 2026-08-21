@@ -1,44 +1,50 @@
 use super::{
-    BTreeMap, Command, HostRegistry, IntegrationLifecycle, LinuxProcessProbe, NativeLaunch,
-    OBSERVER_PROFILE_SCHEMA_VERSION, ObserverProfile, PrivateRuntime, RuntimeId, RuntimePaths,
-    StateRoot, SystemTmux, actions, fs,
+    Command, HostRegistry, IntegrationLifecycle, LinuxProcessProbe,
+    OBSERVER_PROFILE_SCHEMA_VERSION, ObserverProfile, PrivateRuntime, RuntimePaths, RuntimeProbe,
+    StateRoot, SystemTmux, fs,
 };
 use super::{launch::provider_wait, local::observer_profile, model::AppError};
-
-pub(super) fn setup(
-    root: &StateRoot,
-    registry: &mut HostRegistry,
-    skip_review: bool,
-) -> Result<(), AppError> {
-    match prepare_observer_activation(root, registry)? {
-        ObserverActivation::Ready => {
-            println!("observer profile is already ready");
-            Ok(())
-        }
-        ObserverActivation::ReviewRequired if skip_review => {
-            println!("observer profile installed; native hook trust remains pending");
-            Ok(())
-        }
-        ObserverActivation::ReviewRequired => {
-            native_trust_review(root)?;
-            let integration = registry
-                .codex_integration()?
-                .ok_or(AppError::ObserverNotInstalled)?;
-            let manager = observer_profile(root)?;
-            if finalize_native_trust(registry, &manager, &integration.ownership)? {
-                println!("observer profile is ready");
-                Ok(())
-            } else {
-                Err(AppError::NativeTrustReviewIncomplete)
-            }
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ObserverActivation {
     Ready,
     ReviewRequired,
+}
+
+/// Refuses observer profile mutation unless every retained Runtime has an
+/// exact private-tmux absence proof. SQL lifecycle alone is staleable state;
+/// an unavailable or ambiguous native probe is treated as live.
+fn require_no_live_runtime(
+    root: &StateRoot,
+    registry: &HostRegistry,
+    refusal: AppError,
+) -> Result<(), AppError> {
+    let overviews = registry.workstream_overviews()?;
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    for overview in overviews {
+        let Some(runtime_record) = overview.runtime else {
+            continue;
+        };
+        let Ok(paths) = RuntimePaths::for_record(
+            root.base(),
+            runtime_record.runtime_id,
+            &runtime_record.tmux_session,
+        ) else {
+            return Err(refusal);
+        };
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+        let Ok(probe) = runtime.probe() else {
+            return Err(refusal);
+        };
+        if matches!(
+            probe,
+            RuntimeProbe::Live { .. } | RuntimeProbe::Unknown { .. }
+        ) {
+            return Err(refusal);
+        }
+    }
+    Ok(())
 }
 
 /// Reconciles the exact observer declaration before native work can begin.
@@ -51,27 +57,32 @@ pub(crate) fn prepare_observer_activation(
     registry: &mut HostRegistry,
 ) -> Result<ObserverActivation, AppError> {
     let manager = observer_profile(root)?;
-    prepare_observer_activation_with_manager(registry, &manager)
+    prepare_observer_activation_with_manager(root, registry, &manager)
 }
 
 pub(super) fn prepare_observer_activation_with_manager(
+    root: &StateRoot,
     registry: &mut HostRegistry,
     manager: &ObserverProfile,
 ) -> Result<ObserverActivation, AppError> {
     let existing = registry.codex_integration()?;
     let Some(integration) = existing else {
-        if registry.has_live_runtime()? {
-            return Err(AppError::LiveRuntimePreventsObserverActivation);
-        }
+        require_no_live_runtime(
+            root,
+            registry,
+            AppError::LiveRuntimePreventsObserverActivation,
+        )?;
         let ownership = manager.install(uuid::Uuid::new_v4().to_string(), None)?;
         registry.record_codex_integration(ownership, IntegrationLifecycle::TrustPending)?;
         return Ok(ObserverActivation::ReviewRequired);
     };
 
     if integration.ownership.profile_schema_version != OBSERVER_PROFILE_SCHEMA_VERSION {
-        if registry.has_live_runtime()? {
-            return Err(AppError::LiveRuntimePreventsObserverActivation);
-        }
+        require_no_live_runtime(
+            root,
+            registry,
+            AppError::LiveRuntimePreventsObserverActivation,
+        )?;
         let ownership = manager.update(&integration.ownership)?;
         registry.replace_codex_integration(
             &integration.ownership,
@@ -87,9 +98,11 @@ pub(super) fn prepare_observer_activation_with_manager(
     ) {
         Ok(ownership) => ownership,
         Err(crate::provider::codex::profile::ProfileError::OwnershipMismatch) => {
-            if registry.has_live_runtime()? {
-                return Err(AppError::LiveRuntimePreventsObserverActivation);
-            }
+            require_no_live_runtime(
+                root,
+                registry,
+                AppError::LiveRuntimePreventsObserverActivation,
+            )?;
             let ownership = manager.update(&integration.ownership)?;
             registry.replace_codex_integration(
                 &integration.ownership,
@@ -103,41 +116,18 @@ pub(super) fn prepare_observer_activation_with_manager(
     if finalize_native_trust(registry, manager, &ownership)? {
         return Ok(ObserverActivation::Ready);
     }
-    if registry.has_live_runtime()? {
-        return Err(AppError::LiveRuntimePreventsObserverActivation);
-    }
+    require_no_live_runtime(
+        root,
+        registry,
+        AppError::LiveRuntimePreventsObserverActivation,
+    )?;
     if integration.lifecycle != IntegrationLifecycle::TrustPending {
         registry.record_codex_integration(ownership, IntegrationLifecycle::TrustPending)?;
     }
     Ok(ObserverActivation::ReviewRequired)
 }
 
-pub(super) fn update_observer(
-    root: &StateRoot,
-    registry: &mut HostRegistry,
-) -> Result<(), AppError> {
-    if registry.has_live_runtime()? {
-        return Err(AppError::LiveRuntimePreventsUpdate);
-    }
-    let integration = registry
-        .codex_integration()?
-        .ok_or(AppError::ObserverNotInstalled)?;
-    let ownership = observer_profile(root)?.update(&integration.ownership)?;
-    if ownership == integration.ownership {
-        println!("observer profile is already current");
-        return Ok(());
-    }
-    registry.replace_codex_integration(
-        &integration.ownership,
-        ownership,
-        IntegrationLifecycle::TrustPending,
-    )?;
-    println!("observer profile updated; open a fresh wsnav to complete native hook review");
-    Ok(())
-}
-
-pub(super) fn doctor(root: &StateRoot, registry: &mut HostRegistry) -> Result<(), AppError> {
-    actions::reconcile_observer_trust(root, registry)?;
+pub(super) fn doctor(root: &StateRoot, registry: &HostRegistry) -> Result<(), AppError> {
     let integration = registry.codex_integration()?;
     let Some(integration) = integration else {
         println!("observer: not installed");
@@ -148,24 +138,29 @@ pub(super) fn doctor(root: &StateRoot, registry: &mut HostRegistry) -> Result<()
         return Ok(());
     }
     let manager = observer_profile(root)?;
-    match manager.install(
-        integration.ownership.owner_id.clone(),
-        Some(&integration.ownership),
-    ) {
-        Err(crate::provider::codex::profile::ProfileError::UpdateRequired) => {
+    let inspection = manager
+        .inspect(Some(&integration.ownership))
+        .map_err(AppError::Profile)?;
+    match inspection {
+        crate::provider::codex::profile::ProfileInspection::UpdateRequired => {
             println!("observer: update required");
-            return Ok(());
         }
-        Err(error) => return Err(AppError::Profile(error)),
-        Ok(_) => {}
+        crate::provider::codex::profile::ProfileInspection::TrustPending => {
+            println!("observer: trust pending");
+        }
+        crate::provider::codex::profile::ProfileInspection::Ready => {
+            println!("observer: {:?}", integration.lifecycle);
+        }
+        crate::provider::codex::profile::ProfileInspection::Missing => {
+            println!("observer: owned profile is missing");
+        }
+        crate::provider::codex::profile::ProfileInspection::Foreign => {
+            println!("observer: profile path is foreign");
+        }
+        crate::provider::codex::profile::ProfileInspection::Modified => {
+            println!("observer: owned profile is modified");
+        }
     }
-    if integration.lifecycle == IntegrationLifecycle::Ready
-        && manager.verify_native_trust(&integration.ownership).is_err()
-    {
-        println!("observer: trust pending");
-        return Ok(());
-    }
-    println!("observer: {:?}", integration.lifecycle);
     Ok(())
 }
 
@@ -179,37 +174,19 @@ pub(super) fn remove_observer(
 }
 
 /// Removes only the exact observer declaration and native trust, preserving an
-/// accepted provider-owned model prefix. The remote control service uses this
-/// silent helper so its protocol stdout remains one framed response.
+/// accepted provider-owned model prefix. This helper is silent so the native
+/// provider pane never receives control-plane diagnostics.
 pub(crate) fn remove_observer_exact(
     root: &StateRoot,
     registry: &mut HostRegistry,
 ) -> Result<(), AppError> {
-    if registry.has_live_runtime()? {
-        return Err(AppError::LiveRuntimePreventsRemoval);
-    }
+    require_no_live_runtime(root, registry, AppError::LiveRuntimePreventsRemoval)?;
     let integration = registry
         .codex_integration()?
         .ok_or(AppError::ObserverNotInstalled)?;
     observer_profile(root)?.remove(&integration.ownership)?;
     registry.remove_codex_integration(&integration.ownership)?;
     Ok(())
-}
-
-pub(super) fn trust_observer(
-    root: &StateRoot,
-    registry: &mut HostRegistry,
-) -> Result<(), AppError> {
-    let integration = registry
-        .codex_integration()?
-        .ok_or(AppError::ObserverNotInstalled)?;
-    let manager = observer_profile(root)?;
-    if finalize_native_trust(registry, &manager, &integration.ownership)? {
-        println!("observer profile marked ready");
-        Ok(())
-    } else {
-        Err(AppError::NativeTrustReviewIncomplete)
-    }
 }
 
 /// Verifies Codex's own completed native review before recording this observer
@@ -246,7 +223,8 @@ pub(super) fn observer_review_once(root: &StateRoot) {
 }
 
 fn reconcile_observer_review(root: &StateRoot) -> Result<(), AppError> {
-    let mut registry = HostRegistry::open(root)?;
+    let state = crate::state::open_current_only(&StateRoot::select(root.base()))?;
+    let mut registry = state.into_host_registry()?;
     let integration = registry
         .codex_integration()?
         .ok_or(AppError::ObserverNotInstalled)?;
@@ -268,49 +246,6 @@ fn native_trust_review_in_provider_pane(root: &StateRoot) -> Result<(), AppError
     let remove = fs::remove_dir_all(&review_cwd).map_err(AppError::Io);
     let _ = fs::remove_dir(&review_root);
     result?;
-    remove?;
-    Ok(())
-}
-
-fn native_trust_review(root: &StateRoot) -> Result<(), AppError> {
-    let review_root = root.base().join("review");
-    fs::create_dir_all(&review_root).map_err(AppError::Io)?;
-    let review_cwd = review_root.join(uuid::Uuid::new_v4().to_string());
-    fs::create_dir(&review_cwd).map_err(AppError::Io)?;
-
-    let tmux = SystemTmux::default();
-    let process_probe = LinuxProcessProbe;
-    let runtime = PrivateRuntime::new(
-        &tmux,
-        &process_probe,
-        RuntimePaths::for_runtime(root.base(), RuntimeId::new()),
-    );
-    let launch = NativeLaunch {
-        cwd: review_cwd.clone(),
-        program: vec![
-            "codex".into(),
-            "--profile".into(),
-            "wsnav-observer".into(),
-            "-C".into(),
-            review_cwd.clone().into_os_string(),
-        ],
-        environment: BTreeMap::new(),
-    };
-    if let Err(error) = runtime.start(&launch) {
-        let _ = runtime.park();
-        let _ = fs::remove_dir_all(&review_cwd);
-        let _ = fs::remove_dir(&review_root);
-        return Err(AppError::Runtime(error));
-    }
-    let attach = runtime
-        .prepare_attach()
-        .map_err(AppError::Runtime)
-        .and_then(|()| runtime.attach_command().status().map_err(AppError::Io));
-    let park = runtime.park();
-    let remove = fs::remove_dir_all(&review_cwd).map_err(AppError::Io);
-    let _ = fs::remove_dir(&review_root);
-    attach?;
-    park?;
     remove?;
     Ok(())
 }

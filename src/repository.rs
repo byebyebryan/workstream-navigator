@@ -16,7 +16,6 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::process::{BoundedProcessError, output_bounded};
-use crate::state::{HostRegistry, StateError};
 
 const MAX_GIT_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_REMOTES: usize = 32;
@@ -92,42 +91,6 @@ pub fn inspect(checkout: &Path) -> Result<RepositoryRegistration, RepositoryErro
             .map(|identity| identity.fingerprint.clone()),
         remote_identity_display: remote_identity.map(|identity| identity.display),
     })
-}
-
-/// Completes the one-time D6.1 metadata migration for existing locations.
-/// Repository inspection failure is a truthful no-fingerprint outcome rather
-/// than a reason to hide otherwise usable Workstreams.
-///
-/// # Errors
-///
-/// Returns an error only when host registry state cannot be read or updated.
-pub fn refresh_pending_metadata(registry: &mut HostRegistry) -> Result<(), StateError> {
-    for pending in registry.pending_repository_metadata()? {
-        if let Ok(metadata) = inspect(&pending.repository_path) {
-            registry.record_repository_metadata(
-                pending.location_id,
-                &metadata.project_root,
-                &metadata.display_name,
-                metadata.remote_identity_fingerprint.as_deref(),
-                metadata.remote_identity_display.as_deref(),
-            )?;
-            continue;
-        }
-        let display_name = pending
-            .repository_path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .filter(|name| !name.trim().is_empty())
-            .unwrap_or("local project");
-        registry.record_repository_metadata(
-            pending.location_id,
-            &pending.repository_path,
-            display_name,
-            None,
-            None,
-        )?;
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

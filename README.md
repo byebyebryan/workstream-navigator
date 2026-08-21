@@ -1,191 +1,172 @@
 # Workstream Navigator
 
-`wsnav` is a thin terminal layer for organizing persistent coding workstreams
-across machines without replacing the coding agent's native terminal UI.
+Workstream Navigator (`wsnav`) is a thin terminal navigator for persistent
+coding-agent workstreams on the machine where it is running. It adds
+organization, attachment, status, and a few compound workstream actions
+around the provider's native terminal UI.
 
-It is built for the workflow where Codex or OpenCode remains the place you
-plan, code, select models and agents, resume history, and use native commands.
-Workstream Navigator makes those sessions easier to find, enter, and park while
-keeping the agent pane directly interactive.
+> **D16 status:** complete on 2026-08-20. The host-local implementation,
+> disposable repository gate, and explicitly authorized live local and
+> ordinary-SSH-entered-host acceptance passed. The accepted executable is
+> installed on both tested hosts; see the
+> [roadmap](docs/roadmap.md#d16---host-local-simplification) and
+> [acceptance record](docs/evidence/acceptance/d16-host-local.md).
 
-## What it does
+## Host-local by design
 
-- Keeps a compact Workstreams navigator beside the native provider TUI.
-- Organizes independent workstreams under explicitly registered Git projects.
-- Starts fresh Codex or OpenCode workstreams, forks a live same-provider
-  conversation at its last completed turn, parks sessions, resumes exact
-  provider sessions, and recovers a conclusively lost runtime.
-- Treats local and SSH hosts as first-class locations, with the same navigator
-  workflow on both.
-- Groups matching project locations across hosts without exposing raw remote
-  URLs, credentials, filesystem paths, prompts, or transcripts.
-- Uses one private tmux server per live runtime. It never uses or alters your
-  normal tmux server.
-- Offers one optional, short-lived utility shell below the attached provider
-  for short host-local work; the shell is presentation-only and not persisted.
+WSNav controls only the host on which it is executing. Codex or OpenCode
+remains the place where the user plans, codes, selects models and agents,
+resumes history, and uses native commands. WSNav does not replace that UI or
+store its conversations.
 
-## Native by design
+To work on another machine, open an ordinary SSH terminal, tab, or window to
+that machine and run `wsnav` there. Multi-host work therefore means separate
+host-local WSNav windows, one per SSH-entered host. WSNav does not register SSH
+hosts, open or manage SSH, poll remote state, issue remote actions, bridge a
+remote shell, or present a combined cross-host catalog.
 
-Workstream Navigator owns navigation and runtime reachability; the selected
-provider owns the conversation.
+If the outer SSH connection drops, the disposable presentation may end or
+detach, but the host's private Runtime, provider process, native session, and
+completed output remain untouched. Reconnect to the host, run `wsnav` again,
+and attach to the same Runtime.
 
-That means the native provider UI stays visible and interactive, including its
-model, agent, permission, history, and conversation workflows. WSNav never
-sends navigator status, task context, or management prompts into the provider
-pane, and it preserves the completed provider result until you act.
+## What it owns
 
-### Managed native new-session boundary
+- A host-local catalog of registered Git Project Locations and Workstreams.
+- Project grouping by exact, credential-free Git-origin evidence on that
+  host; it never groups records across hosts.
+- Starting, switching, parking, exact resume, same-provider fork, archive,
+  restore, and bounded lost-Runtime recovery.
+- A contextual, read-only observer-readiness check for provider actions that
+  require it.
+- One private tmux server per live Runtime. WSNav never uses or changes the
+  user's ordinary tmux server or configuration.
 
-Do not use Codex's native `/new` inside a WSNav-managed Codex pane. Codex
-does create a distinct new chat, but its current lifecycle signals cannot prove
-that the new chat belongs to that exact live WSNav Runtime. WSNav therefore
-remains bound to the previous conversation tip: its displayed status, rename,
-park, and resume actions still refer to that prior tip.
+The provider pane remains a real native provider TUI. WSNav never writes
+status or management traffic into it, captures prompts/responses/output, or
+replaces completed provider results before the user acts. An optional
+short-lived utility shell may appear below the attached provider; it is
+presentation-only, host-local, and not persisted.
 
-Use `/clear` for a fresh chat in the same Workstream. OpenCode-native session
-creation or switching is likewise not used to rebind a managed Workstream.
-Use WSNav's `n` for an independent Workstream, or `f` for a same-provider fork.
-This is an explicit current limitation,
-recorded in [Spikes 0011](docs/evidence/spikes/0011-codex-native-new-rebinding.md),
-[0012](docs/evidence/spikes/0012-codex-new-prompt-session-rotation.md), and
-[0013](docs/evidence/spikes/0013-codex-new-thread-inventory.md).
+## The reduced navigator
 
-Each workstream starts from its registered project root. WSNav deliberately
-does not create or manage branches, Git worktrees, commits, task records,
-transcript copies, project memory, or autonomous agent teams. Use Codex and
-ordinary Git tooling inside the native session when a task needs them.
+D16 has three direct pages. Page selection is process-local and is not
+persisted; `Left` and `Right` do not cycle views.
 
-## See it
+| Page | Purpose and direct controls |
+| --- | --- |
+| **Workstreams** | Default page with active Workstreams grouped by Project. `Enter` opens/starts/recovers, `n` starts at the selected Workstream's Location, `f` forks, `p` parks, `x` archives, `a` acknowledges attention, `r` recovers an unresolved operation, and `?` opens the page help. |
+| **Projects** | Host-local Projects and registered Locations. `a` opens the Location browser, `b` configures its host-local browser root, `n` starts at the selected Location (including a dormant Project), and `r` performs the explicit revision-checked repository metadata refresh. |
+| **Archived** | Project-grouped archived Workstreams. `u` restores the selected Workstream and returns to Workstreams without launching or attaching a provider. |
 
-The compact navigator remains a supporting surface; the adjacent native
-provider pane keeps terminal focus and remains the place work happens. The tour
-uses the normal 141×60 presentation split: 32 columns for navigation, one
-divider, and the remaining 108 columns for the provider.
+`,` opens or closes Projects; `.` opens or closes Archived; `Esc` returns to
+Workstreams. `?` shows the complete page-specific reference. A Project header
+is display-only; actions always resolve an exact Location or Workstream ID.
 
-![Animated native-workflow tour](docs/media/workstream-tour.gif)
+Project registration uses a host-private browser rooted at `~` by default.
+The browser shows bounded direct-child names and Git markers, uses a relative
+cursor, and keeps raw paths out of public snapshots and provider panes. The
+browser's `.` key toggles hidden directories for that browser only. `Right`
+enters a directory, `Left` moves toward the configured root, `Enter` registers
+a selected Git Location, and `Esc` closes the browser. Initial registration
+inspects that selected repository once; subsequent repository inspection occurs
+only through explicit Projects refresh. Normal redraw, attachment, and
+Workstream switching do not run Git.
 
-The hot path stays short: open a Workstream, fork at its last completed native
-turn, or park it and resume the exact native thread later. The animation uses
-the real navigator renderer with safe fixture data and a clearly labelled
-Codex-pane representation; it contains no recorded provider session content.
+## Observer readiness
 
-Workstreams are project-first, ordered by activity, and carry only the status
-needed to choose the next session. `n`, `f`, `p`, rename, archive, and the
-other navigator actions stay in the small left pane.
+Observer setup is not a Hosts page, settings page, or manual normal-workflow
+mode. Startup detects readiness read-only. If a requested Codex Start, Resume,
+Fork, or recovery action needs an unready observer, WSNav captures that exact
+intent and its revisions, then offers a contextual guide.
 
-Uncertain or unavailable state is visible rather than guessed: an exact native
-resume is required for recovery, and an unreachable host never becomes a false
-"stopped" session. See the [full capture set](docs/media/README.md) for
-individual frames and generation details.
+The guide asks for explicit consent before creating or updating one exact
+WSNav-owned profile, opens the provider's native trust review without granting
+trust, and resumes the captured intent only after exact readiness and revision
+revalidation. Declining changes nothing. Foreign, modified, disabled,
+ambiguous, or live-Runtime-blocked integration state fails closed while
+existing Runtime attachment remains available. Exact profile removal is an
+exceptional cleanup operation, not a setup option; it verifies ownership,
+preserves foreign or modified state, and refuses while managed Runtimes are
+live. A non-interactive CLI request returns bounded guidance to use
+interactive `wsnav` rather than installing or reviewing a profile.
 
-## Quick start
+## The D16 state boundary
 
-Workstream Navigator is currently a source-installed operator beta. Build and
-install the reviewed checkout on the local host:
+D16 is a clean break from the former client catalog. On an existing state root,
+only an ordinary interactive launch may show the pre-presentation confirmation.
+It names what is discarded and what is preserved; declining performs no
+mutation. The exact legacy files are:
+
+```text
+client.sqlite
+client.sqlite-wal
+client.sqlite-shm
+```
+
+Those files are deleted without being opened, read, imported, renamed, or
+backed up. D16 performs no importer, dual write, automatic backup, downgrade,
+or rollback migration. An optional offline backup is an operator procedure:
+park or stop managed Runtimes, exit WSNav, and create and verify a copy of the
+complete state root before confirming cutover. Restoring that external copy is
+the only downgrade path.
+
+The preserved host state includes HostIdentity, integrations, ProjectLocations
+and browser root, Workstream provider/activity/lifecycle fields, Runtime
+generations, OpenCode handles, provider bindings, attention, compound
+operations, private tmux servers, native provider sessions/history, and
+completed output. Schema 12 is migrated transactionally to schema 13 using
+`host.sqlite` only; fresh state is created directly at schema 13. Projects and
+label-source Locations are rebuilt deterministically from current-host
+ProjectLocations. Partial cleanup is retryable; a failed host migration leaves
+schema 12 intact and blocks ordinary navigation until the confirmed
+transition completes.
+
+Before deletion, D16 proves ownership of any legacy presentation. An attached
+client, utility shell, or native observer-review surface blocks mutation. The
+launcher may offer a drain-only attachment that opens no host state, so the
+operator can finish and quit that old presentation. Only one exact detached
+ordinary presentation may then be retired under the transition lease. Runtime
+tmux servers, provider processes, native sessions, and provider output are
+never targeted by presentation retirement. Ambiguous or foreign artifacts fail
+closed.
+
+## Build, install, and CLI
+
+WSNav is currently source-installed. The high-level local workflow is:
 
 ```console
-git clone https://github.com/byebyebryan/workstream-navigator.git
-cd workstream-navigator
 cargo build --locked --release
 install -m 755 target/release/wsnav ~/.local/bin/wsnav
 wsnav
 ```
 
-On the first launch, register a Project with `,`, then `a`, and choose its Git
-directory. If Codex is the only eligible path, WSNav first opens its exact
-passive observer profile for native hook review. When OpenCode is already
-eligible, that Codex review is optional and remains available from Hosts;
-approve it before starting a Codex Workstream. The host-private directory
-browser starts at `~` by default; configure another browser root from
-Hosts with `.` then `r`. Inside the browser, `.` shows or hides dot-directories
-for that picker; each newly opened picker starts with them hidden. Directory
-Git repositories sort ahead of navigation folders; within each tier, shown
-dot-directories group first and names sort case-insensitively. Use `→` to enter
-the selected folder, `←` to move toward the configured root, `Enter` to add a
-selected Git repository, and `Esc` to quit the picker. All letter keys filter
-the current listing; configure the parent when a Git repository would otherwise
-be the browser root itself.
-
-From the Workstreams home:
-
-- `Enter` opens the selected native session.
-- `n` starts a fresh workstream from the selected project's root. With multiple
-  eligible providers, it opens a provider-only chooser initially selecting the
-  current Workstream's provider.
-- `f` forks the selected live Codex or OpenCode workstream at its last settled
-  turn.
-- `p` parks, `r` renames a supported native thread, and `x` archives a
-  workstream. OpenCode Rename remains unavailable.
-- `←` / `→` cycle Recent, By project, By host, and Archived views.
-- `?` shows the complete keyboard reference inside the navigator pane.
-
-In the private presentation, `Ctrl+b "` creates and focuses one temporary
-utility shell below the currently attached provider, or focuses it when it
-already exists. The shell stays fixed to that Workstream's launch host and
-registered ProjectLocation root; `Ctrl+b %` gives bounded guidance instead of
-splitting.
-Selecting a different Workstream closes the shell before the provider changes,
-while reselecting the same Workstream retains it. Normal shell exit or `Ctrl+d`
-removes it. While the utility shell is focused, guarded `Ctrl+b x` does the same.
-`Ctrl+b ?` shows the curated presentation controls. WSNav stores no shell
-command, output, history, or terminal state.
-
-## Add an SSH host
-
-Install the same reviewed `wsnav` build on the remote host at
-`~/.local/bin/wsnav`. In the local navigator, open Hosts with `.`, press `a`,
-and enter the existing SSH destination (for example, `snap`). WSNav verifies
-the remote compatibility, prepares its observer, and opens the remote native
-Codex hook review in the right pane.
-
-WSNav never copies, bootstraps, or updates a remote executable. A remote Codex
-lane requires the same native hook review; OpenCode readiness is detected from
-the bounded installed executable and its Runtime API contract. Confirm a
-registered host before stateful work:
-
-```console
-wsnav host doctor <alias>
-```
-
-Cached remote workstreams stay visible when a host is unavailable, but actions
-remain disabled until compatibility and connectivity are restored.
-
-## Repository status
-
-V1 is a source-installed `0.1.0` operator beta. The
-[roadmap](docs/roadmap.md) is the sole authority for current checkpoint and
-operator-acceptance status. There is no tagged binary release, automatic
-updater, remote deployment service, crates.io publication, or compatibility
-commitment to the earlier Python prototype.
-
-The implementation supports Codex and installed OpenCode releases that satisfy
-the bounded Runtime API/process contract for New, exact resume, same-provider
-Fork, and lost-Runtime recovery. Real acceptance currently covers OpenCode
-`1.18.11`; the release number is diagnostic evidence, not a compatibility pin.
-Provider onboarding, filters, model/role presets, cross-provider Fork, and
-automatic context transfer remain out of scope.
-
-## Documentation
-
-- [Product and architecture design](docs/design.md)
-- [Delivery roadmap and acceptance gates](docs/roadmap.md)
-- [Documentation map](docs/README.md)
-- [Product captures](docs/media/README.md)
-- [Historical acceptance, spike, and study evidence](docs/evidence/README.md)
-
-## Development
-
-The project requires Rust 1.88 or newer, Python 3, Cargo Deny 0.20.x, Git, jq,
-Ruff 0.16.x, and ShellCheck.
+Development requires Rust 1.88 or newer, Python 3, Cargo Deny 0.20.x, Git,
+`jq`, Ruff 0.16.x, and ShellCheck. Run the repository gate from the checkout:
 
 ```console
 scripts/check
 ```
 
-`wsnav register <path>` and the explicit CLI lifecycle commands remain
-available for scripting, diagnostics, and break-glass use; ordinary operation
-uses the baseline Navigator/provider presentation, with the optional
-short-lived utility shell for short host-local work.
+`wsnav --help` is the high-level reference for the installed CLI. Direct CLI
+operations remain optional scripting, diagnostics, and break-glass parity;
+ordinary work happens in the Navigator/provider presentation. D16 cutover is
+an interactive startup transition, not a separate public command: only the
+ordinary `wsnav` launch may present and accept its exact confirmation.
+
+## See it
+
+The [historical product captures](docs/media/README.md) show the pre-D16
+two-pane baseline with privacy-safe fixture data. They are retained design
+history, not current D16 UI or acceptance evidence.
+
+## Documentation
+
+- [Product and architecture design](docs/design.md)
+- [Delivery roadmap and acceptance gates](docs/roadmap.md)
+- [Documentation map and current operator contract](docs/README.md)
+- [Product captures](docs/media/README.md)
+- [Historical acceptance, spike, and study evidence](docs/evidence/README.md)
 
 ## License
 

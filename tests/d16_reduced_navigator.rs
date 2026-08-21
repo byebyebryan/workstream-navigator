@@ -300,7 +300,17 @@ fn pages_are_direct_and_horizontal_keys_are_inert() {
 
 #[test]
 fn project_headers_are_display_only_and_locations_are_exact_targets() {
-    let mut model = D16Model::new(snapshot());
+    let mut input = snapshot();
+    input.projects[0].locations.push(LocationSnapshot {
+        project_id: id(0xA),
+        location_id: id(0xA2),
+        display_name: "alpha secondary".to_owned(),
+        revision: revision(14),
+        repository_fingerprint: None,
+        origin_display: None,
+        is_label_source: false,
+    });
+    let mut model = D16Model::new(input);
     model.select_page(D16Page::Projects);
     let rows = model.rows();
     assert!(matches!(rows[0], D16Row::ProjectHeader(_)));
@@ -793,6 +803,82 @@ fn workstreams_render_name_only_projects_and_full_width_minimal_cards() {
 }
 
 #[test]
+fn projects_flatten_single_checkouts_and_keep_multi_checkout_trees() {
+    let mut single = snapshot();
+    single.projects[0].display_name = "cubey".to_owned();
+    single.projects[0].locations[0].display_name = "cubey".to_owned();
+    let mut single_navigator = D16Navigator::new(single);
+    single_navigator.model_mut().select_page(D16Page::Projects);
+    let single_rows = single_navigator.model().rows();
+    assert!(matches!(single_rows[0], D16Row::Location(_)));
+    let single_rendered = render_buffer(&single_navigator, Some(1_000_000));
+    assert_eq!(
+        rendered_row_segment(&single_rendered, 1, 1, 88).trim_end(),
+        "cubey"
+    );
+    let single_text = rendered_text(&single_rendered);
+    assert_eq!(single_text.matches("cubey").count(), 1);
+    assert!(!single_text.contains("Location "));
+    assert!(!single_text.contains("[label]"));
+
+    let mut multiple = snapshot();
+    multiple.projects[0].locations.push(LocationSnapshot {
+        project_id: id(0xA),
+        location_id: id(0xA2),
+        display_name: "alpha secondary".to_owned(),
+        revision: revision(14),
+        repository_fingerprint: None,
+        origin_display: None,
+        is_label_source: false,
+    });
+    let mut multiple_navigator = D16Navigator::new(multiple);
+    multiple_navigator
+        .model_mut()
+        .select_page(D16Page::Projects);
+    let multiple_rendered = render_buffer(&multiple_navigator, Some(1_000_000));
+    assert_eq!(
+        rendered_row_segment(&multiple_rendered, 1, 1, 88).trim_end(),
+        "alpha"
+    );
+    assert_eq!(
+        rendered_row_segment(&multiple_rendered, 2, 1, 88).trim_end(),
+        "├ alpha checkout"
+    );
+    assert_eq!(
+        rendered_row_segment(&multiple_rendered, 3, 1, 88).trim_end(),
+        "└ alpha secondary"
+    );
+}
+
+#[test]
+fn narrow_footer_packs_complete_hints_on_whole_lines() {
+    let navigator = D16Navigator::new(snapshot());
+    let footer = render_buffer_with_area(&navigator, Some(1_000_000), 32, 18);
+    for hint in [
+        "↑↓ select",
+        "n new",
+        "f fork",
+        "p park",
+        "r rename",
+        "x archive",
+        ", projects",
+        ". archived",
+        "? help",
+    ] {
+        assert!(
+            first_cell_for_text(&footer, hint).is_some(),
+            "complete footer hint {hint:?}"
+        );
+    }
+    let (_, first_row, _) = first_position_for_text(&footer, "↑↓ select").expect("first hint");
+    let (_, last_row, _) = first_position_for_text(&footer, "? help").expect("last hint");
+    assert!(
+        last_row > first_row,
+        "narrow footer uses multiple packed lines"
+    );
+}
+
+#[test]
 fn unnamed_workstream_uses_only_its_stable_short_id() {
     let mut input = snapshot();
     let workstream = &mut input.active_project_groups[0].workstreams[0];
@@ -932,7 +1018,25 @@ fn narrow_status_and_help_preserve_wrapped_words() {
     let help = render_buffer_with_area(&help_navigator, Some(1_000_000), 32, 18);
     assert!(
         first_cell_for_text(&help, "attention").is_some(),
-        "a whole wrapped help word remains visible"
+        "the compact attention action remains visible"
+    );
+    assert_eq!(
+        first_cell_for_text(&help, "Workstreams keys")
+            .expect("styled help title")
+            .fg,
+        Color::Cyan
+    );
+    assert_eq!(
+        first_cell_for_text(&help, "Enter")
+            .expect("styled help key")
+            .fg,
+        Color::Yellow
+    );
+    assert_eq!(
+        first_cell_for_text(&help, "Open")
+            .expect("styled help action")
+            .fg,
+        Color::Green
     );
 }
 
@@ -943,7 +1047,7 @@ fn project_colors_are_collision_resolved_over_the_actual_scrolled_window() {
     for _ in 0..12 {
         navigator.model_mut().select_next();
     }
-    let area = Rect::new(0, 0, 120, 52);
+    let area = Rect::new(0, 0, 120, 15);
     let geometry = navigator.list_geometry(area);
     let (_, visible) = navigator.model().visible_rows(geometry.viewport_rows);
     let visible_project_ids = visible
@@ -965,7 +1069,7 @@ fn project_colors_are_collision_resolved_over_the_actual_scrolled_window() {
         .map(|project_id| {
             let index = usize::try_from(project_id.as_uuid().as_u128() - 0x1_000)
                 .expect("fixture project index");
-            let label = format!("project-{index:02}");
+            let label = format!("location-{index:02}");
             (
                 project_id,
                 first_cell_for_text(&rendered, &label)
@@ -989,16 +1093,13 @@ fn project_colors_are_collision_resolved_over_the_actual_scrolled_window() {
     let first_project = visible_project_ids.iter().next().expect("visible Project");
     let first_index = usize::try_from(first_project.as_uuid().as_u128() - 0x1_000)
         .expect("fixture project index");
-    let header = first_cell_for_text(&rendered, &format!("project-{first_index:02}"))
-        .expect("Project header");
-    let location = first_cell_for_text(&rendered, &format!("location-{first_index:02}"));
-    if let Some(location) = location {
-        assert_eq!(header.fg, location.fg);
-    }
+    let location = first_cell_for_text(&rendered, &format!("location-{first_index:02}"))
+        .expect("flattened Location");
+    assert_ne!(location.fg, Color::Reset);
     for project_id in visible_project_ids {
         let index = usize::try_from(project_id.as_uuid().as_u128() - 0x1_000)
             .expect("fixture project index");
-        let label = format!("project-{index:02}");
+        let label = format!("location-{index:02}");
         assert_eq!(
             first_cell_for_text(&rendered, &label)
                 .expect("first stable Project label")

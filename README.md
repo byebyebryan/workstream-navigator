@@ -60,8 +60,12 @@ persisted; `Left` and `Right` do not cycle views.
 | **Archived** | Project-grouped archived Workstreams. `u` restores the selected Workstream and returns to Workstreams without launching or attaching a provider. |
 
 `,` opens or closes Projects; `.` opens or closes Archived; `Esc` returns to
-Workstreams. `?` shows the complete page-specific reference. A Project header
-is display-only; actions always resolve an exact Location or Workstream ID.
+Workstreams. Footer hints pack into complete key/action pairs at the available
+width, and `?` shows a compact, colored page-specific reference. A Project with
+one Location is one selectable row rather than a repeated header and label
+source. When a Project has several Locations, its header is display-only and
+the selectable Locations form a minimal tree. Actions always resolve an exact
+Location or Workstream ID.
 
 Project registration uses a host-private browser rooted at `~` by default.
 The browser shows bounded direct-child names and Git markers, uses a relative

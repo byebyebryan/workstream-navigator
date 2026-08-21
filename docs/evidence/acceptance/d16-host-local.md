@@ -69,7 +69,7 @@ convergence gap: an explicit second Park could change an exact absent Runtime
 from `unknown` to `stopped` while leaving its Workstream
 `recovery_required`, after which neither Start nor Recover had valid authority.
 Park now atomically resolves that exact case to `parked/stopped` while retaining
-the provider binding and sticky attention. The resulting current-tree
+the provider binding and sticky attention. That lifecycle-correction tree's
 `scripts/check` gate passed 411 tests with the same one controlled D15 timing
 study ignored; the five focused D16 integration suites contribute 89 passing
 tests. The controlled D15 private-tmux study was also run separately and passed
@@ -90,6 +90,17 @@ These corrections change navigator rendering/controller, exact
 presentation-helper replacement, and the existing Park state transition; they
 add no schema or provider interaction contract. This note does not represent a
 second live acceptance.
+
+A later source-only compact-navigator correction flattens one-Location Projects
+instead of repeating their Project and label-source names, retains a minimal
+tree only for multi-Location Projects, packs footer hints as whole key/action
+pairs, and replaces generically wrapped help prose with a concise colored
+key/action grid. The resulting current-tree `scripts/check` gate passed 413
+tests with the same controlled D15 study ignored; the five focused D16 suites
+contribute 91 passing tests. This later UI-only source was atomically installed
+locally for operator inspection as executable SHA-256
+`bcf48bc69d392f0bdea36845eb480038451bb5e4fb7837d09f08ddbad2438c47`; it was
+not live-accepted as part of the evidence above.
 
 ## SSH-entered-host acceptance
 

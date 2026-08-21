@@ -3446,11 +3446,11 @@ and explicitly authorized live local and ordinary-SSH-entered-host acceptance
 passed. D0-D15 remain complete historical checkpoints, and V1 remains a
 source-installed operator beta.
 
-Fresh current-tree evidence includes strict formatting and Clippy, 411 passing
+Fresh current-tree evidence includes strict formatting and Clippy, 413 passing
 tests with one controlled D15 timing study ignored, package verification,
 Cargo Deny policy, shell/Python/fixture checks, the disposable D12 presentation
 harness, D16 retired-source/CLI acceptance, and staged plus unstaged diff
-checks. The five focused D16 integration suites contribute 89 of those passing
+checks. The five focused D16 integration suites contribute 91 of those passing
 tests. This current total includes the post-acceptance source correction that
 removed the redundant page banner, restored the established semantic colors
 and activity ages, then the card refinement that made Project headers
@@ -3458,8 +3458,10 @@ name-only, removed repeated host labels, moved relative age beside provider,
 and gave the second line to lifecycle plus native thread name. It also includes
 the follow-up regression correction for wrapped guidance/status prose, parked
 marker precedence, Running-attachment replacement, and exact dead-helper-pane
-respawn after Park. The latest controller correction attaches an exact owned
-Runtime while its durable status is still `Starting`, avoiding a resume
+respawn after Park, plus the compact Projects rows, width-packed footer, and
+structured colored help reference. The latest controller correction attaches
+an exact owned Runtime while its durable status is still `Starting`, avoiding
+a resume
 bootstrap cycle in which native SessionStart observation waited on the terminal
 attachment that the controller withheld. It also permits exactly one passive
 revision refresh when that lifecycle observation races attachment preflight,
@@ -3906,6 +3908,13 @@ D16 closes only when all of the following are true:
   first line, then lifecycle marker plus the native thread name using the full
   remaining second line. The host label is absent, and a missing native name
   falls back to the stable short Workstream ID without a `Workstream` prefix;
+- the Projects page flattens a one-Location Project into one exact selectable
+  row instead of repeating the Project and its label source. Multi-Location
+  Projects retain a display-only header and minimal child tree; Location rows
+  omit the generic prefix, internal label marker, inventory counts, and inline
+  action repetition. Footer hints pack whole key/action pairs over the lines
+  required by the pane, while page help uses concise colored key/action columns
+  instead of generic prose wrapping;
 - Parked lifecycle always renders `p` even while sticky attention remains
   unseen. Status and guidance prose wraps by terminal cell width, with status
   height and list/mouse geometry derived from the same wrapped layout;

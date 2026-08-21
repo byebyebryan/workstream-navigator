@@ -471,10 +471,14 @@ project-browser modal consumes its own `.` hidden-directory toggle before page
 navigation. Workstreams has no Recent or By-host projection and `Left`/`Right`
 do not change pages or grouping.
 
-Project and Location status renders inline without a detail drill-down.
-Project actions remain explicit page-local keys. Provider readiness is not a
-page or manual setup mode: the navigator detects it read-only and offers a
-contextual guide only when the requested operation needs missing readiness.
+Projects with one Location flatten to one selectable row so a Project name and
+its label-source Location are not repeated. Projects with several Locations
+retain one display-only Project header and a minimal selectable child tree.
+Internal label-source markers, generic `Location` prefixes, inventory counts,
+and repeated inline action hints are not rendered. Project actions remain
+explicit page-local keys. Provider readiness is not a page or manual setup
+mode: the navigator detects it read-only and offers a contextual guide only
+when the requested operation needs missing readiness.
 
 The bounded current-host display label uses deterministic precedence: a valid,
 trimmed operating-system hostname, then `host-<HostId8>`, where `HostId8` is
@@ -586,9 +590,19 @@ and mouse hit-testing use the same resulting list geometry.
 
 Project group headers use the accented Project name alone: no disclosure
 marker, Location count, active count, or archived count consumes that line.
-The Projects page's actionable Location rows may retain their own bounded
-active/archived inventory and `n new` hint because those values belong to the
-Location operation surface, not the grouped Workstream card.
+On Projects, a one-Location Project omits that redundant header and renders the
+exact Location as one accented selectable name. Only multi-Location Projects
+render a header and child branches. Location rows omit the generic `Location`
+prefix, internal label-source marker, active/archived inventory, and repeated
+`n new` hint; the page footer owns action discovery.
+
+Footer hints are laid out as indivisible key/action pairs and packed across the
+number of physical lines required by the current pane width; they are never
+passed to prose wrapping or silently clipped at the ordinary 32-cell navigator
+width. Page help likewise uses a compact key column and concise action column,
+with colored keys plus semantic action colors. Its copy is designed to fit the
+bounded navigator width, and only pathological widths use cell-aware
+truncation rather than breaking words or alignment.
 
 The grouped view renders an explicit minimal tree instead of communicating
 hierarchy through indentation alone:
@@ -1816,11 +1830,13 @@ public Workstream snapshots. Credential-free origin matching may preserve
 same-host grouping, but cross-host merge/split, permanent Project deletion, and
 manual repository cleanup remain outside the product.
 
-Projects render explicit selectable host-local ProjectLocation rows with
-active/archived counts and a bounded repository display name. `n` starts an
-independent Workstream at the selected exact Location; it is inert on a
-Project header. `a` adds an existing project path through the navigator-local
-directory browser, and `b` changes that browser's typed host-local root.
+Projects render explicit selectable host-local ProjectLocation rows with a
+bounded repository display name. A single Location is flattened without a
+duplicate Project header; multiple Locations retain a display-only group
+header and minimal tree. `n` starts an independent Workstream at the selected
+exact Location; it is inert on a Project header. `a` adds an existing project
+path through the navigator-local directory browser, and `b` changes that
+browser's typed host-local root.
 `r` explicitly refreshes bounded network-free repository metadata for the
 selected Project's current locations under the revision-checked transaction
 defined above; ordinary navigation and switching never perform that work.

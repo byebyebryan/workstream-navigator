@@ -58,8 +58,6 @@ const AGE_WEEKLY_COLOR: Color = Color::Indexed(244);
 const AGE_STALE_COLOR: Color = Color::Indexed(241);
 
 const PROJECT_TREE_COLOR: Color = Color::Indexed(245);
-const PROJECT_ACTIVE_COLOR: Color = Color::Green;
-const PROJECT_ARCHIVED_COLOR: Color = Color::Indexed(110);
 const PROVIDER_LABEL_PALETTE: [Color; 2] = [Color::Indexed(209), Color::Indexed(80)];
 const PROJECT_MARKER_PALETTE: [Color; 12] = [
     Color::Indexed(96),
@@ -133,9 +131,10 @@ pub struct D16LocationRow {
     pub location_id: LocationId,
     pub display_name: String,
     pub revision: Revision,
-    pub is_label_source: bool,
-    pub active_workstream_count: usize,
-    pub archived_workstream_count: usize,
+    /// True when this Location is one of several children beneath a visible
+    /// Project header. A single Location is flattened so its label source is
+    /// not rendered as a duplicate Project name.
+    pub grouped_under_project: bool,
 }
 
 /// A Workstream row carrying only the bounded snapshot rendered by its card.
@@ -831,32 +830,17 @@ impl D16Model {
     fn project_rows(&self) -> Vec<D16Row> {
         let mut rows = Vec::new();
         for project in &self.snapshot.projects {
-            rows.push(D16Row::ProjectHeader(Self::project_header(project)));
+            let grouped_under_project = project.locations.len() > 1;
+            if grouped_under_project {
+                rows.push(D16Row::ProjectHeader(Self::project_header(project)));
+            }
             for location in &project.locations {
-                let active = self
-                    .snapshot
-                    .active_project_groups
-                    .iter()
-                    .filter(|group| group.project_id == project.project_id)
-                    .flat_map(|group| group.workstreams.iter())
-                    .filter(|workstream| workstream.location_id == location.location_id)
-                    .count();
-                let archived = self
-                    .snapshot
-                    .archived_project_groups
-                    .iter()
-                    .filter(|group| group.project_id == project.project_id)
-                    .flat_map(|group| group.workstreams.iter())
-                    .filter(|workstream| workstream.location_id == location.location_id)
-                    .count();
                 rows.push(D16Row::Location(D16LocationRow {
                     project_id: project.project_id,
                     location_id: location.location_id,
                     display_name: location.display_name.clone(),
                     revision: location.revision,
-                    is_label_source: location.is_label_source,
-                    active_workstream_count: active,
-                    archived_workstream_count: archived,
+                    grouped_under_project,
                 }));
             }
         }
@@ -1533,7 +1517,7 @@ impl D16Navigator {
     /// Computes the exact list geometry used by the renderer for hit testing.
     #[must_use]
     pub fn list_geometry(&self, area: Rect) -> D16ListGeometry {
-        list_geometry(area, model_status(&self.model))
+        list_geometry(area, model_status(&self.model), self.model.page)
     }
 
     /// Resolves a terminal coordinate to one exact actionable row. Project
@@ -1613,9 +1597,10 @@ fn model_status(model: &D16Model) -> Option<&str> {
     })
 }
 
-fn footer_height(area: Rect, status: Option<&str>) -> u16 {
-    let desired = status.map_or(2, |status| {
-        status_block_height(area, status).saturating_add(1)
+fn footer_height(area: Rect, status: Option<&str>, page: D16Page) -> u16 {
+    let controls = controls_height(page, area.width);
+    let desired = status.map_or(controls, |status| {
+        status_block_height(area, status).saturating_add(controls)
     });
     desired.min(area.height.saturating_sub(1))
 }
@@ -1662,8 +1647,8 @@ fn wrapped_logical_line_count(value: &str, width: usize) -> usize {
     lines
 }
 
-fn list_geometry(area: Rect, status: Option<&str>) -> D16ListGeometry {
-    let footer_height = footer_height(area, status);
+fn list_geometry(area: Rect, status: Option<&str>, page: D16Page) -> D16ListGeometry {
+    let footer_height = footer_height(area, status, page);
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(footer_height)])
@@ -1678,14 +1663,17 @@ fn list_geometry(area: Rect, status: Option<&str>) -> D16ListGeometry {
     D16ListGeometry {
         outer,
         inner,
-        viewport_rows: usize::from(outer.height.saturating_sub(2) / 2).max(1),
+        viewport_rows: match page {
+            D16Page::Projects => usize::from(inner.height).max(1),
+            D16Page::Workstreams | D16Page::Archived => usize::from(inner.height / 2).max(1),
+        },
     }
 }
 
 fn render_model(frame: &mut Frame<'_>, area: Rect, model: &D16Model, now_millis: Option<i64>) {
     let status = model_status(model);
-    let footer_height = footer_height(area, status);
-    let geometry = list_geometry(area, status);
+    let footer_height = footer_height(area, status, model.page);
+    let geometry = list_geometry(area, status, model.page);
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(footer_height)])
@@ -1704,7 +1692,7 @@ fn render_model(frame: &mut Frame<'_>, area: Rect, model: &D16Model, now_millis:
             let global_index = start.saturating_add(offset);
             let tree_last = all_rows
                 .get(global_index.saturating_add(1))
-                .is_none_or(|next| !same_project_workstream(row, next));
+                .is_none_or(|next| !same_project_row(row, next));
             let item = ListItem::new(row_lines(
                 row,
                 tree_last,
@@ -1734,10 +1722,14 @@ fn render_model(frame: &mut Frame<'_>, area: Rect, model: &D16Model, now_millis:
     frame.render_widget(list, vertical[0]);
 
     if let Some(status) = status {
-        let status_height = status_block_height(area, status);
+        let controls_height = controls_height(model.page, area.width).min(vertical[1].height);
+        let status_height = vertical[1].height.saturating_sub(controls_height);
         let footer = Layout::default()
             .direction(Direction::Vertical)
-            .constraints([Constraint::Length(status_height), Constraint::Length(1)])
+            .constraints([
+                Constraint::Length(status_height),
+                Constraint::Length(controls_height),
+            ])
             .split(vertical[1]);
         frame.render_widget(
             Paragraph::new(status).wrap(Wrap { trim: true }).block(
@@ -1748,9 +1740,15 @@ fn render_model(frame: &mut Frame<'_>, area: Rect, model: &D16Model, now_millis:
             ),
             footer[0],
         );
-        frame.render_widget(controls_line(model.page), footer[1]);
+        frame.render_widget(
+            Paragraph::new(controls_lines(model.page, footer[1].width)),
+            footer[1],
+        );
     } else {
-        frame.render_widget(controls_line(model.page), vertical[1]);
+        frame.render_widget(
+            Paragraph::new(controls_lines(model.page, vertical[1].width)),
+            vertical[1],
+        );
     }
 
     if let Some(browser) = &model.browser {
@@ -1770,13 +1768,10 @@ fn render_model(frame: &mut Frame<'_>, area: Rect, model: &D16Model, now_millis:
     }
 }
 
-fn same_project_workstream(left: &D16Row, right: &D16Row) -> bool {
-    match (left, right) {
-        (D16Row::Workstream(left), D16Row::Workstream(right)) => {
-            left.workstream.project_id == right.workstream.project_id
-        }
-        _ => false,
-    }
+fn same_project_row(left: &D16Row, right: &D16Row) -> bool {
+    row_project_id(left)
+        .zip(row_project_id(right))
+        .is_some_and(|(left, right)| left == right)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1794,29 +1789,23 @@ fn row_lines(
                 .fg(project_accent(row.project_id, project_colors))
                 .add_modifier(Modifier::BOLD),
         ))],
-        D16Row::Location(row) => vec![Line::from(vec![
-            Span::styled("  ", Style::default().fg(PROJECT_TREE_COLOR)),
-            Span::styled(
-                format!(
-                    "Location {}{}",
-                    row.display_name,
-                    if row.is_label_source { " [label]" } else { "" }
+        D16Row::Location(row) => {
+            let prefix = if row.grouped_under_project {
+                if tree_last { "└ " } else { "├ " }
+            } else {
+                ""
+            };
+            let name_budget = usize::from(available_width).saturating_sub(display_width(prefix));
+            vec![Line::from(vec![
+                Span::styled(prefix.to_owned(), Style::default().fg(PROJECT_TREE_COLOR)),
+                Span::styled(
+                    truncate_display(&row.display_name, name_budget),
+                    Style::default()
+                        .fg(project_accent(row.project_id, project_colors))
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Style::default().fg(project_accent(row.project_id, project_colors)),
-            ),
-            Span::styled("  · ", Style::default().fg(PROJECT_TREE_COLOR)),
-            Span::styled(
-                format!("{} active", row.active_workstream_count),
-                Style::default().fg(PROJECT_ACTIVE_COLOR),
-            ),
-            Span::styled(" · ", Style::default().fg(PROJECT_TREE_COLOR)),
-            Span::styled(
-                format!("{} archived", row.archived_workstream_count),
-                Style::default().fg(PROJECT_ARCHIVED_COLOR),
-            ),
-            Span::styled("  · ", Style::default().fg(PROJECT_TREE_COLOR)),
-            Span::styled("n new", Style::default().fg(Color::Yellow)),
-        ])],
+            ])]
+        }
         D16Row::Workstream(row) => {
             let branch = if tree_last { "└ " } else { "├ " };
             let continuation = if tree_last { "  " } else { "│ " };
@@ -2071,49 +2060,77 @@ fn stable_color_index(seed: &[u8], palette_len: usize) -> usize {
     usize::try_from(hash % u64::try_from(palette_len).unwrap()).unwrap()
 }
 
-fn controls_line(page: D16Page) -> Line<'static> {
-    let key = Style::default().fg(Color::Yellow);
-    let label = Style::default().fg(Color::Gray);
-    let bindings: &[(&str, &str)] = match page {
+fn control_bindings(page: D16Page) -> &'static [(&'static str, &'static str)] {
+    match page {
         D16Page::Workstreams => &[
-            ("↑/↓", "select"),
+            ("↑↓", "select"),
             ("n", "new"),
             ("f", "fork"),
             ("p", "park"),
             ("r", "rename"),
             ("x", "archive"),
-            (",", "Projects"),
-            (".", "Archived"),
-            ("?", "keys"),
+            (",", "projects"),
+            (".", "archived"),
+            ("?", "help"),
         ],
         D16Page::Projects => &[
-            ("↑/↓", "select"),
+            ("↑↓", "select"),
             ("a", "add"),
             ("b", "root"),
             ("n", "new"),
             ("r", "refresh"),
-            (",", "Workstreams"),
-            (".", "Archived"),
-            ("?", "keys"),
+            (",", "workstreams"),
+            (".", "archived"),
+            ("?", "help"),
         ],
         D16Page::Archived => &[
-            ("↑/↓", "select"),
+            ("↑↓", "select"),
             ("u", "restore"),
-            (",", "Projects"),
-            (".", "Workstreams"),
-            ("?", "keys"),
+            (",", "projects"),
+            (".", "workstreams"),
+            ("?", "help"),
         ],
-    };
+    }
+}
+
+fn controls_height(page: D16Page, width: u16) -> u16 {
+    u16::try_from(controls_lines(page, width).len())
+        .unwrap_or(u16::MAX)
+        .max(1)
+}
+
+fn controls_lines(page: D16Page, width: u16) -> Vec<Line<'static>> {
+    let key = Style::default().fg(Color::Yellow);
+    let label = Style::default().fg(Color::Gray);
+    let width = usize::from(width.max(1));
+    let mut lines = Vec::new();
     let mut spans = vec![Span::raw(" ")];
-    for (index, (shortcut, description)) in bindings.iter().enumerate() {
-        if index > 0 {
+    let mut used = 1_usize;
+    for (shortcut, description) in control_bindings(page) {
+        let binding_width = display_width(shortcut)
+            .saturating_add(1)
+            .saturating_add(display_width(description));
+        let separator_width = usize::from(used > 1) * 2;
+        if used > 1
+            && used
+                .saturating_add(separator_width)
+                .saturating_add(binding_width)
+                > width
+        {
+            lines.push(Line::from(spans));
+            spans = vec![Span::raw(" ")];
+            used = 1;
+        } else if separator_width > 0 {
             spans.push(Span::raw("  "));
+            used = used.saturating_add(separator_width);
         }
         spans.push(Span::styled((*shortcut).to_owned(), key));
         spans.push(Span::raw(" "));
         spans.push(Span::styled((*description).to_owned(), label));
+        used = used.saturating_add(binding_width);
     }
-    Line::from(spans)
+    lines.push(Line::from(spans));
+    lines
 }
 
 fn render_browser(frame: &mut Frame<'_>, area: Rect, browser: &D16ProjectBrowser) {
@@ -2329,7 +2346,40 @@ fn render_action_modal(frame: &mut Frame<'_>, area: Rect, modal: &D16Modal) {
 }
 
 fn render_help(frame: &mut Frame<'_>, area: Rect, page: D16Page, scroll: usize) {
-    let height = area.height.min(14);
+    let bindings: &[(&str, &str, Color)] = match page {
+        D16Page::Workstreams => &[
+            ("↑↓", "Select", Color::Gray),
+            ("Enter", "Open", Color::Green),
+            ("n", "New here", Color::Green),
+            ("f", "Fork", Color::White),
+            ("p", "Park", PARKED_INDICATOR_COLOR),
+            ("r", "Rename", Color::White),
+            ("x", "Archive", Color::Red),
+            ("a", "Clear attention", Color::Green),
+            (",", "Projects", Color::Cyan),
+            (".", "Archived", Color::Cyan),
+            ("?/Esc/q", "Close help", Color::Cyan),
+        ],
+        D16Page::Projects => &[
+            ("↑↓", "Select checkout", Color::Gray),
+            ("a", "Add checkout", Color::Green),
+            ("b", "Browser root", Color::White),
+            ("n", "New here", Color::Green),
+            ("r", "Refresh project", Color::White),
+            (",", "Workstreams", Color::Cyan),
+            (".", "Archived", Color::Cyan),
+            ("?/Esc/q", "Close help", Color::Cyan),
+        ],
+        D16Page::Archived => &[
+            ("↑↓", "Select", Color::Gray),
+            ("u", "Restore", Color::Green),
+            (",", "Projects", Color::Cyan),
+            (".", "Workstreams", Color::Cyan),
+            ("?/Esc/q", "Close help", Color::Cyan),
+        ],
+    };
+    let desired_height = u16::try_from(bindings.len().saturating_add(2)).unwrap_or(u16::MAX);
+    let height = area.height.min(desired_height);
     let popup = Rect::new(
         area.x,
         area.y + area.height.saturating_sub(height),
@@ -2337,55 +2387,45 @@ fn render_help(frame: &mut Frame<'_>, area: Rect, page: D16Page, scroll: usize) 
         height,
     );
     frame.render_widget(Clear, popup);
-    let workstreams = [
-        "↑/↓          select Workstream",
-        "Enter        open selected Workstream",
-        "n            new at same Location",
-        "f            fork selected Workstream",
-        "p            park selected Workstream",
-        "r            rename native thread",
-        "x            archive Workstream",
-        "a            acknowledge attention",
-        ",            open Projects",
-        ".            open Archived",
-        "?            close help",
-        "q            quit",
-    ];
-    let projects = [
-        "↑/↓          select Location",
-        "a            register Location",
-        "b            set browser root",
-        "n            new at Location",
-        "r            refresh Project metadata",
-        ",            return to Workstreams",
-        ".            open Archived",
-        "?            close help",
-        "q            quit",
-    ];
-    let archived = [
-        "↑/↓          select Workstream",
-        "u            restore Workstream",
-        ",            open Projects",
-        ".            return to Workstreams",
-        "?            close help",
-        "q            quit",
-    ];
-    let all: &[&str] = match page {
-        D16Page::Workstreams => &workstreams,
-        D16Page::Projects => &projects,
-        D16Page::Archived => &archived,
-    };
-    let inner = usize::from(height.saturating_sub(3)).max(1);
-    let lines = all
+    let inner_rows = usize::from(height.saturating_sub(2)).max(1);
+    let first = scroll.min(bindings.len().saturating_sub(inner_rows));
+    let content_width = usize::from(popup.width.saturating_sub(2).max(1));
+    let key_column = 7_usize.min(content_width.saturating_sub(1));
+    let lines = bindings
         .iter()
-        .skip(scroll.min(all.len()))
-        .take(inner)
-        .map(|line| Line::raw(*line))
+        .skip(first)
+        .take(inner_rows)
+        .map(|(shortcut, action, color)| {
+            let key_width = display_width(shortcut);
+            let gap = key_column.saturating_sub(key_width).saturating_add(1);
+            let action_budget = content_width.saturating_sub(key_width).saturating_sub(gap);
+            Line::from(vec![
+                Span::styled(
+                    (*shortcut).to_owned(),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(" ".repeat(gap)),
+                Span::styled(
+                    truncate_display(action, action_budget),
+                    Style::default().fg(*color),
+                ),
+            ])
+        })
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(Block::default().borders(Borders::ALL).title(" Keys ")),
+        Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(Span::styled(
+                    format!(" {} keys ", page.title()),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )),
+        ),
         popup,
     );
 }

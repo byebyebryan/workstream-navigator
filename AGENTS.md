@@ -43,3 +43,7 @@
 - Live Codex or remote-host acceptance requires explicit operator intent,
   sanitized evidence, and complete cleanup.
 - Run `scripts/check` before every checkpoint commit.
+- After a requested change passes its validation, build the locked release and
+  atomically install `target/release/wsnav` to `~/.local/bin/wsnav` for operator
+  inspection unless the user explicitly opts out. Verify the installed version
+  and executable hash; do not treat installation as commit or publication.

@@ -4,10 +4,9 @@
 
 D16 host-local implementation, disposable repository gate, and separately
 authorized live local and ordinary-SSH-entered-host acceptance are complete.
-The current source also includes the documented post-acceptance rendering,
-attachment, and Park convergence corrections and is installed locally for
-operator inspection; those follow-ups do not rewrite the earlier candidate's
-live-acceptance evidence.
+The current source also includes documented post-acceptance rendering,
+attachment, Park convergence, and compact-navigator corrections; those
+follow-ups do not rewrite the earlier candidate's live-acceptance evidence.
 
 - [Product and architecture design](design.md) is the V1 contract.
 - [Delivery roadmap](roadmap.md) owns delivery order, checkpoint status, and

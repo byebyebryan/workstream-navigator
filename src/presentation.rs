@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    domain::WorkstreamId,
+    domain::{Revision, WorkstreamId},
     private_tmux::{TERMINAL_CAPABILITY_CONFIG, copy_mode_scroll_config},
     process::{BoundedProcessError, output_bounded},
     state::TransitionLease,
@@ -45,6 +45,7 @@ const MAX_LEGACY_RETIREMENT_ATTEMPTS: usize = 20;
 const ATTACHMENT_STATUS_FILE: &str = "attachment.json";
 const PRESENTATION_OWNERSHIP_MARKER_FILE: &str = "ownership.json";
 const MAX_PRESENTATION_OWNERSHIP_MARKER_BYTES: usize = 4 * 1024;
+const D17_PRESENTATION_CONTEXT_VERSION: u8 = 1;
 const LEGACY_RETIREMENT_MARKER_FILE: &str = "d16-retirement.json";
 const ROLE_OPTION: &str = "@wsnav_role";
 const WORKSTREAM_OPTION: &str = "@wsnav_workstream_id";
@@ -185,6 +186,52 @@ pub struct AttachmentStatus {
     pub attempt_id: uuid::Uuid,
     pub workstream_id: WorkstreamId,
     pub phase: AttachmentPhase,
+}
+
+/// Immutable, presentation-private D17 shell-onboarding context. The seed is
+/// intentionally available only to the future D17 materializer; it never
+/// enters a navigator snapshot, provider command, or durable host registry.
+#[derive(Clone, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "the D17 presentation context remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) struct D17PresentationContext {
+    presentation_id: uuid::Uuid,
+    presentation_revision: Revision,
+    seed_cwd: PathBuf,
+}
+
+impl std::fmt::Debug for D17PresentationContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("D17PresentationContext")
+            .field("presentation_id", &"<opaque>")
+            .field("presentation_revision", &self.presentation_revision)
+            .field("seed_cwd", &"<private>")
+            .finish()
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "the D17 presentation context remains unreachable until the atomic Navigator cutover"
+)]
+impl D17PresentationContext {
+    #[must_use]
+    pub(crate) const fn presentation_id(&self) -> uuid::Uuid {
+        self.presentation_id
+    }
+
+    #[must_use]
+    pub(crate) const fn presentation_revision(&self) -> Revision {
+        self.presentation_revision
+    }
+
+    #[must_use]
+    pub(crate) fn seed_cwd(&self) -> &Path {
+        &self.seed_cwd
+    }
 }
 
 /// Schema-12 attachment metadata retained only for private legacy proof.
@@ -433,6 +480,22 @@ struct PresentationOwnershipMarker {
     directory_identity: LegacyFileIdentity,
     config_identity: LegacyFileIdentity,
     socket_identity: Option<LegacyFileIdentity>,
+    /// Omitted from ordinary D16 markers so their serialized shape remains
+    /// unchanged. D17 writes this only at its own atomic cutover.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    d17: Option<D17PresentationMarker>,
+}
+
+/// The bounded D17 fields carried by the existing presentation-ownership
+/// marker. Keeping this embedded prevents a second loose artifact from being
+/// mistaken for presentation authority.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct D17PresentationMarker {
+    version: u8,
+    presentation_id: uuid::Uuid,
+    presentation_revision: Revision,
+    seed_cwd: PathBuf,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -644,6 +707,64 @@ impl Presentation {
         &self.paths
     }
 
+    /// Captures the exact seed cwd for a fresh D17 presentation. The context
+    /// is embedded in the already-proven ownership marker, so later D17
+    /// materialization can bind its provisional slot without deriving identity
+    /// from a directory name or a provider process.
+    ///
+    /// This dormant seam neither creates a provisional server nor opens host
+    /// state. The atomic D17 cutover is its only future caller.
+    #[allow(
+        dead_code,
+        reason = "the D17 presentation context remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn initialize_d17_context(
+        &self,
+        presentation_id: uuid::Uuid,
+        seed_cwd: &Path,
+    ) -> Result<D17PresentationContext, PresentationError> {
+        let seed_cwd = canonical_d17_seed_cwd(seed_cwd)?;
+        if presentation_id.is_nil() {
+            return Err(PresentationError::D17ContextInvalid);
+        }
+        let mut ownership = read_presentation_ownership(&self.paths)?
+            .ok_or(PresentationError::D17ContextUnavailable)?;
+        if ownership.marker.d17.is_some() {
+            return Err(PresentationError::D17ContextAlreadyInitialized);
+        }
+        let marker = D17PresentationMarker {
+            version: D17_PRESENTATION_CONTEXT_VERSION,
+            presentation_id,
+            presentation_revision: Revision::INITIAL,
+            seed_cwd,
+        };
+        let context = d17_context_from_marker(&marker)?;
+        ownership.marker.d17 = Some(marker);
+        write_presentation_ownership_marker(
+            &self.paths,
+            &ownership.marker,
+            Some(&ownership.marker_identity),
+        )?;
+        Ok(context)
+    }
+
+    /// Reopens the bounded D17 context from the exact current presentation
+    /// marker. It exposes no terminal data, provider input, or registry path.
+    #[allow(
+        dead_code,
+        reason = "the D17 presentation context remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn d17_context(&self) -> Result<D17PresentationContext, PresentationError> {
+        let ownership = read_presentation_ownership(&self.paths)?
+            .ok_or(PresentationError::D17ContextUnavailable)?;
+        let marker = ownership
+            .marker
+            .d17
+            .as_ref()
+            .ok_or(PresentationError::D17ContextUnavailable)?;
+        d17_context_from_marker(marker)
+    }
+
     /// Creates exactly one private tmux server with a navigator pane and a
     /// blank provider-attachment pane. Neither command invokes a shell.
     ///
@@ -652,7 +773,39 @@ impl Presentation {
     /// Returns an error when the owned paths cannot be created or tmux rejects
     /// the private presentation setup.
     pub fn start(&self) -> Result<(), PresentationError> {
+        let _ = self.start_with_d17_context(None)?;
+        Ok(())
+    }
+
+    /// Starts a fresh private presentation with its D17 seed context written
+    /// before the navigator pane can run. This ordering prevents the pane from
+    /// deriving a seed or identity after its process has already started.
+    #[allow(
+        dead_code,
+        reason = "the D17 presentation context remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn start_d17(
+        &self,
+        presentation_id: uuid::Uuid,
+        seed_cwd: &Path,
+    ) -> Result<D17PresentationContext, PresentationError> {
+        self.start_with_d17_context(Some((presentation_id, seed_cwd)))?
+            .ok_or(PresentationError::D17ContextUnavailable)
+    }
+
+    fn start_with_d17_context(
+        &self,
+        d17: Option<(uuid::Uuid, &Path)>,
+    ) -> Result<Option<D17PresentationContext>, PresentationError> {
         create_paths(&self.paths)?;
+        let context = d17
+            .map(|(presentation_id, seed_cwd)| {
+                self.complete_start_stage(
+                    "D17 presentation context capture",
+                    self.initialize_d17_context(presentation_id, seed_cwd),
+                )
+            })
+            .transpose()?;
         let mut arguments = vec![
             "new-session".into(),
             "-d".into(),
@@ -697,7 +850,7 @@ impl Presentation {
         self.complete_start_stage("default navigator width", result)?;
         let result = self.install_navigator_width_hooks();
         self.complete_start_stage("navigator width hooks", result)?;
-        Ok(())
+        Ok(context)
     }
 
     fn complete_start_stage<T>(
@@ -4996,6 +5149,34 @@ fn validate_legacy_host_alias(host_alias: &str) -> Result<(), PresentationError>
     Ok(())
 }
 
+fn canonical_d17_seed_cwd(seed_cwd: &Path) -> Result<PathBuf, PresentationError> {
+    let seed_cwd = fs::canonicalize(seed_cwd).map_err(|_| PresentationError::D17SeedUnavailable)?;
+    if !seed_cwd.is_dir() {
+        return Err(PresentationError::D17SeedUnavailable);
+    }
+    Ok(seed_cwd)
+}
+
+fn d17_context_from_marker(
+    marker: &D17PresentationMarker,
+) -> Result<D17PresentationContext, PresentationError> {
+    if marker.version != D17_PRESENTATION_CONTEXT_VERSION
+        || marker.presentation_id.is_nil()
+        || marker.presentation_revision.value() < Revision::INITIAL.value()
+    {
+        return Err(PresentationError::D17ContextInvalid);
+    }
+    let seed_cwd = canonical_d17_seed_cwd(&marker.seed_cwd)?;
+    if seed_cwd != marker.seed_cwd {
+        return Err(PresentationError::D17ContextInvalid);
+    }
+    Ok(D17PresentationContext {
+        presentation_id: marker.presentation_id,
+        presentation_revision: marker.presentation_revision,
+        seed_cwd,
+    })
+}
+
 fn create_paths(paths: &PresentationPaths) -> Result<(), PresentationError> {
     let parent = paths
         .directory
@@ -5020,6 +5201,7 @@ fn create_paths(paths: &PresentationPaths) -> Result<(), PresentationError> {
         directory_identity: legacy_file_identity(&directory_metadata, None),
         config_identity: legacy_file_identity(&config_metadata, Some(config.as_bytes())),
         socket_identity: None,
+        d17: None,
     };
     write_presentation_ownership_marker(paths, &marker, None)
 }
@@ -5370,6 +5552,14 @@ pub enum PresentationError {
     InvalidAttachmentStatus,
     #[error("provider attachment attempt is stale or already complete")]
     StaleAttachmentAttempt,
+    #[error("the D17 presentation context is unavailable")]
+    D17ContextUnavailable,
+    #[error("the D17 presentation context is already initialized")]
+    D17ContextAlreadyInitialized,
+    #[error("the D17 presentation context is invalid")]
+    D17ContextInvalid,
+    #[error("the D17 presentation seed cwd is unavailable")]
+    D17SeedUnavailable,
     #[error("invoking terminal geometry is unavailable")]
     TerminalGeometryUnavailable,
     #[error("invoking terminal geometry is invalid")]
@@ -5939,6 +6129,69 @@ mod tests {
         };
         presentation.close().unwrap();
         assert!(!paths.directory.exists());
+    }
+
+    #[test]
+    fn d17_context_is_marker_bound_and_uses_only_the_canonical_seed() {
+        let temporary = tempfile::tempdir().unwrap();
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        create_paths(&paths).unwrap();
+        let presentation = Presentation {
+            paths: paths.clone(),
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+
+        let presentation_id = uuid::Uuid::from_u128(71);
+        let context = presentation
+            .initialize_d17_context(presentation_id, &seed)
+            .unwrap();
+        assert_eq!(context.presentation_id(), presentation_id);
+        assert_eq!(context.presentation_revision(), Revision::INITIAL);
+        assert_eq!(context.seed_cwd(), seed.canonicalize().unwrap());
+        assert_eq!(presentation.d17_context().unwrap(), context);
+        assert!(matches!(
+            presentation.initialize_d17_context(uuid::Uuid::from_u128(72), &seed),
+            Err(PresentationError::D17ContextAlreadyInitialized)
+        ));
+
+        let marker = fs::read(paths.directory.join(PRESENTATION_OWNERSHIP_MARKER_FILE)).unwrap();
+        assert!(String::from_utf8(marker).unwrap().contains("\"d17\":{"));
+    }
+
+    #[test]
+    fn ordinary_presentation_marker_omits_the_dormant_d17_shape() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        create_paths(&paths).unwrap();
+
+        let marker = fs::read(paths.directory.join(PRESENTATION_OWNERSHIP_MARKER_FILE)).unwrap();
+        assert!(!marker.windows(5).any(|window| window == b"\"d17\""));
+    }
+
+    #[test]
+    fn d17_context_refuses_a_deleted_seed_without_fallback() {
+        let temporary = tempfile::tempdir().unwrap();
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        create_paths(&paths).unwrap();
+        let presentation = Presentation {
+            paths,
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        presentation
+            .initialize_d17_context(uuid::Uuid::from_u128(73), &seed)
+            .unwrap();
+        fs::remove_dir(&seed).unwrap();
+
+        assert!(matches!(
+            presentation.d17_context(),
+            Err(PresentationError::D17SeedUnavailable)
+        ));
     }
 
     #[test]

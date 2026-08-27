@@ -2,7 +2,10 @@ use std::fmt::Write as _;
 
 use super::{
     HostRegistry, IntegrationLifecycle, ObserverProfile, Path, StateRoot,
-    cli::{Cli, Commands, is_observer_command, is_provider_pane_command},
+    cli::{
+        Cli, Commands, is_d17_shell_gate_command, is_d17_shell_launch_helper_command,
+        is_observer_command, is_provider_pane_command,
+    },
     dispatch,
     model::AppError,
     observer::{finalize_native_trust, prepare_observer_activation_with_manager},
@@ -101,6 +104,68 @@ fn d17_navigator_entrypoint_is_hidden_and_typed() {
         Some(Commands::NavigatorPaneD17 { .. })
     ));
     assert!(Cli::try_parse_from(["wsnav", "navigator_d17"]).is_err());
+}
+
+#[test]
+fn d17_account_shell_entrypoints_are_hidden_typed_and_separate_from_provider_panes() {
+    let gate = Cli::try_parse_from([
+        "wsnav",
+        "_d17_shell_gate",
+        "--provider",
+        "codex",
+        "--shell-leader-pid",
+        "42",
+        "--",
+        "--version",
+    ])
+    .unwrap();
+    assert!(matches!(
+        gate.command.as_ref(),
+        Some(Commands::D17ShellGate { arguments, .. })
+            if arguments == &[std::ffi::OsString::from("--version")]
+    ));
+    assert!(is_d17_shell_gate_command(gate.command.as_ref()));
+    assert!(!is_d17_shell_launch_helper_command(gate.command.as_ref()));
+    assert!(!is_observer_command(gate.command.as_ref()));
+    assert!(!is_provider_pane_command(gate.command.as_ref()));
+
+    let helper = Cli::try_parse_from([
+        "wsnav",
+        "_d17_launch_helper",
+        "--capability",
+        "a1.b2",
+        "--provider",
+        "opencode",
+        "--",
+    ])
+    .unwrap();
+    assert!(matches!(
+        helper.command,
+        Some(Commands::D17LaunchHelper { arguments, .. }) if arguments.is_empty()
+    ));
+    assert!(Cli::try_parse_from(["wsnav", "d17_shell_gate"]).is_err());
+    assert!(Cli::try_parse_from(["wsnav", "d17_launch_helper"]).is_err());
+}
+
+#[test]
+fn d17_gate_leaves_explicit_queries_unmanaged_before_opening_state() {
+    let cli = Cli::try_parse_from([
+        "wsnav",
+        "--state-root",
+        "/missing/d17-state",
+        "_d17_shell_gate",
+        "--provider",
+        "codex",
+        "--shell-leader-pid",
+        "42",
+        "--",
+        "--version",
+    ])
+    .unwrap();
+    assert!(matches!(
+        dispatch::execute(cli),
+        Err(AppError::D17ShellGateUnmanaged)
+    ));
 }
 
 #[test]

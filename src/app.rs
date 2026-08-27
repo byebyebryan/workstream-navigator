@@ -47,8 +47,23 @@ pub fn run() -> ExitCode {
     let cli = cli::Cli::parse();
     let observer_command = cli::is_observer_command(cli.command.as_ref());
     let provider_pane_command = cli::is_provider_pane_command(cli.command.as_ref());
+    let d17_shell_gate_command = cli::is_d17_shell_gate_command(cli.command.as_ref());
+    let d17_shell_launch_helper_command =
+        cli::is_d17_shell_launch_helper_command(cli.command.as_ref());
     match dispatch::execute(cli) {
         Ok(()) => ExitCode::SUCCESS,
+        // The account-shell wrapper needs this one non-error exit code to
+        // delegate explicitly unmanaged provider commands back to the native
+        // executable. All other gate failures stay silent so the wrapper can
+        // present one fixed diagnostic without leaking D17 state detail.
+        Err(AppError::D17ShellGateUnmanaged) if d17_shell_gate_command => ExitCode::from(10),
+        Err(_) if d17_shell_gate_command => ExitCode::FAILURE,
+        // The helper replaces the provisional shell, so it has no wrapper to
+        // translate its failure. Keep the provider pane free of state detail.
+        Err(_) if d17_shell_launch_helper_command => {
+            eprintln!("WSNav D17 onboarding command is unavailable");
+            ExitCode::FAILURE
+        }
         // Observer helpers are disconnected from the provider pane. Keep
         // their bounded errors silent, but let the owning action observe a
         // non-success exit status. Other provider-pane helpers deliberately

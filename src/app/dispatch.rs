@@ -8,13 +8,13 @@ use super::{
     },
     local::observe_hook,
     model::{
-        AppError, default_state_root, parse_operation, parse_optional_provider, parse_revision,
-        parse_workstream,
+        AppError, default_state_root, parse_operation, parse_optional_provider, parse_provider,
+        parse_revision, parse_workstream,
     },
     observer::{doctor, observer_review, remove_observer},
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use std::path::Component;
+use std::{io::Write as _, path::Component};
 
 use crate::application::{
     ApplicationAction, ApplicationError, ApplicationOutcome, ApplicationSnapshot, AttentionKind,
@@ -32,6 +32,22 @@ pub(super) fn execute(cli: Cli) -> Result<(), AppError> {
     if matches!(&command, Commands::Hook) {
         observe_hook(state_root);
         return Ok(());
+    }
+    if let Commands::D17ShellGate {
+        provider,
+        shell_leader_pid,
+        arguments,
+    } = command
+    {
+        return d17_shell_gate(&provider, shell_leader_pid, &arguments);
+    }
+    if let Commands::D17LaunchHelper {
+        capability,
+        provider,
+        arguments,
+    } = command
+    {
+        return d17_launch_helper(&capability, &provider, &arguments);
     }
     if let Commands::OpenCodeServeBarrier {
         executable,
@@ -84,6 +100,67 @@ pub(super) fn execute(cli: Cli) -> Result<(), AppError> {
     // handled above and receive their own exact state contract.
     let root = StateRoot::select(state_root.unwrap_or_else(default_state_root));
     execute_root_command(&root, command)
+}
+
+/// The shell wrapper captures only this exact stdout stream. Any unavailable
+/// state remains an exit code so a malformed capability cannot become terminal
+/// traffic or a provider argument.
+fn d17_shell_gate(
+    provider: &str,
+    shell_leader_pid: u32,
+    arguments: &[std::ffi::OsString],
+) -> Result<(), AppError> {
+    let provider = parse_provider(provider).map_err(|_| AppError::D17ShellControlUnavailable)?;
+    match crate::d17_shell_control::gate_from_account_shell(provider, arguments, shell_leader_pid)
+        .map_err(|_| AppError::D17ShellControlUnavailable)?
+    {
+        crate::d17_shell_control::AccountShellGateOutcome::ExplicitlyUnmanaged => {
+            Err(AppError::D17ShellGateUnmanaged)
+        }
+        crate::d17_shell_control::AccountShellGateOutcome::Prepared(handoff) => {
+            let capability = handoff.capability().token();
+            if !valid_d17_capability(capability) {
+                return Err(AppError::D17ShellControlUnavailable);
+            }
+            let mut stdout = std::io::stdout().lock();
+            stdout
+                .write_all(capability.as_bytes())
+                .and_then(|()| stdout.flush())
+                .map_err(AppError::Io)
+        }
+    }
+}
+
+/// Completes the private half of a D17 account-shell handoff. The helpers
+/// perform their own complete state and identity revalidation before they can
+/// execute either native provider.
+fn d17_launch_helper(
+    capability: &str,
+    provider: &str,
+    arguments: &[std::ffi::OsString],
+) -> Result<(), AppError> {
+    if !valid_d17_capability(capability) {
+        return Err(AppError::D17ShellControlUnavailable);
+    }
+    let provider = parse_provider(provider).map_err(|_| AppError::D17ShellControlUnavailable)?;
+    match provider {
+        ProviderKind::Codex => {
+            crate::d17_shell_control::exec_codex_from_account_shell(capability, arguments)
+                .map_err(|_| AppError::D17ShellControlUnavailable)
+        }
+        ProviderKind::OpenCode => {
+            crate::d17_shell_control::exec_opencode_from_account_shell(capability, arguments)
+                .map_err(|_| AppError::D17ShellControlUnavailable)
+        }
+    }
+}
+
+fn valid_d17_capability(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.')
 }
 
 fn execute_root_command(root: &StateRoot, command: Commands) -> Result<(), AppError> {
@@ -187,6 +264,9 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
         ),
         Commands::OpenCodeObserverStandby { .. } => {
             unreachable!("standby observer is dispatched before state-root creation")
+        }
+        Commands::D17ShellGate { .. } | Commands::D17LaunchHelper { .. } => {
+            unreachable!("D17 account-shell control is dispatched before state-root creation")
         }
         Commands::Doctor => exceptional_observer(root, false),
         Commands::RemoveObserver => exceptional_observer(root, true),

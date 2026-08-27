@@ -87,6 +87,28 @@ pub(super) enum Commands {
         #[arg(long)]
         presentation_session: String,
     },
+    /// Internal D17 account-shell broker gate. Its successful stdout is one
+    /// opaque capability consumed only by the adjacent shell wrapper.
+    #[command(name = "_d17_shell_gate", hide = true)]
+    D17ShellGate {
+        #[arg(long)]
+        provider: String,
+        #[arg(long)]
+        shell_leader_pid: u32,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<std::ffi::OsString>,
+    },
+    /// Internal D17 account-shell launch helper. It consumes one opaque
+    /// capability and replaces itself with the approved native provider.
+    #[command(name = "_d17_launch_helper", hide = true)]
+    D17LaunchHelper {
+        #[arg(long)]
+        capability: String,
+        #[arg(long)]
+        provider: String,
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        arguments: Vec<std::ffi::OsString>,
+    },
     /// Internal fixed presentation control helper.
     #[command(name = "_presentation_control", hide = true)]
     PresentationControl {
@@ -212,4 +234,12 @@ pub(super) const fn is_observer_command(command: Option<&Commands>) -> bool {
                 | Commands::OpenCodeObserverStandby { .. }
         )
     )
+}
+
+pub(super) const fn is_d17_shell_gate_command(command: Option<&Commands>) -> bool {
+    matches!(command, Some(Commands::D17ShellGate { .. }))
+}
+
+pub(super) const fn is_d17_shell_launch_helper_command(command: Option<&Commands>) -> bool {
+    matches!(command, Some(Commands::D17LaunchHelper { .. }))
 }

@@ -16,6 +16,12 @@ pub(super) fn parse_optional_provider(
         .transpose()
 }
 
+pub(super) fn parse_provider(value: &str) -> Result<crate::domain::ProviderKind, AppError> {
+    value
+        .parse()
+        .map_err(|error| AppError::State(StateError::Domain(error)))
+}
+
 pub(super) fn parse_operation(value: &str) -> Result<OperationId, AppError> {
     OperationId::from_str(value).map_err(AppError::InvalidOperationId)
 }
@@ -102,4 +108,8 @@ pub(crate) enum AppError {
     ObserverReadinessGuideRequired,
     #[error("no eligible local provider is available for this action")]
     NoEligibleLocalProvider,
+    #[error("the D17 account-shell command is explicitly unmanaged")]
+    D17ShellGateUnmanaged,
+    #[error("the D17 account-shell command is unavailable")]
+    D17ShellControlUnavailable,
 }

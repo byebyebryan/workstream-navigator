@@ -73,6 +73,9 @@ provider-effect or recovery integration.
 [Spike 0025](spikes/0025-d17-provisional-ownership.md) validates the serialized
 marker-to-owned-runtime winner model and its action fence, without claiming the
 concurrent production implementation.
+[Spike 0026](spikes/0026-d17-provider-effect-journal.md) validates the
+synthetic provider-effect journal ordering for Codex no-effect and OpenCode
+known/ambiguous blank-session creation, without launching either provider.
 
 ## Provider studies
 

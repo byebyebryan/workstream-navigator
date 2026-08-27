@@ -1,0 +1,21 @@
+{
+  "assertions": {
+    "all_case_assertions_pass": true,
+    "ambiguous_post_recovery_never_posts_again": true,
+    "ambiguous_post_stays_recovery_required": true,
+    "codex_known_absent_exec_rolls_back_only_no_effect": true,
+    "duplicate_or_stale_effect_transitions_refuse": true,
+    "exec_started_is_still_fenced": true,
+    "known_binding_exec_error_preserves_recovery_runtime": true,
+    "known_binding_recovery_never_posts_again": true,
+    "only_exec_proof_releases_action_fence": true,
+    "opencode_post_is_journaled_before_effect": true,
+    "pre_effect_helper_crash_can_passively_roll_back": true,
+    "runtime_owned_is_fenced_before_provider_effect": true,
+    "runtime_owned_launching_is_still_fenced": true,
+    "temporary_root_removed": true
+  },
+  "contract": "provider-effect-journal-v1",
+  "reason": "provider-effect-journal-ordering-observed",
+  "status": "pass"
+}

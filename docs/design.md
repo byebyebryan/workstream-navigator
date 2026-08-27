@@ -2682,6 +2682,10 @@ implementation. [Spike
 serialized marker-backed ownership winner model and action fence, while leaving
 the concurrent state/journal/provider implementation as a D17.0 gate. Bash and
 Zsh controlled-function acceptance remains an exit gate for D17.
+[Spike 0026](evidence/spikes/0026-d17-provider-effect-journal.md) separately
+validates the synthetic provider-effect journal ordering, including the
+OpenCode known-binding versus ambiguous-POST recovery split; real provider and
+state integration remain implementation gates.
 
 The implemented checkpoints and their acceptance records corroborate the
 following behavior without widening the product:

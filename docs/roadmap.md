@@ -256,6 +256,9 @@ does not validate helper/broker integration or provider effects.
 [Spike 0025](evidence/spikes/0025-d17-provisional-ownership.md) separately
 validates the serialized marker-to-owned-runtime winner model and action fence;
 concurrent implementation, recovery, and provider effects remain unproven.
+[Spike 0026](evidence/spikes/0026-d17-provider-effect-journal.md) separately
+validates synthetic Codex no-effect and OpenCode known/ambiguous POST journal
+ordering; it does not validate the real state/helper/provider integration.
 The separate observer-ancestry revalidation passed on Codex `0.150.0`, while a
 real brokered Codex launch remains a D17 gate. D17.0 remains the first
 implementation gate for the complete handshake, grammar, wrapper, ownership,

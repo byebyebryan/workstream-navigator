@@ -21,8 +21,11 @@ use crate::{
     private_tmux::{TERMINAL_CAPABILITY_CONFIG, copy_mode_scroll_config},
     process::{BoundedProcessError, output_bounded},
     provisional::{PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, read_marker},
-    runtime::RuntimePaths,
-    state::{D16State, ProvisionalLease, TransitionLease, d16::D17OnboardingOperationInventory},
+    runtime::{LinuxProcessProbe, PrivateRuntime, RuntimePaths, SystemTmux},
+    state::{
+        D16State, ProvisionalLease, StateRoot, TransitionLease,
+        d16::D17OnboardingOperationInventory, open_d17_current_only,
+    },
 };
 
 const PRESENTATION_DIRECTORY: &str = "presentation";
@@ -48,6 +51,7 @@ const ATTACHMENT_STATUS_FILE: &str = "attachment.json";
 const PRESENTATION_OWNERSHIP_MARKER_FILE: &str = "ownership.json";
 const MAX_PRESENTATION_OWNERSHIP_MARKER_BYTES: usize = 4 * 1024;
 const D17_PRESENTATION_CONTEXT_VERSION: u8 = 1;
+const MAX_D17_PROVISIONAL_MARKER_BYTES: usize = 8 * 1024;
 const MAX_D17_PROVISIONAL_INVENTORY_ENTRIES: usize = 128;
 const LEGACY_RETIREMENT_MARKER_FILE: &str = "d16-retirement.json";
 const ROLE_OPTION: &str = "@wsnav_role";
@@ -461,6 +465,16 @@ pub struct PresentationPaths {
     pub config: PathBuf,
     pub attachment_status: PathBuf,
     pub session_name: String,
+}
+
+/// Exact pre-handoff provisional evidence captured before D17 presentation
+/// close. It is deliberately private: it carries cleanup authority only for
+/// this presentation's materialized account shell, never for a managed
+/// Runtime.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct D17ProvisionalCleanupProof {
+    slot: ProvisionalSlot,
+    marker_identity: LegacyFileIdentity,
 }
 
 /// The result of the read-only legacy presentation classifier.
@@ -881,6 +895,18 @@ impl Presentation {
         }
     }
 
+    /// D17-only equivalent of [`Self::open_or_create`]. Its discovery and
+    /// cleanup path admits the presentation-private provisional marker, but
+    /// never lets the legacy D16 ownership reader adopt it.
+    pub(crate) fn open_or_create_d17(state_root: &Path) -> Result<(Self, bool), PresentationError> {
+        let live = Self::discover_live_d17(state_root)?;
+        match live.as_slice() {
+            [] => Ok((Self::fresh(state_root)?, true)),
+            [presentation] => Ok((presentation.clone(), false)),
+            _ => Err(PresentationError::AmbiguousPresentations),
+        }
+    }
+
     /// Reopens the exact owned presentation described by a hidden child
     /// command. This does not discover or use any ordinary tmux socket.
     ///
@@ -1152,6 +1178,40 @@ impl Presentation {
         }
         if self.navigator_pane_is_dead()? {
             self.close()?;
+            return Ok(());
+        }
+        Err(PresentationError::TmuxRejected(
+            "presentation attach failed".to_owned(),
+        ))
+    }
+
+    /// Directly attaches the caller's terminal to an owned D17 presentation.
+    /// Unlike [`Self::attach`], every terminal-loss cleanup branch stays on
+    /// the D17 marker-aware lifecycle path.
+    pub(crate) fn attach_d17(&self) -> Result<(), PresentationError> {
+        self.prepare_attach()?;
+        let status = private_tmux_command()
+            .arg("-S")
+            .arg(&self.paths.socket)
+            .args(["attach-session", "-t", &self.paths.session_name])
+            .status()
+            .map_err(PresentationError::Io)?;
+        if stopped_owned_presentation(self.is_live()?) {
+            self.close_d17()?;
+            return Ok(());
+        }
+        if status.success() {
+            for _ in 0..NAVIGATOR_STOP_ATTEMPTS {
+                if self.navigator_pane_is_dead()? {
+                    self.close_d17()?;
+                    return Ok(());
+                }
+                thread::sleep(NAVIGATOR_STOP_RETRY);
+            }
+            return Ok(());
+        }
+        if self.navigator_pane_is_dead()? {
+            self.close_d17()?;
             return Ok(());
         }
         Err(PresentationError::TmuxRejected(
@@ -2331,6 +2391,42 @@ impl Presentation {
         )
     }
 
+    /// D17-only session stop. This is intentionally separate from
+    /// [`Self::stop_session`]: a materialized provisional shell is an allowed
+    /// D17 presentation artifact, but remains a hard refusal for the legacy
+    /// D16 lifecycle.
+    pub(crate) fn stop_d17_session(&self) -> Result<(), PresentationError> {
+        self.d17_context()?;
+        let ownership = read_d17_presentation_ownership(&self.paths)?.ok_or(
+            PresentationError::ControlRefused("presentation ownership marker is missing"),
+        )?;
+        let current = read_d17_presentation_ownership(&self.paths)?.ok_or(
+            PresentationError::ControlRefused(
+                "presentation ownership disappeared before session stop",
+            ),
+        )?;
+        if current.marker != ownership.marker
+            || current.marker_identity != ownership.marker_identity
+            || current.socket_identity.is_none()
+            || !optional_socket_identity_compatible(
+                ownership.socket_identity.as_ref(),
+                current.socket_identity.as_ref(),
+            )
+        {
+            return Err(PresentationError::ControlRefused(
+                "presentation ownership changed before session stop",
+            ));
+        }
+        self.invoke(
+            None,
+            vec![
+                "detach-client".into(),
+                "-s".into(),
+                self.paths.session_name.clone().into(),
+            ],
+        )
+    }
+
     /// Advances only the currently recorded exact attachment attempt.
     ///
     /// # Errors
@@ -2408,6 +2504,161 @@ impl Presentation {
         remove_owned_presentation(&self.paths, &ownership)
     }
 
+    /// Stops this owned D17 presentation. A materialized, pre-handoff shell
+    /// is cleaned only after the shared lease, current marker, presentation
+    /// binding, and exact live shell all agree. Any handoff or runtime-owned
+    /// phase is deliberately left for onboarding recovery rather than being
+    /// mistaken for presentation cleanup authority.
+    pub(crate) fn close_d17(&self) -> Result<(), PresentationError> {
+        let Some(ownership) = read_d17_presentation_ownership(&self.paths)? else {
+            match fs::symlink_metadata(&self.paths.directory) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Ok(_) => {
+                    return Err(PresentationError::ControlRefused(
+                        "presentation ownership marker is missing or invalid",
+                    ));
+                }
+                Err(error) => return Err(PresentationError::Io(error)),
+            }
+        };
+        let current = read_d17_presentation_ownership(&self.paths)?.ok_or(
+            PresentationError::ControlRefused("presentation ownership disappeared before close"),
+        )?;
+        if current.marker != ownership.marker
+            || current.marker_identity != ownership.marker_identity
+            || (current.socket_identity.is_some()
+                && (ownership.socket_identity.is_none()
+                    || !optional_socket_identity_compatible(
+                        ownership.socket_identity.as_ref(),
+                        current.socket_identity.as_ref(),
+                    )))
+        {
+            return Err(PresentationError::ControlRefused(
+                "presentation ownership changed before close",
+            ));
+        }
+        self.d17_context()?;
+
+        let provisional = self.d17_provisional_cleanup_proof()?;
+        let provisional_lease = provisional
+            .as_ref()
+            .map(|provisional| self.cleanup_d17_materialized_shell(provisional))
+            .transpose()?;
+
+        let result = self.invoke(None, vec!["kill-server".into()]);
+        if let Err(PresentationError::TmuxRejected(message)) = &result
+            && !message.contains("no server running")
+            && !message.contains("No such file")
+        {
+            return Err(PresentationError::TmuxRejected(message.clone()));
+        }
+        if let Some(provisional_lease) = provisional_lease.as_ref() {
+            provisional_lease
+                .revalidate_for_mutation(&self.state_root)
+                .map_err(|_| {
+                    PresentationError::ControlRefused(
+                        "D17 provisional shell cleanup is unavailable",
+                    )
+                })?;
+        }
+        remove_owned_d17_presentation(
+            &self.state_root,
+            &self.paths,
+            &ownership,
+            provisional.as_ref(),
+        )
+    }
+
+    fn d17_provisional_cleanup_proof(
+        &self,
+    ) -> Result<Option<D17ProvisionalCleanupProof>, PresentationError> {
+        let marker_path = self.paths.directory.join(PROVISIONAL_MARKER_FILE);
+        let marker_identity =
+            inspect_regular_file(&marker_path, false, MAX_D17_PROVISIONAL_MARKER_BYTES)
+                .map_err(map_presentation_ownership_probe)?;
+        let Some(marker_identity) = marker_identity else {
+            return Ok(None);
+        };
+        let slot = read_marker(&self.state_root, &self.paths.directory).map_err(|_| {
+            PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+        })?;
+        if slot.phase() != ProvisionalPhase::Materialized {
+            return Err(PresentationError::ControlRefused(
+                "D17 provisional shell cleanup requires onboarding recovery",
+            ));
+        }
+        let context = self.d17_context().map_err(|_| {
+            PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+        })?;
+        if slot.presentation_id() != context.presentation_id()
+            || slot.presentation_revision() != context.presentation_revision()
+            || slot.seed_cwd() != context.seed_cwd()
+        {
+            return Err(PresentationError::ControlRefused(
+                "D17 provisional shell cleanup is unavailable",
+            ));
+        }
+        Ok(Some(D17ProvisionalCleanupProof {
+            slot,
+            marker_identity,
+        }))
+    }
+
+    fn cleanup_d17_materialized_shell(
+        &self,
+        provisional: &D17ProvisionalCleanupProof,
+    ) -> Result<ProvisionalLease, PresentationError> {
+        let root = StateRoot::select(&self.state_root);
+        let mut state = open_d17_current_only(&root).map_err(|_| {
+            PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+        })?;
+        let provisional_lease = state.acquire_d17_provisional_lease().map_err(|_| {
+            PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+        })?;
+        self.validate_d17_provisional_attachment(&state, &provisional_lease, &provisional.slot)?;
+        let tmux = SystemTmux::default();
+        let process_probe = LinuxProcessProbe;
+        let runtime = PrivateRuntime::new(
+            &tmux,
+            &process_probe,
+            provisional.slot.runtime_paths().clone(),
+        );
+        provisional
+            .slot
+            .revalidate_live_shell(&runtime, &process_probe)
+            .map_err(|_| {
+                PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+            })?;
+        provisional_lease
+            .revalidate_for_mutation(state.root())
+            .map_err(|_| {
+                PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+            })?;
+        runtime.park().map_err(|_| {
+            PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+        })?;
+        provisional_lease
+            .revalidate_for_mutation(state.root())
+            .map_err(|_| {
+                PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+            })?;
+        Ok(provisional_lease)
+    }
+
+    fn d17_attached_client_count(&self) -> Result<usize, PresentationError> {
+        let clients = self.invoke_capture(
+            None,
+            vec![
+                "list-clients".into(),
+                "-F".into(),
+                "#{client_name}\t#{session_name}\t#{window_name}".into(),
+            ],
+        )?;
+        parse_client_rows(&clients, &self.paths.session_name)
+            .map(|clients| clients.len())
+            .map_err(map_presentation_ownership_probe)
+    }
+
     fn discover_live(state_root: &Path) -> Result<Vec<Self>, PresentationError> {
         let presentation_root = state_root.join(PRESENTATION_DIRECTORY);
         if !presentation_root.exists() {
@@ -2432,6 +2683,39 @@ impl Presentation {
             } else {
                 presentation.close()?;
             }
+        }
+        Ok(live)
+    }
+
+    fn discover_live_d17(state_root: &Path) -> Result<Vec<Self>, PresentationError> {
+        let presentation_root = state_root.join(PRESENTATION_DIRECTORY);
+        if !presentation_root.exists() {
+            return Ok(Vec::new());
+        }
+        let entries = fs::read_dir(&presentation_root).map_err(PresentationError::Io)?;
+        let mut live = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(PresentationError::Io)?;
+            if !entry.file_type().map_err(PresentationError::Io)?.is_dir() {
+                return Err(PresentationError::InvalidControlPath(entry.path()));
+            }
+            let directory = entry.path();
+            let session_name = presentation_session_name(&directory)
+                .ok_or_else(|| PresentationError::InvalidControlPath(directory.clone()))?;
+            let presentation =
+                Self::from_control(state_root, directory.join("tmux.sock"), session_name)?;
+            let session_live = presentation.is_live()?;
+            let navigator_pane_dead = session_live && presentation.navigator_pane_is_dead()?;
+            if should_reuse_presentation(session_live, navigator_pane_dead) {
+                live.push(presentation);
+                continue;
+            }
+            if session_live && presentation.d17_attached_client_count()? > 0 {
+                return Err(PresentationError::ControlRefused(
+                    "D17 presentation is attached while navigator recovery is pending",
+                ));
+            }
+            presentation.close_d17()?;
         }
         Ok(live)
     }
@@ -6122,6 +6406,105 @@ fn remove_owned_presentation(
     }
 }
 
+fn remove_owned_d17_presentation(
+    state_root: &Path,
+    paths: &PresentationPaths,
+    expected: &PresentationOwnershipProof,
+    provisional: Option<&D17ProvisionalCleanupProof>,
+) -> Result<(), PresentationError> {
+    let actual = read_d17_presentation_ownership(paths)?.ok_or(
+        PresentationError::ControlRefused("presentation ownership disappeared"),
+    )?;
+    if actual.marker != expected.marker || actual.marker_identity != expected.marker_identity {
+        return Err(PresentationError::ControlRefused(
+            "presentation ownership changed during close",
+        ));
+    }
+
+    if let Some(provisional) = provisional {
+        if read_marker(state_root, &paths.directory).map_err(|_| {
+            PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+        })? != provisional.slot
+        {
+            return Err(PresentationError::ControlRefused(
+                "D17 provisional shell cleanup is unavailable",
+            ));
+        }
+        validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D17)?;
+        remove_exact_regular_artifact(
+            &paths.directory.join(PROVISIONAL_MARKER_FILE),
+            Some(&provisional.marker_identity),
+            MAX_D17_PROVISIONAL_MARKER_BYTES,
+            &mut |_| Ok(()),
+        )?;
+    } else {
+        match fs::symlink_metadata(paths.directory.join(PROVISIONAL_MARKER_FILE)) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(_) => {
+                return Err(PresentationError::ControlRefused(
+                    "D17 provisional shell appeared during close",
+                ));
+            }
+            Err(error) => return Err(PresentationError::Io(error)),
+        }
+    }
+
+    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D17)?;
+    let attachment = inspect_regular_file(
+        &paths.attachment_status,
+        false,
+        MAX_ATTACHMENT_STATUS_BYTES_USIZE,
+    )
+    .map_err(map_presentation_ownership_probe)?;
+    if let Some(identity) = attachment.as_ref() {
+        remove_exact_regular_artifact(
+            &paths.attachment_status,
+            Some(identity),
+            MAX_ATTACHMENT_STATUS_BYTES_USIZE,
+            &mut |_| Ok(()),
+        )?;
+    }
+
+    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D17)?;
+    remove_exact_regular_artifact(
+        &paths.config,
+        Some(&expected.marker.config_identity),
+        MAX_LEGACY_CONFIG_BYTES,
+        &mut |_| Ok(()),
+    )?;
+
+    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D17)?;
+    let socket = inspect_private_socket(&paths.socket).map_err(map_presentation_ownership_probe)?;
+    if socket.is_some()
+        && !optional_socket_identity_compatible(expected.socket_identity.as_ref(), socket.as_ref())
+    {
+        return Err(PresentationError::ControlRefused(
+            "presentation socket identity changed during close",
+        ));
+    }
+    if let Some(identity) = socket.as_ref() {
+        remove_exact_socket_artifact(&paths.socket, Some(identity), &mut |_| Ok(()))?;
+    }
+
+    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D17)?;
+    remove_exact_regular_artifact(
+        &presentation_ownership_marker_path(paths),
+        Some(&expected.marker_identity),
+        MAX_PRESENTATION_OWNERSHIP_MARKER_BYTES,
+        &mut |_| Ok(()),
+    )?;
+    match fs::remove_dir(&paths.directory) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+            Err(PresentationError::ControlRefused(
+                "presentation directory gained an entry during close",
+            ))
+        }
+        Err(error) => Err(PresentationError::Io(error)),
+    }
+}
+
 #[cfg(unix)]
 fn set_mode(path: &Path, mode: u32) -> Result<(), PresentationError> {
     use std::os::unix::fs::PermissionsExt;
@@ -6819,6 +7202,64 @@ mod tests {
             Presentation::d17_context_from_directory(temporary.path(), &seed),
             Err(PresentationError::D17ContextUnavailable)
         ));
+    }
+
+    #[test]
+    fn close_d17_removes_an_owned_presentation_without_a_provisional_shell() {
+        let temporary = tempfile::tempdir().unwrap();
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        create_paths(&paths).unwrap();
+        let presentation = Presentation {
+            paths: paths.clone(),
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        presentation
+            .initialize_d17_context(uuid::Uuid::from_u128(75), &seed)
+            .unwrap();
+
+        presentation.close_d17().unwrap();
+
+        assert!(!paths.directory.exists());
+    }
+
+    #[test]
+    fn close_d17_leaves_a_non_materialized_provisional_marker_for_recovery() {
+        let temporary = tempfile::tempdir().unwrap();
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        create_paths(&paths).unwrap();
+        let presentation = Presentation {
+            paths: paths.clone(),
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        let presentation_id = uuid::Uuid::from_u128(76);
+        let context = presentation
+            .initialize_d17_context(presentation_id, &seed)
+            .unwrap();
+        let slot = crate::provisional::ProvisionalSlot::materializing(
+            temporary.path(),
+            presentation_id,
+            context.presentation_revision(),
+            1,
+            crate::domain::RuntimeId::new(),
+            crate::provisional::SlotGeneration::new(uuid::Uuid::from_u128(77)),
+            &seed,
+        )
+        .unwrap();
+        crate::provisional::write_new_marker(temporary.path(), &paths.directory, &slot).unwrap();
+
+        assert!(matches!(
+            presentation.close_d17(),
+            Err(PresentationError::ControlRefused(message))
+                if message.contains("requires onboarding recovery")
+        ));
+        assert!(paths.directory.exists());
+        assert!(paths.directory.join(PROVISIONAL_MARKER_FILE).exists());
     }
 
     #[test]

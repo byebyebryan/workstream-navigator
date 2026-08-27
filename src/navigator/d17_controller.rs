@@ -184,7 +184,7 @@ pub(crate) fn run_d17_navigator(
     };
     drop(terminal);
     if quit {
-        presentation.stop_session()?;
+        presentation.stop_d17_session()?;
     }
     Ok(())
 }
@@ -558,6 +558,11 @@ mod tests {
 
         let state = open_d17_current_only(&root).unwrap();
         assert!(state.d17_registered_runtime_paths().unwrap().is_empty());
+        drop(state);
+
+        presentation.close_d17().unwrap();
+        assert!(!presentation.paths().directory.exists());
+        assert!(!marker.runtime_paths().directory.exists());
     }
 
     #[test]

@@ -1280,7 +1280,9 @@ fn has_direct_provider_parent(hook_parent: u32, provider_pid: u32) -> bool {
     hook_parent == provider_pid
 }
 
-fn process_parent(pid: u32) -> Option<u32> {
+/// Returns one Linux process's parent PID. Callers that use this as authority
+/// must bound any ancestry walk and fail closed when a parent is unavailable.
+pub(crate) fn process_parent(pid: u32) -> Option<u32> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     let close_paren = stat.rfind(')')?;
     stat.get(close_paren + 2..)?

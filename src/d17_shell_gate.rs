@@ -80,6 +80,7 @@ pub(crate) fn classify_shell_gate(
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ShellGateInvocation {
     pub(crate) shell_leader_pid: u32,
+    pub(crate) caller_pid: u32,
     pub(crate) caller_group: ProcessGroupInfo,
 }
 
@@ -167,19 +168,59 @@ pub(crate) fn validate_invocation(
     shell: &LiveProvisionalShell,
     invocation: ShellGateInvocation,
 ) -> Result<(), ShellGateError> {
+    validate_invocation_with(shell, invocation, |caller, shell| {
+        is_descendant_of_shell(caller, shell, crate::runtime::process_parent)
+    })
+}
+
+const MAX_SHELL_ANCESTRY_DEPTH: usize = 8;
+
+fn validate_invocation_with<F>(
+    shell: &LiveProvisionalShell,
+    invocation: ShellGateInvocation,
+    is_descendant: F,
+) -> Result<(), ShellGateError>
+where
+    F: FnOnce(u32, u32) -> bool,
+{
     if invocation.shell_leader_pid == 0
+        || invocation.caller_pid == 0
         || invocation.caller_group.process_group_id == 0
         || invocation.caller_group.session_id == 0
     {
         return Err(ShellGateError::InvocationIdentityUnavailable);
     }
     if shell.shell_pid != invocation.shell_leader_pid
-        || shell.shell_process_group != invocation.caller_group.process_group_id
         || shell.shell_session != invocation.caller_group.session_id
+        || !is_descendant(invocation.caller_pid, shell.shell_pid)
     {
         return Err(ShellGateError::InvocationIdentityMismatch);
     }
     Ok(())
+}
+
+/// A command substitution runs the gate in a distinct foreground process
+/// group, but it remains a short descendant of the exact interactive shell.
+/// Bound the walk so an unreadable, cyclic, or unexpectedly deep process tree
+/// can never become authority.
+fn is_descendant_of_shell<F>(caller_pid: u32, shell_pid: u32, mut parent: F) -> bool
+where
+    F: FnMut(u32) -> Option<u32>,
+{
+    let mut current = caller_pid;
+    for _ in 0..=MAX_SHELL_ANCESTRY_DEPTH {
+        if current == shell_pid {
+            return true;
+        }
+        let Some(next) = parent(current) else {
+            return false;
+        };
+        if next == 0 || next == current {
+            return false;
+        }
+        current = next;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -188,7 +229,7 @@ mod tests {
 
     use super::{
         ShellGateDecision, ShellGateError, ShellGateInvocation, classify_shell_gate,
-        validate_invocation,
+        is_descendant_of_shell, validate_invocation_with,
     };
     use crate::{
         domain::ProviderKind, provisional::LiveProvisionalShell, runtime::ProcessGroupInfo,
@@ -232,38 +273,68 @@ mod tests {
     }
 
     #[test]
-    fn gate_requires_the_exact_recorded_shell_pid_group_and_session() {
+    fn gate_requires_the_exact_recorded_shell_pid_descendant_and_session() {
         let shell = live_shell();
         let exact = ShellGateInvocation {
             shell_leader_pid: 41,
+            caller_pid: 44,
             caller_group: ProcessGroupInfo {
-                process_group_id: 42,
+                process_group_id: 44,
                 session_id: 43,
             },
         };
-        assert!(validate_invocation(&shell, exact).is_ok());
+        assert!(
+            validate_invocation_with(&shell, exact, |caller, expected_shell| {
+                is_descendant_of_shell(caller, expected_shell, |pid| match pid {
+                    44 => Some(42),
+                    42 => Some(41),
+                    _ => None,
+                })
+            })
+            .is_ok()
+        );
         assert!(matches!(
-            validate_invocation(
+            validate_invocation_with(
                 &shell,
                 ShellGateInvocation {
                     shell_leader_pid: 99,
+                    caller_pid: 44,
                     caller_group: exact.caller_group,
                 },
+                |_, _| true,
             ),
             Err(ShellGateError::InvocationIdentityMismatch)
         ));
         assert!(matches!(
-            validate_invocation(
+            validate_invocation_with(
                 &shell,
                 ShellGateInvocation {
                     shell_leader_pid: 41,
+                    caller_pid: 44,
                     caller_group: ProcessGroupInfo {
-                        process_group_id: 42,
+                        process_group_id: 44,
                         session_id: 99,
                     },
                 },
+                |_, _| true,
             ),
             Err(ShellGateError::InvocationIdentityMismatch)
         ));
+        assert!(matches!(
+            validate_invocation_with(&shell, exact, |_, _| false),
+            Err(ShellGateError::InvocationIdentityMismatch)
+        ));
+    }
+
+    #[test]
+    fn shell_descendant_proof_refuses_cycles_and_deep_ancestry() {
+        assert!(!is_descendant_of_shell(44, 41, |pid| match pid {
+            44 => Some(42),
+            42 => Some(44),
+            _ => None,
+        }));
+        assert!(!is_descendant_of_shell(50, 41, |pid| {
+            (pid > 41).then_some(pid - 1)
+        }));
     }
 }

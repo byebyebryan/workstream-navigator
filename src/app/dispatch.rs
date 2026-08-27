@@ -556,14 +556,14 @@ fn navigator(root: &StateRoot) -> Result<(), AppError> {
         D17NavigatorStartup::DrainOnly(plan) => return drain_only_presentation(root, &plan),
         D17NavigatorStartup::Exit => return Ok(()),
     }
-    let (presentation, fresh) = Presentation::open_or_create(root.base())?;
+    let (presentation, fresh) = Presentation::open_or_create_d17(root.base())?;
     if fresh {
         let seed_cwd = std::env::current_dir().map_err(AppError::Io)?;
         presentation.start_d17(uuid::Uuid::new_v4(), &seed_cwd)?;
     } else {
         presentation.d17_context()?;
     }
-    match presentation.attach() {
+    match presentation.attach_d17() {
         // A normal tmux detach leaves the private presentation available for a
         // later bare `wsnav` reconnect. It never affects a provider Runtime.
         Ok(()) => Ok(()),
@@ -571,10 +571,10 @@ fn navigator(root: &StateRoot) -> Result<(), AppError> {
         // sees a failed attach because the socket vanished, which is a normal
         // clean exit rather than an attachment failure.
         Err(_) if !presentation.paths().directory.exists() => {
-            presentation.close().map_err(Into::into)
+            presentation.close_d17().map_err(Into::into)
         }
         Err(error) => {
-            let cleanup = presentation.close();
+            let cleanup = presentation.close_d17();
             cleanup?;
             Err(AppError::Presentation(error))
         }

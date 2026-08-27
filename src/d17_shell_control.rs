@@ -257,8 +257,9 @@ pub(crate) fn gate_from_account_shell(
         .acquire_d17_provisional_lease()
         .map_err(|_| AccountShellGateError::State)?;
     let process_probe = LinuxProcessProbe;
+    let caller_pid = process::id();
     let caller_group = process_probe
-        .process_group_checked(process::id())
+        .process_group_checked(caller_pid)
         .map_err(|_| AccountShellGateError::InvocationIdentityUnavailable)?
         .ok_or(AccountShellGateError::InvocationIdentityUnavailable)?;
     let tmux = SystemTmux::default();
@@ -269,6 +270,7 @@ pub(crate) fn gate_from_account_shell(
         presentation_binding,
         invocation: ShellGateInvocation {
             shell_leader_pid,
+            caller_pid,
             caller_group,
         },
         tmux: &tmux,
@@ -313,8 +315,9 @@ pub(crate) fn exec_codex_from_account_shell(
         .acquire_d17_provisional_lease()
         .map_err(|_| AccountShellCodexLaunchError::State)?;
     let process_probe = LinuxProcessProbe;
+    let caller_pid = process::id();
     let caller_group = process_probe
-        .process_group_checked(process::id())
+        .process_group_checked(caller_pid)
         .map_err(|_| AccountShellCodexLaunchError::InvocationIdentityUnavailable)?
         .ok_or(AccountShellCodexLaunchError::InvocationIdentityUnavailable)?;
     let tmux = SystemTmux::default();
@@ -327,7 +330,8 @@ pub(crate) fn exec_codex_from_account_shell(
     validate_invocation(
         &live,
         ShellGateInvocation {
-            shell_leader_pid: process::id(),
+            shell_leader_pid: caller_pid,
+            caller_pid,
             caller_group,
         },
     )
@@ -476,8 +480,9 @@ pub(crate) fn exec_opencode_from_account_shell(
         .acquire_d17_provisional_lease()
         .map_err(|_| AccountShellOpenCodeLaunchError::State)?;
     let process_probe = LinuxProcessProbe;
+    let caller_pid = process::id();
     let caller_group = process_probe
-        .process_group_checked(process::id())
+        .process_group_checked(caller_pid)
         .map_err(|_| AccountShellOpenCodeLaunchError::InvocationIdentityUnavailable)?
         .ok_or(AccountShellOpenCodeLaunchError::InvocationIdentityUnavailable)?;
     let tmux = SystemTmux::default();
@@ -490,7 +495,8 @@ pub(crate) fn exec_opencode_from_account_shell(
     validate_invocation(
         &live,
         ShellGateInvocation {
-            shell_leader_pid: process::id(),
+            shell_leader_pid: caller_pid,
+            caller_pid,
             caller_group,
         },
     )

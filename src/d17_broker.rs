@@ -12,7 +12,6 @@
 
 use std::{ffi::OsString, path::Path};
 
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
@@ -58,6 +57,7 @@ pub(crate) struct PrepareContext<'a, 'runtime> {
     pub(crate) arguments: &'a [OsString],
     pub(crate) now_monotonic_millis: i64,
     pub(crate) expiry_monotonic_millis: i64,
+    pub(crate) boot_provenance: &'a str,
     pub(crate) id_generator: &'a dyn IdGenerator,
     pub(crate) worktree_inspector: &'a dyn WorktreeInspector,
 }
@@ -213,7 +213,7 @@ pub(crate) fn request_from_context(
         shell_process_group: shell.shell_process_group,
         shell_session: shell.shell_session,
         argv_digest: launch.argv_digest().to_owned(),
-        boot_provenance: boot_provenance(),
+        boot_provenance: context.boot_provenance.to_owned(),
         now_monotonic_millis: context.now_monotonic_millis,
         expiry_monotonic_millis: context.expiry_monotonic_millis,
     };
@@ -226,11 +226,6 @@ fn request_key(slot: &ProvisionalSlot) -> String {
         slot.presentation_id(),
         slot.slot_generation()
     )
-}
-
-fn boot_provenance() -> String {
-    let digest = Sha256::digest(b"wsnav-d17-broker-bootstrap-v1");
-    format!("d17-boot-v1:sha256:{digest:x}")
 }
 
 #[cfg(test)]
@@ -480,6 +475,7 @@ mod tests {
             arguments: &[OsString::from("--model"), OsString::from("gpt-5.6")],
             now_monotonic_millis: 10,
             expiry_monotonic_millis: 1_010,
+            boot_provenance: "d17-boot-v1:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             id_generator: &ids,
             worktree_inspector: &inspector,
         };
@@ -492,6 +488,29 @@ mod tests {
             prepare(&mut state, &provisional_lease, &context),
             Err(BrokerError::ExistingOperation)
         ));
+        let after_reboot_context = PrepareContext {
+            presentation_directory: &presentation,
+            runtime: &runtime,
+            process_group_probe: &ShellGroup,
+            provider: ProviderKind::Codex,
+            arguments: &[OsString::from("--model"), OsString::from("gpt-5.6")],
+            now_monotonic_millis: 11,
+            expiry_monotonic_millis: 1_011,
+            boot_provenance: "d17-boot-v1:sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            id_generator: &ids,
+            worktree_inspector: &inspector,
+        };
+        assert!(
+            begin_provider_preparation(
+                &mut state,
+                &provisional_lease,
+                &after_reboot_context,
+                &token,
+                11,
+            )
+            .is_err(),
+            "a helper after a different boot must not consume the handoff"
+        );
         let preparation =
             begin_provider_preparation(&mut state, &provisional_lease, &context, &token, 11)
                 .unwrap();

@@ -11,6 +11,7 @@
 
 use std::{
     collections::BTreeMap,
+    env,
     ffi::OsString,
     fs::{self, OpenOptions},
     io::Write,
@@ -198,6 +199,35 @@ impl AccountShellContext {
             state_root,
             presentation_directory,
         })
+    }
+
+    /// Reconstructs the non-authoritative discovery context inherited by a
+    /// private account shell child. Missing, non-UTF-8, empty, or control-byte
+    /// values fail closed before a helper can inspect state.
+    pub(crate) fn from_environment() -> Result<Self, AccountShellError> {
+        Self::from_environment_values(
+            env::var_os(STATE_ROOT_ENV),
+            env::var_os(PRESENTATION_DIRECTORY_ENV),
+        )
+    }
+
+    #[must_use]
+    pub(crate) fn state_root(&self) -> &Path {
+        &self.state_root
+    }
+
+    #[must_use]
+    pub(crate) fn presentation_directory(&self) -> &Path {
+        &self.presentation_directory
+    }
+
+    fn from_environment_values(
+        state_root: Option<OsString>,
+        presentation_directory: Option<OsString>,
+    ) -> Result<Self, AccountShellError> {
+        let state_root = environment_path(state_root)?;
+        let presentation_directory = environment_path(presentation_directory)?;
+        Self::new(&state_root, &presentation_directory)
     }
 }
 
@@ -404,6 +434,15 @@ fn path_environment_value(path: &Path) -> Result<OsString, AccountShellError> {
         return Err(AccountShellError::UnsafeEnvironment);
     }
     Ok(OsString::from(value))
+}
+
+fn environment_path(value: Option<OsString>) -> Result<PathBuf, AccountShellError> {
+    let value = value.ok_or(AccountShellError::ContextUnavailable)?;
+    let value = value
+        .to_str()
+        .filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
+        .ok_or(AccountShellError::ContextUnavailable)?;
+    Ok(PathBuf::from(value))
 }
 
 fn write_private_new(path: &Path, body: &str) -> Result<(), std::io::Error> {
@@ -897,6 +936,39 @@ mod tests {
 
         assert_eq!(
             AccountShellContext::new(&state_root, &foreign_presentation).unwrap_err(),
+            AccountShellError::ContextUnavailable
+        );
+    }
+
+    #[test]
+    fn inherited_account_shell_context_is_canonicalized_and_requires_bounded_paths() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_root = temporary.path().join("state");
+        let presentation = state_root.join("presentation");
+        make_directory(&state_root);
+        make_directory(&presentation);
+
+        let context = AccountShellContext::from_environment_values(
+            Some(state_root.clone().into_os_string()),
+            Some(presentation.clone().into_os_string()),
+        )
+        .unwrap();
+        assert_eq!(context.state_root(), fs::canonicalize(&state_root).unwrap());
+        assert_eq!(
+            context.presentation_directory(),
+            fs::canonicalize(&presentation).unwrap()
+        );
+        assert_eq!(
+            AccountShellContext::from_environment_values(None, Some(presentation.into_os_string()))
+                .unwrap_err(),
+            AccountShellError::ContextUnavailable
+        );
+        assert_eq!(
+            AccountShellContext::from_environment_values(
+                Some(OsString::from("unsafe\nstate")),
+                Some(state_root.into_os_string()),
+            )
+            .unwrap_err(),
             AccountShellError::ContextUnavailable
         );
     }

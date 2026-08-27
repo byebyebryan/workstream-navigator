@@ -9,7 +9,8 @@ the approved next checkpoint. Its D17.0 falsification studies plus the D17.2
 test-only ownership/private-runtime model and dormant D17.3 grammar,
 command-classification, and onboarding-phase contracts are in progress; no D17
 user-facing behavior or provider launch path is implemented yet. The explicit
-schema-13-to-14 groundwork is dormant and no product path can invoke it.
+schema-13-to-14 migration and stable provisional-lease foundations are dormant,
+and no product path can invoke either.
 
 The D0-D15 entries below preserve truthful historical implementation and
 acceptance evidence. D3 and later SSH, remote, cross-host, and combined
@@ -4271,7 +4272,8 @@ Status: in progress. The product contract is approved; D17.0 studies and the
 D17.2 test-only ownership/private-runtime model and dormant D17.3 grammar,
 command-classification, and onboarding-phase contracts have begun. No D17
 user-facing behavior or provider launch path is implemented. The explicit
-schema-13-to-14 groundwork remains dormant, and no D17 acceptance is complete.
+schema-13-to-14 migration and stable provisional-lease foundations remain
+dormant, and no D17 acceptance is complete.
 
 ### Goal
 

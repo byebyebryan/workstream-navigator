@@ -176,6 +176,10 @@ pub enum StateError {
     TransitionLeaseRootMismatch,
     #[error("the held transition lease is no longer valid")]
     InvalidTransitionLease,
+    #[error("the stable provisional lease is busy")]
+    ProvisionalLeaseBusy,
+    #[error("the held provisional lease is no longer valid")]
+    InvalidProvisionalLease,
 }
 
 impl StateError {

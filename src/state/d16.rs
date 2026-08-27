@@ -15,7 +15,7 @@ use std::{
     collections::BTreeMap,
     fmt::Write as _,
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
@@ -62,6 +62,9 @@ pub const D17_HOST_SCHEMA_VERSION: i64 = 14;
 pub const D16_SCHEMA_12_VERSION: i64 = 12;
 
 pub const TRANSITION_LOCK_FILE: &str = "transition.lock";
+pub const PROVISIONAL_LOCK_FILE: &str = "provisional.lock";
+const PROVISIONAL_LOCK_FORMAT: &str = "wsnav-provisional-lock-v1";
+const MAX_PROVISIONAL_LOCK_BYTES: usize = 512;
 pub const LEGACY_CLIENT_DATABASE_FILE: &str = "client.sqlite";
 pub const LEGACY_CLIENT_DATABASE_WAL_FILE: &str = "client.sqlite-wal";
 pub const LEGACY_CLIENT_DATABASE_SHM_FILE: &str = "client.sqlite-shm";
@@ -194,6 +197,19 @@ pub enum FreshRootRejection {
 struct FileIdentity {
     device: u64,
     inode: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProvisionalLockPhase {
+    Pending,
+    Ready { expected_identity: FileIdentity },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ProvisionalLockMetadata {
+    host_id: String,
+    generation: i64,
+    phase: ProvisionalLockPhase,
 }
 
 fn file_identity(metadata: &fs::Metadata) -> FileIdentity {
@@ -347,6 +363,104 @@ impl TransitionLease {
 
     fn require_root(&self, root: &Path) -> Result<(), StateError> {
         self.revalidate(root)
+    }
+}
+
+/// The retained, nonblocking exclusive lease for D17's one host-wide
+/// provisional shell slot. The descriptor is opened `CLOEXEC` and remains
+/// bound to the exact root, inode, generation, and bounded lock contents for
+/// its lifetime.
+pub struct ProvisionalLease {
+    root: PathBuf,
+    lock_path: PathBuf,
+    root_identity: FileIdentity,
+    lock_identity: FileIdentity,
+    lease_generation: i64,
+    expected_contents: Vec<u8>,
+    file: nix::fcntl::Flock<File>,
+}
+
+impl std::fmt::Debug for ProvisionalLease {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ProvisionalLease")
+            .field("root", &"<private>")
+            .field("lock_path", &"<private>")
+            .field("lease_generation", &self.lease_generation)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ProvisionalLease {
+    fn new(
+        root: PathBuf,
+        root_identity: FileIdentity,
+        lock_path: PathBuf,
+        lock_identity: FileIdentity,
+        lease_generation: i64,
+        expected_contents: Vec<u8>,
+        file: nix::fcntl::Flock<File>,
+    ) -> Self {
+        Self {
+            root,
+            lock_path,
+            root_identity,
+            lock_identity,
+            lease_generation,
+            expected_contents,
+            file,
+        }
+    }
+
+    #[must_use]
+    pub const fn lease_generation(&self) -> i64 {
+        self.lease_generation
+    }
+
+    /// Revalidates the held root, inode, and lock contents before a D17
+    /// actor changes a marker, capability, or onboarding journal.
+    pub(crate) fn revalidate_for_mutation(&self, requested_root: &Path) -> Result<(), StateError> {
+        let requested_root = fs::canonicalize(requested_root)
+            .map_err(|error| StateError::io(requested_root, error))?;
+        if requested_root != self.root {
+            return Err(StateError::InvalidProvisionalLease);
+        }
+        let root_metadata =
+            fs::symlink_metadata(&self.root).map_err(|_| StateError::InvalidProvisionalLease)?;
+        let lock_metadata = fs::symlink_metadata(&self.lock_path)
+            .map_err(|_| StateError::InvalidProvisionalLease)?;
+        let opened_metadata = self
+            .file
+            .metadata()
+            .map_err(|error| StateError::io(&self.lock_path, error))?;
+        if !root_metadata.is_dir()
+            || !is_private_owner_directory(&root_metadata)
+            || file_identity(&root_metadata) != self.root_identity
+            || !lock_metadata.is_file()
+            || !is_private_owner_file(&lock_metadata)
+            || file_identity(&lock_metadata) != self.lock_identity
+            || !opened_metadata.is_file()
+            || !is_private_owner_file(&opened_metadata)
+            || file_identity(&opened_metadata) != self.lock_identity
+        {
+            return Err(StateError::InvalidProvisionalLease);
+        }
+        let mut duplicate = self
+            .file
+            .try_clone()
+            .map_err(|error| StateError::io(&self.lock_path, error))?;
+        duplicate
+            .seek(SeekFrom::Start(0))
+            .map_err(|error| StateError::io(&self.lock_path, error))?;
+        let mut contents = Vec::with_capacity(self.expected_contents.len());
+        duplicate
+            .take(u64::try_from(MAX_PROVISIONAL_LOCK_BYTES + 1).unwrap_or(u64::MAX))
+            .read_to_end(&mut contents)
+            .map_err(|error| StateError::io(&self.lock_path, error))?;
+        if contents != self.expected_contents {
+            return Err(StateError::InvalidProvisionalLease);
+        }
+        Ok(())
     }
 }
 
@@ -1589,6 +1703,107 @@ impl D16State {
         lease.revalidate_for_mutation(&self.root)
     }
 
+    /// Installs or acquires the exact schema-14 stable provisional lease.
+    ///
+    /// The pending metadata written by [`Self::migrate_schema13_to14`] is
+    /// finalized only after an owner-only, no-follow, `CLOEXEC` file has been
+    /// written and synced. A ready lock is never recreated: missing,
+    /// replaced, malformed, or busy evidence fails closed.
+    ///
+    /// This remains a dormant cutover seam. No current D16 command invokes
+    /// it, and it never materializes a shell or launches a provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when schema-14 metadata, the exact lock artifact, or
+    /// the held transition lease cannot prove one current owner.
+    pub fn install_or_acquire_provisional_lease(
+        &mut self,
+        transition_lease: &TransitionLease,
+    ) -> Result<ProvisionalLease, StateError> {
+        ensure_cutover_transition_mode(self.mode)?;
+        transition_lease.revalidate_for_mutation(&self.root)?;
+        validate_schema14(&self.connection)?;
+        let metadata = load_provisional_lock_metadata(&self.connection)?;
+        let (root, root_identity) = validate_transition_root(&self.root)
+            .map_err(|_| StateError::InvalidProvisionalLease)?;
+        let lock_path = root.join(PROVISIONAL_LOCK_FILE);
+        let expected_contents = provisional_lock_contents(&metadata.host_id, metadata.generation)?;
+        let (file, lock_identity) = match metadata.phase {
+            ProvisionalLockPhase::Pending => {
+                let file = match exact_artifact_metadata(&lock_path)? {
+                    None => {
+                        let mut file = open_private_provisional_file(&lock_path, true)?;
+                        file.write_all(&expected_contents)
+                            .map_err(|error| StateError::io(&lock_path, error))?;
+                        file.sync_all()
+                            .map_err(|error| StateError::io(&lock_path, error))?;
+                        sync_directory(&root)?;
+                        file
+                    }
+                    Some(_) => open_private_provisional_file(&lock_path, false)?,
+                };
+                let identity =
+                    validate_provisional_lock_file(&file, &lock_path, &expected_contents)?;
+                (file, identity)
+            }
+            ProvisionalLockPhase::Ready { expected_identity } => {
+                let file = open_private_provisional_file(&lock_path, false)?;
+                let identity =
+                    validate_provisional_lock_file(&file, &lock_path, &expected_contents)?;
+                if identity != expected_identity {
+                    return Err(StateError::InvalidProvisionalLease);
+                }
+                (file, identity)
+            }
+        };
+        let file = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
+            .map_err(|(_file, _error)| StateError::ProvisionalLeaseBusy)?;
+        let provisional = ProvisionalLease::new(
+            root,
+            root_identity,
+            lock_path,
+            lock_identity,
+            metadata.generation,
+            expected_contents,
+            file,
+        );
+        provisional.revalidate_for_mutation(&self.root)?;
+        if matches!(metadata.phase, ProvisionalLockPhase::Pending) {
+            transition_lease.revalidate_for_mutation(&self.root)?;
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(StateError::Sqlite)?;
+            let changed = transaction
+                .execute(
+                    "UPDATE host_operational_metadata
+                     SET provisional_lock_phase = 'ready',
+                         provisional_lock_device = ?1,
+                         provisional_lock_inode = ?2
+                     WHERE singleton = 1
+                       AND provisional_lease_generation = ?3
+                       AND provisional_lock_phase = 'pending'",
+                    params![
+                        i64::try_from(lock_identity.device)
+                            .map_err(|_| StateError::InvalidProvisionalLease)?,
+                        i64::try_from(lock_identity.inode)
+                            .map_err(|_| StateError::InvalidProvisionalLease)?,
+                        metadata.generation,
+                    ],
+                )
+                .map_err(StateError::Sqlite)?;
+            if changed != 1 {
+                return Err(StateError::ConcurrentWrite);
+            }
+            validate_schema14(&transaction)?;
+            transaction.commit().map_err(StateError::Sqlite)?;
+            transition_lease.revalidate_for_mutation(&self.root)?;
+            provisional.revalidate_for_mutation(&self.root)?;
+        }
+        Ok(provisional)
+    }
+
     /// Lists only deterministic, current `OpenCode` observer handles whose
     /// Runtime lifecycle is itself non-stopped. Runtime IDs are ordered by
     /// their opaque persisted spelling and handles are provider/generation/
@@ -2600,10 +2815,77 @@ fn validate_schema14(connection: &Connection) -> Result<(), StateError> {
         || !matches!(phase.as_str(), "pending" | "ready")
         || matches!(phase.as_str(), "pending") && (device.is_some() || inode.is_some())
         || matches!(phase.as_str(), "ready") && (device.is_none() || inode.is_none())
+        || device.is_some_and(|value| value < 0)
+        || inode.is_some_and(|value| value <= 0)
     {
         return Err(StateError::MalformedHostSchema);
     }
     Ok(())
+}
+
+fn load_provisional_lock_metadata(
+    connection: &Connection,
+) -> Result<ProvisionalLockMetadata, StateError> {
+    let (host_id, generation, phase, device, inode): (
+        String,
+        i64,
+        String,
+        Option<i64>,
+        Option<i64>,
+    ) = connection
+        .query_row(
+            "SELECT host_identity.host_id,
+                        host_operational_metadata.provisional_lease_generation,
+                        host_operational_metadata.provisional_lock_phase,
+                        host_operational_metadata.provisional_lock_device,
+                        host_operational_metadata.provisional_lock_inode
+                 FROM host_identity
+                 JOIN host_operational_metadata
+                   ON host_operational_metadata.singleton = host_identity.singleton
+                 WHERE host_identity.singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .map_err(StateError::Sqlite)?;
+    if Uuid::parse_str(&host_id).is_err() || generation <= 0 {
+        return Err(StateError::MalformedHostSchema);
+    }
+    let phase = match (phase.as_str(), device, inode) {
+        ("pending", None, None) => ProvisionalLockPhase::Pending,
+        ("ready", Some(device), Some(inode)) if device >= 0 && inode > 0 => {
+            ProvisionalLockPhase::Ready {
+                expected_identity: FileIdentity {
+                    device: u64::try_from(device).map_err(|_| StateError::MalformedHostSchema)?,
+                    inode: u64::try_from(inode).map_err(|_| StateError::MalformedHostSchema)?,
+                },
+            }
+        }
+        _ => return Err(StateError::MalformedHostSchema),
+    };
+    Ok(ProvisionalLockMetadata {
+        host_id,
+        generation,
+        phase,
+    })
+}
+
+fn provisional_lock_contents(host_id: &str, generation: i64) -> Result<Vec<u8>, StateError> {
+    if Uuid::parse_str(host_id).is_err() || generation <= 0 {
+        return Err(StateError::MalformedHostSchema);
+    }
+    let contents = format!("{PROVISIONAL_LOCK_FORMAT} {host_id} {generation}\n").into_bytes();
+    if contents.len() > MAX_PROVISIONAL_LOCK_BYTES {
+        return Err(StateError::MalformedHostSchema);
+    }
+    Ok(contents)
 }
 
 fn validate_schema13_extensions(connection: &Connection) -> Result<(), StateError> {
@@ -4058,6 +4340,85 @@ fn open_private_transition_file(path: &Path, create_new: bool) -> Result<File, S
         return Err(StateError::InvalidTransitionLease);
     }
     Ok(file)
+}
+
+fn open_private_provisional_file(path: &Path, create_new: bool) -> Result<File, StateError> {
+    let before = exact_artifact_metadata(path)?;
+    if let Some(metadata) = &before
+        && (!metadata.is_file() || !is_private_owner_file(metadata))
+    {
+        return Err(StateError::InvalidProvisionalLease);
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    if create_new {
+        options.create_new(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW);
+    }
+    let file = options.open(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            StateError::InvalidProvisionalLease
+        } else {
+            StateError::io(path, error)
+        }
+    })?;
+    let opened = file
+        .metadata()
+        .map_err(|error| StateError::io(path, error))?;
+    if !opened.is_file()
+        || !is_current_owner(&opened)
+        || before.is_some_and(|metadata| file_identity(&metadata) != file_identity(&opened))
+    {
+        return Err(StateError::InvalidProvisionalLease);
+    }
+    if create_new {
+        set_private_file_permissions_handle(&file, path)?;
+    }
+    let private = file
+        .metadata()
+        .map_err(|error| StateError::io(path, error))?;
+    if !private.is_file() || !is_private_owner_file(&private) {
+        return Err(StateError::InvalidProvisionalLease);
+    }
+    Ok(file)
+}
+
+fn validate_provisional_lock_file(
+    file: &File,
+    path: &Path,
+    expected_contents: &[u8],
+) -> Result<FileIdentity, StateError> {
+    let opened = file
+        .metadata()
+        .map_err(|error| StateError::io(path, error))?;
+    let path_metadata = fs::symlink_metadata(path).map_err(|error| StateError::io(path, error))?;
+    if !opened.is_file()
+        || !is_private_owner_file(&opened)
+        || !path_metadata.is_file()
+        || !is_private_owner_file(&path_metadata)
+        || file_identity(&opened) != file_identity(&path_metadata)
+    {
+        return Err(StateError::InvalidProvisionalLease);
+    }
+    let mut duplicate = file
+        .try_clone()
+        .map_err(|error| StateError::io(path, error))?;
+    duplicate
+        .seek(SeekFrom::Start(0))
+        .map_err(|error| StateError::io(path, error))?;
+    let mut contents = Vec::with_capacity(expected_contents.len());
+    duplicate
+        .take(u64::try_from(MAX_PROVISIONAL_LOCK_BYTES + 1).unwrap_or(u64::MAX))
+        .read_to_end(&mut contents)
+        .map_err(|error| StateError::io(path, error))?;
+    if contents != expected_contents {
+        return Err(StateError::InvalidProvisionalLease);
+    }
+    Ok(file_identity(&opened))
 }
 
 fn create_private_database_file(path: &Path) -> Result<File, StateError> {
@@ -6125,6 +6486,201 @@ mod tests {
         );
         assert_eq!(authoritative_snapshot(&state.connection), before);
         assert_eq!(fs::read(&provisional).unwrap(), marker);
+    }
+
+    #[test]
+    fn schema14_provisional_lease_installs_pending_lock_then_reacquires_same_inode() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+        drop(fresh_create(&state_path, &SequenceIds::default()).unwrap());
+
+        let transition = transition_lease(&state_path);
+        let mut state = open_cutover_transition(&root, &transition).unwrap();
+        state.migrate_schema13_to14(&transition).unwrap();
+        let lock_path = state_path.join(PROVISIONAL_LOCK_FILE);
+        let host_id: String = state
+            .connection
+            .query_row(
+                "SELECT host_id FROM host_identity WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let expected_contents = provisional_lock_contents(&host_id, 1).unwrap();
+
+        let first = state
+            .install_or_acquire_provisional_lease(&transition)
+            .unwrap();
+        assert_eq!(first.lease_generation(), 1);
+        first.revalidate_for_mutation(&state_path).unwrap();
+        #[cfg(unix)]
+        {
+            let descriptor_flags =
+                nix::fcntl::fcntl(&*first.file, nix::fcntl::FcntlArg::F_GETFD).unwrap();
+            assert_ne!(descriptor_flags & nix::libc::FD_CLOEXEC, 0);
+        }
+        assert_eq!(fs::read(&lock_path).unwrap(), expected_contents);
+        let first_identity = file_identity(&fs::metadata(&lock_path).unwrap());
+        assert!(matches!(
+            state.install_or_acquire_provisional_lease(&transition),
+            Err(StateError::ProvisionalLeaseBusy)
+        ));
+        drop(first);
+
+        let second = state
+            .install_or_acquire_provisional_lease(&transition)
+            .unwrap();
+        assert_eq!(second.lease_generation(), 1);
+        second.revalidate_for_mutation(&state_path).unwrap();
+        assert_eq!(
+            file_identity(&fs::metadata(&lock_path).unwrap()),
+            first_identity,
+            "a ready provisional lock must be reacquired, never recreated"
+        );
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT provisional_lease_generation, provisional_lock_phase,
+                            provisional_lock_device, provisional_lock_inode
+                     FROM host_operational_metadata WHERE singleton = 1",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                1,
+                "ready".to_owned(),
+                Some(i64::try_from(first_identity.device).unwrap()),
+                Some(i64::try_from(first_identity.inode).unwrap()),
+            )
+        );
+    }
+
+    #[test]
+    fn schema14_provisional_lease_finalizes_an_exact_pending_crash_file() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+        drop(fresh_create(&state_path, &SequenceIds::default()).unwrap());
+
+        let transition = transition_lease(&state_path);
+        let mut state = open_cutover_transition(&root, &transition).unwrap();
+        state.migrate_schema13_to14(&transition).unwrap();
+        let host_id: String = state
+            .connection
+            .query_row(
+                "SELECT host_id FROM host_identity WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let lock_path = state_path.join(PROVISIONAL_LOCK_FILE);
+        let expected_contents = provisional_lock_contents(&host_id, 1).unwrap();
+        let mut crashed_installer = open_private_provisional_file(&lock_path, true).unwrap();
+        crashed_installer.write_all(&expected_contents).unwrap();
+        crashed_installer.sync_all().unwrap();
+        sync_directory(&state_path).unwrap();
+        drop(crashed_installer);
+        let crash_identity = file_identity(&fs::metadata(&lock_path).unwrap());
+
+        let recovered = state
+            .install_or_acquire_provisional_lease(&transition)
+            .unwrap();
+        recovered.revalidate_for_mutation(&state_path).unwrap();
+        assert_eq!(
+            load_provisional_lock_metadata(&state.connection)
+                .unwrap()
+                .phase,
+            ProvisionalLockPhase::Ready {
+                expected_identity: crash_identity
+            }
+        );
+        assert_eq!(fs::read(&lock_path).unwrap(), expected_contents);
+    }
+
+    #[test]
+    fn schema14_ready_provisional_lease_refuses_missing_and_recreated_lock() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+        drop(fresh_create(&state_path, &SequenceIds::default()).unwrap());
+
+        let transition = transition_lease(&state_path);
+        let mut state = open_cutover_transition(&root, &transition).unwrap();
+        state.migrate_schema13_to14(&transition).unwrap();
+        let held = state
+            .install_or_acquire_provisional_lease(&transition)
+            .unwrap();
+        let lock_path = state_path.join(PROVISIONAL_LOCK_FILE);
+        let expected_contents = fs::read(&lock_path).unwrap();
+        let original_metadata = load_provisional_lock_metadata(&state.connection).unwrap();
+        fs::remove_file(&lock_path).unwrap();
+        assert!(matches!(
+            held.revalidate_for_mutation(&state_path),
+            Err(StateError::InvalidProvisionalLease)
+        ));
+        drop(held);
+        assert!(matches!(
+            state.install_or_acquire_provisional_lease(&transition),
+            Err(StateError::InvalidProvisionalLease)
+        ));
+
+        fs::write(&lock_path, &expected_contents).unwrap();
+        set_private_file_permissions(&lock_path).unwrap();
+        assert!(matches!(
+            state.install_or_acquire_provisional_lease(&transition),
+            Err(StateError::InvalidProvisionalLease)
+        ));
+        assert_eq!(
+            load_provisional_lock_metadata(&state.connection).unwrap(),
+            original_metadata,
+            "ready metadata must retain its original inode after every refusal"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn schema14_ready_provisional_lease_refuses_a_symlink_without_following_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+        drop(fresh_create(&state_path, &SequenceIds::default()).unwrap());
+
+        let transition = transition_lease(&state_path);
+        let mut state = open_cutover_transition(&root, &transition).unwrap();
+        state.migrate_schema13_to14(&transition).unwrap();
+        let held = state
+            .install_or_acquire_provisional_lease(&transition)
+            .unwrap();
+        let lock_path = state_path.join(PROVISIONAL_LOCK_FILE);
+        let target = state_path.join("provisional.lock.target");
+        let target_contents = fs::read(&lock_path).unwrap();
+        drop(held);
+        fs::remove_file(&lock_path).unwrap();
+        fs::write(&target, &target_contents).unwrap();
+        set_private_file_permissions(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &lock_path).unwrap();
+
+        assert!(matches!(
+            state.install_or_acquire_provisional_lease(&transition),
+            Err(StateError::InvalidProvisionalLease)
+        ));
+        assert_eq!(fs::read(&target).unwrap(), target_contents);
+        assert!(
+            fs::symlink_metadata(&lock_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
     }
 
     #[test]

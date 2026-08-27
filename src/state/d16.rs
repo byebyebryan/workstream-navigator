@@ -3672,6 +3672,17 @@ impl D16State {
         if current.ownership != ownership {
             return Err(StateError::ConcurrentWrite);
         }
+        if current.provider() == ProviderKind::OpenCode {
+            let handle = load_opencode_handle(&transaction, ownership.runtime_id)?
+                .ok_or(StateError::OnboardingOperationUnavailable)?;
+            if handle.runtime_generation != current.runtime_generation()
+                || handle.observer_status != OpenCodeObserverStatus::Ready
+                || handle.observer_pid.is_none()
+                || handle.observer_birth.is_none()
+            {
+                return Err(StateError::OnboardingOperationUnavailable);
+            }
+        }
         let next_operation_revision = next_revision(ownership.operation_revision)?;
         let runtime: (Option<i64>, Option<String>, String, i64) = transaction
             .query_row(
@@ -10185,6 +10196,14 @@ mod tests {
                 .unwrap(),
             (9123, "birth-opencode".to_owned())
         );
+        assert!(matches!(
+            state.record_d17_provider_exec_proven_current(
+                &provisional,
+                observed,
+                &OnboardingProviderExecEvidence::new(9123, "birth-opencode".to_owned()).unwrap(),
+            ),
+            Err(StateError::OnboardingOperationUnavailable)
+        ));
         let recovery = state
             .record_d17_recovery_required_current(&provisional, &request, observed)
             .unwrap();

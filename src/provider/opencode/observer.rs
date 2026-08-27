@@ -209,14 +209,14 @@ impl ObserverAuthority for HostRegistry {
         &mut self,
         runtime_id: RuntimeId,
     ) -> Result<Option<RuntimeRecord>, StateError> {
-        HostRegistry::runtime_by_id(self, runtime_id)
+        self.observer_runtime_by_id(runtime_id)
     }
 
     fn opencode_runtime_handle(
         &mut self,
         runtime_id: RuntimeId,
     ) -> Result<Option<OpenCodeRuntimeHandle>, StateError> {
-        HostRegistry::opencode_runtime_handle(self, runtime_id)
+        self.observer_opencode_runtime_handle(runtime_id)
     }
 
     fn mark_ready(
@@ -227,8 +227,7 @@ impl ObserverAuthority for HostRegistry {
         observer_pid: u32,
         observer_birth: &str,
     ) -> Result<(), StateError> {
-        HostRegistry::mark_opencode_observer_ready(
-            self,
+        self.mark_opencode_observer_ready(
             runtime_id,
             generation,
             expected_revision,
@@ -246,8 +245,7 @@ impl ObserverAuthority for HostRegistry {
         observer_pid: u32,
         observer_birth: &str,
     ) -> Result<(), StateError> {
-        HostRegistry::mark_opencode_observer_unknown_exact(
-            self,
+        self.mark_opencode_observer_unknown_exact(
             runtime_id,
             generation,
             expected_revision,
@@ -261,7 +259,7 @@ impl ObserverAuthority for HostRegistry {
         runtime_id: RuntimeId,
         observation: &OpenCodeLifecycleObservation,
     ) -> Result<(), StateError> {
-        HostRegistry::apply_opencode_lifecycle_observation(self, runtime_id, observation)
+        self.apply_opencode_lifecycle_observation(runtime_id, observation)
             .map(|_| ())
     }
 }

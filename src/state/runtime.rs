@@ -333,6 +333,15 @@ impl HostRegistry {
         Ok(runtime)
     }
 
+    /// D17 observer-only spelling for the already-open schema-14 registry.
+    /// It avoids granting the observer any root-opening authority.
+    pub(crate) fn observer_runtime_by_id(
+        &self,
+        runtime_id: RuntimeId,
+    ) -> Result<Option<RuntimeRecord>, StateError> {
+        self.runtime_by_id(runtime_id)
+    }
+
     /// Returns only current, process-fingerprinted private Runtimes that may
     /// corroborate a passive Codex hook. This is host-local evidence; callers
     /// must still probe the exact private tmux pane and require one match.
@@ -561,6 +570,15 @@ impl HostRegistry {
         let handle = load_opencode_handle(&transaction, runtime_id)?;
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(handle)
+    }
+
+    /// D17 observer-only spelling for a handle read from an already-open
+    /// schema-14 registry.
+    pub(crate) fn observer_opencode_runtime_handle(
+        &self,
+        runtime_id: RuntimeId,
+    ) -> Result<Option<OpenCodeRuntimeHandle>, StateError> {
+        self.opencode_runtime_handle(runtime_id)
     }
 
     /// Binds an exact `OpenCode` session before native launch.  A pre-existing

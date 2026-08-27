@@ -1017,6 +1017,20 @@ impl D16State {
         self.project_projections()
     }
 
+    /// Returns the retained Project/Location display projection for the D17
+    /// Workstreams surface. Schema 14 removed the Project-browser table, so
+    /// this explicit mode is the only projection path that may read Projects
+    /// after the atomic cutover.
+    #[allow(
+        dead_code,
+        reason = "the D17 Workstreams projection remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn d17_project_projections(&self) -> Result<Vec<ProjectProjection>, StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        validate_schema14(&self.connection)?;
+        load_project_projections(&self.connection)
+    }
+
     /// Reads all schema-13 Projects in deterministic opaque-ID order and
     /// validates every persisted label source before returning any row.
     pub fn projects(&self) -> Result<Vec<ProjectRecord>, StateError> {
@@ -9034,6 +9048,7 @@ mod tests {
         let mut d17 = open_d17_current_only(&root).unwrap();
         assert_eq!(d17.mode(), D16OpenMode::D17Current);
         assert_eq!(d17.schema_version().unwrap(), D17_HOST_SCHEMA_VERSION);
+        assert!(d17.d17_project_projections().unwrap().is_empty());
         let provisional = d17.acquire_d17_provisional_lease().unwrap();
         assert_eq!(provisional.lease_generation(), 1);
         provisional.revalidate_for_mutation(&state_path).unwrap();
@@ -9083,6 +9098,41 @@ mod tests {
         );
         assert_eq!(authoritative_snapshot(&state.connection), before);
         assert_eq!(fs::read(&provisional).unwrap(), marker);
+    }
+
+    #[test]
+    fn schema14_d17_projection_keeps_retained_project_display() {
+        let temporary = private_root();
+        let state_path = temporary.path().join("state");
+        let checkout = temporary.path().join("checkout");
+        fs::create_dir(&checkout).unwrap();
+        let mut state = fresh_create(&state_path, &SequenceIds::default()).unwrap();
+        state
+            .register_project_location_with_initial_workstream(
+                &checkout,
+                "checkout",
+                None,
+                None,
+                ProviderKind::Codex,
+                &SequenceIds::default(),
+            )
+            .unwrap();
+        drop(state);
+
+        let root = StateRoot::select(&state_path);
+        let lease = transition_lease(&state_path);
+        let mut state = open_cutover_transition(&root, &lease).unwrap();
+        state.migrate_schema13_to14(&lease).unwrap();
+        drop(state);
+        drop(lease);
+        fs::remove_file(state_path.join(TRANSITION_LOCK_FILE)).unwrap();
+
+        let state = open_d17_current_only(&root).unwrap();
+        let projects = state.d17_project_projections().unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].display_name, "checkout");
+        assert_eq!(projects[0].locations.len(), 1);
+        assert_eq!(projects[0].locations[0].display_name, "checkout");
     }
 
     #[test]

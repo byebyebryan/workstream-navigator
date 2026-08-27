@@ -29,11 +29,11 @@ pub use d16::{
     observer_degraded_marker_path, observer_handover_activation_ack_path,
     observer_handover_activation_ack_temp_path, observer_handover_journal_path,
     observer_handover_journal_temp_path, open_confirmed_cutover, open_current_only,
-    open_cutover_transition, open_observer_transition, read_observer_degraded_marker,
-    read_observer_handover_activation_ack, read_observer_handover_journal,
-    recover_observer_handover_journal, run_observer_write_with_degraded_marker,
-    write_observer_degraded_marker, write_observer_handover_activation_ack,
-    write_observer_handover_journal,
+    open_cutover_transition, open_d17_current_only, open_observer_transition,
+    read_observer_degraded_marker, read_observer_handover_activation_ack,
+    read_observer_handover_journal, recover_observer_handover_journal,
+    run_observer_write_with_degraded_marker, write_observer_degraded_marker,
+    write_observer_handover_activation_ack, write_observer_handover_journal,
 };
 pub use models::MAX_PROJECT_BROWSER_ENTRIES;
 pub use models::{

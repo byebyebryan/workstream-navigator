@@ -11,8 +11,9 @@ and dormant D17.3 grammar, command-classification, onboarding-phase,
 capability-journal, atomic reservation, and ownership-consumption foundations
 are in progress; no D17 user-facing behavior or provider launch path is
 implemented yet. The explicit schema-13-to-14 migration, stable provisional
-lease, marker storage, lease-bound reservation, and ownership-consumption seams
-are dormant, and no product path can invoke any of them.
+lease, schema-14-only open, marker storage, lease-bound reservation, and
+ownership-consumption seams are dormant, and no product path can invoke any of
+them.
 
 The D0-D15 entries below preserve truthful historical implementation and
 acceptance evidence. D3 and later SSH, remote, cross-host, and combined
@@ -4276,8 +4277,8 @@ marker storage, and dormant D17.3 grammar, command-classification,
 onboarding-phase, capability-journal, reservation, and ownership-consumption
 foundations have begun. No D17 user-facing behavior or provider launch path is
 implemented. The explicit schema-13-to-14 migration, stable provisional-lease,
-and marker storage foundations remain dormant, and no D17 acceptance is
-complete.
+schema-14-only open, and marker storage foundations remain dormant, and no D17
+acceptance is complete.
 
 ### Goal
 

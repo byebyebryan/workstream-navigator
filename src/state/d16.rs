@@ -161,6 +161,9 @@ pub const fn exact_schema_12_fixture_sql() -> &'static str {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum D16OpenMode {
     CurrentOnly,
+    /// Schema-14 is open for D17-specific, lease-bound onboarding only. It
+    /// deliberately cannot convert into the schema-13 `HostRegistry` surface.
+    D17Current,
     ObserverTransition,
     CutoverTransition,
     FreshCreate,
@@ -791,6 +794,7 @@ impl D16State {
     pub fn into_host_registry(self) -> Result<HostRegistry, StateError> {
         if self.mode == D16OpenMode::ObserverTransition
             || self.mode == D16OpenMode::CutoverTransition
+            || self.mode == D16OpenMode::D17Current
         {
             return Err(StateError::StateRecoveryRequired(
                 StateRecoveryReason::UnsupportedLegacySchema,
@@ -2749,6 +2753,54 @@ pub fn open_current_only(root: &StateRoot) -> Result<D16State, StateError> {
     })
 }
 
+/// Opens a schema-14 root for the dormant D17-specific state boundary.
+///
+/// This is intentionally not a compatibility path for the active D16
+/// `HostRegistry`: the removed browser table and D17 onboarding columns mean
+/// the regular D16 navigator must not be pointed at it. The future D17
+/// application boundary acquires and revalidates `provisional.lock` before
+/// every marker or onboarding mutation.
+pub fn open_d17_current_only(root: &StateRoot) -> Result<D16State, StateError> {
+    validate_state_root_directory(root.base())?;
+    let path = root.host_database_path();
+    if !validate_d16_host_database_path(&path)? {
+        if exact_artifact_metadata(&root.base().join(PROVISIONAL_LOCK_FILE))?.is_some() {
+            return Err(StateError::StateRecoveryRequired(
+                StateRecoveryReason::ProvisionalLockPresent,
+            ));
+        }
+        reject_d17_current_only_artifacts(root.base())?;
+        return Err(StateError::FreshStateRequired);
+    }
+    reject_d17_current_only_artifacts(root.base())?;
+    let connection = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .map_err(StateError::Sqlite)?;
+    configure_d16_connection(&connection)?;
+    match schema_version(&connection)? {
+        D17_HOST_SCHEMA_VERSION => validate_schema14(&connection)?,
+        D16_HOST_SCHEMA_VERSION | D16_SCHEMA_12_VERSION => return Err(StateError::CutoverRequired),
+        0..=11 => {
+            return Err(StateError::HostStateResetRequired(schema_version(
+                &connection,
+            )?));
+        }
+        value if value > D17_HOST_SCHEMA_VERSION => {
+            return Err(StateError::UnsupportedFutureHostSchema(value));
+        }
+        _ => return Err(StateError::MalformedHostSchema),
+    }
+    Ok(D16State {
+        connection,
+        root: root.base().to_path_buf(),
+        mode: D16OpenMode::D17Current,
+    })
+}
+
 /// Opens exactly schema 12 or 13 for the provider observer bridge.  No client
 /// path is inspected and no migration or host identity creation occurs.
 pub fn open_observer_transition(root: &StateRoot) -> Result<D16State, StateError> {
@@ -3630,6 +3682,36 @@ fn reject_current_only_artifacts(
                     return Err(StateError::CutoverRequired);
                 }
                 StateRecoveryReason::LegacyClientArtifact
+            } else if name == TRANSITION_LOCK_FILE {
+                StateRecoveryReason::TransitionLeasePresent
+            } else {
+                StateRecoveryReason::ObserverJournalPresent
+            };
+            return Err(StateError::StateRecoveryRequired(reason));
+        }
+    }
+    Ok(())
+}
+
+/// D17 recognizes the stable provisional lock as schema-14 operational state,
+/// but otherwise retains D16's strict refusal of unfinished cutover, legacy
+/// client, and observer-handover artifacts. The lock itself is revalidated by
+/// the retained `ProvisionalLease` before a D17 mutation; merely opening state
+/// never adopts, creates, or repairs it.
+fn reject_d17_current_only_artifacts(root: &Path) -> Result<(), StateError> {
+    for name in [
+        TRANSITION_LOCK_FILE,
+        LEGACY_CLIENT_DATABASE_FILE,
+        LEGACY_CLIENT_DATABASE_WAL_FILE,
+        LEGACY_CLIENT_DATABASE_SHM_FILE,
+        OBSERVER_HANDOVER_JOURNAL_FILE,
+        OBSERVER_HANDOVER_JOURNAL_TEMP_FILE,
+        OBSERVER_HANDOVER_ACTIVATION_ACK_FILE,
+        OBSERVER_HANDOVER_ACTIVATION_ACK_TEMP_FILE,
+    ] {
+        if exact_artifact_metadata(&root.join(name))?.is_some() {
+            let reason = if is_exact_legacy_client_artifact(name) {
+                return Err(StateError::CutoverRequired);
             } else if name == TRANSITION_LOCK_FILE {
                 StateRecoveryReason::TransitionLeasePresent
             } else {
@@ -7543,6 +7625,15 @@ mod tests {
                 D17_HOST_SCHEMA_VERSION
             ))
         ));
+        let d17 = open_d17_current_only(&root).unwrap();
+        assert_eq!(d17.mode(), D16OpenMode::D17Current);
+        assert_eq!(d17.schema_version().unwrap(), D17_HOST_SCHEMA_VERSION);
+        assert!(matches!(
+            d17.into_host_registry(),
+            Err(StateError::StateRecoveryRequired(
+                StateRecoveryReason::UnsupportedLegacySchema
+            ))
+        ));
     }
 
     #[test]
@@ -7571,6 +7662,24 @@ mod tests {
         );
         assert_eq!(authoritative_snapshot(&state.connection), before);
         assert_eq!(fs::read(&provisional).unwrap(), marker);
+    }
+
+    #[test]
+    fn d17_open_refuses_a_provisional_lock_without_a_schema14_database() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        fs::create_dir(&state_path).unwrap();
+        set_private_directory_permissions(&state_path).unwrap();
+        let lock = state_path.join(PROVISIONAL_LOCK_FILE);
+        fs::write(&lock, b"unexpected").unwrap();
+        set_private_file_permissions(&lock).unwrap();
+
+        assert!(matches!(
+            open_d17_current_only(&StateRoot::select(&state_path)),
+            Err(StateError::StateRecoveryRequired(
+                StateRecoveryReason::ProvisionalLockPresent
+            ))
+        ));
     }
 
     #[test]

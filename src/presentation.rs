@@ -1,7 +1,7 @@
 //! Disposable private tmux ownership for the local navigator presentation.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs::{self, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -17,10 +17,12 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    domain::{Revision, WorkstreamId},
+    domain::{OnboardingPhase, Revision, WorkstreamId},
     private_tmux::{TERMINAL_CAPABILITY_CONFIG, copy_mode_scroll_config},
     process::{BoundedProcessError, output_bounded},
-    state::TransitionLease,
+    provisional::{PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, read_marker},
+    runtime::RuntimePaths,
+    state::{TransitionLease, d16::D17OnboardingOperationInventory},
 };
 
 const PRESENTATION_DIRECTORY: &str = "presentation";
@@ -46,6 +48,7 @@ const ATTACHMENT_STATUS_FILE: &str = "attachment.json";
 const PRESENTATION_OWNERSHIP_MARKER_FILE: &str = "ownership.json";
 const MAX_PRESENTATION_OWNERSHIP_MARKER_BYTES: usize = 4 * 1024;
 const D17_PRESENTATION_CONTEXT_VERSION: u8 = 1;
+const MAX_D17_PROVISIONAL_INVENTORY_ENTRIES: usize = 128;
 const LEGACY_RETIREMENT_MARKER_FILE: &str = "d16-retirement.json";
 const ROLE_OPTION: &str = "@wsnav_role";
 const WORKSTREAM_OPTION: &str = "@wsnav_workstream_id";
@@ -232,6 +235,201 @@ impl D17PresentationContext {
     pub(crate) fn seed_cwd(&self) -> &Path {
         &self.seed_cwd
     }
+}
+
+/// Result of the read-only D17 provisional-slot classifier. The caller must
+/// hold the stable provisional lease before acting on this result; the
+/// classifier itself never creates, adopts, removes, attaches, or signals a
+/// presentation or Runtime artifact.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) enum D17ProvisionalInventory {
+    Vacant,
+    Occupied,
+}
+
+/// Bounded refusal from D17's cross-presentation provisional-slot inventory.
+/// No path, marker body, operation identifier, shell evidence, or provider
+/// content crosses this boundary.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) enum D17ProvisionalInventoryError {
+    #[error("D17 provisional inventory is unavailable")]
+    Unavailable,
+    #[error("D17 provisional inventory is ambiguous")]
+    Ambiguous,
+}
+
+/// Cross-checks all D17 presentation markers against exact durable onboarding
+/// journal claims and registered Runtime paths. Any malformed, changed,
+/// markerless, or unregistered runtime-shaped evidence is a closed refusal;
+/// the function never makes a new candidate to evade ambiguity.
+///
+/// The registered paths and operation inventory must come from the same
+/// schema-14 passive read while the caller retains the stable provisional
+/// lease. They are intentionally private classifier inputs, not Navigator
+/// projection data.
+#[allow(
+    dead_code,
+    clippy::too_many_lines,
+    reason = "the singleton proof intentionally keeps every marker, journal, and runtime-path cross-check in one fail-closed classifier"
+)]
+pub(crate) fn classify_d17_provisional_inventory(
+    state_root: &Path,
+    registered_runtime_paths: &[RuntimePaths],
+    operations: &[D17OnboardingOperationInventory],
+) -> Result<D17ProvisionalInventory, D17ProvisionalInventoryError> {
+    if registered_runtime_paths.len() > MAX_D17_PROVISIONAL_INVENTORY_ENTRIES
+        || operations.len() > MAX_D17_PROVISIONAL_INVENTORY_ENTRIES
+    {
+        return Err(D17ProvisionalInventoryError::Ambiguous);
+    }
+    let state_root = canonical_d17_inventory_root(state_root)?;
+    let mut operations_by_id = BTreeMap::new();
+    for operation in operations {
+        if operations_by_id
+            .insert(operation.operation_id.as_uuid(), operation)
+            .is_some()
+        {
+            return Err(D17ProvisionalInventoryError::Ambiguous);
+        }
+    }
+
+    let mut matched_operations = BTreeSet::new();
+    let mut allowed_runtime_directories = registered_runtime_paths
+        .iter()
+        .map(|paths| paths.directory.clone())
+        .collect::<BTreeSet<_>>();
+    let mut occupied = false;
+    let presentation_root = state_root.join(PRESENTATION_DIRECTORY);
+    match fs::symlink_metadata(&presentation_root) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(D17ProvisionalInventoryError::Unavailable),
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                || !metadata.is_dir()
+                || !is_private_owner_directory(&metadata) =>
+        {
+            return Err(D17ProvisionalInventoryError::Ambiguous);
+        }
+        Ok(_) => {
+            let entries = fs::read_dir(&presentation_root)
+                .map_err(|_| D17ProvisionalInventoryError::Unavailable)?;
+            for (count, entry) in entries.enumerate() {
+                if count >= MAX_D17_PROVISIONAL_INVENTORY_ENTRIES {
+                    return Err(D17ProvisionalInventoryError::Ambiguous);
+                }
+                let entry = entry.map_err(|_| D17ProvisionalInventoryError::Unavailable)?;
+                let directory = entry.path();
+                let metadata = fs::symlink_metadata(&directory)
+                    .map_err(|_| D17ProvisionalInventoryError::Unavailable)?;
+                if metadata.file_type().is_symlink()
+                    || !metadata.is_dir()
+                    || !is_private_owner_directory(&metadata)
+                    || presentation_session_name(&directory).is_none()
+                {
+                    return Err(D17ProvisionalInventoryError::Ambiguous);
+                }
+                let context = Presentation::d17_context_from_directory(&state_root, &directory)
+                    .map_err(|_| D17ProvisionalInventoryError::Ambiguous)?;
+                let marker_path = directory.join(PROVISIONAL_MARKER_FILE);
+                let slot = match fs::symlink_metadata(&marker_path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(_) => return Err(D17ProvisionalInventoryError::Unavailable),
+                    Ok(_) => Some(
+                        read_marker(&state_root, &directory)
+                            .map_err(|_| D17ProvisionalInventoryError::Ambiguous)?,
+                    ),
+                };
+                let Some(slot) = slot else {
+                    continue;
+                };
+                if slot.presentation_id() != context.presentation_id()
+                    || slot.presentation_revision() != context.presentation_revision()
+                {
+                    return Err(D17ProvisionalInventoryError::Ambiguous);
+                }
+                match slot.phase() {
+                    ProvisionalPhase::Materializing => {
+                        if operations
+                            .iter()
+                            .any(|operation| operation.runtime_id == slot.candidate_runtime_id())
+                        {
+                            return Err(D17ProvisionalInventoryError::Ambiguous);
+                        }
+                        occupied = true;
+                        allowed_runtime_directories.insert(slot.runtime_paths().directory.clone());
+                    }
+                    ProvisionalPhase::Materialized => {
+                        match_materialized_slot_operation(
+                            &slot,
+                            operations,
+                            &mut matched_operations,
+                        )?;
+                        occupied = true;
+                        allowed_runtime_directories.insert(slot.runtime_paths().directory.clone());
+                    }
+                    ProvisionalPhase::HandoffIssued => {
+                        match_slot_operation(
+                            &slot,
+                            &operations_by_id,
+                            &mut matched_operations,
+                            &[OnboardingPhase::CapabilityIssued],
+                        )?;
+                        occupied = true;
+                        allowed_runtime_directories.insert(slot.runtime_paths().directory.clone());
+                    }
+                    ProvisionalPhase::RuntimeOwnedLaunching => {
+                        match_slot_operation(
+                            &slot,
+                            &operations_by_id,
+                            &mut matched_operations,
+                            &[
+                                OnboardingPhase::RuntimeOwnedLaunching,
+                                OnboardingPhase::ProviderPreparation,
+                                OnboardingPhase::ProviderExternalEffectStarted,
+                                OnboardingPhase::ProviderExecStarted,
+                                OnboardingPhase::KnownAbsentExec,
+                                OnboardingPhase::RecoveryRequired,
+                                OnboardingPhase::ProviderExecProven,
+                            ],
+                        )?;
+                        require_registered_runtime_path(&slot, registered_runtime_paths)?;
+                    }
+                    ProvisionalPhase::ProviderExecProven => {
+                        match_slot_operation(
+                            &slot,
+                            &operations_by_id,
+                            &mut matched_operations,
+                            &[OnboardingPhase::ProviderExecProven],
+                        )?;
+                        require_registered_runtime_path(&slot, registered_runtime_paths)?;
+                    }
+                    ProvisionalPhase::Cancelled => {
+                        return Err(D17ProvisionalInventoryError::Ambiguous);
+                    }
+                }
+            }
+        }
+    }
+    if operations.iter().any(|operation| {
+        operation.phase != OnboardingPhase::RolledBack
+            && !matched_operations.contains(&operation.operation_id.as_uuid())
+    }) {
+        return Err(D17ProvisionalInventoryError::Ambiguous);
+    }
+    classify_d17_runtime_namespace(&state_root, &allowed_runtime_directories)?;
+    Ok(if occupied {
+        D17ProvisionalInventory::Occupied
+    } else {
+        D17ProvisionalInventory::Vacant
+    })
 }
 
 /// Schema-12 attachment metadata retained only for private legacy proof.
@@ -5201,6 +5399,116 @@ fn validate_legacy_host_alias(host_alias: &str) -> Result<(), PresentationError>
     Ok(())
 }
 
+fn canonical_d17_inventory_root(
+    state_root: &Path,
+) -> Result<PathBuf, D17ProvisionalInventoryError> {
+    let metadata =
+        fs::symlink_metadata(state_root).map_err(|_| D17ProvisionalInventoryError::Unavailable)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || !is_private_owner_directory(&metadata)
+    {
+        return Err(D17ProvisionalInventoryError::Ambiguous);
+    }
+    let state_root =
+        fs::canonicalize(state_root).map_err(|_| D17ProvisionalInventoryError::Unavailable)?;
+    let metadata =
+        fs::symlink_metadata(&state_root).map_err(|_| D17ProvisionalInventoryError::Unavailable)?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || !is_private_owner_directory(&metadata)
+    {
+        return Err(D17ProvisionalInventoryError::Ambiguous);
+    }
+    Ok(state_root)
+}
+
+fn match_materialized_slot_operation(
+    slot: &ProvisionalSlot,
+    operations: &[D17OnboardingOperationInventory],
+    matched_operations: &mut BTreeSet<uuid::Uuid>,
+) -> Result<(), D17ProvisionalInventoryError> {
+    let matches = operations
+        .iter()
+        .filter(|operation| operation.runtime_id == slot.candidate_runtime_id())
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(()),
+        [operation] if operation.phase == OnboardingPhase::CapabilityIssued => {
+            matched_operations.insert(operation.operation_id.as_uuid());
+            Ok(())
+        }
+        _ => Err(D17ProvisionalInventoryError::Ambiguous),
+    }
+}
+
+fn match_slot_operation(
+    slot: &ProvisionalSlot,
+    operations: &BTreeMap<uuid::Uuid, &D17OnboardingOperationInventory>,
+    matched_operations: &mut BTreeSet<uuid::Uuid>,
+    allowed_phases: &[OnboardingPhase],
+) -> Result<(), D17ProvisionalInventoryError> {
+    let request = slot
+        .handoff_request()
+        .ok_or(D17ProvisionalInventoryError::Ambiguous)?;
+    let operation = operations
+        .get(&request)
+        .ok_or(D17ProvisionalInventoryError::Ambiguous)?;
+    if operation.runtime_id != slot.candidate_runtime_id()
+        || !allowed_phases.contains(&operation.phase)
+        || !matched_operations.insert(request)
+    {
+        return Err(D17ProvisionalInventoryError::Ambiguous);
+    }
+    Ok(())
+}
+
+fn require_registered_runtime_path(
+    slot: &ProvisionalSlot,
+    registered_runtime_paths: &[RuntimePaths],
+) -> Result<(), D17ProvisionalInventoryError> {
+    registered_runtime_paths
+        .iter()
+        .any(|paths| paths == slot.runtime_paths())
+        .then_some(())
+        .ok_or(D17ProvisionalInventoryError::Ambiguous)
+}
+
+fn classify_d17_runtime_namespace(
+    state_root: &Path,
+    allowed_runtime_directories: &BTreeSet<PathBuf>,
+) -> Result<(), D17ProvisionalInventoryError> {
+    let runtime_root = state_root.join("run");
+    let metadata = match fs::symlink_metadata(&runtime_root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err(D17ProvisionalInventoryError::Unavailable),
+    };
+    if metadata.file_type().is_symlink()
+        || !metadata.is_dir()
+        || !is_private_owner_directory(&metadata)
+    {
+        return Err(D17ProvisionalInventoryError::Ambiguous);
+    }
+    let entries =
+        fs::read_dir(&runtime_root).map_err(|_| D17ProvisionalInventoryError::Unavailable)?;
+    for (count, entry) in entries.enumerate() {
+        if count >= MAX_D17_PROVISIONAL_INVENTORY_ENTRIES {
+            return Err(D17ProvisionalInventoryError::Ambiguous);
+        }
+        let entry = entry.map_err(|_| D17ProvisionalInventoryError::Unavailable)?;
+        let name = entry.file_name();
+        if name
+            .to_str()
+            .is_some_and(|name| name.starts_with("runtime-"))
+            && !allowed_runtime_directories.contains(&entry.path())
+        {
+            return Err(D17ProvisionalInventoryError::Ambiguous);
+        }
+    }
+    Ok(())
+}
+
 fn canonical_d17_seed_cwd(seed_cwd: &Path) -> Result<PathBuf, PresentationError> {
     let seed_cwd = fs::canonicalize(seed_cwd).map_err(|_| PresentationError::D17SeedUnavailable)?;
     if !seed_cwd.is_dir() {
@@ -6276,6 +6584,71 @@ mod tests {
             Presentation::d17_context_from_directory(temporary.path(), &seed),
             Err(PresentationError::D17ContextUnavailable)
         ));
+    }
+
+    #[test]
+    fn d17_provisional_inventory_allows_one_marker_but_refuses_stale_journal_or_runtime_artifact() {
+        let temporary = tempfile::tempdir().unwrap();
+        set_mode(temporary.path(), 0o700).unwrap();
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        create_paths(&paths).unwrap();
+        let presentation = Presentation {
+            paths: paths.clone(),
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        let presentation_id = uuid::Uuid::from_u128(76);
+        let context = presentation
+            .initialize_d17_context(presentation_id, &seed)
+            .unwrap();
+        assert_eq!(
+            Presentation::d17_context_from_directory(temporary.path(), &paths.directory).unwrap(),
+            context
+        );
+
+        assert_eq!(
+            classify_d17_provisional_inventory(temporary.path(), &[], &[]).unwrap(),
+            D17ProvisionalInventory::Vacant
+        );
+        let candidate_runtime_id = crate::domain::RuntimeId::from(uuid::Uuid::from_u128(77));
+        let slot = crate::provisional::ProvisionalSlot::materializing(
+            temporary.path(),
+            presentation_id,
+            context.presentation_revision(),
+            1,
+            candidate_runtime_id,
+            crate::provisional::SlotGeneration::new(uuid::Uuid::from_u128(78)),
+            &seed,
+        )
+        .unwrap();
+        crate::provisional::write_new_marker(temporary.path(), &paths.directory, &slot).unwrap();
+        assert_eq!(
+            classify_d17_provisional_inventory(temporary.path(), &[], &[]).unwrap(),
+            D17ProvisionalInventory::Occupied
+        );
+        let stale = D17OnboardingOperationInventory {
+            operation_id: crate::domain::OperationId::from(uuid::Uuid::from_u128(79)),
+            workstream_id: WorkstreamId::from(uuid::Uuid::from_u128(80)),
+            runtime_id: candidate_runtime_id,
+            phase: OnboardingPhase::CapabilityIssued,
+        };
+        assert_eq!(
+            classify_d17_provisional_inventory(temporary.path(), &[], &[stale]),
+            Err(D17ProvisionalInventoryError::Ambiguous)
+        );
+
+        let other = tempfile::tempdir().unwrap();
+        set_mode(other.path(), 0o700).unwrap();
+        let run = other.path().join("run");
+        fs::create_dir(&run).unwrap();
+        set_mode(&run, 0o700).unwrap();
+        fs::create_dir(run.join("runtime-foreign")).unwrap();
+        assert_eq!(
+            classify_d17_provisional_inventory(other.path(), &[], &[]),
+            Err(D17ProvisionalInventoryError::Ambiguous)
+        );
     }
 
     #[test]

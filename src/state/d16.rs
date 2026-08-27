@@ -739,6 +739,22 @@ pub(crate) struct D17OnboardingWorkstreamProjection {
     pub(crate) visibility: D17OnboardingVisibility,
 }
 
+/// One exact D17 onboarding journal relationship retained only for the
+/// provisional-slot singleton classifier. It is never a navigator snapshot:
+/// operation identity, paths, shell evidence, and capability metadata remain
+/// outside the display surface.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) struct D17OnboardingOperationInventory {
+    pub(crate) operation_id: OperationId,
+    pub(crate) workstream_id: WorkstreamId,
+    pub(crate) runtime_id: RuntimeId,
+    pub(crate) phase: OnboardingPhase,
+}
+
 /// Bounded file identity captured from the exact native provider executable
 /// immediately before the helper transfers into provider preparation. It is
 /// durable proof input only: the executable path and command line are never
@@ -1072,12 +1088,53 @@ impl D16State {
     pub(crate) fn d17_onboarding_workstream_projections(
         &self,
     ) -> Result<Vec<D17OnboardingWorkstreamProjection>, StateError> {
+        let operations = self.d17_onboarding_operation_inventory()?;
+        let mut projections = BTreeMap::new();
+        for operation in operations {
+            let visibility = match operation.phase {
+                OnboardingPhase::CapabilityIssued => D17OnboardingVisibility::Reserved,
+                OnboardingPhase::RuntimeOwnedLaunching
+                | OnboardingPhase::ProviderPreparation
+                | OnboardingPhase::ProviderExternalEffectStarted
+                | OnboardingPhase::ProviderExecStarted
+                | OnboardingPhase::KnownAbsentExec => D17OnboardingVisibility::ActionFenced,
+                OnboardingPhase::RecoveryRequired => D17OnboardingVisibility::RecoveryRequired,
+                OnboardingPhase::ProviderExecProven | OnboardingPhase::RolledBack => continue,
+                OnboardingPhase::Prepared => return Err(StateError::MalformedHostSchema),
+            };
+            if projections
+                .insert(
+                    operation.workstream_id,
+                    D17OnboardingWorkstreamProjection {
+                        workstream_id: operation.workstream_id,
+                        runtime_id: operation.runtime_id,
+                        visibility,
+                    },
+                )
+                .is_some()
+            {
+                return Err(StateError::MalformedHostSchema);
+            }
+        }
+        Ok(projections.into_values().collect())
+    }
+
+    /// Returns the bounded exact D17 journal inventory required to reconcile
+    /// a presentation-private provisional marker. It validates each durable
+    /// operation against the Runtime it claims before returning any entry.
+    #[allow(
+        dead_code,
+        reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn d17_onboarding_operation_inventory(
+        &self,
+    ) -> Result<Vec<D17OnboardingOperationInventory>, StateError> {
         ensure_d17_current_mode(self.mode)?;
         validate_schema14(&self.connection)?;
         let mut statement = self
             .connection
             .prepare(
-                "SELECT phase, expected_revisions_json
+                "SELECT operation_id, phase, expected_revisions_json
                  FROM compound_operations
                  WHERE kind = 'onboard'
                  ORDER BY operation_id
@@ -1086,7 +1143,11 @@ impl D16State {
             .map_err(StateError::Sqlite)?;
         let operations = statement
             .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })
             .map_err(StateError::Sqlite)?
             .collect::<Result<Vec<_>, _>>()
@@ -1096,8 +1157,11 @@ impl D16State {
         }
 
         let mut seen_workstreams = BTreeSet::new();
-        let mut projections = BTreeMap::new();
-        for (phase, encoded_intent) in operations {
+        let mut inventory = Vec::with_capacity(operations.len());
+        for (operation_id, phase, encoded_intent) in operations {
+            let operation_id = Uuid::parse_str(&operation_id)
+                .map(OperationId::from)
+                .map_err(StateError::InvalidPersistedUuid)?;
             let phase =
                 operation_phase_from_text(&phase).map_err(|_| StateError::MalformedHostSchema)?;
             let phase = OnboardingPhase::from_operation_phase(phase)
@@ -1122,6 +1186,12 @@ impl D16State {
                 if runtime.is_some() {
                     return Err(StateError::MalformedHostSchema);
                 }
+                inventory.push(D17OnboardingOperationInventory {
+                    operation_id,
+                    workstream_id: intent.workstream_id,
+                    runtime_id: intent.candidate_runtime_id,
+                    phase,
+                });
                 continue;
             }
             let Some((workstream_id, provider)) = runtime else {
@@ -1132,35 +1202,55 @@ impl D16State {
             {
                 return Err(StateError::MalformedHostSchema);
             }
-
-            let visibility = match phase {
-                OnboardingPhase::CapabilityIssued => D17OnboardingVisibility::Reserved,
-                OnboardingPhase::RuntimeOwnedLaunching
-                | OnboardingPhase::ProviderPreparation
-                | OnboardingPhase::ProviderExternalEffectStarted
-                | OnboardingPhase::ProviderExecStarted
-                | OnboardingPhase::KnownAbsentExec => D17OnboardingVisibility::ActionFenced,
-                OnboardingPhase::RecoveryRequired => D17OnboardingVisibility::RecoveryRequired,
-                OnboardingPhase::ProviderExecProven => continue,
-                OnboardingPhase::Prepared | OnboardingPhase::RolledBack => {
-                    return Err(StateError::MalformedHostSchema);
-                }
-            };
-            if projections
-                .insert(
-                    intent.workstream_id,
-                    D17OnboardingWorkstreamProjection {
-                        workstream_id: intent.workstream_id,
-                        runtime_id: intent.candidate_runtime_id,
-                        visibility,
-                    },
-                )
-                .is_some()
-            {
-                return Err(StateError::MalformedHostSchema);
-            }
+            inventory.push(D17OnboardingOperationInventory {
+                operation_id,
+                workstream_id: intent.workstream_id,
+                runtime_id: intent.candidate_runtime_id,
+                phase,
+            });
         }
-        Ok(projections.into_values().collect())
+        Ok(inventory)
+    }
+
+    /// Lists the exact private path set for every retained Runtime. This is
+    /// classifier input only; neither paths nor session names enter a D17
+    /// navigator snapshot or provider command.
+    #[allow(
+        dead_code,
+        reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn d17_registered_runtime_paths(&self) -> Result<Vec<RuntimePaths>, StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        validate_schema14(&self.connection)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT runtime_id, tmux_session
+                 FROM runtimes
+                 ORDER BY runtime_id
+                 LIMIT ?1",
+            )
+            .map_err(StateError::Sqlite)?;
+        let runtimes = statement
+            .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(StateError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::Sqlite)?;
+        if runtimes.len() > MAX_NAVIGATOR_WORKSTREAMS {
+            return Err(StateError::NavigatorSnapshotTooLarge);
+        }
+        runtimes
+            .into_iter()
+            .map(|(runtime_id, session_name)| {
+                let runtime_id = Uuid::parse_str(&runtime_id)
+                    .map(RuntimeId::from)
+                    .map_err(StateError::InvalidPersistedUuid)?;
+                RuntimePaths::for_record(&self.root, runtime_id, &session_name)
+                    .map_err(|_| StateError::MalformedHostSchema)
+            })
+            .collect()
     }
 
     /// Reads all schema-13 Projects in deterministic opaque-ID order and

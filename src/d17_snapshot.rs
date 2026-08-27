@@ -227,6 +227,8 @@ mod tests {
     use crate::{
         domain::{ProviderKind, RandomIdGenerator, Revision, RuntimeId},
         onboarding::{ShellCommandDecision, classify_shell_command},
+        presentation::{D17ProvisionalInventory, D17ProvisionalInventoryError},
+        provisional::{HostInventoryError, classify_host_inventory},
         repository::RepositoryRegistration,
         runtime::RuntimePaths,
         state::{
@@ -286,6 +288,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the fixture proves the complete reserved-to-owned passive snapshot boundary"
+    )]
     fn schema14_snapshot_hides_reserved_onboarding_then_fences_runtime_owned_card() {
         let temporary = tempfile::tempdir().unwrap();
         let state_path = temporary.path().join("state");
@@ -342,6 +348,10 @@ mod tests {
         };
         let mut state = open_d17_current_only(&root).unwrap();
         let provisional = state.acquire_d17_provisional_lease().unwrap();
+        assert_eq!(
+            classify_host_inventory(&state, &provisional).unwrap(),
+            D17ProvisionalInventory::Vacant
+        );
         let issued = match state
             .prepare_d17_onboarding_current(&provisional, &request, &RandomIdGenerator)
             .unwrap()
@@ -349,6 +359,12 @@ mod tests {
             OnboardingPreparation::Issued(issued) => issued,
             OnboardingPreparation::Existing(_) => panic!("first request must issue"),
         };
+        assert!(matches!(
+            classify_host_inventory(&state, &provisional),
+            Err(HostInventoryError::Inventory(
+                D17ProvisionalInventoryError::Ambiguous
+            ))
+        ));
         assert!(read_snapshot(&root).unwrap().workstreams.is_empty());
 
         let token = issued.capability().token().to_owned();
@@ -360,6 +376,10 @@ mod tests {
                 request.now_monotonic_millis + 1,
             )
             .unwrap();
+        assert_eq!(
+            state.d17_registered_runtime_paths().unwrap(),
+            vec![request.runtime_paths.clone()]
+        );
         let snapshot = read_snapshot(&root).unwrap();
         assert_eq!(snapshot.workstreams.len(), 1);
         assert_eq!(

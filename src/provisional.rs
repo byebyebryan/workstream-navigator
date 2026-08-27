@@ -22,9 +22,13 @@ use uuid::Uuid;
 
 use crate::{
     domain::{Revision, RuntimeId},
+    presentation::{
+        D17ProvisionalInventory, D17ProvisionalInventoryError, classify_d17_provisional_inventory,
+    },
     runtime::{
         NativeLaunch, PrivateRuntime, ProcessGroupProbe, RuntimePaths, RuntimeProbe, RuntimeStartup,
     },
+    state::{D16State, ProvisionalLease, StateError},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -114,11 +118,45 @@ pub(crate) enum SlotError {
     MarkerTransitionInvalid,
 }
 
+/// Bounded failure from the D17 host-wide provisional-slot classifier. It
+/// retains no marker, Runtime path, journal, shell, or provider detail.
+#[derive(Debug, Error)]
+#[allow(
+    dead_code,
+    reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) enum HostInventoryError {
+    #[error("D17 provisional state is unavailable")]
+    State(#[from] StateError),
+    #[error("D17 provisional inventory is unavailable")]
+    Inventory(#[from] D17ProvisionalInventoryError),
+}
+
 const PROVISIONAL_MARKER_VERSION: u8 = 2;
 const MAX_PROVISIONAL_MARKER_BYTES: usize = 8 * 1024;
 const MAX_SHELL_BIRTH_BYTES: usize = 256;
 const MAX_TMUX_PANE_ID_BYTES: usize = 64;
 pub(crate) const PROVISIONAL_MARKER_FILE: &str = "d17-provisional.json";
+
+/// Rebuilds the complete host-wide singleton inventory while retaining the
+/// stable provisional lease. It performs no marker, runtime, tmux, process,
+/// provider, or filesystem mutation; callers must revalidate the same lease
+/// again immediately before any later materialization step.
+#[allow(
+    dead_code,
+    reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) fn classify_host_inventory(
+    state: &D16State,
+    provisional_lease: &ProvisionalLease,
+) -> Result<D17ProvisionalInventory, HostInventoryError> {
+    provisional_lease.revalidate_for_mutation(state.root())?;
+    let registered_runtime_paths = state.d17_registered_runtime_paths()?;
+    let operations = state.d17_onboarding_operation_inventory()?;
+    provisional_lease.revalidate_for_mutation(state.root())?;
+    classify_d17_provisional_inventory(state.root(), &registered_runtime_paths, &operations)
+        .map_err(HostInventoryError::from)
+}
 
 /// Exact private-pane/process evidence that binds a materialized provisional
 /// shell to the marker's final tmux path set. The server's socket/config/session

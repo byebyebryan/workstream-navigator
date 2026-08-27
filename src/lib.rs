@@ -4,6 +4,7 @@ pub mod actions;
 pub mod app;
 pub mod application;
 pub mod cutover;
+pub(crate) mod d17_account_shell;
 pub(crate) mod d17_broker;
 pub(crate) mod d17_helper;
 pub(crate) mod d17_reconcile;

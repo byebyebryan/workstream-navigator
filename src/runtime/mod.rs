@@ -129,6 +129,22 @@ impl NativeLaunch {
     }
 }
 
+/// Writes fixed, private bootstrap artifacts after a Runtime directory has
+/// been created but before tmux can start its native program. Bootstrap code
+/// receives the exact final Runtime paths and cannot alter the launch command,
+/// attach a client, or use the default tmux server.
+pub(crate) trait RuntimeStartup {
+    fn prepare(&self, paths: &RuntimePaths) -> Result<(), RuntimeError>;
+}
+
+struct NoRuntimeStartup;
+
+impl RuntimeStartup for NoRuntimeStartup {
+    fn prepare(&self, _paths: &RuntimePaths) -> Result<(), RuntimeError> {
+        Ok(())
+    }
+}
+
 /// The observable state of one private runtime server.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RuntimeProbe {
@@ -1309,6 +1325,18 @@ impl<'a> PrivateRuntime<'a> {
     /// Returns an error if the runtime directory already exists, tmux reports a
     /// live server, launch validation fails, or tmux cannot create the server.
     pub fn start(&self, launch: &NativeLaunch) -> Result<(), RuntimeError> {
+        self.start_with_startup(launch, &NoRuntimeStartup)
+    }
+
+    /// Creates the private tmux server after the supplied exact bootstrap has
+    /// prepared only that Runtime's new directory. The startup hook runs after
+    /// directory ownership exists and before configuration or tmux invocation;
+    /// a failure leaves the owned directory for conservative reconciliation.
+    pub(crate) fn start_with_startup(
+        &self,
+        launch: &NativeLaunch,
+        startup: &dyn RuntimeStartup,
+    ) -> Result<(), RuntimeError> {
         launch.validate()?;
         if self.paths.directory.exists() {
             return Err(RuntimeError::RuntimeAlreadyOwned(
@@ -1316,6 +1344,7 @@ impl<'a> PrivateRuntime<'a> {
             ));
         }
         create_private_runtime_directory(&self.paths.directory)?;
+        startup.prepare(&self.paths)?;
         write_tmux_config(&self.paths.config)?;
 
         let mut arguments = vec![
@@ -1774,6 +1803,8 @@ fn is_missing_server(diagnostic: &str) -> bool {
 pub enum RuntimeError {
     #[error("native launch program is empty")]
     EmptyProgram,
+    #[error("private Runtime startup is unavailable")]
+    StartupUnavailable,
     #[error("invalid working directory {0}")]
     InvalidWorkingDirectory(PathBuf),
     #[error("invalid private runtime path {0}")]
@@ -2650,6 +2681,72 @@ mod tests {
                 .iter()
                 .all(|argument| argument != "sh" && argument != "/bin/sh")
         );
+    }
+
+    struct PrivateStartup;
+
+    impl RuntimeStartup for PrivateStartup {
+        fn prepare(&self, paths: &RuntimePaths) -> Result<(), RuntimeError> {
+            let bootstrap = paths.directory.join("bootstrap-proof");
+            fs::write(&bootstrap, b"prepared").map_err(|source| RuntimeError::Io {
+                path: bootstrap,
+                source,
+            })
+        }
+    }
+
+    struct RefusingStartup;
+
+    impl RuntimeStartup for RefusingStartup {
+        fn prepare(&self, _paths: &RuntimePaths) -> Result<(), RuntimeError> {
+            Err(RuntimeError::StartupUnavailable)
+        }
+    }
+
+    #[test]
+    fn startup_prepares_only_the_new_private_runtime_before_tmux_launch() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let tmux = FakeTmux::with_responses([successful()]);
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
+        let launch = NativeLaunch {
+            cwd: temporary.path().to_path_buf(),
+            program: vec![OsString::from("synthetic-shell")],
+            environment: BTreeMap::new(),
+        };
+
+        runtime
+            .start_with_startup(&launch, &PrivateStartup)
+            .unwrap();
+
+        assert_eq!(
+            fs::read(paths.directory.join("bootstrap-proof")).unwrap(),
+            b"prepared"
+        );
+        assert_eq!(tmux.calls.borrow().len(), 1);
+    }
+
+    #[test]
+    fn startup_refusal_leaves_only_the_new_private_runtime_directory_for_reconciliation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let tmux = FakeTmux::default();
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
+        let launch = NativeLaunch {
+            cwd: temporary.path().to_path_buf(),
+            program: vec![OsString::from("synthetic-shell")],
+            environment: BTreeMap::new(),
+        };
+
+        assert!(matches!(
+            runtime.start_with_startup(&launch, &RefusingStartup),
+            Err(RuntimeError::StartupUnavailable)
+        ));
+        assert!(paths.directory.is_dir());
+        assert!(!paths.config.exists());
+        assert!(tmux.calls.borrow().is_empty());
     }
 
     #[test]

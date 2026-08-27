@@ -207,3 +207,67 @@ pub(crate) fn record_opencode_provider_exec_started(
         provider: ProviderKind::OpenCode,
     })
 }
+
+/// Advances one revalidated shell handoff through every durable fence required
+/// immediately before a native provider exec. It deliberately performs no
+/// executable resolution, HTTP request, process inspection, or provider exec:
+/// the caller must make the provider-specific external effect directly after
+/// receiving this proof.
+pub(crate) fn advance_to_provider_exec_fence(
+    state: &mut D16State,
+    provisional_lease: &ProvisionalLease,
+    context: &PrepareContext<'_, '_>,
+    token: &str,
+    now_monotonic_millis: i64,
+) -> Result<ProviderExecFence, HelperError> {
+    let preparation = begin_provider_preparation(
+        state,
+        provisional_lease,
+        context,
+        token,
+        now_monotonic_millis,
+    )?;
+    match context.provider {
+        ProviderKind::Codex => {
+            record_codex_provider_exec_started(state, provisional_lease, context, preparation)
+        }
+        ProviderKind::OpenCode => {
+            let effect_fence = record_opencode_external_effect_started(
+                state,
+                provisional_lease,
+                context,
+                preparation,
+            )?;
+            record_opencode_provider_exec_started(state, provisional_lease, context, effect_fence)
+        }
+    }
+}
+
+/// Records a final direct-Codex-`execve` failure only after the caller has
+/// received the operating-system error proving that no provider process was
+/// created. The consumed fence is intentionally not reusable.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "moving the opaque fence prevents a caller from reusing the pre-exec authority"
+)]
+pub(crate) fn record_codex_exec_failed_known_absent(
+    state: &mut D16State,
+    provisional_lease: &ProvisionalLease,
+    context: &PrepareContext<'_, '_>,
+    exec_fence: ProviderExecFence,
+) -> Result<(), HelperError> {
+    let ProviderExecFence {
+        ownership,
+        provider,
+    } = exec_fence;
+    if provider != ProviderKind::Codex {
+        return Err(HelperError::CodexPreparationProviderMismatch);
+    }
+    let (_, request) = request_from_context(state, provisional_lease, context)?;
+    state.record_d17_codex_exec_failed_known_absent_current(
+        provisional_lease,
+        &request,
+        ownership,
+    )?;
+    Ok(())
+}

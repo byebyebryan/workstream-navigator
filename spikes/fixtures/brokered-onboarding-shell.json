@@ -1,0 +1,83 @@
+{
+  "assertions": {
+    "bypasses_require_fail_closed": true,
+    "cleanup_complete": true,
+    "durable_shell_keeps_provider_output_after_exit": true,
+    "exec_function_preserves_current_runtime_identity": true,
+    "fixed_arguments_preserved_by_path_and_exec": true,
+    "ordinary_tmux_unchanged": true,
+    "path_shim_changes_current_runtime_identity": true,
+    "preexec_argument_corruption_observed": true,
+    "private_tmux_only": true,
+    "provider_pgid_leadership_observed_for_all_candidates": true
+  },
+  "bypasses": {
+    "absolute_path_args_preserved": true,
+    "absolute_path_argument_shape": "expected",
+    "absolute_path_bypasses_function": true,
+    "all_bypasses_require_fail_closed": true,
+    "bypass_outcome": "unmanaged_fail_closed_required",
+    "command_codex_args_preserved": true,
+    "command_codex_argument_shape": "expected",
+    "command_codex_bypasses_function": true,
+    "nested_script_args_preserved": true,
+    "nested_script_argument_shape": "expected",
+    "nested_script_bypasses_function": true,
+    "shell_survives_bypasses": true
+  },
+  "candidates": {
+    "durable_shell_supervisor": {
+      "args_preserved": true,
+      "broker_invoked": false,
+      "pane_pid_equals_provider": false,
+      "provider_birth_equals_initial_pane": false,
+      "provider_output_survives_provider_exit": true,
+      "provider_ppid_equals_initial_pane": false,
+      "provider_process_group_leader": true,
+      "provider_session_nonempty": true,
+      "shell_child_present_after_provider_exit": true,
+      "shell_survives_provider_exit": true,
+      "supervisor_survives_provider_exit": true
+    },
+    "exec_function": {
+      "args_preserved": true,
+      "broker_invoked": true,
+      "pane_pid_equals_provider": true,
+      "provider_birth_equals_initial_pane": true,
+      "provider_output_survives_provider_exit": false,
+      "provider_ppid_equals_initial_pane": false,
+      "provider_process_group_leader": true,
+      "provider_session_nonempty": true,
+      "shell_survives_provider_exit": false
+    },
+    "path_shim": {
+      "args_preserved": true,
+      "broker_invoked": false,
+      "pane_pid_equals_provider": false,
+      "provider_birth_equals_initial_pane": false,
+      "provider_output_survives_provider_exit": true,
+      "provider_ppid_equals_initial_pane": true,
+      "provider_process_group_leader": true,
+      "provider_session_nonempty": true,
+      "shell_survives_provider_exit": true
+    },
+    "preexec": {
+      "args_preserved": false,
+      "broker_invoked": true,
+      "pane_pid_equals_provider": true,
+      "provider_birth_equals_initial_pane": true,
+      "provider_output_survives_provider_exit": false,
+      "provider_ppid_equals_initial_pane": false,
+      "provider_process_group_leader": true,
+      "provider_session_nonempty": true,
+      "shell_survives_provider_exit": false
+    }
+  },
+  "contract_fingerprint": "provisional-private-shell-topology-v1",
+  "environment": {
+    "tmux_version": "3.7c"
+  },
+  "reason": "all_topology_candidates_observed",
+  "status": "pass",
+  "study": "brokered-onboarding-shell"
+}

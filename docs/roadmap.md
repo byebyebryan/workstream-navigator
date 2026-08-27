@@ -1,15 +1,255 @@
 # Workstream Navigator V1 Roadmap
 
-Date: 2026-08-20
+Date: 2026-08-26
 
 Status: D0-D16 complete; D16 host-local implementation, disposable repository
 gate, and operator-gated live local and SSH-entered-host acceptance complete;
-source-installed operator beta.
+source-installed operator beta. D17 shell-first managed-session onboarding is
+the approved design and next planned checkpoint; implementation has not
+started.
 
 The D0-D15 entries below preserve truthful historical implementation and
 acceptance evidence. D3 and later SSH, remote, cross-host, and combined
 local/remote descriptions document the former WSNav-managed surface and are
 retired or superseded by D16 for the current product contract.
+
+## 2026-08-26 D17 shell-first onboarding decision
+
+D17 dissolves the Projects page into the ordinary Workstreams experience.
+Workstreams always shows one pinned `New session · shell` card outside Project
+groups. At presentation creation WSNav captures, validates, and canonicalizes
+the invocation cwd as a presentation-private seed cwd. Selecting the card
+lazily materializes exactly one opaque candidate `RuntimeId` and creates its
+provisional tmux directory, socket, configuration, and session using the
+existing final full-UUID `RuntimePaths` fields (directory, socket,
+configuration, and session). The candidate ID, exact
+`RuntimePaths` fields (directory, socket, configuration, and session), seed, and
+shell/server ownership evidence live only in the presentation-private marker;
+they are not a registry Runtime or Workstream row. Before creating those
+artifacts, materialization proves the candidate ID and all four path fields are
+absent and unused; it never adopts pre-existing artifacts. A marker-backed
+candidate is excluded from ordinary registry inventory, probe, park, remove,
+and recovery discovery/action until durable adoption; only the exact
+presentation marker plus the stable host-private `provisional.lock` lease may
+manage it. Markerless/registryless, foreign, or collision artifacts remain
+untouched, and a clean replacement allocates a fresh candidate RuntimeId.
+Every newly materialized clean shell starts at that seed, while detach/reattach
+preserves a live shell's actual cwd. A missing, deleted, unsafe, or ambiguous
+seed makes onboarding unavailable with guidance; it never falls back or becomes
+Project authority. A new presentation captures its own seed. The pinned card is
+a derived singleton with no durable card row, and each materialization mints a
+fresh opaque `slot_generation` bound by the marker, capability, and onboarding
+journal.
+
+The one serialized ownership handoff is a stable host-private
+`provisional.lock`, distinct from D16's schema-cutover `transition.lock`. It is
+operational state, not a Runtime/card/Workstream row or presentation-private
+storage. Schema-14 host-operational lease metadata stores only a planned
+`lease_generation`, install phase `pending` or `ready`, and expected lock
+device/inode once ready; it is not a card, Runtime, Workstream, or
+presentation-private row. The schema/HostId transaction commits schema-14
+ownership and this pending metadata first; schema-13 code and path never create
+or recognize `provisional.lock`.
+
+Only after that database commit is durable may schema-14 startup reconcile the
+stable artifact. In `pending`, an absent artifact is created lazily as a
+mode-`0600` current-owner regular file with create-new/no-follow semantics;
+startup writes bounded file contents, fsyncs the file, then fsyncs the containing
+state-root directory, and transactionally
+finalizes metadata as `ready` with expected device/inode. An exact file left by
+a crash after file creation may instead be validated and locked, then finalized
+the same way. Pending foreign or mismatched evidence fails closed. In `ready`,
+a missing, replaced, or device/inode-mismatched artifact fails closed and is
+never recreated. The file contains only bounded format version, HostId, and
+`lease_generation`; it contains no cwd, command, argv, provider/user content, or
+provider payload. Malformed, symlinked, foreign, replaced, or locked evidence
+fails closed. Normal D17 operation never unlinks/recreates it; state-root
+reset/removal is outside this flow. A lock artifact seen before schema-14
+ownership is unexpected/ambiguous, remains untouched, and is never adopted or
+deleted. A crash between the database commit and file creation is retried
+safely in `pending`; no cross-store atomicity is claimed. Every
+materializer, broker, helper, confirmed close/loss
+cleanup, and singleton reconciler opens it no-follow/CLOEXEC, acquires one
+nonblocking exclusive kernel lock, retains the FD, and revalidates canonical
+root/path plus open-FD device/inode identity before mutation. Crash releases
+the kernel lock without changing the file; restart reacquires that same
+artifact and reconciles marker/journal. The FD never crosses provider exec;
+busy/timeout returns bounded guidance and never creates a second lock or
+proceeds unlocked. Marker, capability, and journal bind both
+`lease_generation` and `slot_generation`.
+
+Each presentation derives one pinned provisional card, but the shared host
+`provisional.lock` and classifier permit at most one unregistered materialized
+candidate server across all presentations. A valid marker/artifact belonging to
+another presentation is busy/owned, not unknown or adoptable; that presentation's
+card remains visible but unavailable until its slot promotes or conclusively
+cleans. Under the lock, a bounded classifier cross-checks the exact marker and
+unfinished onboarding operations against registered Runtime IDs and the bounded
+`run/runtime-*` namespace only to detect conflicts. It never passively adopts or
+deletes unknown artifacts. Missing/changed marker evidence plus an unregistered
+Runtime-shaped artifact, multiple candidates, or ambiguous journal/path/process
+evidence blocks every fresh materialization and leaves artifacts untouched; it
+cannot evade ambiguity by choosing a new UUID. A clean replacement is allowed
+only after exact prior absence or conclusive cleanup and receives a fresh
+`slot_generation` and candidate RuntimeId.
+
+Every participant revalidates the marker, onboarding journal, and
+presentation/registry revisions while holding `provisional.lock`. The broker
+validates the shell's current cwd, detects the exact non-bare Git worktree root,
+and transactionally generates/reserves the durable Runtime generation and graph
+for the exact candidate ID and unchanged full-UUID `RuntimePaths` fields
+(directory, socket, configuration, and session), then marks the request handoff
+issued. A prepared reservation does not revoke provisional cleanup. Before the
+helper successfully revalidates every bound marker/process/cwd/path/revision/
+token claim and atomically consumes the capability while committing durable
+`Runtime-owned` authority, close/loss may win only under the same
+`provisional.lock` lease by
+atomically canceling/revoking an issued but unconsumed capability, proving
+pre-effect absence, rolling back attempt-only rows, and cleaning exact
+provisional artifacts. The helper instead reacquires the lock and, while
+holding it, revalidates every bound claim; only on successful revalidation does
+it atomically compare-and-consume the capability and commit durable
+`Runtime-owned` authority for the candidate. A mismatch does not advance
+ownership. It then, still under `provisional.lock` and before releasing it,
+revokes/removes presentation cleanup authority; durable transition precedes
+marker cleanup, and only afterward may provider effects be prepared or
+executed. After that exact helper commit, presentation cleanup never signals
+the pane, process, or server. Ambiguous cross-store crash windows stay in the
+onboarding journal for recovery; conclusive pre-effect rollback after transfer
+belongs to onboarding recovery.
+
+For a promotable fresh interactive native TUI shape, the controlled function
+invokes a bounded prepare broker as a child over private non-terminal control
+I/O. The broker returns only an exact one-shot opaque launch capability, never a
+provider command or argv. Its claims bind the request/operation,
+presentation/slot, candidate ID and exact `RuntimePaths` fields (directory,
+socket, configuration, and session), fixed provider, exact shell cwd and
+root/Location, reserved Runtime generation, captured revisions, shell
+PID/birth/process group, grammar-approved argv digest, and short monotonic
+expiry. The helper's lease-held revalidation covers every bound
+marker/process/cwd/path/revision/token claim, including the candidate ID and all
+four `RuntimePaths` fields. Only on successful revalidation does the helper
+atomically compare-and-consume the capability and commit durable `Runtime-owned`
+authority; a mismatch does not advance ownership. The helper then, still under
+`provisional.lock` and before releasing it, revokes/removes presentation cleanup
+authority; durable transition precedes marker cleanup, and only afterward builds
+provider argv internally, prepares provider effects, and `exec`s the provider,
+preserving the shell leader PID,
+birth token, and process group. Persisted state keeps only bounded token
+identifier/verifier, phase, and claim references or digests; the live token,
+argv, shell command line, environment, terminal capture, and provider payload
+are never persisted.
+
+The helper's successful revalidation, atomic capability consume, and durable
+`Runtime-owned` commit do not yet make the Runtime ordinarily attachable or
+actionable. The request-keyed `CompoundOperation` enters
+`runtime_owned_launching` (no provider effect), then provider-specific
+preparation/external-effect phases, and `provider_exec_started` immediately
+before `execve`; terminal outcomes are `provider_exec_proven`, known-absent
+exec failure, or `recovery-required`/`unknown`. Until full exec proof or terminal
+reconciliation, attachment and action authority for that unproven Runtime
+remains fenced. Its
+originating presentation may retain its existing Runtime attachment/pane or
+detach through ordinary card switching, but no new attachment to that Runtime
+is allowed. Selecting/materializing the fresh derived singleton card attaches
+only its separate provisional server under `provisional.lock` and grants no
+authority over the unproven Runtime. Park/Resume/Fork/contextual
+`n`/`new-workstream`, archive, Rename, recovery/start retry, and cleanup actions
+for that Runtime refuse or wait with bounded `onboarding-in-progress` guidance.
+Passive snapshot/probe may show `starting`/`onboarding` and reconcile, but must
+not adopt helper/preparation processes, mark the Runtime lost, signal it, or
+expose ordinary action authority. Once terminal `recovery-required`, only exact
+recovery or explicit Park rules apply. A terminal known-absent exec result is
+not itself action authority: the reconciler must atomically resolve it. When
+provider-specific journal evidence proves no prior external effect or binding,
+guarded rollback ends onboarding and leaves the derived singleton card available
+but unmaterialized. When OpenCode has a known blank-session POST or binding, the
+same atomic resolution ends onboarding in the exact stopped/recovery state; only
+binding-preserving Resume/recovery or explicit Park is then allowed. A possible
+effect remains `recovery-required`. No ordinary action is enabled directly by
+exec-error evidence, and no operation remains fenced after terminal
+reconciliation. A host-local reconciler invoked by passive snapshot/action
+preflight or restart recovery performs no provider effect; only after
+revalidating the operation/revisions, RuntimeId/generation and exact
+`RuntimePaths` fields
+(directory, socket, configuration, and session), tmux pane/session,
+same PID/birth/PGID/session, and expected executable does it atomically commit
+`provider_exec_proven` and activate ordinary attachment/action authority.
+An authoritative Codex hook contributes only through that same identity/revision
+proof; an OpenCode sidecar or server identity is never native-TUI exec proof.
+An exact helper `execve` error proves only absence of the final provider TUI
+exec. Attempt-only graph rollback is allowed only when the provider-specific
+journal also conclusively proves no prior external effect or binding; a crash
+after exec-start without proof is ambiguous and never rollback authority.
+
+Card and server state key off Runtime ownership, not provider success. Before
+the exact helper commit the selected card remains the exact shell. Once
+ownership commits, it becomes the managed Workstream and the UI derives one
+fresh unmaterialized singleton card even when native binding is not ready;
+the launch fence above still applies until exec proof or exact recovery. For
+OpenCode, any possible non-idempotent `POST /session` effect leaves the same
+server Runtime-owned and the card visibly `recovery-required`, even if no
+native TUI remains; presentation cleanup cannot touch it and recovery never
+issues a second POST. A conclusive pre-effect failure after the exact helper
+commit is classified by onboarding recovery; it rolls back attempt-only graph
+state only when provider-specific evidence proves no effect or binding, leaving
+the derived singleton card available but unmaterialized. An ambiguous-effect
+slot is never reusable. Codex may remain managed `starting` and unbound until
+`SessionStart`; a known OpenCode blank-session POST or binding remains on the
+same Runtime/Workstream/binding for exact recovery/resume after a final TUI
+failure and is never rolled back or posted again.
+
+D17 supports Bash and Zsh interactive non-login account shells only. Shell-
+specific private wrapper startup files inherit the validated presentation
+environment, original `HOME`, and (for Zsh) original `ZDOTDIR`, reproduce the
+ordinary non-login interactive startup graph in system/user order exactly once,
+then remove conflicting `codex`/`opencode` aliases/functions and install exact
+WSNav functions. Observable environment, options, aliases, functions, and
+prompt readiness match an ordinary disposable baseline except bounded wrapper
+state and intentional interception. WSNav never parses or persists RC
+contents. Login-shell mode, startup abort, wrapper replacement, and ambiguous
+startup contexts leave onboarding unavailable with guidance. Provider grammar
+is closed and adapter/version-contract validated: only fresh native TUI shapes
+promote; broker-owned cwd/profile, resume/session, attach/server,
+host/port/endpoint, and equivalent identity flags refuse before reservation.
+Explicitly enumerated provider-owned non-session commands such as `--help`,
+`--version`, and `login` may run directly as explicitly unmanaged commands;
+their effects remain provider-owned. Other shapes refuse with bounded
+guidance. Safe native options are admitted only when proven.
+
+The broker detects the exact containing non-bare Git worktree root from the
+shell's current cwd and registers it atomically with the new Workstream. A
+linked worktree remains its own ProjectLocation; WSNav never normalizes it to a
+primary checkout, creates or switches worktrees, or retargets a Workstream
+when the provider later works elsewhere. Only this broker-time check creates
+ProjectLocation/launch authority; arbitrary cwd history is not persisted in the
+host registry. `n` remains the fast path from a selected managed Workstream:
+another independent blank session with the same provider at that exact stored
+root. A different provider or directory begins through the provisional shell;
+`f` remains a conversation Fork. New provider or Location creation is
+broker-only; public `new-workstream` remains source-based parity for contextual
+`n`, inherits the exact source provider/Location, rejects provider/path
+overrides, and cannot accept source-less arbitrary creation.
+
+Passive process detection, hook-only adoption, pane-text inference, and
+provider launches that bypass the broker remain unmanaged.
+
+[Spike 0019](evidence/spikes/0019-brokered-onboarding-shell.md) validates a
+single-phase controlled-function-plus-`exec` candidate in a synthetic
+private-tmux harness. [Spike
+0021](evidence/spikes/0021-d17-two-phase-handshake.md) validates the narrow D17
+prepare-token-helper topology, synthetic closed grammar, exact claim
+comparison, one-shot semantics, and shell-identity-preserving provider exec
+across Bash/Zsh and Codex/OpenCode routes. It does not validate the account
+startup wrapper, schema-14 ownership, races/recovery, or real provider effects.
+The separate observer-ancestry revalidation passed on Codex `0.150.0`, while a
+real brokered Codex launch remains a D17 gate. D17.0 remains the first
+implementation gate for the complete handshake, grammar, wrapper, ownership,
+and recovery contract.
+[Spike 0020](evidence/spikes/0020-opencode-1.18.23-revalidation.md) revalidates
+the OpenCode fresh-session/provider lifecycle assumptions on `1.18.23`; it does
+not replace the required D17 broker implementation and Bash/Zsh acceptance.
+The detailed target contract is in [design.md](design.md).
 
 ## 2026-08-05 minimal multi-provider creation contract and D8 approval
 
@@ -30,12 +270,11 @@ endpoint ownership, and a persistent host-owned observer sidecar on OpenCode
 effort, roles, agents, prompts, and presets remain entirely native-provider
 choices. Ordinary `n` from an existing Workstream retains its exact host and
 ProjectLocation. The host supplies providers eligible for fresh launch, exact
-resume, and observation: one is selected without prompting, while multiple
-providers open a provider-only chooser initially selecting the source
-Workstream's provider when eligible. The empty navigator still performs host
-and ProjectLocation registration first. Cross-provider work is an independent
-New Workstream with an empty conversation, never Fork, migration, or automatic
-context transfer.
+resume, and observation. This paragraph records the D8 creation UI that shipped;
+D17 supersedes its chooser and Projects-registration path with explicit
+shell-command provider choice and brokered Git-root registration. Cross-provider
+work remains an independent New Workstream with an empty conversation, never
+Fork, migration, or automatic context transfer.
 
 D8.0 completed on 2026-08-05. It introduced the provider identity and dispatch
 foundation, preserved Codex behavior, and made provider kind visible without
@@ -301,6 +540,7 @@ This document owns sequencing, exit gates, and progress.
 | D14 | Private tmux copy-mode scroll convergence | Complete (2026-08-18) |
 | D15 | Fluid local Workstream switching | Complete |
 | D16 | Host-local product simplification | Complete (2026-08-20) |
+| D17 | Shell-first managed-session onboarding | Planned |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -3940,8 +4180,13 @@ D16 closes only when all of the following are true:
   single-window roles, live navigator, and bounded utility cleanup revalidate;
   ambiguous or otherwise dead topology still refuses before provider mutation.
   AwaitRuntime attaches as soon as the exact owned Runtime exists, including
-  while its durable lifecycle is `Starting`; native SessionStart observation
-  confirms lifecycle progress but is not a terminal-attachment prerequisite;
+  while its durable lifecycle is `Starting`, only when no D17 onboarding
+  operation remains unfinished and `provider_exec_proven` has committed;
+  a D17 Runtime in any earlier post-commit phase is not attachable merely from
+  record/process identity—the originating presentation may retain its existing
+  pane, but that is not a new attachment. Native SessionStart observation
+  confirms lifecycle progress but is not a terminal-attachment prerequisite
+  after that D17 proof;
 - Workstreams, Projects, and Archived are the only ordinary navigator pages.
   Workstreams and Archived are Project-grouped by descending durable
   `last_activity_sequence` with opaque Project/Workstream ID tie-breakers;
@@ -4000,13 +4245,682 @@ D16 closes only when all of the following are true:
   content-free, with complete cleanup. Historical D3-D15 evidence is not
   rewritten as current validation.
 
+## D17 - Shell-first managed-session onboarding
+
+Status: planned. The product contract is approved; no D17 implementation or
+acceptance is complete.
+
+### Goal
+
+Make onboarding feel like opening an ordinary shell while retaining exact
+managed-session authority. Remove the separate Projects workflow, let native
+provider commands own provider and launch-option choice, and preserve WSNav's
+private Runtime, recovery, privacy, and completed-output guarantees.
+
+### Product contract
+
+- Workstreams and Archived are the only ordinary pages.
+- Workstreams always contains exactly one pinned provisional shell card outside
+  Project groups. At presentation creation, WSNav captures, validates, and
+  canonicalizes the invocation cwd as a private seed cwd. The card is
+  materialized lazily with
+  exactly one opaque candidate `RuntimeId`; its provisional tmux directory,
+  socket, configuration, and session use the existing final full-UUID
+  `RuntimePaths` fields (directory, socket, configuration, and session).
+  Candidate ID, exact `RuntimePaths` fields (directory,
+  socket, configuration, and session), seed, and ownership evidence live only
+  in the presentation-private marker, not a registry Runtime or Workstream row.
+  Before creating those artifacts, materialization proves the candidate ID and
+  all four path fields are absent and unused; it never adopts pre-existing
+  artifacts. A marker-backed candidate is excluded from ordinary registry
+  inventory, probe, park, remove, and recovery discovery/action until durable
+  adoption; only the exact presentation marker plus the stable host-private
+  `provisional.lock` lease may manage it. Markerless/registryless, foreign, or
+  collision artifacts remain untouched, and a clean replacement allocates a
+  fresh candidate RuntimeId. The pinned card is a derived singleton with no
+  durable card row, and each materialization mints a fresh opaque
+  `slot_generation` bound by the marker, capability, and onboarding journal.
+  Every clean newly materialized shell starts at the seed; detach/reattach
+  preserves a live shell's actual cwd, and a new presentation captures its own
+  seed. Missing, deleted, unsafe, or ambiguous seed evidence makes onboarding
+  unavailable with guidance and never falls back.
+- The provisional account shell supports Bash and Zsh interactive non-login
+  shells only. Shell-specific private wrapper startup files inherit the
+  validated presentation environment, original `HOME`, and (for Zsh) original
+  `ZDOTDIR`, reproduce the ordinary non-login interactive startup graph in
+  system/user order exactly once, remove conflicting `codex`/`opencode`
+  aliases/functions, and install exact WSNav-owned functions. Observable
+  environment, options, aliases, functions, and prompt readiness match an
+  ordinary disposable baseline except bounded wrapper state and intentional
+  interception. WSNav never parses or persists RC contents; login-shell mode,
+  startup abort, wrapper replacement, or ambiguity leave onboarding
+  unavailable.
+- For a promotable fresh interactive native TUI shape, the exact function
+  invokes a bounded prepare broker as a child over presentation-private
+  non-terminal control I/O. One exact stable host-private `provisional.lock`
+  artifact, distinct from D16's schema-cutover `transition.lock`, is shared by
+  materialization, close/loss cleanup, broker preparation/token issuance,
+  helper consume, singleton reconciliation, and marker cleanup. It is
+  operational state rather than a Runtime/card/Workstream row or
+  presentation-private storage. Schema-14 host-operational lease metadata
+  stores only a planned `lease_generation`, install phase `pending` or `ready`,
+  and expected lock device/inode once ready. The schema/HostId transaction
+  commits schema-14 ownership and pending metadata first; schema-13 code/path
+  never creates or recognizes `provisional.lock`.
+  In `pending`, startup lazily creates an absent mode-`0600` current-owner
+  regular file with create-new/no-follow, writes bounded file contents, fsyncs
+  the file, then fsyncs the containing state-root directory before finalizing
+  `ready` with expected device/inode; an exact file
+  left by a crash may be validated/locked and finalized. Pending foreign or
+  mismatched evidence fails closed. In `ready`, missing, replaced, or
+  device/inode-mismatched evidence fails closed and is never recreated. The
+  file contains only bounded format version, HostId, and
+  `lease_generation`; it contains no cwd, command, argv, provider/user content,
+  or provider payload. A pre-schema-14 artifact is unexpected/ambiguous,
+  remains untouched, and is never adopted or deleted; this ordering does not
+  claim cross-store atomicity. Normal operation never unlinks/recreates it.
+  Every participant opens it no-follow/CLOEXEC, acquires one nonblocking
+  exclusive kernel lock, retains the FD, and revalidates canonical root/path
+  plus FD device/inode before mutation. Crash releases only the kernel lock;
+  restart reacquires the same artifact and reconciles marker/journal. The FD
+  never crosses provider exec, and busy/timeout never creates a second lock or
+  proceeds unlocked. Marker, capability, and journal bind both
+  `lease_generation` and `slot_generation`; each participant revalidates the
+  marker, onboarding journal, and presentation/registry revisions while
+  holding it.
+  The broker transactionally generates/reserves the durable Runtime generation
+  and graph for the exact candidate ID and unchanged full-UUID `RuntimePaths`
+  fields (directory, socket, configuration, and session), marks the handoff
+  issued, and returns only an exact one-shot opaque launch capability, never a
+  provider command or argv. Its claims bind the request/operation,
+  presentation/slot, candidate ID and exact `RuntimePaths` fields (directory,
+  socket, configuration, and session), fixed provider, exact shell
+  cwd/root/Location, reserved generation, captured revisions, shell
+  PID/birth/process group, grammar-approved argv digest, and short monotonic
+  expiry. The function then `exec`s one hidden WSNav launch helper with that
+  capability and the original bounded argv; the helper reacquires
+  `provisional.lock` and, while holding it, revalidates every bound
+  marker/process/cwd/path/revision/
+  token claim, including the candidate ID and all four `RuntimePaths` fields.
+  Only on successful revalidation does it atomically compare-and-consume the
+  capability and commit durable `Runtime-owned` authority for the candidate; a
+  mismatch does not advance ownership. It then, still under the lock and before
+  releasing it, revokes/removes presentation cleanup authority; durable
+  transition precedes marker cleanup, and only afterward prepares provider
+  effects, constructs provider argv internally, and
+  `exec`s the provider. Persisted state keeps only
+  bounded token identifier/verifier/phase and claim references or digests; the
+  live token, argv, shell command line, environment, terminal capture, and
+  provider payload are never persisted. The shell leader PID, birth token, and
+  process group survive into the provider. Promotion adopts the same private
+  tmux server/pane/process lineage without rename, rehome, or replacement.
+- Each presentation derives one pinned provisional card, but the shared host
+  `provisional.lock` and classifier permit at most one unregistered materialized
+  candidate server across all presentations. A valid marker/artifact belonging
+  to another presentation is busy/owned, not unknown or adoptable; that card
+  remains visible but unavailable until its slot promotes or conclusively
+  cleans. Under the lock, a bounded classifier cross-checks the exact marker
+  and unfinished operations against registered Runtime IDs and bounded
+  `run/runtime-*` names only to detect conflicts; it never adopts or deletes
+  unknown artifacts. Missing/changed marker evidence with an unregistered
+  Runtime-shaped artifact, multiple candidates, or ambiguous journal/path/
+  process evidence blocks every fresh materialization and leaves artifacts
+  untouched; no new UUID may evade ambiguity. A clean replacement requires
+  exact prior absence or conclusive cleanup and gets a fresh slot generation
+  and candidate ID.
+- The helper's successful claim revalidation and atomic capability consume
+  commit durable Runtime ownership but do not yet activate ordinary attachment
+  or action authority. The request-keyed operation enters
+  `runtime_owned_launching` (no provider effect), provider-specific
+  preparation/external-effect phases, and `provider_exec_started` immediately
+  before `execve`; terminal outcomes are `provider_exec_proven`, known-absent
+  exec failure, or `recovery-required`/`unknown`. Until full proof, attachment
+  and action authority for that unproven Runtime remains fenced: its originating
+  presentation may retain its existing Runtime pane or detach through ordinary
+  card switching, but no new attachment to that Runtime is allowed. Selecting
+  or materializing the fresh derived singleton card attaches only its separate
+  provisional server under `provisional.lock` and grants no authority over the
+  unproven Runtime. Every ordinary Park/Resume/Fork/contextual
+  `n`/`new-workstream`, archive, Rename, recovery/start retry, and cleanup
+  action for that Runtime refuses or waits with bounded
+  `onboarding-in-progress` guidance. Passive snapshot/probe may
+  render `starting`/`onboarding` and reconcile, but must not adopt helper or
+  preparation processes, mark the Runtime lost, signal it, or expose ordinary
+  action authority. Once terminal `recovery-required`, only exact recovery or
+  explicit Park rules apply. A host-local reconciler invoked by passive snapshot/action
+  preflight or restart recovery performs no provider effect; only after full
+  operation/revision, RuntimeId/generation and exact `RuntimePaths` fields
+  (directory, socket, configuration, and session), tmux pane/session,
+  PID/birth/PGID/session, and expected-executable proof does it atomically
+  commit `provider_exec_proven` and activate ordinary authority. An exact
+  helper-recorded `execve` error proves only absence of the final provider TUI
+  exec; attempt-only graph rollback is allowed only when provider-specific
+  journal evidence also conclusively proves no prior external effect or
+  binding. A crash after `provider_exec_started` without proof is ambiguous and
+  never rollback authority. A known OpenCode blank-session POST or binding
+  remains on the same Runtime/Workstream/binding for exact recovery/resume and
+  is never rolled back or posted again; a possible POST effect is
+  `recovery-required`. A terminal known-absent result is not itself action
+  authority: when provider-specific evidence proves no effect or binding,
+  guarded rollback atomically ends onboarding and leaves the derived singleton
+  card available but unmaterialized; with a known OpenCode binding, atomic
+  resolution instead ends onboarding in the exact stopped/recovery state where
+  only binding-preserving Resume/recovery or explicit Park is allowed. No
+  ordinary action follows directly from exec-error evidence, and terminal
+  reconciliation cannot leave the operation fenced indefinitely.
+- Durable Runtime ownership consumes the old slot generation and derives one
+  fresh unmaterialized provisional card. Any rollback is lease-held,
+  revision/slot-generation guarded, and targets only the old operation/Runtime/
+  slot; it never resets a newly materialized shell, targets a newer marker, or
+  creates a second card. Existing fresh marker/card state remains unchanged.
+- Process names, pane content, hooks, provider inventory, and commands that
+  bypass the functions are never adoption authority. A bypassed provider is an
+  unmanaged shell process.
+- At broker invocation, bounded read-only Git discovery from the shell's exact
+  current cwd resolves the containing non-bare worktree root. Only this
+  broker-time check creates ProjectLocation/launch authority. A linked
+  worktree stays its own ProjectLocation. Missing, unsafe, ambiguous, or
+  non-Git seed/current cwd evidence never falls back; failure leaves the shell
+  interactive and creates no durable record. Arbitrary cwd history is not
+  persisted in the host registry.
+- Provider kind is the explicit command the user types. The provider adapter's
+  closed, version/contract-validated grammar admits only fresh native TUI
+  shapes. Broker-owned cwd, profile, resume/session, attach/server,
+  host/port/endpoint, and equivalent identity flags fail before reservation;
+  they are never stripped or reinterpreted. Explicitly enumerated provider-owned
+  non-session commands such as `--help`, `--version`, and `login` may run
+  directly as explicitly unmanaged commands; their effects remain provider-
+  owned. Other shapes refuse with bounded guidance. Provider authentication,
+  model, effort, role,
+  permissions, and first input stay native; safe native arguments pass only
+  when proven compatible, without an invented live-version flag list. Any
+  secret-bearing argument or value is outside the promotable grammar.
+- Public `new-workstream` is source-based parity for contextual `n`: it
+  inherits the exact source provider and ProjectLocation, rejects provider/path
+  overrides, and has no source-less arbitrary creation form.
+- `n` on a selected managed Workstream starts an independent blank session with
+  the same provider at the same exact registered Location. `n` does nothing
+  special on the provisional card. A different provider or directory uses the
+  shell; `f` remains same-provider conversation Fork.
+- Once promoted, a Workstream remains pinned to its launch Location. WSNav does
+  not create, switch, remove, discover, or follow later provider worktrees and
+  never retargets from provider cwd changes.
+- Normal tmux detach and reattach to the same owned presentation preserves the
+  exact provisional shell, actual cwd, and pending state and never creates a
+  duplicate. A prepared reservation alone does not revoke provisional cleanup:
+  before the helper successfully revalidates every bound
+  marker/process/cwd/path/revision/token claim and atomically consumes the
+  capability while committing durable `Runtime-owned` authority, confirmed
+  close/loss may win only under the shared lease by atomically canceling/
+  revoking an unconsumed capability, proving pre-effect absence, rolling back
+  attempt-only rows, and then cleaning exact provisional artifacts. After that
+  exact helper commit, presentation cleanup never signals that pane, process,
+  or server. Durable transition precedes marker cleanup, and ambiguous
+  cross-store windows remain in the onboarding journal for recovery. Outer SSH
+  detach follows these same rules. Shell exit and conclusive pre-effect
+  failure after the exact helper ownership commit are resolved by onboarding
+  recovery, not presentation cleanup. Ambiguous ownership leaves evidence untouched, fails closed, and
+  blocks duplicate-shell creation. Managed Runtimes are preserved in every
+  presentation-loss path.
+- Card and server state key off Runtime ownership rather than provider success.
+  Before that exact helper commit the selected card remains the exact shell; once
+  ownership commits it becomes the managed Workstream and a fresh
+  unmaterialized card appears even when binding is not ready. OpenCode
+  pre-creates its exact blank root session; any possible `POST /session` effect
+  leaves the same server Runtime-owned and the card visibly
+  `recovery-required`, even without a native TUI. Presentation cleanup cannot
+  touch it and recovery never issues a second POST. A conclusive pre-effect
+  failure after the exact helper commit is classified by onboarding recovery;
+  it rolls back attempt-only graph state only when provider-specific evidence
+  proves no effect or binding, leaving the derived singleton card available but
+  unmaterialized. A blank Codex TUI remains a managed `starting` row until its
+  first authoritative SessionStart, without session-list or title inference.
+- D12's optional utility shell below an attached managed provider remains a
+  distinct, short-lived current-Workstream tool. D17 does not make utility
+  shells durable or permit multiple provisional shells.
+
+### Durable-state contract
+
+Host schema 13 migrates transactionally to schema 14. The migration removes
+only `ProjectBrowserSettings` and preserves Projects, ProjectLocations,
+Workstreams, Runtime generations, provider bindings, integrations, attention,
+and unfinished operations. No state wipe is required. Fresh state writes
+schema 14 directly; unsupported or ambiguous schema evidence fails closed.
+
+The provisional shell has no registry row. Its marker owns exactly one fresh
+`slot_generation`, one candidate RuntimeId, the exact final full-UUID
+`RuntimePaths` fields (directory, socket, configuration, and session), seed cwd,
+and bounded shell/server ownership evidence. Materialization alone references
+no durable graph row; broker prepare may reserve the ProjectLocation,
+Workstream, Runtime generation, and onboarding operation before the exact helper
+ownership commit. The stable host-private `provisional.lock` is operational
+state, distinct from D16's `transition.lock`, and contains only bounded format
+version, HostId, and `lease_generation`. Schema-14 host-operational metadata
+stores a planned `lease_generation`, install phase `pending` or `ready`, and
+expected device/inode once ready; it is not a card/Runtime row. The schema/HostId
+transaction commits schema-14 ownership and pending metadata first; schema-13
+code/path never creates or recognizes the lock. In `pending`, startup creates an
+absent mode-`0600` current-owner regular artifact with create-new/no-follow,
+writes bounded file contents, fsyncs the file, then fsyncs the containing
+state-root directory before finalizing `ready` with expected device/inode; an
+exact crash-window file may be validated/locked and
+finalized. Pending foreign/mismatched evidence fails closed. In `ready`, missing,
+replaced, or device/inode-mismatched evidence fails closed and is never
+recreated. A pre-schema-14 artifact is unexpected/ambiguous, remains untouched,
+and is never adopted or deleted; no cross-store atomicity is claimed. All actors
+use one retained no-follow/CLOEXEC nonblocking exclusive lock, and malformed,
+unlinked/recreated, or busy evidence fails closed. Crash releases the kernel lock
+without changing the file; restart retries `pending` or reacquires only the
+expected `ready` artifact.
+Marker, capability, and journal bind both `lease_generation` and
+`slot_generation`.
+
+Promotion acquires `provisional.lock` and creates one request-keyed
+`CompoundOperation(kind=onboard)`, transactionally adopting that candidate ID
+and unchanged `RuntimePaths` fields (directory, socket, configuration, and
+session) while reserving the Project/Location, fixed-provider Workstream, and
+Runtime generation. The `provisional.lock` lease and marker/revision checks are
+held through the handoff-issued transition. A prepared reservation does not
+revoke provisional cleanup: close/loss can cancel/revoke an unconsumed
+capability, prove
+pre-effect absence, roll back attempt-only rows, and then clean the
+marker-backed artifacts. The helper instead reacquires the lock and, while
+holding it, revalidates every bound marker/process/cwd/path/revision/token
+claim. Only on successful revalidation does it atomically compare-and-consume
+the capability and commit durable `Runtime-owned` authority for the candidate;
+a mismatch does not advance ownership. It then, still under `provisional.lock`
+and before releasing it, revokes/removes presentation cleanup authority, leaves
+marker cleanup after that durable transition, and only afterward prepares provider
+effects or executes the provider.
+
+The same operation then records `runtime_owned_launching` (no provider effect),
+provider-specific preparation/external-effect phases, and
+`provider_exec_started` immediately before `execve`; terminal outcomes are
+`provider_exec_proven`, known-absent exec failure, or
+`recovery-required`/`unknown`. Runtime ownership alone does not activate
+ordinary attachment or action authority for that unproven Runtime: until full
+proof, its originating presentation may retain its existing pane or detach
+through ordinary card switching, but no new attachment to that Runtime is
+allowed. Selecting/materializing the fresh derived singleton card attaches only
+its separate provisional server under `provisional.lock` and grants no authority
+over the unproven Runtime. Park/Resume/Fork, contextual `n`/`new-workstream`,
+archive, Rename, recovery/start retry, and cleanup for that Runtime refuse or
+wait with bounded onboarding guidance. Passive snapshot/probe and restart recovery
+may reconcile but perform no provider effect. A host-local
+reconciler atomically commits `provider_exec_proven` only after full
+operation/revision, RuntimeId/generation and exact `RuntimePaths` fields
+(directory, socket, configuration, and session), tmux pane/session,
+  PID/birth/PGID/session, and expected-executable proof. An exact helper-recorded
+  `execve` error proves only absence of the final provider TUI exec; attempt-only
+  graph rollback is allowed only when provider-specific journal evidence also
+  proves no prior external effect or binding. An authoritative Codex hook may
+  contribute only through that same identity/revision proof, and an OpenCode
+  sidecar or server identity is never native-TUI exec proof. A known OpenCode
+  blank-session POST or binding remains on the same Runtime/Workstream/binding
+  for exact recovery/resume and is never rolled back or posted again; a possible
+  POST effect is `recovery-required`. A terminal known-absent result is not
+  itself action authority: when provider-specific evidence proves no effect or
+  binding, guarded rollback atomically ends onboarding and leaves the derived
+  singleton card available but unmaterialized; with a known OpenCode binding,
+  atomic resolution instead ends onboarding in the exact stopped/recovery state
+  where only binding-preserving Resume/recovery or explicit Park is allowed. No
+  ordinary action follows directly from exec-error evidence, and terminal
+  reconciliation cannot leave the operation fenced indefinitely. A crash after
+  exec-start without proof is ambiguous and never rollback authority.
+
+Each presentation derives one pinned provisional card with no durable card row,
+but the shared host lease/classifier permits at most one unregistered materialized
+candidate server across all presentations. A valid marker/artifact belonging to
+another presentation is busy/owned, not unknown or adoptable; its card remains
+visible but unavailable until that slot promotes or conclusively cleans. Under
+the stable lease, the classifier may cross-check the exact marker and unfinished
+operations against registered Runtime IDs and bounded `run/runtime-*` artifacts
+only to detect conflicts; it never passively adopts or deletes unknown artifacts.
+Missing/changed marker evidence with any unregistered
+Runtime-shaped artifact, multiple candidates, or ambiguous journal/path/process
+evidence blocks all fresh materialization and leaves artifacts untouched. A
+fresh UUID cannot evade that ambiguity; replacement is permitted only after
+exact prior absence or conclusive cleanup and receives a new slot generation
+and candidate ID. Runtime ownership consumes the old slot generation and derives
+one fresh unmaterialized card. A lease-held, revision/slot-generation-guarded
+rollback targets only the old operation/Runtime/slot, leaves any newer marker or
+card unchanged, and is idempotent across restart; it never creates a second
+card or resets a newly materialized shell.
+
+The one-shot capability binds the request/operation, presentation and
+provisional slot, candidate RuntimeId and exact `RuntimePaths` fields
+(directory, socket, configuration, and session), fixed provider, exact shell
+cwd/root/Location, reserved Runtime generation, captured revisions, shell
+PID/birth/process group, grammar-approved argv digest, and short monotonic
+expiry. Its bounded phase records prepare, token issuance,
+hidden-helper handoff/atomic consume, `runtime_owned_launching`,
+provider-specific preparation/external-effect phases,
+`provider_exec_started`, `provider_exec_proven`, known-absent exec failure,
+and `recovery-required`/`unknown`. Persisted state keeps only a bounded token
+identifier/verifier, claim references or digests, expiry, and phase; it never
+stores the live token, original argv, shell command line, environment,
+terminal bytes, or provider payload. Secret-bearing arguments are outside the
+promotable grammar. Ambiguous cross-store crash windows remain in the journal
+for onboarding recovery. A conclusive pre-effect failure after the exact helper
+commit is rolled back and classified by onboarding recovery only when the
+provider-specific journal proves no prior external effect or binding; an exact
+`execve` error alone proves only final TUI exec absence. A possible post-effect
+failure is recovery-required and cannot be retried as a clean launch; a known
+OpenCode binding remains on the same Runtime/Workstream for exact recovery or
+resume and never receives a second POST.
+
+### Evidence basis and remaining falsification gates
+
+- Spike 0019 proves only a single-phase controlled-function-plus-`exec`
+  candidate. Spike 0021 validates the narrow synthetic
+  prepare-token-helper-provider chain across Bash/Zsh and both provider routes:
+  direct prepare child, verifier-backed one-shot consume, every bound-claim
+  mutation and expiry/replay refusal, shell PID/birth/PGID/session preservation,
+  and lease-FD noninheritance. It does not prove account-shell startup parity,
+  schema-14 ownership, cancellation/crash recovery, or native provider effects.
+  The separate Codex `0.150.0` run revalidates observer ancestry only; real
+  native Codex promotion, terminal behavior, and output retention remain exit
+  gates.
+- D17.0 is the first falsification gate: disposable Bash/Zsh evidence must
+  validate or reject the two-phase handshake, one marker-backed candidate
+  RuntimeId with final full-UUID `RuntimePaths` fields (directory, socket,
+  configuration, and session), exact non-login wrapper startup and function
+  precedence, bounded argv handling, provider grammar, signals, cancellation,
+  crash gaps, and shell-leader PID/birth/process-group preservation before
+  production onboarding work begins. It must prove the schema/HostId transaction
+  commits schema-14 ownership and `pending` lease metadata before lock
+  creation/recognition, that schema-13 code/path does neither, and that
+  pending-before-file, file-before-ready, ready-steady-state, and crash/restart
+  windows behave deterministically. A pre-schema-14 lock artifact is
+  unexpected/ambiguous and remains untouched rather than adopted or deleted; no
+  cross-store atomicity is assumed. It must prove candidate
+  collision/foreign-artifact refusal and exclusion from ordinary registry
+  inventory, probe, park, remove, and recovery paths until durable adoption;
+  markerless/registryless artifacts remain untouched and a clean replacement
+  uses a fresh candidate ID. It must exercise the exact stable host-private
+  `provisional.lock` distinct from D16's `transition.lock`: schema-14
+  fresh-root recognition, create-new/no-follow, mode-`0600` current-owner
+  regular-file validation, pending absent-file creation and exact crash-window
+  file finalization, ready missing/replacement/device-inode mismatch refusal,
+  valid unlocked-leftover reuse, HostId/format/path/inode checks, one
+  nonblocking exclusive lock held by every actor, holder crash/restart, busy
+  timeout, symlink/replacement/unlink-recreate attempts, inode mismatch, and FD
+  noninheritance across provider exec. It must cover
+  `HOME`/Zsh `ZDOTDIR`, system/user startup ordering, environment/options/
+  aliases/functions/prompt readiness, startup abort, wrapper replacement, and
+  double-source baseline parity. It must race materialization, close/loss,
+  prepare and token issuance, helper consume, OpenCode preparation/POST, and
+  provider exec under that lock, plus passive snapshot, new attachment,
+  Park/Resume/Fork/contextual `n`/`new-workstream`, archive/Rename,
+  recovery/start retry, helper exit, exact exec error, exec proof, immediate
+  provider exit, and restart. It must prove one deterministic winner, no
+  helper adoption, managed kill, premature signal/action, stuck operation,
+  blind rollback, duplicate ownership/shell, or second POST. It must exercise
+  `runtime_owned_launching`, every provider preparation/external-effect phase,
+  `provider_exec_started`, terminal known-absent failure,
+  `provider_exec_proven`, and recovery-required/unknown; only a full
+  operation/revision, RuntimeId/generation and exact `RuntimePaths` fields
+  (directory, socket, configuration, and session), tmux pane/session,
+  PID/birth/PGID/session, and expected-executable proof may activate ordinary
+  attachment/action authority. It must also prove terminal known-absent plus
+  no-effect evidence performs guarded rollback and ends onboarding, while
+  terminal known-absent plus a known OpenCode binding ends onboarding in the
+  exact stopped/recovery state with only binding-preserving Resume/recovery or
+  explicit Park allowed; exec-error evidence alone never grants ordinary
+  action, possible effects remain recovery-required, and no operation stays
+  fenced indefinitely. It must also cover issuance-to-helper
+  cancellation/crash, replay, expiry, duplicate helper, and every bound-claim
+  mismatch before provider effect. Marker deletion with live/dead candidates,
+  multiple/unknown `run/runtime-*` artifacts, bounded namespace overflow,
+  restart, and stale rollback racing fresh-card selection/materialization. It
+  must prove outcome-specific singleton counts: ambiguous or unknown evidence
+  leaves every artifact untouched, blocks new materialization, and creates no
+  new provisional server or marker (the derived singleton card may remain
+  unavailable); conclusive clean/pre-effect rollback creates no duplicate and
+  leaves one derived unmaterialized card; successful ownership leaves the
+  adopted Runtime server plus one unmaterialized card; and clean
+  pre-materialization has zero provisional servers. A two-presentation
+  materialization race is serialized by the shared host lease: one valid
+  candidate may materialize, while the other presentation recognizes that
+  marker/artifact as busy/owned, keeps its derived card visible but unavailable,
+  and creates no second server. It never normalizes unknown artifacts to a
+  count of one or resets a newer marker. The post-commit action fence applies
+  only to the unproven Runtime; selecting the fresh card may attach its separate
+  provisional server but grants no authority over that Runtime.
+- Spike 0020 passes the bounded OpenCode `1.18.23` fresh-session/provider
+  lifecycle revalidation. It supports the adapter contract but is not evidence
+  that OpenCode promotion through the D17 broker is implemented.
+- Before implementation can rely on account-shell interception, disposable
+  tests must prove the exact function, quoting, argument, signal, and `exec`
+  behavior for both Bash and Zsh. Login-shell mode and unsupported or ambiguous
+  startup contexts must show bounded unavailable guidance and must not launch a
+  managed provider. A missing/deleted/unsafe/ambiguous seed cwd must likewise
+  fail closed without fallback or Project authority.
+- The broker must prove how Codex contextual observer readiness completes
+  before final `exec`, and how OpenCode's non-idempotent blank-session
+  precreation remains journaled under the same reserved Runtime authority.
+
+### Implementation slices
+
+1. **D17.0 handshake and grammar falsification.** Build disposable synthetic
+   Bash/Zsh evidence for the two-phase prepare-token-helper handshake, exact
+   non-login wrapper startup/baseline behavior, closed fresh-TUI grammar,
+   bounded argument transfer, signals, cancellation, crash gaps, and
+   shell-leader PID/birth/process-group preservation. Exercise one
+   marker-backed candidate RuntimeId with final full-UUID `RuntimePaths` fields
+   (directory, socket, configuration, and session), including candidate
+   collision/foreign-artifact refusal and inventory/probe/park/remove/recovery
+   exclusion until durable adoption. Exercise the exact stable host-private
+   `provisional.lock` (schema-14 creation/reuse, no-follow, mode-`0600`,
+   HostId/format/path/inode checks, holder crash/restart, busy timeout,
+   symlink/replacement/unlink-recreate refusal, and FD noninheritance) and its
+   race across close/loss, prepare/token issuance, helper consume, OpenCode
+   preparation/POST, and provider exec. Race passive snapshot, new attachment,
+   Park/Resume/Fork/contextual `n`/`new-workstream`, archive/Rename,
+   recovery/start retry, helper exit, exec error/proof, immediate provider
+   exit, and restart across every post-commit phase. Prove the full
+   operation/revision, RuntimeId/generation and exact `RuntimePaths` fields
+   (directory, socket, configuration, and session), tmux,
+   PID/birth/PGID/session, and executable proof fence, no managed kill,
+   premature action, stuck operation, blind rollback, duplicate ownership/shell,
+   or second POST. Exercise issuance-to-helper cancellation/crash, replay,
+   expiry, duplicate helper, and every bound-claim mismatch before provider
+  effect. Spike 0021 closes only the narrow two-phase topology risk; its listed
+  limits and every unresolved falsification above still stop the production
+  slices.
+2. **Dormant/test-only provisional ownership.** Add the presentation-scoped
+   ownership/card model and private provisional server behind internal test
+   seams, including deterministic presentation seed cwd, exact final-form
+   candidate `RuntimePaths` fields (directory, socket, configuration, and
+   session), fresh `slot_generation`, singleton derivation, detach/reattach,
+   and close/loss lifecycle, but do not render
+   or activate the provisional card in the ordinary D16 UI. D16 onboarding
+   remains exactly usable through this slice and the next slices; do not remove
+   or repurpose its Projects, picker, browser, refresh, or provider-choice
+   paths yet.
+3. **Broker, journal, and migration support.** Add the prepare broker, hidden
+   launch-helper boundary, request authentication, bounded Git-root and
+   provider-grammar adapters, bounded `runtime_owned_launching` through
+   `provider_exec_proven`/known-absent/recovery-required phases, the host-local
+   no-provider-effect reconciler, and crash/recovery journal support while D16
+   ordinary Projects, picker, browser, and refresh workflows remain usable.
+   Migration groundwork may understand schema 14, but does not remove the D16
+   settings or action surface before the replacement is ready. D16 onboarding
+   remains exactly usable through slice 4.
+4. **Provider promotion.** Complete Codex observer-readiness and OpenCode
+   blank-session preparation inside the onboarding journal, preserve exact
+   Runtime/process authority, provider-exec proof, and conclusive versus
+   ambiguous effects through the validated helper handoff for both Bash and Zsh.
+   This work stays dormant behind internal seams until the atomic cutover.
+5. **Atomic schema-14 and Navigator cutover.** In one coherent product
+   cutover, migrate schema 13 transactionally to 14, remove
+   `ProjectBrowserSettings` and Project-browser action DTOs, remove the
+   Projects/provider-picker/browser/refresh UI, render the pinned shell card
+   and in-place promotion, keep Archived, and make `n` the same-provider/
+   same-Location selected-Workstream fast path. Remove the current public
+   arbitrary-location `register <checkout> [--provider]` command and any
+   equivalent `host register-checkout` form in this same cutover. D16 ordinary
+   onboarding stays available until this replacement is complete; no hidden
+   D16 compatibility behavior remains after cutover.
+6. **Recovery and dead-code cleanup.** Reconcile interrupted onboarding,
+   remove dead D16 chooser/registration code and the public arbitrary-location
+   registration command after the atomic cutover rather than preserving hidden
+   compatibility behavior, and keep bypassed provider launches unmanaged.
+7. **Acceptance and operator docs.** Run focused tests, complete repository
+   gates, and explicitly operator-gated live Codex/OpenCode shell promotion
+   with sanitized evidence and complete disposable cleanup.
+
+Each slice is independently reviewable and runs its focused tests plus diff
+checks. `scripts/check` is mandatory before every checkpoint commit.
+
+### Exit gate
+
+D17 closes only when all of the following are true:
+
+- exactly one derived provisional shell card is visible, lazily materialized
+  with one fresh `slot_generation`, one marker-backed candidate RuntimeId, and
+  final full-UUID `RuntimePaths` fields (directory, socket, configuration, and
+  session). It remains usable across managed-card switching in the same
+  presentation, starts clean shells at the presentation seed cwd, preserves a
+  live shell's actual cwd across normal detach/reattach, proves candidate
+  collision/foreign-artifact refusal and exclusion from ordinary registry
+  inventory, probe, park, remove, and recovery paths until durable adoption,
+  and leaves no durable row or residue on shell exit or conclusive pre-handoff
+  loss. Marker deletion with live/dead candidates, multiple/unknown
+  `run/runtime-*` artifacts, bounded namespace overflow, restart, and stale
+  rollback versus fresh-card selection/materialization have outcome-specific
+  invariants: ambiguous or unknown evidence leaves every artifact untouched,
+  blocks new materialization, and creates no new provisional server or marker
+  (the derived singleton card may remain unavailable); conclusive clean/
+  pre-effect rollback creates no duplicate and leaves one derived unmaterialized
+  card; successful ownership leaves the adopted Runtime server plus one
+  unmaterialized card; and clean pre-materialization has zero provisional
+  servers. Unknown artifacts are never normalized to a count of one, and a
+  newer marker is never reset;
+- Bash and Zsh interactive non-login wrapper/functions inherit the validated
+  environment and original `HOME`/Zsh `ZDOTDIR`, match ordinary non-login
+  baseline matrices (system/user startup ordering, environment, options,
+  aliases, functions, and prompt readiness), reproduce the ordinary non-login
+  interactive startup graph exactly once without parsing RC contents, and fail
+  closed on login-shell mode, abort, replacement, or ambiguity. They pass
+  bounded grammar/quoting/argument/signal tests, invoke a child prepare broker
+  that returns only an exact one-shot capability, and hand it to the hidden
+  helper. The helper opens `provisional.lock`, retains its lease, and
+  revalidates every bound marker/process/cwd/path/revision/token claim. Only
+  after successful revalidation does the helper atomically compare-and-consume
+  the capability and commit durable `Runtime-owned` authority. A mismatch does not advance
+  ownership. The helper then revokes presentation cleanup before releasing the
+  lease, with durable transition preceding marker cleanup, and only afterward
+  prepares provider effects/execs. The final provider
+  preserves the shell leader PID, birth token, and process group.
+  Issuance-to-helper cancellation/crash, replay, expiry, duplicate helper, and
+  each request/operation/presentation/provider/candidate/path/cwd/root/Location/
+  Runtime/revision/process/argv-digest mismatch fail before effect. A terminal
+  known-absent result is resolved atomically: provider-specific no-effect proof
+  performs guarded rollback and ends onboarding, while a known OpenCode binding
+  ends onboarding in the exact stopped/recovery state where only
+  binding-preserving Resume/recovery or explicit Park is allowed. Exec-error
+  evidence alone never grants ordinary action, possible effects remain
+  recovery-required, and no operation stays fenced indefinitely;
+- the stable host-private `provisional.lock` (distinct from D16's
+  `transition.lock`) serializes materialization, close/loss, prepare/token
+  issuance, helper consume, singleton reconciliation, and marker cleanup. Its
+  schema-14 host-operational metadata stores planned `lease_generation`, phase
+  `pending`/`ready`, and expected device/inode once ready; it is not a card or
+  Runtime row. Schema-14 ownership and pending metadata commit before any lock
+  create/recognition; schema-13 code/path never does so. In pending, an absent
+  mode-`0600` current-owner regular file is created with create-new/no-follow,
+  bounded file contents are written, the file is fsynced, then the containing
+  state-root directory is fsynced before metadata finalizes ready; an exact
+  crash-window file may be validated/locked and finalized. Ready missing,
+  replaced, or device/inode-mismatched evidence fails closed and is never
+  recreated. A pre-schema-14 artifact remains untouched and is never adopted or
+  deleted; no cross-store atomicity is claimed. The file contains only bounded
+  format version, HostId, and `lease_generation` (no cwd, command, argv,
+  provider/user content, or provider payload), and is never unlinked/recreated
+  in normal operation. Every actor holds one nonblocking exclusive
+  no-follow/CLOEXEC FD lock; crash/restart, busy timeout, symlink, replacement,
+  unlink/recreate, or inode mismatch never permits a second lock or unlocked
+  mutation. A prepared reservation alone does not revoke cleanup:
+  before the helper successfully revalidates every bound marker/process/cwd/
+  path/revision/token claim and atomically consumes the capability while
+  committing durable `Runtime-owned` authority, close/loss may win only under
+  the lease by atomically revoking the unconsumed capability and proving
+  pre-effect absence. After that exact helper commit, presentation cleanup
+  never signals the server, pane, or process. Ambiguous ownership leaves
+  evidence untouched and blocks duplicate creation, and every
+  presentation/outer-SSH path preserves managed Runtimes;
+- live Codex and OpenCode promotions retain the exact candidate private tmux
+  server/path/pane, provider PID, birth token, process group, native terminal,
+  and fixed provider kind without rename/rehome/replacement, then keep the
+  promoted card selected and derive one unmaterialized singleton card even when
+  binding is absent. Runtime-owned is not ordinary attach/action authority for
+  the unproven Runtime until the operation reaches `provider_exec_proven` or
+  terminal reconciliation: while `runtime_owned_launching`, provider
+  preparation/external-effect, or `provider_exec_started`, its originating
+  presentation may retain or detach its existing pane, but no new attachment
+  to that Runtime is allowed. Selecting the fresh card attaches only its
+  separate provisional server under `provisional.lock` and grants no authority
+  over the unproven Runtime; ordinary actions for that Runtime refuse/wait with
+  onboarding guidance. A passive snapshot,
+  action preflight, or restart reconciler performs no provider effect and may
+  activate authority only after proving the exact operation/revisions,
+  RuntimeId/generation and exact `RuntimePaths` fields (directory, socket,
+  configuration, and session), tmux pane/session, PID/birth/PGID/
+  session, and expected executable. A possible OpenCode `POST /session` effect
+  leaves that same server Runtime-owned and its card visibly recovery-required,
+  with no second POST. Helper-recorded exact `execve` errors prove only absence
+  of the final provider TUI exec; attempt-only rollback requires provider-specific
+  journal proof of no prior external effect or binding. A known OpenCode
+  blank-session POST or binding remains on the same Runtime/Workstream/binding
+  for exact recovery/resume and is never rolled back or posted again; a possible
+  POST is recovery-required. A terminal known-absent result is not itself action
+  authority: provider-specific no-effect proof performs guarded rollback and
+  ends onboarding, while a known OpenCode binding ends onboarding in the exact
+  stopped/recovery state where only binding-preserving Resume/recovery or
+  explicit Park is allowed. Exec-error evidence alone never grants ordinary
+  action, and no operation stays fenced indefinitely. A crash after
+  `provider_exec_started` without proof is ambiguous/recovery-required and is
+  never blindly rolled back;
+- `git rev-parse --show-toplevel`-equivalent discovery from a child directory,
+  main worktree, and linked worktree records the exact containing worktree root;
+  non-Git, bare, changed, unsafe, timed-out, and ambiguous seed/current cwd
+  evidence launches nothing, leaves the shell intact, and never falls back;
+- conflicting cwd/profile/resume/session/attach/server/host/port/endpoint or
+  equivalent identity arguments fail before provider effects; only
+  version/contract-proven safe native arguments preserve native behavior,
+  explicitly enumerated provider-owned non-session commands such as
+  `--help`, `--version`, and `login` remain explicitly unmanaged with their
+  effects provider-owned, other non-fresh-TUI shapes refuse with bounded
+  guidance, secret-bearing argv remains outside the promotable grammar, and
+  bypassed launches are never adopted from process, pane, hook, or inventory
+  evidence;
+- conclusive pre-effect failures, including those discovered after the exact
+  helper commit, are classified by onboarding recovery and leave no Project,
+  Location, Workstream, Runtime, binding, or operation residue after their
+  attempt-only rollback, while every possible post-effect result is visible as
+  one recovery-required managed Workstream and cannot be blindly retried;
+- schema 13 migrates transactionally to 14 without a state wipe, removes only
+  obsolete browser settings, and preserves all enumerated authoritative state;
+- Workstreams and Archived are the only pages; Project grouping is derived
+  from retained Workstreams/Locations, no browser/root/refresh action survives,
+  and `n` uses the selected managed Workstream's exact provider and Location;
+- provider exit preserves the managed stopped/recoverable card and completed
+  output, provider cwd/worktree changes never retarget it, and D12 utility-shell
+  behavior remains distinct and bounded;
+- all automated tests use disposable state roots, repositories, provider homes,
+  account-shell startup files, and private tmux sockets; and
+- `scripts/check`, staged and unstaged `git diff --check`, focused D17 tests,
+  and explicitly authorized sanitized live acceptance pass with complete
+  cleanup and no ordinary tmux/provider-state interference.
+
 ## Deferred beyond V1
 
 The roadmap does not include arbitrary existing-session adoption, hard
 Workstream/provider-session deletion, worktree or branch removal, checkout
 synchronization, task/context transfer, transcript or memory features,
 automatic plan rollover, provider/model/role launch presets, provider filters
-or grouping, generalized provider onboarding, unproven OpenCode navigator
+or grouping, passive provider-session adoption, unproven OpenCode navigator
 Rename, profile composition, Claude parity, multiple-controller catalog
 synchronization, a public daemon, or a replacement provider UI.
 
@@ -4014,10 +4928,8 @@ WSNav-managed cross-host/SSH operation is retired by D16, not deferred for a
 later aggregator. Ordinary SSH composition and one host-local wsnav instance
 per execution host are the supported multi-host workflow.
 
-One optional and undecided post-V1 expansion is a per-Workstream presentation
-surface that treats the native provider TUI and utility shell as one unit. It
-could preserve a live shell across Workstream switches by parking its existing
-pane in an internal window of the already-owned presentation tmux session and
-restoring it when that Workstream becomes active. This remains deferred until
-its multi-shell resource bound, background-shell visibility, transition
-rollback, and cleanup contract are explicitly approved.
+The one D17 provisional onboarding shell does not approve durable or multiple
+per-Workstream shells. A future presentation could preserve each utility shell
+across Workstream switches, but that remains deferred until its multi-shell
+resource bound, background-shell visibility, transition rollback, and cleanup
+contract are explicitly approved.

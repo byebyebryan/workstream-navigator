@@ -54,6 +54,13 @@ concurrency probes; [Spike
 Runtime, observer, and exact HTTP Fork boundary; and [Spike
 0017](spikes/0017-opencode-fresh-session.md) records blank-session binding,
 endpoint ownership, and per-Runtime observer sidecar evidence.
+[Spike 0019](spikes/0019-brokered-onboarding-shell.md) records the bounded
+brokered provisional-shell topology study and its implementation limits.
+[Spike 0020](spikes/0020-opencode-1.18.23-revalidation.md) records the
+OpenCode `1.18.23` revalidation of the historical fresh-session contract.
+[Spike 0021](spikes/0021-d17-two-phase-handshake.md) validates the narrow D17
+prepare-capability-helper-exec topology across synthetic Bash/Zsh and
+Codex/OpenCode routes while preserving the remaining D17.0 acceptance gates.
 
 ## Provider studies
 

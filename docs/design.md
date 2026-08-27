@@ -2668,12 +2668,12 @@ a single-phase controlled shell function that obtains broker authority before
 narrow synthetic two-phase prepare-token-helper chain: direct prepare child,
 verifier-backed one-shot consume, bound-claim/replay/expiry refusal,
 shell PID/birth/process-group preservation, and lease-FD noninheritance across
-Bash/Zsh and both provider routes. Spikes
-0022 and 0023 separately validate account-shell startup and the isolated
-schema-14 lock lifecycle; real closed grammar, cross-actor integration, and
-crash/cancel recovery remain D17.0 gates. A separate observer-ancestry
-revalidation passed on Codex `0.150.0`; real brokered Codex terminal/output
-behavior remains a D17 acceptance gate. [Spike
+Bash/Zsh and both provider routes. Spikes 0022-0024 separately validate
+account-shell startup, the isolated schema-14 lock lifecycle, and pinned
+Codex/OpenCode fresh-TUI grammar; cross-actor integration and crash/cancel
+recovery remain D17.0 gates. A separate observer-ancestry revalidation passed
+on Codex `0.150.0`; real brokered Codex terminal/output behavior remains a D17
+acceptance gate. [Spike
 0020](evidence/spikes/0020-opencode-1.18.23-revalidation.md) reruns the bounded
 OpenCode fresh-session/provider lifecycle contract on `1.18.23`; it supports
 the provider adapter assumptions but is not, by itself, proof of the D17 broker

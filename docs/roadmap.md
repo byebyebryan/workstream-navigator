@@ -250,6 +250,9 @@ validates the controlled non-login wrapper and records Bash's required launcher
 login preflight. [Spike 0023](evidence/spikes/0023-d17-provisional-lock.md)
 separately validates the isolated schema-14 stable-lock lifecycle. Neither
 probe validates the required cross-actor onboarding races or provider effects.
+[Spike 0024](evidence/spikes/0024-d17-provider-grammar.md) separately pins the
+conservative fresh-TUI parser for Codex `0.150.0` and OpenCode `1.18.23`; it
+does not validate helper/broker integration or provider effects.
 The separate observer-ancestry revalidation passed on Codex `0.150.0`, while a
 real brokered Codex launch remains a D17 gate. D17.0 remains the first
 implementation gate for the complete handshake, grammar, wrapper, ownership,
@@ -4627,10 +4630,10 @@ resume and never receives a second POST.
 direct prepare child, verifier-backed one-shot consume, every bound-claim
 mutation and expiry/replay refusal, shell PID/birth/PGID/session preservation,
 and lease-FD noninheritance. Spike 0022 separately validates account-shell
-non-login baseline parity and its Bash login preflight, while Spike 0023
-separately validates the isolated schema-14 stable-lock lifecycle. The probes
-do not prove their cross-actor integration, cancellation/crash recovery, or
-native provider effects.
+non-login baseline parity and its Bash login preflight, Spike 0023 separately
+validates the isolated schema-14 stable-lock lifecycle, and Spike 0024 pins the
+versioned fresh-TUI grammar. The probes do not prove their cross-actor
+integration, cancellation/crash recovery, or native provider effects.
   The separate Codex `0.150.0` run revalidates observer ancestry only; real
   native Codex promotion, terminal behavior, and output retention remain exit
   gates.
@@ -4738,9 +4741,10 @@ native provider effects.
    premature action, stuck operation, blind rollback, duplicate ownership/shell,
    or second POST. Exercise issuance-to-helper cancellation/crash, replay,
    expiry, duplicate helper, and every bound-claim mismatch before provider
-  effect. Spikes 0021-0023 close only the narrow two-phase topology,
-  account-wrapper, and isolated stable-lock risks; their listed limits and every
-  unresolved falsification above still stop the production slices.
+  effect. Spikes 0021-0024 close only the narrow two-phase topology,
+  account-wrapper, isolated stable-lock, and versioned grammar risks; their
+  listed limits and every unresolved falsification above still stop the
+  production slices.
 2. **Dormant/test-only provisional ownership.** Add the presentation-scoped
    ownership/card model and private provisional server behind internal test
    seams, including deterministic presentation seed cwd, exact final-form

@@ -67,6 +67,9 @@ login preflight boundary.
 [Spike 0023](spikes/0023-d17-provisional-lock.md) validates the isolated
 schema-14 stable `provisional.lock` installation and refusal lifecycle while
 leaving the cross-actor onboarding races as D17.0 work.
+[Spike 0024](spikes/0024-d17-provider-grammar.md) pins the conservative fresh
+native-TUI grammar for Codex `0.150.0` and OpenCode `1.18.23`, without claiming
+provider-effect or recovery integration.
 
 ## Provider studies
 

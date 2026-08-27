@@ -1,0 +1,26 @@
+{
+  "assertions": {
+    "all_case_assertions_pass": true,
+    "codex_ambiguous_or_secret_like_forms_refuse": true,
+    "codex_empty_is_managed_fresh": true,
+    "codex_help_exposes_native_and_rejected_boundaries": true,
+    "codex_identity_session_profile_and_prompt_forms_refuse": true,
+    "codex_information_and_login_are_unmanaged": true,
+    "codex_local_provider_requires_explicit_oss": true,
+    "codex_safe_native_options_are_managed": true,
+    "managed_routes_bind_normalized_argv_digest": true,
+    "opencode_ambiguous_or_oversized_forms_refuse": true,
+    "opencode_empty_is_managed_fresh": true,
+    "opencode_help_exposes_native_and_rejected_boundaries": true,
+    "opencode_identity_session_server_and_prompt_forms_refuse": true,
+    "opencode_information_and_auth_are_unmanaged": true,
+    "opencode_safe_native_options_are_managed": true
+  },
+  "contract": "d17-fresh-tui-grammar-v1",
+  "providers": {
+    "codex": "codex-cli 0.150.0",
+    "opencode": "1.18.23"
+  },
+  "reason": "pinned-fresh-tui-grammar-observed",
+  "status": "pass"
+}

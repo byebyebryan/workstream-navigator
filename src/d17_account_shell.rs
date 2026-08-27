@@ -19,7 +19,12 @@ use std::{
 
 use thiserror::Error;
 
-use crate::runtime::{NativeLaunch, RuntimeError, RuntimePaths, RuntimeStartup};
+use crate::{
+    provisional::{ProvisionalSlot, SlotError, materialize_private_shell_with_startup},
+    runtime::{
+        NativeLaunch, PrivateRuntime, ProcessGroupProbe, RuntimeError, RuntimePaths, RuntimeStartup,
+    },
+};
 
 const BASH_WRAPPER_FILE: &str = ".wsnav-d17-bashrc";
 const ZSH_WRAPPER_FILE: &str = ".zshrc";
@@ -243,6 +248,28 @@ impl AccountShellLaunch {
     pub(crate) fn bootstrap(&self) -> &AccountShellBootstrap {
         &self.bootstrap
     }
+
+    /// Materializes this exact account shell through the marker-first
+    /// provisional seam. The atomic D17 cutover is the only future caller;
+    /// this method does not add a D16 launch route.
+    pub(crate) fn materialize(
+        &self,
+        state_root: &Path,
+        presentation_directory: &Path,
+        slot: &ProvisionalSlot,
+        runtime: &PrivateRuntime<'_>,
+        process_group_probe: &dyn ProcessGroupProbe,
+    ) -> Result<ProvisionalSlot, SlotError> {
+        materialize_private_shell_with_startup(
+            state_root,
+            presentation_directory,
+            slot,
+            runtime,
+            self.launch(),
+            self.bootstrap(),
+            process_group_probe,
+        )
+    }
 }
 
 /// Fixed startup-file writer for [`AccountShellLaunch`].
@@ -336,16 +363,28 @@ fn write_private_new(path: &Path, body: &str) -> Result<(), std::io::Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, ffi::OsString, fs, path::Path, process::Command};
+    use std::{
+        cell::RefCell,
+        env,
+        ffi::OsString,
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+    };
 
     use super::{
         AccountShellError, AccountShellLaunch, BASH_WRAPPER, BASH_WRAPPER_FILE, EXECUTABLE_ENV,
         HOME_ENV, ORIGINAL_HOME_ENV, ORIGINAL_ZDOTDIR_ENV, ZSH_WRAPPER, ZSH_WRAPPER_FILE,
     };
     use crate::{
-        domain::RuntimeId,
-        runtime::{RuntimeError, RuntimePaths, RuntimeStartup},
+        domain::{Revision, RuntimeId},
+        provisional::{ProvisionalSlot, SlotGeneration, read_marker},
+        runtime::{
+            PrivateRuntime, ProcessGroupInfo, ProcessGroupProbe, ProcessProbe, ProcessProbeError,
+            RuntimeError, RuntimePaths, RuntimeStartup, TmuxClient, TmuxInvocation, TmuxResponse,
+        },
     };
+    use uuid::Uuid;
 
     fn make_directory(path: &Path) {
         fs::create_dir(path).unwrap();
@@ -458,6 +497,74 @@ mod tests {
             fs::read_to_string(temporary.path().join("probe")).unwrap(),
             expected_probe
         );
+    }
+
+    struct AccountMaterializationTmux {
+        calls: RefCell<Vec<TmuxInvocation>>,
+        wrapper: PathBuf,
+        seed_cwd: PathBuf,
+    }
+
+    impl TmuxClient for AccountMaterializationTmux {
+        fn invoke(&self, invocation: &TmuxInvocation) -> Result<TmuxResponse, RuntimeError> {
+            let call = self.calls.borrow().len();
+            if call == 0 {
+                assert!(self.wrapper.is_file());
+            }
+            self.calls.borrow_mut().push(invocation.clone());
+            let stdout = match call {
+                0 | 1 => String::new(),
+                2 => "%17\n".to_owned(),
+                3 => "4242\n".to_owned(),
+                4 => format!("{}\n", self.seed_cwd.display()),
+                _ => {
+                    return Err(RuntimeError::TmuxRejected(
+                        "unexpected tmux call".to_owned(),
+                    ));
+                }
+            };
+            Ok(TmuxResponse {
+                success: true,
+                stdout,
+                stderr: String::new(),
+            })
+        }
+    }
+
+    struct AccountMaterializationProcess;
+
+    impl ProcessProbe for AccountMaterializationProcess {
+        fn process_birth(&self, pid: u32) -> Option<String> {
+            (pid == 4242).then(|| "birth-4242".to_owned())
+        }
+    }
+
+    struct AccountMaterializationGroup;
+
+    impl ProcessGroupProbe for AccountMaterializationGroup {
+        fn process_group_checked(
+            &self,
+            pid: u32,
+        ) -> Result<Option<ProcessGroupInfo>, ProcessProbeError> {
+            Ok((pid == 4242).then_some(ProcessGroupInfo {
+                process_group_id: 4242,
+                session_id: 31337,
+            }))
+        }
+
+        fn process_group_members_checked(
+            &self,
+            _group: &ProcessGroupInfo,
+        ) -> Result<Vec<u32>, ProcessProbeError> {
+            Ok(vec![4242])
+        }
+
+        fn process_group_members_by_id_checked(
+            &self,
+            _process_group_id: u32,
+        ) -> Result<Vec<u32>, ProcessProbeError> {
+            Ok(vec![4242])
+        }
     }
 
     #[test]
@@ -587,6 +694,61 @@ mod tests {
                 0o600
             );
         }
+    }
+
+    #[test]
+    fn account_shell_materialization_writes_its_wrapper_before_the_private_server_starts() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_root = temporary.path().join("state");
+        let presentation = state_root.join("presentation");
+        let seed_cwd = temporary.path().join("seed");
+        let original_home = temporary.path().join("home");
+        fs::create_dir(&state_root).unwrap();
+        fs::create_dir(&presentation).unwrap();
+        make_directory(&seed_cwd);
+        make_directory(&original_home);
+        let shell = temporary.path().join("bash");
+        let wsnav = temporary.path().join("wsnav");
+        executable(&shell);
+        executable(&wsnav);
+        let runtime_id = RuntimeId::new();
+        let slot = ProvisionalSlot::materializing(
+            &state_root,
+            Uuid::new_v4(),
+            Revision::INITIAL,
+            1,
+            runtime_id,
+            SlotGeneration::new(Uuid::new_v4()),
+            &seed_cwd,
+        )
+        .unwrap();
+        let paths = RuntimePaths::for_runtime(&state_root, runtime_id);
+        let plan = AccountShellLaunch::new(&paths, &seed_cwd, &shell, &original_home, None, &wsnav)
+            .unwrap();
+        let tmux = AccountMaterializationTmux {
+            calls: RefCell::new(Vec::new()),
+            wrapper: paths.directory.join(BASH_WRAPPER_FILE),
+            seed_cwd: fs::canonicalize(&seed_cwd).unwrap(),
+        };
+        let process_probe = AccountMaterializationProcess;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
+
+        let materialized = plan
+            .materialize(
+                &state_root,
+                &presentation,
+                &slot,
+                &runtime,
+                &AccountMaterializationGroup,
+            )
+            .unwrap();
+
+        assert_eq!(
+            read_marker(&state_root, &presentation).unwrap(),
+            materialized
+        );
+        assert_eq!(fs::read_to_string(&tmux.wrapper).unwrap(), BASH_WRAPPER);
+        assert_eq!(tmux.calls.borrow().len(), 5);
     }
 
     #[test]

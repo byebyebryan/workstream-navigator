@@ -22,7 +22,9 @@ use uuid::Uuid;
 
 use crate::{
     domain::{Revision, RuntimeId},
-    runtime::{NativeLaunch, PrivateRuntime, ProcessGroupProbe, RuntimePaths, RuntimeProbe},
+    runtime::{
+        NativeLaunch, PrivateRuntime, ProcessGroupProbe, RuntimePaths, RuntimeProbe, RuntimeStartup,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -391,6 +393,49 @@ pub(crate) fn materialize_private_shell(
     launch: &NativeLaunch,
     process_group_probe: &dyn ProcessGroupProbe,
 ) -> Result<ProvisionalSlot, SlotError> {
+    materialize_private_shell_inner(
+        state_root,
+        presentation_directory,
+        slot,
+        runtime,
+        launch,
+        None,
+        process_group_probe,
+    )
+}
+
+/// Materializes a provisional shell only after a startup plan bound to this
+/// exact candidate Runtime has written its private artifacts. This remains a
+/// dormant D17 composition seam; it does not alter the D16 materializer.
+pub(crate) fn materialize_private_shell_with_startup(
+    state_root: &Path,
+    presentation_directory: &Path,
+    slot: &ProvisionalSlot,
+    runtime: &PrivateRuntime<'_>,
+    launch: &NativeLaunch,
+    startup: &dyn RuntimeStartup,
+    process_group_probe: &dyn ProcessGroupProbe,
+) -> Result<ProvisionalSlot, SlotError> {
+    materialize_private_shell_inner(
+        state_root,
+        presentation_directory,
+        slot,
+        runtime,
+        launch,
+        Some(startup),
+        process_group_probe,
+    )
+}
+
+fn materialize_private_shell_inner(
+    state_root: &Path,
+    presentation_directory: &Path,
+    slot: &ProvisionalSlot,
+    runtime: &PrivateRuntime<'_>,
+    launch: &NativeLaunch,
+    startup: Option<&dyn RuntimeStartup>,
+    process_group_probe: &dyn ProcessGroupProbe,
+) -> Result<ProvisionalSlot, SlotError> {
     if slot.phase != ProvisionalPhase::Materializing || slot.shell_evidence.is_some() {
         return Err(SlotError::ShellEvidenceUnavailable);
     }
@@ -402,9 +447,11 @@ pub(crate) fn materialize_private_shell(
         return Err(SlotError::ShellCwdMismatch);
     }
     write_new_marker(state_root, presentation_directory, slot)?;
-    runtime
-        .start(launch)
-        .map_err(|_| SlotError::ShellEvidenceUnavailable)?;
+    match startup {
+        Some(startup) => runtime.start_with_startup(launch, startup),
+        None => runtime.start(launch),
+    }
+    .map_err(|_| SlotError::ShellEvidenceUnavailable)?;
     let observed = observe_live_shell(runtime, process_group_probe)?;
     if observed.cwd != slot.seed_cwd {
         return Err(SlotError::ShellCwdMismatch);
@@ -891,14 +938,15 @@ mod tests {
     use super::{
         CleanupAuthority, PROVISIONAL_MARKER_FILE, ProvisionalMarker, ProvisionalPhase,
         ProvisionalShellEvidence, ProvisionalSlot, SlotError, SlotGeneration,
-        materialize_private_shell, read_marker, update_marker, write_new_marker,
+        materialize_private_shell, materialize_private_shell_with_startup, read_marker,
+        update_marker, write_new_marker,
     };
     use crate::{
         domain::{Revision, RuntimeId},
         runtime::{
             NativeLaunch, PrivateRuntime, ProcessGroupInfo, ProcessGroupProbe, ProcessProbe,
-            ProcessProbeError, RuntimeError, RuntimePaths, TmuxClient, TmuxInvocation,
-            TmuxResponse,
+            ProcessProbeError, RuntimeError, RuntimePaths, RuntimeStartup, TmuxClient,
+            TmuxInvocation, TmuxResponse,
         },
     };
 
@@ -962,10 +1010,23 @@ mod tests {
         }
     }
 
+    struct PrivateShellStartup;
+
+    impl RuntimeStartup for PrivateShellStartup {
+        fn prepare(&self, paths: &RuntimePaths) -> Result<(), RuntimeError> {
+            let bootstrap = paths.directory.join("startup-proof");
+            fs::write(&bootstrap, b"prepared").map_err(|source| RuntimeError::Io {
+                path: bootstrap,
+                source,
+            })
+        }
+    }
+
     struct MaterializationTmux {
         calls: RefCell<Vec<TmuxInvocation>>,
         responses: RefCell<VecDeque<TmuxResponse>>,
         marker_path: PathBuf,
+        startup_path: Option<PathBuf>,
     }
 
     impl MaterializationTmux {
@@ -974,6 +1035,20 @@ mod tests {
                 calls: RefCell::new(Vec::new()),
                 responses: RefCell::new(responses.into_iter().collect()),
                 marker_path,
+                startup_path: None,
+            }
+        }
+
+        fn with_startup(
+            marker_path: PathBuf,
+            startup_path: PathBuf,
+            responses: impl IntoIterator<Item = TmuxResponse>,
+        ) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                responses: RefCell::new(responses.into_iter().collect()),
+                marker_path,
+                startup_path: Some(startup_path),
             }
         }
     }
@@ -985,6 +1060,12 @@ mod tests {
                     self.marker_path.is_file(),
                     "the marker must be durable before the private server starts"
                 );
+                if let Some(startup_path) = &self.startup_path {
+                    assert!(
+                        startup_path.is_file(),
+                        "the private startup must finish before the private server starts"
+                    );
+                }
             }
             self.calls.borrow_mut().push(invocation.clone());
             self.responses
@@ -1185,6 +1266,68 @@ mod tests {
             read_marker(&state_root, &presentation).unwrap(),
             materialized
         );
+        assert_eq!(tmux.calls.borrow().len(), 5);
+    }
+
+    #[test]
+    fn materializer_runs_the_bound_private_startup_after_marker_and_before_tmux() {
+        let (temporary, slot) = materializing_fixture();
+        let state_root = temporary.path().join("state");
+        let presentation = state_root.join("presentation");
+        fs::create_dir(&presentation).unwrap();
+        let startup_path = slot.runtime_paths.directory.join("startup-proof");
+        let tmux = MaterializationTmux::with_startup(
+            presentation.join(PROVISIONAL_MARKER_FILE),
+            startup_path.clone(),
+            [
+                TmuxResponse {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+                TmuxResponse {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+                TmuxResponse {
+                    success: true,
+                    stdout: "%17\n".to_owned(),
+                    stderr: String::new(),
+                },
+                TmuxResponse {
+                    success: true,
+                    stdout: "4242\n".to_owned(),
+                    stderr: String::new(),
+                },
+                TmuxResponse {
+                    success: true,
+                    stdout: format!("{}\n", slot.seed_cwd.display()),
+                    stderr: String::new(),
+                },
+            ],
+        );
+        let process_probe = ShellProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, slot.runtime_paths.clone());
+        let launch = NativeLaunch {
+            cwd: slot.seed_cwd.clone(),
+            program: vec![OsString::from("synthetic-provisional-shell")],
+            environment: BTreeMap::new(),
+        };
+
+        let materialized = materialize_private_shell_with_startup(
+            &state_root,
+            &presentation,
+            &slot,
+            &runtime,
+            &launch,
+            &PrivateShellStartup,
+            &ShellGroupProbe,
+        )
+        .unwrap();
+
+        assert_eq!(materialized.phase, ProvisionalPhase::Materialized);
+        assert_eq!(fs::read(startup_path).unwrap(), b"prepared");
         assert_eq!(tmux.calls.borrow().len(), 5);
     }
 

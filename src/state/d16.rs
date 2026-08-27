@@ -950,6 +950,30 @@ impl D16State {
         Ok(HostRegistry { connection })
     }
 
+    /// Converts only a schema-14 D17-current handle into the retained
+    /// lifecycle registry. This deliberately does not make the existing D16
+    /// application schema-14-capable: callers must opt into the replacement
+    /// D17 boundary, which has no Project-browser authority.
+    #[allow(
+        dead_code,
+        reason = "the D17 application boundary remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn into_d17_host_registry(self) -> Result<HostRegistry, StateError> {
+        if self.mode != D16OpenMode::D17Current {
+            return Err(StateError::StateRecoveryRequired(
+                StateRecoveryReason::UnsupportedLegacySchema,
+            ));
+        }
+        if !validate_d16_host_database_path(&self.root.join("host.sqlite"))? {
+            return Err(StateError::StateRecoveryRequired(
+                StateRecoveryReason::MissingHostDatabase,
+            ));
+        }
+        validate_schema14(&self.connection)?;
+        let Self { connection, .. } = self;
+        Ok(HostRegistry { connection })
+    }
+
     /// Lease-bound conversion for a schema-13 handle opened during the
     /// confirmed transition.  The transition lock is allowed only when this
     /// exact held lease is revalidated immediately before conversion.
@@ -9028,6 +9052,9 @@ mod tests {
                 StateRecoveryReason::UnsupportedLegacySchema
             ))
         ));
+        let d17 = open_d17_current_only(&root).unwrap();
+        let registry = d17.into_d17_host_registry().unwrap();
+        assert_eq!(registry.schema_version().unwrap(), D17_HOST_SCHEMA_VERSION);
     }
 
     #[test]

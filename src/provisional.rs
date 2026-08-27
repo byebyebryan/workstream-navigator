@@ -28,6 +28,13 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SlotGeneration(Uuid);
 
+impl SlotGeneration {
+    #[must_use]
+    pub(crate) const fn new(value: Uuid) -> Self {
+        Self(value)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProvisionalPhase {
@@ -123,6 +130,19 @@ pub(crate) struct ProvisionalShellEvidence {
     shell_birth: String,
     shell_process_group: u32,
     shell_session: u32,
+}
+
+/// Freshly observed private-shell evidence. This is transient broker input;
+/// it is compared against the marker before any durable onboarding mutation
+/// and is never persisted separately.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LiveProvisionalShell {
+    pub(crate) cwd: PathBuf,
+    pub(crate) pane_id: String,
+    pub(crate) shell_pid: u32,
+    pub(crate) shell_birth: String,
+    pub(crate) shell_process_group: u32,
+    pub(crate) shell_session: u32,
 }
 
 impl ProvisionalShellEvidence {
@@ -385,6 +405,27 @@ pub(crate) fn materialize_private_shell(
     runtime
         .start(launch)
         .map_err(|_| SlotError::ShellEvidenceUnavailable)?;
+    let observed = observe_live_shell(runtime, process_group_probe)?;
+    if observed.cwd != slot.seed_cwd {
+        return Err(SlotError::ShellCwdMismatch);
+    }
+    let shell_evidence = ProvisionalShellEvidence::new(
+        observed.pane_id,
+        observed.shell_pid,
+        observed.shell_birth,
+        observed.shell_process_group,
+        observed.shell_session,
+    )?;
+    let mut materialized = slot.clone();
+    materialized.record_shell_evidence(shell_evidence)?;
+    update_marker(state_root, presentation_directory, slot, &materialized)?;
+    Ok(materialized)
+}
+
+fn observe_live_shell(
+    runtime: &PrivateRuntime<'_>,
+    process_group_probe: &dyn ProcessGroupProbe,
+) -> Result<LiveProvisionalShell, SlotError> {
     let RuntimeProbe::Live {
         pane_id,
         pane_pid,
@@ -397,26 +438,27 @@ pub(crate) fn materialize_private_shell(
         return Err(SlotError::ShellEvidenceUnavailable);
     };
     let cwd = fs::canonicalize(cwd).map_err(|_| SlotError::ShellEvidenceUnavailable)?;
-    if cwd != slot.seed_cwd {
-        return Err(SlotError::ShellCwdMismatch);
-    }
     let Some(group) = process_group_probe
         .process_group_checked(pane_pid)
         .map_err(|_| SlotError::ShellEvidenceUnavailable)?
     else {
         return Err(SlotError::ShellEvidenceUnavailable);
     };
-    let shell_evidence = ProvisionalShellEvidence::new(
-        pane_id,
+    ProvisionalShellEvidence::new(
+        pane_id.clone(),
         pane_pid,
-        shell_birth,
+        shell_birth.clone(),
         group.process_group_id,
         group.session_id,
     )?;
-    let mut materialized = slot.clone();
-    materialized.record_shell_evidence(shell_evidence)?;
-    update_marker(state_root, presentation_directory, slot, &materialized)?;
-    Ok(materialized)
+    Ok(LiveProvisionalShell {
+        cwd,
+        pane_id,
+        shell_pid: pane_pid,
+        shell_birth,
+        shell_process_group: group.process_group_id,
+        shell_session: group.session_id,
+    })
 }
 
 fn marker_path(
@@ -599,7 +641,7 @@ impl ProvisionalSlot {
     /// Creates the pre-server marker state. The caller must persist this
     /// exact marker before attempting private tmux creation so a crash leaves
     /// conservative materialization evidence rather than an adoptable server.
-    fn materializing(
+    pub(crate) fn materializing(
         state_root: &Path,
         presentation_id: Uuid,
         presentation_revision: Revision,
@@ -629,6 +671,69 @@ impl ProvisionalSlot {
             phase: ProvisionalPhase::Materializing,
             handoff_request: None,
         })
+    }
+
+    #[must_use]
+    pub(crate) const fn presentation_id(&self) -> Uuid {
+        self.presentation_id
+    }
+
+    #[must_use]
+    pub(crate) const fn presentation_revision(&self) -> Revision {
+        self.presentation_revision
+    }
+
+    #[must_use]
+    pub(crate) const fn lease_generation(&self) -> i64 {
+        self.lease_generation
+    }
+
+    #[must_use]
+    pub(crate) const fn candidate_runtime_id(&self) -> RuntimeId {
+        self.candidate_runtime_id
+    }
+
+    #[must_use]
+    pub(crate) fn runtime_paths(&self) -> &RuntimePaths {
+        &self.runtime_paths
+    }
+
+    #[must_use]
+    pub(crate) const fn slot_generation(&self) -> Uuid {
+        self.slot_generation.0
+    }
+
+    /// Repeats the exact private pane/process comparison required before a
+    /// broker or helper may use this marker. Current cwd is deliberately live
+    /// evidence rather than a stored cwd history.
+    pub(crate) fn revalidate_live_shell(
+        &self,
+        runtime: &PrivateRuntime<'_>,
+        process_group_probe: &dyn ProcessGroupProbe,
+    ) -> Result<LiveProvisionalShell, SlotError> {
+        if !matches!(
+            self.phase,
+            ProvisionalPhase::Materialized
+                | ProvisionalPhase::HandoffIssued
+                | ProvisionalPhase::RuntimeOwnedLaunching
+        ) || runtime.paths() != &self.runtime_paths
+        {
+            return Err(SlotError::ShellEvidenceUnavailable);
+        }
+        let expected = self
+            .shell_evidence
+            .as_ref()
+            .ok_or(SlotError::ShellEvidenceUnavailable)?;
+        let observed = observe_live_shell(runtime, process_group_probe)?;
+        if expected.pane_id != observed.pane_id
+            || expected.shell_pid != observed.shell_pid
+            || expected.shell_birth != observed.shell_birth
+            || expected.shell_process_group != observed.shell_process_group
+            || expected.shell_session != observed.shell_session
+        {
+            return Err(SlotError::ShellEvidenceUnavailable);
+        }
+        Ok(observed)
     }
 
     const fn cleanup_authority(&self) -> CleanupAuthority {
@@ -679,7 +784,7 @@ impl ProvisionalSlot {
         Ok(())
     }
 
-    fn issue_handoff(&mut self, request: Uuid) -> Result<(), SlotError> {
+    pub(crate) fn issue_handoff(&mut self, request: Uuid) -> Result<(), SlotError> {
         if self.phase != ProvisionalPhase::Materialized
             || self.shell_evidence.is_none()
             || self.handoff_request.is_some()
@@ -702,7 +807,7 @@ impl ProvisionalSlot {
         Ok(())
     }
 
-    fn consume_handoff(&mut self, request: Uuid) -> Result<(), SlotError> {
+    pub(crate) fn consume_handoff(&mut self, request: Uuid) -> Result<(), SlotError> {
         if self.phase != ProvisionalPhase::HandoffIssued {
             return Err(SlotError::HandoffUnavailable);
         }

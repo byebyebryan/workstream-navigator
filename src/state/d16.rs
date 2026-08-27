@@ -653,6 +653,12 @@ impl OnboardingReservation {
     pub(crate) fn capability(&self) -> &LaunchCapability {
         &self.capability
     }
+
+    /// Transfers the live capability only to the crate-private D17 broker
+    /// channel. Durable state never receives this value.
+    pub(crate) fn into_capability(self) -> LaunchCapability {
+        self.capability
+    }
 }
 
 /// A request-key replay that found the one existing unresolved onboarding

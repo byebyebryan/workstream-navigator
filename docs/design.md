@@ -6,8 +6,8 @@ Status: D16 host-local simplification is complete, including operator-gated
 live local and SSH-entered-host acceptance. The current binary routes ordinary
 Navigator startup through D17 shell-first managed-session onboarding: fresh
 state is schema 14, idle schema-13 state migrates without a wipe only after a
-legacy presentation is absent, and interrupted schema-14 transition recovery
-is explicit. D17 disposable acceptance is in progress; no D17 live-provider
+legacy presentation is absent, and interrupted schema-13/schema-14 transition
+recovery is explicit. D17 disposable acceptance is in progress; no D17 live-provider
 acceptance has been performed in this checkpoint. V1 remains a source-installed
 operator beta with no compatibility contract.
 

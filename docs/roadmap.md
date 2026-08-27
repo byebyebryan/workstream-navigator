@@ -7,8 +7,8 @@ gate, and operator-gated live local and SSH-entered-host acceptance complete;
 source-installed operator beta. D17 shell-first managed-session onboarding is
 now routed by the ordinary Navigator: fresh roots initialize directly at schema
 14, idle schema-13 roots migrate transactionally only after a legacy
-presentation is absent, and a post-transaction schema-14 restart resumes the
-same transition and stable provisional-lock installation. The Navigator starts
+presentation is absent, and an interrupted schema-13 or schema-14 restart
+resumes the same transition and stable provisional-lock installation. The Navigator starts
 the dedicated D17 pane, renders the pinned shell card, and `n` creates a
 selected Workstream's same-provider/same-Location session. The public
 arbitrary-location `register` and provider-override `new-workstream` commands
@@ -22,7 +22,7 @@ The earlier dormant `Presentation::start_d17` seam was not eligible for
 activation because it still selected the D16-only `_navigator` pane. Atomic
 cutover now starts `_navigator_d17` only after the schema-14 state boundary is
 ready. Disposable tests prove fresh schema-14 creation, idle schema-13
-migration, post-transaction restart recovery, and refusal to migrate beneath a
+migration, both restart recovery boundaries, and refusal to migrate beneath a
 live D16 presentation. The remaining acceptance work is provider-promotion and
 operator-gated live evidence, not a D16-pane fallback.
 

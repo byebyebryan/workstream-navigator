@@ -625,6 +625,15 @@ pub(super) fn prepare_d17_navigator_state(
             crate::state::migrate_current_to_d17(root)?;
             return Ok(D17NavigatorStartup::Ready);
         }
+        Err(crate::startup::StartupError::State(
+            crate::state::StateError::StateRecoveryRequired(
+                crate::state::StateRecoveryReason::TransitionLeasePresent,
+            ),
+        )) if resume_d17_transition => {
+            require_no_legacy_presentation(root)?;
+            crate::state::migrate_current_to_d17(root)?;
+            return Ok(D17NavigatorStartup::Ready);
+        }
         Err(error) => return Err(AppError::Startup(error)),
     };
     match assessment {

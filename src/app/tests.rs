@@ -96,6 +96,36 @@ fn normal_d17_startup_resumes_a_schema14_transition_before_opening_a_presentatio
 }
 
 #[test]
+fn normal_d17_startup_resumes_a_schema13_transition_before_opening_a_presentation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_path = temporary.path().join("state");
+    let root = StateRoot::create(&state_path).unwrap();
+    drop(crate::state::fresh_create(&state_path, &RandomIdGenerator).unwrap());
+    let transition_path = state_path.join(crate::state::TRANSITION_LOCK_FILE);
+    let transition_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&transition_path)
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&transition_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    drop(transition_file);
+
+    let startup = dispatch::prepare_d17_navigator_state(&root).unwrap();
+    assert!(matches!(startup, dispatch::D17NavigatorStartup::Ready));
+
+    assert!(!transition_path.exists());
+    let state = crate::state::open_d17_current_only(&root).unwrap();
+    assert_eq!(
+        state.schema_version().unwrap(),
+        crate::state::D17_HOST_SCHEMA_VERSION
+    );
+}
+
+#[test]
 fn normal_d17_startup_refuses_to_migrate_beneath_a_live_d16_presentation() {
     let temporary = tempfile::tempdir().unwrap();
     let state_path = temporary.path().join("state");

@@ -11,6 +11,7 @@ pub(crate) mod d17_helper;
 pub(crate) mod d17_reconcile;
 pub(crate) mod d17_shell_control;
 pub(crate) mod d17_shell_gate;
+pub(crate) mod d17_snapshot;
 pub mod domain;
 pub mod navigator;
 pub(crate) mod onboarding;

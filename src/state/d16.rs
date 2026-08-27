@@ -703,6 +703,37 @@ pub(crate) struct OnboardingOwnership {
     pub(crate) operation_revision: Revision,
 }
 
+/// Bounded process evidence supplied only after an external reconciler has
+/// proved that the adopted private pane still contains the expected native
+/// provider executable. State stores no executable path or command line.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) struct OnboardingProviderExecEvidence {
+    provider_pid: u32,
+    provider_birth: String,
+}
+
+#[allow(
+    dead_code,
+    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
+)]
+impl OnboardingProviderExecEvidence {
+    pub(crate) fn new(provider_pid: u32, provider_birth: String) -> Result<Self, StateError> {
+        if provider_pid == 0 {
+            return Err(StateError::InvalidOnboardingPreparation);
+        }
+        validate_registry_text("provider birth", &provider_birth)
+            .map_err(|_| StateError::InvalidOnboardingPreparation)?;
+        Ok(Self {
+            provider_pid,
+            provider_birth,
+        })
+    }
+}
+
 impl std::fmt::Debug for OnboardingPreparation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2711,6 +2742,150 @@ impl D16State {
         })
     }
 
+    /// Loads the exact Runtime-owned D17 operation that is eligible for an
+    /// external provider-exec proof. This read remains lease-bound so a stale
+    /// presentation marker cannot race a later reconciliation mutation.
+    #[allow(
+        dead_code,
+        reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn d17_onboarding_exec_proof_ownership_current(
+        &self,
+        provisional_lease: &ProvisionalLease,
+        operation_id: OperationId,
+    ) -> Result<OnboardingOwnership, StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        validate_schema14(&self.connection)?;
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        let ownership = load_d17_exec_proof_ownership(&transaction, operation_id)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        Ok(ownership)
+    }
+
+    /// Atomically records the exact process identity of a provider whose
+    /// native exec was independently proven. This requires the one current
+    /// `provider_exec_started` revision, preserves the unbound `starting`
+    /// Runtime lifecycle, and never starts, attaches, signals, or contacts a
+    /// provider.
+    #[allow(
+        dead_code,
+        reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn record_d17_provider_exec_proven_current(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        ownership: OnboardingOwnership,
+        evidence: &OnboardingProviderExecEvidence,
+    ) -> Result<OnboardingOwnership, StateError> {
+        let previous_busy_timeout = self
+            .connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+            .map_err(StateError::Sqlite)?;
+        self.connection
+            .busy_timeout(Duration::ZERO)
+            .map_err(StateError::Sqlite)?;
+        let proven = self.record_d17_provider_exec_proven_with_zero_timeout(
+            provisional_lease,
+            ownership,
+            evidence,
+        );
+        let restore = self.connection.busy_timeout(Duration::from_millis(
+            u64::try_from(previous_busy_timeout.max(0)).unwrap_or(0),
+        ));
+        match (proven, restore) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(StateError::Sqlite(error)),
+            (Ok(ownership), Ok(())) => Ok(ownership),
+        }
+    }
+
+    fn record_d17_provider_exec_proven_with_zero_timeout(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        ownership: OnboardingOwnership,
+        evidence: &OnboardingProviderExecEvidence,
+    ) -> Result<OnboardingOwnership, StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        validate_schema14(&self.connection)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        let current = load_d17_exec_proof_ownership(&transaction, ownership.operation_id)?;
+        if current != ownership {
+            return Err(StateError::ConcurrentWrite);
+        }
+        let next_operation_revision = next_revision(ownership.operation_revision)?;
+        let runtime: (Option<i64>, Option<String>, String, i64) = transaction
+            .query_row(
+                "SELECT provider_pid, process_birth, lifecycle, revision
+                 FROM runtimes WHERE runtime_id = ?1 AND workstream_id = ?2",
+                params![
+                    ownership.runtime_id.to_string(),
+                    ownership.workstream_id.to_string(),
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(StateError::Sqlite)?;
+        let runtime_revision = Revision::try_from(runtime.3)?;
+        if runtime.0.is_some() || runtime.1.is_some() || runtime.2 != "starting" {
+            return Err(StateError::MalformedHostSchema);
+        }
+        let next_runtime_revision = next_revision(runtime_revision)?;
+        let runtime_updated = transaction
+            .execute(
+                "UPDATE runtimes
+                 SET provider_pid = ?1, process_birth = ?2, revision = ?3
+                 WHERE runtime_id = ?4 AND workstream_id = ?5
+                   AND provider_pid IS NULL AND process_birth IS NULL
+                   AND lifecycle = 'starting' AND revision = ?6",
+                params![
+                    i64::from(evidence.provider_pid),
+                    evidence.provider_birth,
+                    next_runtime_revision.value(),
+                    ownership.runtime_id.to_string(),
+                    ownership.workstream_id.to_string(),
+                    runtime_revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if runtime_updated != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        let operation_updated = transaction
+            .execute(
+                "UPDATE compound_operations
+                 SET phase = 'provider_exec_proven', revision = ?1
+                 WHERE operation_id = ?2 AND kind = 'onboard'
+                   AND phase = 'provider_exec_started' AND revision = ?3",
+                params![
+                    next_operation_revision.value(),
+                    ownership.operation_id.to_string(),
+                    ownership.operation_revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if operation_updated != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        validate_schema14(&transaction)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        Ok(OnboardingOwnership {
+            operation_revision: next_operation_revision,
+            ..ownership
+        })
+    }
+
     /// Lists only deterministic, current `OpenCode` observer handles whose
     /// Runtime lifecycle is itself non-stopped. Runtime IDs are ordered by
     /// their opaque persisted spelling and handles are provider/generation/
@@ -3901,6 +4076,81 @@ fn validate_d17_owned_onboarding_transaction(
     )
     .ok_or(StateError::MalformedHostSchema)?;
     Ok((phase, persisted_revision))
+}
+
+/// Loads one exact D17 provider-exec-started operation and its retained graph
+/// identity. This is deliberately narrower than a snapshot: it returns no
+/// command, path, provider payload, or marker data, and it refuses every phase
+/// except the final pre-exec reconciliation fence.
+#[allow(
+    dead_code,
+    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
+)]
+fn load_d17_exec_proof_ownership(
+    transaction: &rusqlite::Transaction<'_>,
+    operation_id: OperationId,
+) -> Result<OnboardingOwnership, StateError> {
+    let persisted: Option<(String, String, String, i64)> = transaction
+        .query_row(
+            "SELECT kind, phase, expected_revisions_json, revision
+             FROM compound_operations WHERE operation_id = ?1",
+            [operation_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?;
+    let Some((kind, phase, encoded_intent, revision)) = persisted else {
+        return Err(StateError::UnknownOperation(operation_id));
+    };
+    if kind != "onboard" || phase != "provider_exec_started" {
+        return Err(StateError::OnboardingOperationUnavailable);
+    }
+    let intent: PersistedOnboardingIntent =
+        serde_json::from_str(&encoded_intent).map_err(|_| StateError::MalformedHostSchema)?;
+    if intent.version != 1 {
+        return Err(StateError::MalformedHostSchema);
+    }
+    let runtime: Option<(String, String, String, String, String, String)> = transaction
+        .query_row(
+            "SELECT runtimes.workstream_id, workstreams.location_id, runtimes.provider,
+                    runtimes.tmux_generation, runtimes.tmux_session, runtimes.cwd
+             FROM runtimes
+             JOIN workstreams ON workstreams.workstream_id = runtimes.workstream_id
+             WHERE runtimes.runtime_id = ?1",
+            [intent.candidate_runtime_id.to_string()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?;
+    let Some((workstream_id, location_id, provider, runtime_generation, session, cwd)) = runtime
+    else {
+        return Err(StateError::MalformedHostSchema);
+    };
+    if workstream_id != intent.workstream_id.to_string()
+        || location_id != intent.location_id.to_string()
+        || provider != intent.provider.as_str()
+        || runtime_generation != intent.runtime_generation
+        || session.is_empty()
+        || cwd.is_empty()
+    {
+        return Err(StateError::MalformedHostSchema);
+    }
+    Ok(OnboardingOwnership {
+        operation_id,
+        location_id: intent.location_id,
+        workstream_id: intent.workstream_id,
+        runtime_id: intent.candidate_runtime_id,
+        operation_revision: Revision::try_from(revision)?,
+    })
 }
 
 #[allow(
@@ -8659,6 +8909,59 @@ mod tests {
             0,
             "journal fences never manufacture a provider binding"
         );
+        assert_eq!(
+            state
+                .d17_onboarding_exec_proof_ownership_current(
+                    &provisional,
+                    exec_started.operation_id,
+                )
+                .unwrap(),
+            exec_started
+        );
+        let provider_evidence =
+            OnboardingProviderExecEvidence::new(711, "birth-711".to_owned()).unwrap();
+        let exec_proven = state
+            .record_d17_provider_exec_proven_current(&provisional, exec_started, &provider_evidence)
+            .unwrap();
+        assert_eq!(exec_proven.operation_revision.value(), 7);
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT phase, revision FROM compound_operations WHERE operation_id = ?1",
+                    [issued.operation_id().to_string()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            ("provider_exec_proven".to_owned(), 7)
+        );
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT provider_pid, process_birth, lifecycle, revision
+                     FROM runtimes WHERE runtime_id = ?1",
+                    [candidate_runtime_id.to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (711, "birth-711".to_owned(), "starting".to_owned(), 2),
+            "exec proof records only the exact process identity, not a binding or lifecycle claim"
+        );
+        assert!(matches!(
+            state.d17_onboarding_exec_proof_ownership_current(
+                &provisional,
+                exec_started.operation_id,
+            ),
+            Err(StateError::OnboardingOperationUnavailable),
+        ));
         assert_eq!(
             state
                 .connection

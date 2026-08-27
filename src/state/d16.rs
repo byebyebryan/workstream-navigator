@@ -26,10 +26,14 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::domain::{
-    Clock, HostId, IdGenerator, LocationId, OnboardingPhase, ProjectId, ProviderKind,
-    ProviderSessionId, Revision, RuntimeId, RuntimeStatus, SystemClock, WorkstreamId,
+    Clock, CompoundOperation, HostId, IdGenerator, LocationId, OnboardingPhase, OperationId,
+    OperationKind, ProjectId, ProviderKind, ProviderSessionId, Revision, RuntimeId, RuntimeStatus,
+    SystemClock, WorkstreamId,
 };
+use crate::onboarding::{CapabilityError, LaunchCapability, LaunchCapabilityClaims};
 use crate::provider::lifecycle::{LifecycleEvent, LifecycleHint, LifecycleObservation};
+use crate::repository::RepositoryRegistration;
+use crate::runtime::RuntimePaths;
 
 use super::{
     StateError, StateRoot,
@@ -542,6 +546,172 @@ pub struct ProjectLocationWorkstreamRegistration {
     pub revision: Revision,
     pub project: ProjectRecord,
     pub workstream: ExternalWorkstream,
+}
+
+/// Complete private input for one dormant D17 broker preparation.  It is
+/// deliberately crate-visible only: all paths and shell/process evidence stay
+/// within the broker/helper boundary and never enter a public snapshot.
+#[derive(Clone)]
+#[allow(
+    dead_code,
+    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) struct OnboardingPrepareRequest {
+    pub(crate) request_key: String,
+    pub(crate) presentation_id: Uuid,
+    pub(crate) presentation_revision: Revision,
+    pub(crate) slot_generation: Uuid,
+    pub(crate) candidate_runtime_id: RuntimeId,
+    pub(crate) runtime_paths: RuntimePaths,
+    pub(crate) provider: ProviderKind,
+    pub(crate) repository: RepositoryRegistration,
+    pub(crate) shell_cwd: PathBuf,
+    pub(crate) shell_pid: u32,
+    pub(crate) shell_birth: String,
+    pub(crate) shell_process_group: u32,
+    pub(crate) shell_session: u32,
+    pub(crate) argv_digest: String,
+    pub(crate) boot_provenance: String,
+    pub(crate) now_monotonic_millis: i64,
+    pub(crate) expiry_monotonic_millis: i64,
+}
+
+impl std::fmt::Debug for OnboardingPrepareRequest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OnboardingPrepareRequest")
+            .field("request_key", &"<private>")
+            .field("presentation", &"<opaque>")
+            .field("slot_generation", &"<opaque>")
+            .field("candidate_runtime_id", &"<opaque>")
+            .field("provider", &self.provider)
+            .field("repository", &"<private>")
+            .field("shell", &"<private>")
+            .finish_non_exhaustive()
+    }
+}
+
+/// A newly issued broker handoff.  The live capability remains in memory and
+/// is deliberately not copied into the operation, runtime, or snapshot.
+#[allow(
+    dead_code,
+    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) struct OnboardingReservation {
+    operation_id: OperationId,
+    location_id: LocationId,
+    workstream_id: WorkstreamId,
+    runtime: RuntimeRecord,
+    capability: LaunchCapability,
+}
+
+impl std::fmt::Debug for OnboardingReservation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OnboardingReservation")
+            .field("operation_id", &"<opaque>")
+            .field("location_id", &"<opaque>")
+            .field("workstream_id", &"<opaque>")
+            .field("runtime", &self.runtime)
+            .field("capability", &self.capability)
+            .finish()
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+)]
+impl OnboardingReservation {
+    #[must_use]
+    pub(crate) const fn operation_id(&self) -> OperationId {
+        self.operation_id
+    }
+
+    #[must_use]
+    pub(crate) const fn location_id(&self) -> LocationId {
+        self.location_id
+    }
+
+    #[must_use]
+    pub(crate) const fn workstream_id(&self) -> WorkstreamId {
+        self.workstream_id
+    }
+
+    #[must_use]
+    pub(crate) fn runtime(&self) -> &RuntimeRecord {
+        &self.runtime
+    }
+
+    #[must_use]
+    pub(crate) fn capability(&self) -> &LaunchCapability {
+        &self.capability
+    }
+}
+
+/// A request-key replay that found the one existing unresolved onboarding
+/// journal.  It never reissues the lost live token or creates another graph.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    clippy::struct_field_names,
+    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) struct ExistingOnboardingReservation {
+    pub(crate) operation_id: OperationId,
+    pub(crate) location_id: LocationId,
+    pub(crate) workstream_id: WorkstreamId,
+    pub(crate) runtime_id: RuntimeId,
+}
+
+#[allow(
+    dead_code,
+    clippy::large_enum_variant,
+    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) enum OnboardingPreparation {
+    Issued(OnboardingReservation),
+    Existing(ExistingOnboardingReservation),
+}
+
+impl std::fmt::Debug for OnboardingPreparation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Issued(reservation) => formatter
+                .debug_tuple("OnboardingPreparation::Issued")
+                .field(reservation)
+                .finish(),
+            Self::Existing(existing) => formatter
+                .debug_tuple("OnboardingPreparation::Existing")
+                .field(existing)
+                .finish(),
+        }
+    }
+}
+
+/// The bounded, non-secret part of an onboarding request retained in the
+/// operation journal.  Paths, shell identities, and the live token stay out
+/// of this structure; their exact commitment is the capability claim digest.
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+#[allow(
+    dead_code,
+    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+)]
+struct PersistedOnboardingIntent {
+    version: u8,
+    presentation_id: Uuid,
+    presentation_revision: Revision,
+    slot_generation: Uuid,
+    lease_generation: i64,
+    candidate_runtime_id: RuntimeId,
+    provider: ProviderKind,
+    location_id: LocationId,
+    workstream_id: WorkstreamId,
+    runtime_generation: String,
+    registry_generation: String,
+    argv_digest: String,
+    boot_provenance: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1812,6 +1982,236 @@ impl D16State {
         Ok(provisional)
     }
 
+    /// Transactionally reserves the D17 Project/Location/Workstream/Runtime
+    /// graph for one marker-owned candidate and records a verifier-backed
+    /// handoff.  This is intentionally a dormant cutover seam: it requires
+    /// both the migration lease and the stable provisional lease, creates no
+    /// marker or tmux artifact, and never launches a provider.
+    #[allow(
+        dead_code,
+        reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn prepare_d17_onboarding(
+        &mut self,
+        transition_lease: &TransitionLease,
+        provisional_lease: &ProvisionalLease,
+        request: &OnboardingPrepareRequest,
+        id_generator: &dyn IdGenerator,
+    ) -> Result<OnboardingPreparation, StateError> {
+        let previous_busy_timeout = self
+            .connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+            .map_err(StateError::Sqlite)?;
+        self.connection
+            .busy_timeout(Duration::ZERO)
+            .map_err(StateError::Sqlite)?;
+        let preparation = self.prepare_d17_onboarding_with_zero_timeout(
+            transition_lease,
+            provisional_lease,
+            request,
+            id_generator,
+        );
+        let restore = self.connection.busy_timeout(Duration::from_millis(
+            u64::try_from(previous_busy_timeout.max(0)).unwrap_or(0),
+        ));
+        match (preparation, restore) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(StateError::Sqlite(error)),
+            (Ok(preparation), Ok(())) => Ok(preparation),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        clippy::too_many_lines,
+        reason = "the single transaction keeps every onboarding authority transition auditable"
+    )]
+    fn prepare_d17_onboarding_with_zero_timeout(
+        &mut self,
+        transition_lease: &TransitionLease,
+        provisional_lease: &ProvisionalLease,
+        request: &OnboardingPrepareRequest,
+        id_generator: &dyn IdGenerator,
+    ) -> Result<OnboardingPreparation, StateError> {
+        ensure_cutover_transition_mode(self.mode)?;
+        transition_lease.revalidate_for_mutation(&self.root)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        validate_schema14(&self.connection)?;
+        validate_onboarding_prepare_request(request, &self.root)?;
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        transition_lease.revalidate_for_mutation(&self.root)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        let registry_generation = load_registry_generation(&transaction)?;
+
+        if let Some(existing) = load_existing_onboarding_preparation(
+            &transaction,
+            request,
+            provisional_lease.lease_generation(),
+            &registry_generation,
+            &self.root,
+        )? {
+            transaction.commit().map_err(StateError::Sqlite)?;
+            transition_lease.revalidate_for_mutation(&self.root)?;
+            provisional_lease.revalidate_for_mutation(&self.root)?;
+            return Ok(OnboardingPreparation::Existing(existing));
+        }
+
+        let candidate_exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM runtimes WHERE runtime_id = ?1)",
+                [request.candidate_runtime_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StateError::Sqlite)?;
+        if candidate_exists {
+            return Err(StateError::InvalidOnboardingPreparation);
+        }
+
+        let existing_location = load_location_for_repository_path(
+            &transaction,
+            request.repository.project_root.as_path(),
+        )?;
+        let location_id = existing_location.map_or_else(
+            || LocationId::from(id_generator.uuid()),
+            |location| location.location_id,
+        );
+        let operation_id = OperationId::from(id_generator.uuid());
+        let workstream_id = WorkstreamId::from(id_generator.uuid());
+        let runtime_generation = id_generator.uuid().to_string();
+        validate_registry_text("runtime generation", &runtime_generation)?;
+        let intent = PersistedOnboardingIntent {
+            version: 1,
+            presentation_id: request.presentation_id,
+            presentation_revision: request.presentation_revision,
+            slot_generation: request.slot_generation,
+            lease_generation: provisional_lease.lease_generation(),
+            candidate_runtime_id: request.candidate_runtime_id,
+            provider: request.provider,
+            location_id,
+            workstream_id,
+            runtime_generation: runtime_generation.clone(),
+            registry_generation: registry_generation.clone(),
+            argv_digest: request.argv_digest.clone(),
+            boot_provenance: request.boot_provenance.clone(),
+        };
+        let expected_revisions_json =
+            serde_json::to_string(&intent).map_err(|_| StateError::InvalidOnboardingPreparation)?;
+        let claims = onboarding_claims(
+            operation_id,
+            location_id,
+            &runtime_generation,
+            &registry_generation,
+            provisional_lease.lease_generation(),
+            request,
+        )?;
+        let capability = LaunchCapability::issue(
+            &claims,
+            request.now_monotonic_millis,
+            request.expiry_monotonic_millis,
+            id_generator,
+        )
+        .map_err(|_| StateError::InvalidOnboardingPreparation)?;
+        let mut operation = CompoundOperation::with_id(
+            operation_id,
+            request.request_key.clone(),
+            OperationKind::Onboard,
+            expected_revisions_json,
+        )?;
+        operation.transition_onboarding(OnboardingPhase::CapabilityIssued, None, None)?;
+        operation.launch_token_id = Some(capability.metadata().token_id().to_owned());
+        operation.launch_token_verifier = Some(capability.metadata().verifier().to_owned());
+        operation.launch_token_expiry_monotonic =
+            Some(capability.metadata().expiry_monotonic_millis());
+        operation.launch_claims_digest = Some(capability.metadata().claims_digest().to_owned());
+
+        if existing_location.is_none() {
+            insert_onboarding_location(&transaction, request, location_id, id_generator)?;
+        }
+        let activity_sequence = next_activity_sequence(&transaction)?;
+        transaction
+            .execute(
+                "INSERT INTO workstreams (
+                    workstream_id, location_id, provider, origin, source_workstream_id,
+                    lifecycle, archived_at_millis, last_activity_sequence,
+                    last_activity_at_millis, revision
+                 ) VALUES (?1, ?2, ?3, 'independent', NULL, 'open', NULL, ?4, 0, 1)",
+                params![
+                    workstream_id.to_string(),
+                    location_id.to_string(),
+                    request.provider.as_str(),
+                    activity_sequence,
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        let runtime = RuntimeRecord {
+            runtime_id: request.candidate_runtime_id,
+            workstream_id,
+            provider: request.provider,
+            tmux_generation: runtime_generation,
+            tmux_session: request.runtime_paths.session_name.clone(),
+            cwd: request.repository.project_root.clone(),
+            provider_pid: None,
+            process_birth: None,
+            status: RuntimeStatus::Starting,
+            revision: Revision::INITIAL,
+        };
+        transaction
+            .execute(
+                "INSERT INTO runtimes (
+                    runtime_id, workstream_id, provider, tmux_generation, tmux_session,
+                    cwd, provider_pid, process_birth, lifecycle, revision
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, 'starting', 1)",
+                params![
+                    runtime.runtime_id.to_string(),
+                    runtime.workstream_id.to_string(),
+                    runtime.provider.as_str(),
+                    runtime.tmux_generation,
+                    runtime.tmux_session,
+                    runtime.cwd.to_string_lossy(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        transaction
+            .execute(
+                "INSERT INTO compound_operations (
+                    operation_id, request_key, kind, phase, expected_revisions_json,
+                    effect_watermark, outcome_json, revision,
+                    launch_token_id, launch_token_verifier,
+                    launch_token_expiry_monotonic, launch_claims_digest
+                 ) VALUES (?1, ?2, 'onboard', 'capability_issued', ?3,
+                    NULL, NULL, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    operation.id.to_string(),
+                    operation.request_key,
+                    operation.expected_revisions_json,
+                    operation.revision.value(),
+                    operation.launch_token_id,
+                    operation.launch_token_verifier,
+                    operation.launch_token_expiry_monotonic,
+                    operation.launch_claims_digest,
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        validate_project_membership_transaction(&transaction)?;
+        validate_schema14(&transaction)?;
+        transition_lease.revalidate_for_mutation(&self.root)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        transition_lease.revalidate_for_mutation(&self.root)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        Ok(OnboardingPreparation::Issued(OnboardingReservation {
+            operation_id,
+            location_id,
+            workstream_id,
+            runtime,
+            capability,
+        }))
+    }
+
     /// Lists only deterministic, current `OpenCode` observer handles whose
     /// Runtime lifecycle is itself non-stopped. Runtime IDs are ordered by
     /// their opaque persisted spelling and handles are provider/generation/
@@ -2525,6 +2925,352 @@ fn ensure_cutover_transition_mode(mode: D16OpenMode) -> Result<(), StateError> {
             StateRecoveryReason::UnsupportedLegacySchema,
         ))
     }
+}
+
+#[derive(Clone, Copy)]
+#[allow(
+    dead_code,
+    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+)]
+struct ExistingOnboardingLocation {
+    location_id: LocationId,
+}
+
+#[allow(
+    dead_code,
+    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+)]
+fn validate_onboarding_prepare_request(
+    request: &OnboardingPrepareRequest,
+    state_root: &Path,
+) -> Result<(), StateError> {
+    validate_registry_text("onboarding request key", &request.request_key)?;
+    if request.presentation_id.is_nil()
+        || request.slot_generation.is_nil()
+        || request.candidate_runtime_id.as_uuid().is_nil()
+    {
+        return Err(StateError::InvalidOnboardingPreparation);
+    }
+    let state_root =
+        fs::canonicalize(state_root).map_err(|_| StateError::InvalidOnboardingPreparation)?;
+    if request.runtime_paths != RuntimePaths::for_runtime(&state_root, request.candidate_runtime_id)
+        || !is_normalized_absolute_utf8_path(&request.repository.project_root)
+        || !is_normalized_absolute_utf8_path(&request.shell_cwd)
+        || !request
+            .shell_cwd
+            .starts_with(&request.repository.project_root)
+    {
+        return Err(StateError::InvalidOnboardingPreparation);
+    }
+    let repository_path = request
+        .repository
+        .project_root
+        .to_str()
+        .ok_or(StateError::InvalidOnboardingPreparation)?;
+    validate_registry_text("repository path", repository_path)?;
+    validate_project_display_name(&request.repository.display_name)?;
+    validate_repository_fingerprint(request.repository.remote_identity_fingerprint.as_deref())?;
+    validate_safe_origin_display(request.repository.remote_identity_display.as_deref())?;
+    Ok(())
+}
+
+#[allow(
+    dead_code,
+    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+)]
+fn is_normalized_absolute_utf8_path(path: &Path) -> bool {
+    path.is_absolute()
+        && path.to_str().is_some()
+        && path.components().all(|component| {
+            matches!(
+                component,
+                std::path::Component::RootDir | std::path::Component::Normal(_)
+            )
+        })
+}
+
+#[allow(
+    dead_code,
+    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+)]
+fn load_registry_generation(transaction: &rusqlite::Transaction<'_>) -> Result<String, StateError> {
+    let generation: String = transaction
+        .query_row(
+            "SELECT registry_generation FROM host_identity WHERE singleton = 1",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)?;
+    validate_registry_text("registry generation", &generation)?;
+    Ok(generation)
+}
+
+#[allow(
+    dead_code,
+    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+)]
+fn load_location_for_repository_path(
+    transaction: &rusqlite::Transaction<'_>,
+    repository_path: &Path,
+) -> Result<Option<ExistingOnboardingLocation>, StateError> {
+    let repository_path = repository_path
+        .to_str()
+        .ok_or(StateError::InvalidOnboardingPreparation)?;
+    let mut statement = transaction
+        .prepare(
+            "SELECT location_id FROM project_locations
+             WHERE repository_path = ?1 ORDER BY location_id LIMIT 2",
+        )
+        .map_err(StateError::Sqlite)?;
+    let locations = statement
+        .query_map([repository_path], |row| row.get::<_, String>(0))
+        .map_err(StateError::Sqlite)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StateError::Sqlite)?;
+    match locations.as_slice() {
+        [] => Ok(None),
+        [location_id] => location_id
+            .parse::<LocationId>()
+            .map(|location_id| Some(ExistingOnboardingLocation { location_id }))
+            .map_err(|_| StateError::MalformedHostSchema),
+        _ => Err(StateError::MalformedHostSchema),
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+)]
+fn onboarding_claims(
+    operation_id: OperationId,
+    location_id: LocationId,
+    runtime_generation: &str,
+    registry_generation: &str,
+    lease_generation: i64,
+    request: &OnboardingPrepareRequest,
+) -> Result<LaunchCapabilityClaims, StateError> {
+    LaunchCapabilityClaims::new(
+        operation_id,
+        request.presentation_id,
+        request.presentation_revision,
+        request.slot_generation,
+        lease_generation,
+        request.candidate_runtime_id,
+        request.runtime_paths.clone(),
+        request.provider,
+        request.shell_cwd.clone(),
+        request.repository.project_root.clone(),
+        location_id,
+        runtime_generation.to_owned(),
+        registry_generation.to_owned(),
+        request.shell_pid,
+        request.shell_birth.clone(),
+        request.shell_process_group,
+        request.shell_session,
+        request.argv_digest.clone(),
+        request.boot_provenance.clone(),
+    )
+    .map_err(|_error: CapabilityError| StateError::InvalidOnboardingPreparation)
+}
+
+#[allow(
+    dead_code,
+    clippy::too_many_lines,
+    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+)]
+fn load_existing_onboarding_preparation(
+    transaction: &rusqlite::Transaction<'_>,
+    request: &OnboardingPrepareRequest,
+    lease_generation: i64,
+    registry_generation: &str,
+    state_root: &Path,
+) -> Result<Option<ExistingOnboardingReservation>, StateError> {
+    let existing: Option<(String, String, String, String, Option<String>)> = transaction
+        .query_row(
+            "SELECT operation_id, kind, phase, expected_revisions_json, launch_claims_digest
+             FROM compound_operations WHERE request_key = ?1",
+            [&request.request_key],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?;
+    let Some((operation_id, kind, phase, encoded_intent, claims_digest)) = existing else {
+        return Ok(None);
+    };
+    if kind != "onboard" || phase != "capability_issued" {
+        return Err(StateError::OnboardingOperationUnavailable);
+    }
+    let operation_id = operation_id
+        .parse::<OperationId>()
+        .map_err(|_| StateError::MalformedHostSchema)?;
+    let intent: PersistedOnboardingIntent =
+        serde_json::from_str(&encoded_intent).map_err(|_| StateError::MalformedHostSchema)?;
+    if intent.version != 1
+        || intent.presentation_id != request.presentation_id
+        || intent.presentation_revision != request.presentation_revision
+        || intent.slot_generation != request.slot_generation
+        || intent.lease_generation != lease_generation
+        || intent.candidate_runtime_id != request.candidate_runtime_id
+        || intent.provider != request.provider
+        || intent.registry_generation != registry_generation
+        || intent.argv_digest != request.argv_digest
+        || intent.boot_provenance != request.boot_provenance
+    {
+        return Err(StateError::OperationRequestMismatch);
+    }
+    let runtime: Option<(String, String, String, String, String, String)> = transaction
+        .query_row(
+            "SELECT runtimes.workstream_id, workstreams.location_id, runtimes.provider,
+                    runtimes.tmux_generation, runtimes.tmux_session, runtimes.cwd
+             FROM runtimes
+             JOIN workstreams ON workstreams.workstream_id = runtimes.workstream_id
+             WHERE runtimes.runtime_id = ?1",
+            [intent.candidate_runtime_id.to_string()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?;
+    let Some((workstream_id, location_id, provider, runtime_generation, session, cwd)) = runtime
+    else {
+        return Err(StateError::MalformedHostSchema);
+    };
+    let repository_path = request
+        .repository
+        .project_root
+        .to_str()
+        .ok_or(StateError::InvalidOnboardingPreparation)?;
+    if workstream_id != intent.workstream_id.to_string()
+        || location_id != intent.location_id.to_string()
+        || provider != intent.provider.as_str()
+        || runtime_generation != intent.runtime_generation
+        || session != request.runtime_paths.session_name
+        || cwd != repository_path
+        || request.runtime_paths
+            != RuntimePaths::for_runtime(
+                &fs::canonicalize(state_root)
+                    .map_err(|_| StateError::InvalidOnboardingPreparation)?,
+                intent.candidate_runtime_id,
+            )
+    {
+        return Err(StateError::MalformedHostSchema);
+    }
+    let claims = onboarding_claims(
+        operation_id,
+        intent.location_id,
+        &intent.runtime_generation,
+        registry_generation,
+        lease_generation,
+        request,
+    )?;
+    if claims_digest.as_deref() != Some(claims.digest().as_str()) {
+        return Err(StateError::OperationRequestMismatch);
+    }
+    Ok(Some(ExistingOnboardingReservation {
+        operation_id,
+        location_id: intent.location_id,
+        workstream_id: intent.workstream_id,
+        runtime_id: intent.candidate_runtime_id,
+    }))
+}
+
+#[allow(
+    dead_code,
+    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+)]
+fn insert_onboarding_location(
+    transaction: &rusqlite::Transaction<'_>,
+    request: &OnboardingPrepareRequest,
+    location_id: LocationId,
+    id_generator: &dyn IdGenerator,
+) -> Result<(), StateError> {
+    let repository_path = request
+        .repository
+        .project_root
+        .to_str()
+        .ok_or(StateError::InvalidOnboardingPreparation)?;
+    let fingerprint = request.repository.remote_identity_fingerprint.as_deref();
+    let remote_display = request
+        .repository
+        .remote_identity_display
+        .as_deref()
+        .unwrap_or_default();
+    transaction
+        .execute(
+            "INSERT INTO project_locations (
+                location_id, repository_path, repository_display_name,
+                remote_identity_fingerprint, remote_identity_display,
+                revision, project_id
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 1, NULL)",
+            params![
+                location_id.to_string(),
+                repository_path,
+                request.repository.display_name,
+                fingerprint,
+                remote_display,
+            ],
+        )
+        .map_err(StateError::Sqlite)?;
+    let project = if let Some(fingerprint) = fingerprint {
+        if let Some(existing) = find_project_by_fingerprint(transaction, fingerprint)? {
+            bump_project_revision(transaction, existing.project_id)?;
+            transaction
+                .execute(
+                    "UPDATE project_locations SET project_id = ?1 WHERE location_id = ?2",
+                    params![existing.project_id.to_string(), location_id.to_string()],
+                )
+                .map_err(StateError::Sqlite)?;
+            existing
+        } else {
+            let created = create_project(
+                transaction,
+                location_id,
+                &request.repository.display_name,
+                Some(fingerprint),
+                id_generator,
+            )?;
+            transaction
+                .execute(
+                    "UPDATE project_locations SET project_id = ?1 WHERE location_id = ?2",
+                    params![created.project_id.to_string(), location_id.to_string()],
+                )
+                .map_err(StateError::Sqlite)?;
+            created
+        }
+    } else {
+        let created = create_project(
+            transaction,
+            location_id,
+            &request.repository.display_name,
+            None,
+            id_generator,
+        )?;
+        transaction
+            .execute(
+                "UPDATE project_locations SET project_id = ?1 WHERE location_id = ?2",
+                params![created.project_id.to_string(), location_id.to_string()],
+            )
+            .map_err(StateError::Sqlite)?;
+        created
+    };
+    let _ = project;
+    Ok(())
 }
 
 fn next_revision(revision: Revision) -> Result<Revision, StateError> {
@@ -5834,13 +6580,19 @@ fn read_observer_handover_candidate(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::{
+        ffi::OsString,
+        sync::atomic::{AtomicU64, Ordering},
+    };
 
     use rusqlite::{Connection, types::Value};
     use uuid::Uuid;
 
     use super::*;
     use crate::domain::{HostId, IdGenerator, LocationId, Revision};
+    use crate::onboarding::{ShellCommandDecision, classify_shell_command};
+    use crate::repository::RepositoryRegistration;
+    use crate::runtime::RuntimePaths;
     use crate::state::OpenCodeLifecycleObservation;
     use crate::state::utils::{set_private_directory_permissions, set_private_file_permissions};
 
@@ -6068,6 +6820,46 @@ mod tests {
         set_private_file_permissions_handle(&file, &lock_path).expect("lock permissions");
         drop(file);
         acquire_transition_lease(path).expect("transition lease")
+    }
+
+    fn onboarding_prepare_request(
+        state_path: &Path,
+        candidate_runtime_id: RuntimeId,
+    ) -> OnboardingPrepareRequest {
+        let worktree_root = state_path.join("worktree");
+        fs::create_dir(&worktree_root).expect("worktree root");
+        let shell_cwd = worktree_root.join("nested");
+        fs::create_dir(&shell_cwd).expect("shell cwd");
+        let arguments = [OsString::from("--model"), OsString::from("gpt-5.6")];
+        let ShellCommandDecision::ManagedFresh(launch) =
+            classify_shell_command(ProviderKind::Codex, &arguments).expect("managed launch")
+        else {
+            panic!("fixture must be promotable");
+        };
+        OnboardingPrepareRequest {
+            request_key: "d17-onboarding-request".to_owned(),
+            presentation_id: Uuid::from_u128(700),
+            presentation_revision: Revision::INITIAL,
+            slot_generation: Uuid::from_u128(701),
+            candidate_runtime_id,
+            runtime_paths: RuntimePaths::for_runtime(state_path, candidate_runtime_id),
+            provider: ProviderKind::Codex,
+            repository: RepositoryRegistration {
+                project_root: worktree_root,
+                display_name: "worktree".to_owned(),
+                remote_identity_fingerprint: Some(format!("git-remote-v1:{}", "a".repeat(64))),
+                remote_identity_display: Some("github.com/example/worktree".to_owned()),
+            },
+            shell_cwd,
+            shell_pid: 710,
+            shell_birth: "birth-710".to_owned(),
+            shell_process_group: 710,
+            shell_session: 710,
+            argv_digest: launch.argv_digest().to_owned(),
+            boot_provenance: format!("d17-boot-v1:sha256:{}", "b".repeat(64)),
+            now_monotonic_millis: 10,
+            expiry_monotonic_millis: 1_010,
+        }
     }
 
     fn sample_journal() -> ObserverHandoverJournal {
@@ -6677,6 +7469,151 @@ mod tests {
             validate_schema14(&state.connection),
             Err(StateError::MalformedHostSchema)
         ));
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn schema14_onboarding_preparation_adopts_one_exact_candidate_and_never_reissues_its_token() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+        drop(fresh_create(&state_path, &SequenceIds::default()).unwrap());
+        let transition = transition_lease(&state_path);
+        let mut state = open_cutover_transition(&root, &transition).unwrap();
+        state.migrate_schema13_to14(&transition).unwrap();
+        let provisional = state
+            .install_or_acquire_provisional_lease(&transition)
+            .unwrap();
+        let candidate_runtime_id = RuntimeId::from(Uuid::from_u128(702));
+        let request = onboarding_prepare_request(&state_path, candidate_runtime_id);
+        let ids = SequenceIds::default();
+        state
+            .connection
+            .busy_timeout(Duration::from_millis(73))
+            .unwrap();
+
+        let issued = match state
+            .prepare_d17_onboarding(&transition, &provisional, &request, &ids)
+            .unwrap()
+        {
+            OnboardingPreparation::Issued(reservation) => reservation,
+            OnboardingPreparation::Existing(_) => panic!("first preparation must issue"),
+        };
+        assert_eq!(issued.runtime().runtime_id, candidate_runtime_id);
+        assert_eq!(issued.runtime().provider, ProviderKind::Codex);
+        assert_eq!(issued.runtime().status, RuntimeStatus::Starting);
+        assert_eq!(issued.runtime().cwd, request.repository.project_root);
+        assert_eq!(
+            issued.runtime().tmux_session,
+            request.runtime_paths.session_name
+        );
+        let token = issued.capability().token().to_owned();
+        assert!(!format!("{issued:?}").contains(&token));
+
+        let persisted = state
+            .connection
+            .query_row(
+                "SELECT kind, phase, launch_token_id, launch_token_verifier,
+                        launch_token_expiry_monotonic, launch_claims_digest
+                 FROM compound_operations WHERE operation_id = ?1",
+                [issued.operation_id().to_string()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(persisted.0, "onboard");
+        assert_eq!(persisted.1, "capability_issued");
+        assert_ne!(persisted.2, token);
+        assert_ne!(persisted.3, token);
+        assert_eq!(persisted.4, request.expiry_monotonic_millis);
+        assert!(persisted.5.starts_with("d17-launch-claims-v1:sha256:"));
+        assert_eq!(
+            state
+                .connection
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            73
+        );
+        assert_eq!(
+            state
+                .connection
+                .query_row("SELECT COUNT(*) FROM project_locations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            state
+                .connection
+                .query_row("SELECT COUNT(*) FROM workstreams", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            state
+                .connection
+                .query_row("SELECT COUNT(*) FROM runtimes", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+        validate_schema14(&state.connection).unwrap();
+
+        match state
+            .prepare_d17_onboarding(&transition, &provisional, &request, &ids)
+            .unwrap()
+        {
+            OnboardingPreparation::Existing(existing) => {
+                assert_eq!(existing.operation_id, issued.operation_id());
+                assert_eq!(existing.location_id, issued.location_id());
+                assert_eq!(existing.workstream_id, issued.workstream_id());
+                assert_eq!(existing.runtime_id, candidate_runtime_id);
+            }
+            OnboardingPreparation::Issued(_) => panic!("replay must not reissue a token"),
+        }
+        assert_eq!(
+            state
+                .connection
+                .query_row("SELECT COUNT(*) FROM compound_operations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+
+        let mut mismatched = request.clone();
+        mismatched.provider = ProviderKind::OpenCode;
+        assert!(matches!(
+            state.prepare_d17_onboarding(&transition, &provisional, &mismatched, &ids),
+            Err(StateError::OperationRequestMismatch)
+        ));
+        let mut invalid_path = request;
+        invalid_path.runtime_paths.session_name = "wsnav-replacement".to_owned();
+        assert!(matches!(
+            state.prepare_d17_onboarding(&transition, &provisional, &invalid_path, &ids),
+            Err(StateError::InvalidOnboardingPreparation)
+        ));
+        assert_eq!(
+            state
+                .connection
+                .query_row("SELECT COUNT(*) FROM compound_operations", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
     }
 
     #[test]

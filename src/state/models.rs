@@ -107,6 +107,8 @@ pub enum StateError {
     OpenCodeSessionCreationUnavailable,
     #[error("D17 onboarding operations are unavailable through the D16 state boundary")]
     OnboardingOperationUnavailable,
+    #[error("D17 onboarding preparation evidence is invalid")]
+    InvalidOnboardingPreparation,
     #[error("request key was reused with different workstream intent")]
     OperationRequestMismatch,
     #[error("the source Workstream has no live exact settled conversation boundary")]

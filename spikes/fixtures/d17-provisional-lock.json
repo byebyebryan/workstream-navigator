@@ -1,0 +1,32 @@
+{
+  "assertions": {
+    "all_case_assertions_pass": true,
+    "busy_lock_refuses_without_second_artifact": true,
+    "crash_restart_reuses_exact_inode": true,
+    "ordinary_tmux_unchanged": true,
+    "pending_crash_window_recovers_exact_artifact": true,
+    "pending_finalizes_exact_ready_inode": true,
+    "pending_mismatch_refused": true,
+    "pending_precedes_create": true,
+    "pending_symlink_refused": true,
+    "pre_schema_artifact_refused": true,
+    "pre_schema_artifact_untouched": true,
+    "ready-missing_metadata_stays_ready": true,
+    "ready-missing_refused": true,
+    "ready-replaced_metadata_stays_ready": true,
+    "ready-replaced_refused": true,
+    "ready-symlink_metadata_stays_ready": true,
+    "ready-symlink_refused": true,
+    "ready-unlink-recreate_metadata_stays_ready": true,
+    "ready-unlink-recreate_refused": true,
+    "ready_fd_is_cloexec": true,
+    "temporary_root_removed": true
+  },
+  "contract": "schema14-provisional-lock-v1",
+  "reason": "schema14-stable-provisional-lock-observed",
+  "status": "pass",
+  "tools": {
+    "python": "Python 3.14.7",
+    "tmux": "tmux 3.7c"
+  }
+}

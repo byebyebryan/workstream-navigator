@@ -245,6 +245,11 @@ prepare-token-helper topology, synthetic closed grammar, exact claim
 comparison, one-shot semantics, and shell-identity-preserving provider exec
 across Bash/Zsh and Codex/OpenCode routes. It does not validate the account
 startup wrapper, schema-14 ownership, races/recovery, or real provider effects.
+[Spike 0022](evidence/spikes/0022-d17-account-shell-wrapper.md) separately
+validates the controlled non-login wrapper and records Bash's required launcher
+login preflight. [Spike 0023](evidence/spikes/0023-d17-provisional-lock.md)
+separately validates the isolated schema-14 stable-lock lifecycle. Neither
+probe validates the required cross-actor onboarding races or provider effects.
 The separate observer-ancestry revalidation passed on Codex `0.150.0`, while a
 real brokered Codex launch remains a D17 gate. D17.0 remains the first
 implementation gate for the complete handshake, grammar, wrapper, ownership,
@@ -4619,10 +4624,13 @@ resume and never receives a second POST.
 - Spike 0019 proves only a single-phase controlled-function-plus-`exec`
   candidate. Spike 0021 validates the narrow synthetic
   prepare-token-helper-provider chain across Bash/Zsh and both provider routes:
-  direct prepare child, verifier-backed one-shot consume, every bound-claim
-  mutation and expiry/replay refusal, shell PID/birth/PGID/session preservation,
-  and lease-FD noninheritance. It does not prove account-shell startup parity,
-  schema-14 ownership, cancellation/crash recovery, or native provider effects.
+direct prepare child, verifier-backed one-shot consume, every bound-claim
+mutation and expiry/replay refusal, shell PID/birth/PGID/session preservation,
+and lease-FD noninheritance. Spike 0022 separately validates account-shell
+non-login baseline parity and its Bash login preflight, while Spike 0023
+separately validates the isolated schema-14 stable-lock lifecycle. The probes
+do not prove their cross-actor integration, cancellation/crash recovery, or
+native provider effects.
   The separate Codex `0.150.0` run revalidates observer ancestry only; real
   native Codex promotion, terminal behavior, and output retention remain exit
   gates.
@@ -4730,9 +4738,9 @@ resume and never receives a second POST.
    premature action, stuck operation, blind rollback, duplicate ownership/shell,
    or second POST. Exercise issuance-to-helper cancellation/crash, replay,
    expiry, duplicate helper, and every bound-claim mismatch before provider
-  effect. Spike 0021 closes only the narrow two-phase topology risk; its listed
-  limits and every unresolved falsification above still stop the production
-  slices.
+  effect. Spikes 0021-0023 close only the narrow two-phase topology,
+  account-wrapper, and isolated stable-lock risks; their listed limits and every
+  unresolved falsification above still stop the production slices.
 2. **Dormant/test-only provisional ownership.** Add the presentation-scoped
    ownership/card model and private provisional server behind internal test
    seams, including deterministic presentation seed cwd, exact final-form

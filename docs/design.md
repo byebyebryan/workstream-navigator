@@ -772,9 +772,13 @@ This two-phase prepare-token-helper variant is an explicit D17 candidate.
 narrow synthetic mechanical boundary across Bash/Zsh and both provider routes:
 direct prepare child, one-shot verifier-backed capability, exact claim
 comparison, shell identity preservation, and lease-FD noninheritance. D17.0
-still must validate the account-shell wrapper, schema-14 ownership, races and
+still must validate the cross-actor wrapper/lock integration, races and
 recovery, and real provider effects before production implementation relies on
-the complete contract.
+the complete contract. [Spike
+0022](evidence/spikes/0022-d17-account-shell-wrapper.md) validates the
+non-login account wrapper and Bash login preflight, while [Spike
+0023](evidence/spikes/0023-d17-provisional-lock.md) validates the isolated
+schema-14 stable-lock lifecycle.
 
 The command grammar is closed and provider-specific. Broker-owned or
 identity-changing cwd, profile, resume, session, attach, server, host, port,
@@ -2664,10 +2668,12 @@ a single-phase controlled shell function that obtains broker authority before
 narrow synthetic two-phase prepare-token-helper chain: direct prepare child,
 verifier-backed one-shot consume, bound-claim/replay/expiry refusal,
 shell PID/birth/process-group preservation, and lease-FD noninheritance across
-Bash/Zsh and both provider routes. Account-shell startup, real closed grammar,
-schema-14 ownership, and crash/cancel recovery remain D17.0 gates. A separate
-observer-ancestry revalidation passed on Codex `0.150.0`; real brokered Codex
-terminal/output behavior remains a D17 acceptance gate. [Spike
+Bash/Zsh and both provider routes. Spikes
+0022 and 0023 separately validate account-shell startup and the isolated
+schema-14 lock lifecycle; real closed grammar, cross-actor integration, and
+crash/cancel recovery remain D17.0 gates. A separate observer-ancestry
+revalidation passed on Codex `0.150.0`; real brokered Codex terminal/output
+behavior remains a D17 acceptance gate. [Spike
 0020](evidence/spikes/0020-opencode-1.18.23-revalidation.md) reruns the bounded
 OpenCode fresh-session/provider lifecycle contract on `1.18.23`; it supports
 the provider adapter assumptions but is not, by itself, proof of the D17 broker

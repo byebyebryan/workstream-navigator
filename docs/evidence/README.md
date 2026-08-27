@@ -64,6 +64,9 @@ Codex/OpenCode routes while preserving the remaining D17.0 acceptance gates.
 [Spike 0022](spikes/0022-d17-account-shell-wrapper.md) validates the controlled
 non-login Bash/Zsh account-wrapper candidate and records the mandatory Bash
 login preflight boundary.
+[Spike 0023](spikes/0023-d17-provisional-lock.md) validates the isolated
+schema-14 stable `provisional.lock` installation and refusal lifecycle while
+leaving the cross-actor onboarding races as D17.0 work.
 
 ## Provider studies
 

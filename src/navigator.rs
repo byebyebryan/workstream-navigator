@@ -6,6 +6,7 @@
 
 mod d16;
 mod d16_controller;
+pub(crate) mod d17;
 
 pub use d16::{
     D16Command, D16ListGeometry, D16LocationRow, D16Modal, D16Model, D16Navigator, D16OperationRow,

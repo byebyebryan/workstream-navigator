@@ -8,18 +8,17 @@ use super::{
     },
     local::observe_hook,
     model::{
-        AppError, default_state_root, parse_operation, parse_optional_provider, parse_provider,
-        parse_revision, parse_workstream,
+        AppError, default_state_root, parse_operation, parse_provider, parse_revision,
+        parse_workstream,
     },
     observer::{doctor, observer_review, remove_observer},
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use std::{io::Write as _, path::Component};
+use std::io::Write as _;
 
 use crate::application::{
     ApplicationAction, ApplicationError, ApplicationOutcome, ApplicationSnapshot, AttentionKind,
-    BrowserPath, BrowserRootPath, HostRegistryApplicationBackend, LocalApplication,
-    ProviderCapability, operating_system_hostname,
+    HostRegistryApplicationBackend, LocalApplication, ProviderCapability,
+    operating_system_hostname,
 };
 use crate::domain::ProviderKind;
 
@@ -292,9 +291,7 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
         }
         Commands::Doctor => exceptional_observer(root, false),
         Commands::RemoveObserver => exceptional_observer(root, true),
-        Commands::Register { .. }
-        | Commands::NewWorkstream { .. }
-        | Commands::ForkWorkstream { .. }
+        Commands::ForkWorkstream { .. }
         | Commands::Start { .. }
         | Commands::Recover { .. }
         | Commands::Attach { .. }
@@ -347,46 +344,6 @@ fn execute_d16_local_command(root: &StateRoot, command: Commands) -> Result<(), 
     let mut application = open_local_application(root)?;
     let snapshot = application.snapshot().map_err(AppError::Application)?;
     match command {
-        Commands::Register { checkout, provider } => {
-            let relative_path = checkout_browser_path(root, &checkout)?;
-            let requested = parse_optional_provider(provider.as_deref())?;
-            let provider = choose_provider(
-                &snapshot,
-                requested,
-                None,
-                ProviderCapability::eligible_for_new,
-            )?;
-            apply_and_report(
-                &mut application,
-                ApplicationAction::RegisterLocation {
-                    relative_path,
-                    expected_browser_revision: snapshot.project_browser.revision,
-                    provider,
-                },
-            )
-        }
-        Commands::NewWorkstream {
-            source_workstream_id,
-            provider,
-        } => {
-            let source_id = parse_workstream(&source_workstream_id)?;
-            let source = find_workstream(&snapshot, source_id)?;
-            let requested = parse_optional_provider(provider.as_deref())?;
-            let provider = choose_provider(
-                &snapshot,
-                requested,
-                Some(source.provider),
-                ProviderCapability::eligible_for_new,
-            )?;
-            apply_and_report(
-                &mut application,
-                ApplicationAction::NewAtSameLocation {
-                    source_workstream_id: source_id,
-                    expected_workstream_revision: source.revision,
-                    provider,
-                },
-            )
-        }
         Commands::ForkWorkstream {
             source_workstream_id,
         } => {
@@ -570,70 +527,6 @@ fn apply_and_report(
     }
 }
 
-pub(super) fn checkout_browser_path(
-    root: &StateRoot,
-    checkout: &std::path::Path,
-) -> Result<BrowserPath, AppError> {
-    let browser_root = read_browser_root(root)?;
-    let checkout = std::fs::canonicalize(checkout)
-        .map_err(|_| AppError::Application(ApplicationError::InvalidBrowserPath))?;
-    if checkout == browser_root || !checkout.starts_with(&browser_root) {
-        return Err(AppError::Application(ApplicationError::InvalidBrowserPath));
-    }
-    let relative = checkout
-        .strip_prefix(&browser_root)
-        .map_err(|_| AppError::Application(ApplicationError::InvalidBrowserPath))?;
-    let mut text = String::new();
-    for component in relative.components() {
-        let Component::Normal(component) = component else {
-            return Err(AppError::Application(ApplicationError::InvalidBrowserPath));
-        };
-        let component = component
-            .to_str()
-            .ok_or(AppError::Application(ApplicationError::InvalidBrowserPath))?;
-        if !text.is_empty() {
-            text.push('/');
-        }
-        text.push_str(component);
-    }
-    BrowserPath::new(text).map_err(AppError::Application)
-}
-
-fn read_browser_root(root: &StateRoot) -> Result<std::path::PathBuf, AppError> {
-    let database = root.host_database_path();
-    let connection = Connection::open_with_flags(
-        &database,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX
-            | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-    )
-    .map_err(|_| AppError::Application(ApplicationError::InvalidBrowserPath))?;
-    let configured: Option<String> = connection
-        .query_row(
-            "SELECT root_path FROM project_browser_settings WHERE singleton = 1",
-            [],
-            |row| row.get(0),
-        )
-        .optional()
-        .map_err(|_| AppError::Application(ApplicationError::InvalidBrowserPath))?;
-    let configured = configured
-        .map(|value| BrowserRootPath::new(value).map_err(AppError::Application))
-        .transpose()?;
-    let root = configured.map_or_else(
-        || {
-            std::env::var_os("HOME")
-                .map(std::path::PathBuf::from)
-                .ok_or(AppError::Application(ApplicationError::InvalidBrowserPath))
-        },
-        |path| Ok(std::path::PathBuf::from(path.as_str())),
-    )?;
-    let root = std::fs::canonicalize(root)
-        .map_err(|_| AppError::Application(ApplicationError::InvalidBrowserPath))?;
-    root.is_dir()
-        .then_some(root)
-        .ok_or(AppError::Application(ApplicationError::InvalidBrowserPath))
-}
-
 fn find_workstream(
     snapshot: &ApplicationSnapshot,
     workstream_id: crate::domain::WorkstreamId,
@@ -657,48 +550,94 @@ fn capability(
         .ok_or(AppError::NoEligibleLocalProvider)
 }
 
-fn choose_provider(
-    snapshot: &ApplicationSnapshot,
-    requested: Option<ProviderKind>,
-    preferred: Option<ProviderKind>,
-    eligible: fn(ProviderCapability) -> bool,
-) -> Result<ProviderKind, AppError> {
-    if let Some(provider) = requested {
-        let capability = capability(snapshot, provider)?;
-        return eligible(capability)
-            .then_some(capability.provider)
-            .ok_or(AppError::NoEligibleLocalProvider);
+fn navigator(root: &StateRoot) -> Result<(), AppError> {
+    match prepare_d17_navigator_state(root)? {
+        D17NavigatorStartup::Ready => {}
+        D17NavigatorStartup::DrainOnly(plan) => return drain_only_presentation(root, &plan),
+        D17NavigatorStartup::Exit => return Ok(()),
     }
-    if let Some(provider) = preferred
-        && let Ok(capability) = capability(snapshot, provider)
-        && eligible(capability)
-    {
-        return Ok(provider);
+    let (presentation, fresh) = Presentation::open_or_create(root.base())?;
+    if fresh {
+        let seed_cwd = std::env::current_dir().map_err(AppError::Io)?;
+        presentation.start_d17(uuid::Uuid::new_v4(), &seed_cwd)?;
+    } else {
+        presentation.d17_context()?;
     }
-    snapshot
-        .provider_capabilities
-        .iter()
-        .copied()
-        .find(|capability| eligible(*capability))
-        .map(|capability| capability.provider)
-        .ok_or(AppError::NoEligibleLocalProvider)
+    match presentation.attach() {
+        // A normal tmux detach leaves the private presentation available for a
+        // later bare `wsnav` reconnect. It never affects a provider Runtime.
+        Ok(()) => Ok(()),
+        // `q` in the navigator stops the owned presentation itself. Its parent
+        // sees a failed attach because the socket vanished, which is a normal
+        // clean exit rather than an attachment failure.
+        Err(_) if !presentation.paths().directory.exists() => {
+            presentation.close().map_err(Into::into)
+        }
+        Err(error) => {
+            let cleanup = presentation.close();
+            cleanup?;
+            Err(AppError::Presentation(error))
+        }
+    }
 }
 
-fn navigator(root: &StateRoot) -> Result<(), AppError> {
+pub(super) enum D17NavigatorStartup {
+    Ready,
+    DrainOnly(Box<crate::cutover::CutoverPlan>),
+    Exit,
+}
+
+/// Prepares only the durable state boundary for a normal D17 Navigator
+/// launch. It deliberately proves that an old D16 presentation is absent
+/// before schema-13 migration; no provider, tmux, marker, or shell action is
+/// performed here.
+pub(super) fn prepare_d17_navigator_state(
+    root: &StateRoot,
+) -> Result<D17NavigatorStartup, AppError> {
+    let mut resume_d17_transition = false;
+    match crate::state::open_d17_current_only(root) {
+        Ok(state) => {
+            drop(state);
+            return Ok(D17NavigatorStartup::Ready);
+        }
+        Err(crate::state::StateError::FreshStateRequired) => {
+            let state =
+                crate::state::fresh_create_d17(root.base(), &crate::domain::RandomIdGenerator)?;
+            drop(state);
+            return Ok(D17NavigatorStartup::Ready);
+        }
+        Err(crate::state::StateError::CutoverRequired) => {}
+        Err(crate::state::StateError::StateRecoveryRequired(
+            crate::state::StateRecoveryReason::TransitionLeasePresent,
+        )) => resume_d17_transition = true,
+        Err(error) => return Err(AppError::State(error)),
+    }
     let assessment = {
         let mut presentation = crate::cutover::LivePresentationAuthority::new(root.base());
-        crate::startup::assess_startup(root, &mut presentation)?
+        crate::startup::assess_startup(root, &mut presentation)
+    };
+    let assessment = match assessment {
+        Ok(assessment) => assessment,
+        Err(crate::startup::StartupError::State(
+            crate::state::StateError::UnsupportedFutureHostSchema(version),
+        )) if resume_d17_transition && version == crate::state::D17_HOST_SCHEMA_VERSION => {
+            require_no_legacy_presentation(root)?;
+            crate::state::migrate_current_to_d17(root)?;
+            return Ok(D17NavigatorStartup::Ready);
+        }
+        Err(error) => return Err(AppError::Startup(error)),
     };
     match assessment {
         crate::startup::StartupAssessment::Fresh(_) => {
-            let state = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)?;
-            let _ = state.into_host_registry()?;
+            let state =
+                crate::state::fresh_create_d17(root.base(), &crate::domain::RandomIdGenerator)?;
+            drop(state);
         }
-        crate::startup::StartupAssessment::Current(_) => {}
+        crate::startup::StartupAssessment::Current(state) => drop(state),
         crate::startup::StartupAssessment::Cutover(plan)
             if plan.kind() == crate::cutover::CutoverPlanKind::DrainOnly =>
         {
-            return drain_only_presentation(root, &plan);
+            return Ok(D17NavigatorStartup::DrainOnly(Box::new(plan)));
         }
         crate::startup::StartupAssessment::Cutover(plan) => {
             let confirmation = {
@@ -717,34 +656,28 @@ fn navigator(root: &StateRoot) -> Result<(), AppError> {
                 &mut state_factory,
             );
             match orchestrator.execute(&plan, &confirmation, &crate::domain::RandomIdGenerator)? {
-                crate::cutover::CutoverOutcome::Declined => return Ok(()),
+                crate::cutover::CutoverOutcome::Declined => return Ok(D17NavigatorStartup::Exit),
                 crate::cutover::CutoverOutcome::DrainOnly(_) => {
-                    return drain_only_presentation(root, &plan);
+                    return Ok(D17NavigatorStartup::DrainOnly(Box::new(plan)));
                 }
                 crate::cutover::CutoverOutcome::Completed(_) => {}
             }
         }
     }
-    let (presentation, fresh) = Presentation::open_or_create(root.base())?;
-    if fresh {
-        presentation.start()?;
+
+    require_no_legacy_presentation(root)?;
+    crate::state::migrate_current_to_d17(root)?;
+    Ok(D17NavigatorStartup::Ready)
+}
+
+fn require_no_legacy_presentation(root: &StateRoot) -> Result<(), AppError> {
+    let presentation = crate::presentation::classify_legacy_presentations(root.base())?;
+    if presentation.state() != crate::presentation::LegacyPresentationState::None
+        || presentation.proof().is_some()
+    {
+        return Err(AppError::D17CutoverNeedsPresentationClosed);
     }
-    match presentation.attach() {
-        // A normal tmux detach leaves the private presentation available for a
-        // later bare `wsnav` reconnect. It never affects a provider Runtime.
-        Ok(()) => Ok(()),
-        // `q` in the navigator stops the owned presentation itself. Its parent
-        // sees a failed attach because the socket vanished, which is a normal
-        // clean exit rather than an attachment failure.
-        Err(_) if !presentation.paths().directory.exists() => {
-            presentation.close().map_err(Into::into)
-        }
-        Err(error) => {
-            let cleanup = presentation.close();
-            cleanup?;
-            Err(AppError::Presentation(error))
-        }
-    }
+    Ok(())
 }
 
 fn drain_only_presentation(

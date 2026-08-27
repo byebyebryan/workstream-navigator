@@ -4250,9 +4250,9 @@ pub fn open_observer_transition(root: &StateRoot) -> Result<D16State, StateError
     })
 }
 
-/// Opens a schema-12 root only through the explicit cutover entrypoint and
-/// performs the transactional 12-to-13 migration.  Client files
-/// are deliberately neither read nor removed in this slice.
+/// Opens a schema-12, schema-13, or resumable schema-14 root only through the
+/// explicit transition entrypoint. Client files are deliberately neither read
+/// nor removed in this slice.
 pub fn open_cutover_transition(
     root: &StateRoot,
     lease: &TransitionLease,
@@ -4275,12 +4275,13 @@ pub fn open_cutover_transition(
     match schema_version(&connection)? {
         D16_SCHEMA_12_VERSION => validate_schema12(&connection)?,
         D16_HOST_SCHEMA_VERSION => validate_schema13(&connection)?,
+        D17_HOST_SCHEMA_VERSION => validate_schema14(&connection)?,
         0..=11 => {
             return Err(StateError::HostStateResetRequired(schema_version(
                 &connection,
             )?));
         }
-        value if value > D16_HOST_SCHEMA_VERSION => {
+        value if value > D17_HOST_SCHEMA_VERSION => {
             return Err(StateError::UnsupportedFutureHostSchema(value));
         }
         _ => return Err(StateError::MalformedHostSchema),
@@ -4408,6 +4409,31 @@ fn classify_fresh_root_while_lease_held(
 /// Creates a fresh schema-13 root while holding a private transition lease
 /// across the complete allowlist recheck and database creation.
 pub fn fresh_create(path: &Path, id_generator: &dyn IdGenerator) -> Result<D16State, StateError> {
+    fresh_create_with_schema(path, id_generator, FreshCreationSchema::D16)
+}
+
+/// Creates a fresh schema-14 D17 root without publishing a schema-13 current
+/// state. The transition lease covers the schema creation, schema-14 migration,
+/// and stable provisional-lock installation; a restart can therefore only
+/// resume the same bounded transition rather than adopt an ordinary D16 root.
+pub fn fresh_create_d17(
+    path: &Path,
+    id_generator: &dyn IdGenerator,
+) -> Result<D16State, StateError> {
+    fresh_create_with_schema(path, id_generator, FreshCreationSchema::D17)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FreshCreationSchema {
+    D16,
+    D17,
+}
+
+fn fresh_create_with_schema(
+    path: &Path,
+    id_generator: &dyn IdGenerator,
+    target: FreshCreationSchema,
+) -> Result<D16State, StateError> {
     let initial = classify_fresh_root(path)?;
     if matches!(initial, FreshRootClassification::Absent) {
         create_private_fresh_root(path)?;
@@ -4422,7 +4448,6 @@ pub fn fresh_create(path: &Path, id_generator: &dyn IdGenerator) -> Result<D16St
             ));
         }
     };
-    let lease_path = path.join(TRANSITION_LOCK_FILE);
     // The allowlist is repeated while the lease is held, closing the TOCTOU
     // window between classification and database creation.
     let rechecked = classify_fresh_root_while_lease_held(path)?;
@@ -4468,11 +4493,20 @@ pub fn fresh_create(path: &Path, id_generator: &dyn IdGenerator) -> Result<D16St
     }
     configure_d16_connection(&connection)?;
     create_schema13(&mut connection, id_generator)?;
+    if target == FreshCreationSchema::D17 {
+        migrate_schema13_to14(&mut connection, &lease)?;
+        let mut state = D16State {
+            connection,
+            root: path.to_path_buf(),
+            mode: D16OpenMode::CutoverTransition,
+        };
+        let provisional = state.install_or_acquire_provisional_lease(&lease)?;
+        drop(provisional);
+        connection = state.connection;
+    }
     drop(database_file);
     drop(connection);
-    drop(lease);
-    fs::remove_file(&lease_path).map_err(|error| StateError::io(&lease_path, error))?;
-    sync_directory(path)?;
+    retire_transition_lease(lease)?;
     let connection = Connection::open_with_flags(
         &database_path,
         OpenFlags::SQLITE_OPEN_READ_WRITE
@@ -4481,12 +4515,73 @@ pub fn fresh_create(path: &Path, id_generator: &dyn IdGenerator) -> Result<D16St
     )
     .map_err(StateError::Sqlite)?;
     configure_d16_connection(&connection)?;
-    validate_schema13(&connection)?;
+    match target {
+        FreshCreationSchema::D16 => validate_schema13(&connection)?,
+        FreshCreationSchema::D17 => validate_schema14(&connection)?,
+    }
     Ok(D16State {
         connection,
         root: path.to_path_buf(),
-        mode: D16OpenMode::FreshCreate,
+        mode: match target {
+            FreshCreationSchema::D16 => D16OpenMode::FreshCreate,
+            FreshCreationSchema::D17 => D16OpenMode::D17Current,
+        },
     })
+}
+
+/// Atomically promotes one intact schema-13 root to D17's schema-14 state
+/// boundary. A pre-existing transition lock is resumed only when it can be
+/// acquired exactly; otherwise a new private lease is created. The stable
+/// provisional lock is ready before the transition artifact is retired.
+///
+/// This function has no presentation, provider, Runtime, or shell effect.
+/// Callers must prove that no D16 presentation remains before invoking it.
+///
+/// # Errors
+///
+/// Returns an error when the state root, database, transition lease, or
+/// provisional-lock evidence is ambiguous. A completed schema transaction
+/// with a retained transition lock remains recoverable by calling this exact
+/// function again.
+pub fn migrate_current_to_d17(root: &StateRoot) -> Result<(), StateError> {
+    validate_state_root_directory(root.base())?;
+    let database_path = root.host_database_path();
+    if !validate_d16_host_database_path(&database_path)? {
+        return Err(StateError::FreshStateRequired);
+    }
+    let transition_path = root.base().join(TRANSITION_LOCK_FILE);
+    let lease = match exact_artifact_metadata(&transition_path)? {
+        None => TransitionLease::create_for_fresh_root(root.base())?,
+        Some(_) => TransitionLease::acquire(root.base())?,
+    };
+    let mut state = open_cutover_transition(root, &lease)?;
+    state.migrate_schema13_to14(&lease)?;
+    let provisional = state.install_or_acquire_provisional_lease(&lease)?;
+    drop(provisional);
+    drop(state);
+    retire_transition_lease(lease)?;
+
+    let state = open_d17_current_only(root)?;
+    drop(state);
+    Ok(())
+}
+
+fn retire_transition_lease(lease: TransitionLease) -> Result<(), StateError> {
+    let root = lease.root.clone();
+    let lock_path = lease.lock_path.clone();
+    let expected_identity = lease.lock_identity;
+    lease.revalidate(&root)?;
+    let metadata =
+        fs::symlink_metadata(&lock_path).map_err(|error| StateError::io(&lock_path, error))?;
+    if !metadata.is_file()
+        || !is_private_owner_file(&metadata)
+        || file_identity(&metadata) != expected_identity
+    {
+        return Err(StateError::InvalidTransitionLease);
+    }
+    fs::remove_file(&lock_path).map_err(|error| StateError::io(&lock_path, error))?;
+    drop(lease);
+    sync_directory(&root)
 }
 
 /// Creates the absent fresh root without following a path component that may
@@ -9613,6 +9708,65 @@ mod tests {
         let d17 = open_d17_current_only(&root).unwrap();
         let registry = d17.into_d17_host_registry().unwrap();
         assert_eq!(registry.schema_version().unwrap(), D17_HOST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn fresh_d17_creation_never_publishes_schema13_or_a_transition_artifact() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+
+        let mut state = fresh_create_d17(&state_path, &SequenceIds::default()).unwrap();
+        assert_eq!(state.mode(), D16OpenMode::D17Current);
+        assert_eq!(state.schema_version().unwrap(), D17_HOST_SCHEMA_VERSION);
+        assert!(!state_path.join(TRANSITION_LOCK_FILE).exists());
+        assert!(state_path.join(PROVISIONAL_LOCK_FILE).is_file());
+        assert!(!table_exists(&state.connection, "project_browser_settings").unwrap());
+        let provisional = state.acquire_d17_provisional_lease().unwrap();
+        provisional.revalidate_for_mutation(&state_path).unwrap();
+        drop(provisional);
+        drop(state);
+
+        let reopened = open_d17_current_only(&root).unwrap();
+        assert_eq!(reopened.schema_version().unwrap(), D17_HOST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn current_schema13_root_migrates_to_d17_with_ready_provisional_lock() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+        drop(fresh_create(&state_path, &SequenceIds::default()).unwrap());
+
+        migrate_current_to_d17(&root).unwrap();
+
+        let mut state = open_d17_current_only(&root).unwrap();
+        assert_eq!(state.schema_version().unwrap(), D17_HOST_SCHEMA_VERSION);
+        assert!(!state_path.join(TRANSITION_LOCK_FILE).exists());
+        let provisional = state.acquire_d17_provisional_lease().unwrap();
+        assert_eq!(provisional.lease_generation(), 1);
+        drop(provisional);
+    }
+
+    #[test]
+    fn d17_migration_resumes_a_post_schema_transaction_before_retiring_its_lease() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+        drop(fresh_create(&state_path, &SequenceIds::default()).unwrap());
+
+        let lease = transition_lease(&state_path);
+        let mut state = open_cutover_transition(&root, &lease).unwrap();
+        state.migrate_schema13_to14(&lease).unwrap();
+        drop(state);
+        drop(lease);
+
+        migrate_current_to_d17(&root).unwrap();
+
+        let mut reopened = open_d17_current_only(&root).unwrap();
+        let provisional = reopened.acquire_d17_provisional_lease().unwrap();
+        provisional.revalidate_for_mutation(&state_path).unwrap();
+        assert!(!state_path.join(TRANSITION_LOCK_FILE).exists());
     }
 
     #[test]

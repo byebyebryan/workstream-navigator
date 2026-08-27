@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 
 use super::{
-    HostRegistry, IntegrationLifecycle, ObserverProfile, Path, StateRoot,
+    HostRegistry, IntegrationLifecycle, ObserverProfile, Path, Presentation, StateRoot,
     cli::{
         Cli, Commands, is_d17_shell_gate_command, is_d17_shell_launch_helper_command,
         is_observer_command, is_provider_pane_command,
@@ -10,7 +10,6 @@ use super::{
     model::AppError,
     observer::{finalize_native_trust, prepare_observer_activation_with_manager},
 };
-use crate::application::ApplicationError;
 use crate::domain::RandomIdGenerator;
 use clap::{CommandFactory as _, Parser as _};
 
@@ -26,6 +25,104 @@ fn open_registry(root: &StateRoot) -> HostRegistry {
         .unwrap()
         .into_host_registry()
         .unwrap()
+}
+
+#[test]
+fn normal_d17_startup_creates_schema14_for_a_fresh_root() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_path = temporary.path().join("state");
+    let root = StateRoot::select(&state_path);
+
+    let startup = dispatch::prepare_d17_navigator_state(&root).unwrap();
+    assert!(matches!(startup, dispatch::D17NavigatorStartup::Ready));
+
+    let state = crate::state::open_d17_current_only(&root).unwrap();
+    assert_eq!(
+        state.schema_version().unwrap(),
+        crate::state::D17_HOST_SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn normal_d17_startup_migrates_idle_schema13_before_presentation_creation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_path = temporary.path().join("state");
+    let root = StateRoot::create(&state_path).unwrap();
+    drop(crate::state::fresh_create(&state_path, &RandomIdGenerator).unwrap());
+
+    let startup = dispatch::prepare_d17_navigator_state(&root).unwrap();
+    assert!(matches!(startup, dispatch::D17NavigatorStartup::Ready));
+
+    let state = crate::state::open_d17_current_only(&root).unwrap();
+    assert_eq!(
+        state.schema_version().unwrap(),
+        crate::state::D17_HOST_SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn normal_d17_startup_resumes_a_schema14_transition_before_opening_a_presentation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_path = temporary.path().join("state");
+    let root = StateRoot::create(&state_path).unwrap();
+    drop(crate::state::fresh_create(&state_path, &RandomIdGenerator).unwrap());
+    let transition_path = state_path.join(crate::state::TRANSITION_LOCK_FILE);
+    let transition_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&transition_path)
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&transition_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    drop(transition_file);
+    let lease = crate::state::acquire_transition_lease(&state_path).unwrap();
+    let mut state = crate::state::open_cutover_transition(&root, &lease).unwrap();
+    state.migrate_schema13_to14(&lease).unwrap();
+    drop(state);
+    drop(lease);
+
+    let startup = dispatch::prepare_d17_navigator_state(&root).unwrap();
+    assert!(matches!(startup, dispatch::D17NavigatorStartup::Ready));
+
+    assert!(!transition_path.exists());
+    let state = crate::state::open_d17_current_only(&root).unwrap();
+    assert_eq!(
+        state.schema_version().unwrap(),
+        crate::state::D17_HOST_SCHEMA_VERSION
+    );
+}
+
+#[test]
+fn normal_d17_startup_refuses_to_migrate_beneath_a_live_d16_presentation() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_path = temporary.path().join("state");
+    let root = StateRoot::create(&state_path).unwrap();
+    drop(crate::state::fresh_create(&state_path, &RandomIdGenerator).unwrap());
+    let navigator = temporary.path().join("navigator-fixture");
+    std::fs::write(&navigator, "#!/bin/sh\nexec sleep 60\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&navigator, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let presentation = Presentation::fresh_with_executable(&state_path, navigator);
+    presentation.start().unwrap();
+
+    let result = dispatch::prepare_d17_navigator_state(&root);
+    presentation.close().unwrap();
+
+    assert!(matches!(
+        result,
+        Err(AppError::D17CutoverNeedsPresentationClosed)
+    ));
+    let state = crate::state::open_current_only(&root).unwrap();
+    assert_eq!(
+        state.schema_version().unwrap(),
+        crate::state::D16_HOST_SCHEMA_VERSION
+    );
 }
 
 #[test]
@@ -300,35 +397,22 @@ fn normal_help_and_parser_exclude_retired_surfaces() {
     assert!(help.contains("Recover a lost private Runtime through its exact native"));
     assert!(help.contains("durable host-registry record"));
     assert!(!help.contains("live private-tmux probe"));
-    for retired in ["register-remote", "host", "_remote", "_probe", "_attach"] {
+    assert!(!help.contains("Register one existing Git project"));
+    assert!(!help.contains("Create and start an independent Workstream"));
+    for retired in [
+        "register",
+        "new-workstream",
+        "register-remote",
+        "host",
+        "_remote",
+        "_probe",
+        "_attach",
+    ] {
         assert!(
             Cli::try_parse_from(["wsnav", retired]).is_err(),
             "{retired}"
         );
     }
-}
-
-#[test]
-fn register_checkout_is_reduced_to_a_current_browser_relative_path() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = fresh_root(&temporary);
-    let browser = temporary.path().join("browser");
-    let checkout = browser.join("repo");
-    std::fs::create_dir_all(&checkout).unwrap();
-    let outside = temporary.path().join("outside");
-    std::fs::create_dir(&outside).unwrap();
-    let mut registry = open_registry(&root);
-    registry
-        .set_project_browser_root(browser.to_str().unwrap())
-        .unwrap();
-    drop(registry);
-
-    let relative = dispatch::checkout_browser_path(&root, &checkout).unwrap();
-    assert_eq!(relative.as_str(), "repo");
-    assert!(matches!(
-        dispatch::checkout_browser_path(&root, &outside),
-        Err(AppError::Application(ApplicationError::InvalidBrowserPath))
-    ));
 }
 
 #[test]

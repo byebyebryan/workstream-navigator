@@ -20,20 +20,6 @@ pub(super) enum Commands {
     Doctor,
     /// Remove only the exact unchanged observer profile after runtimes stop.
     RemoveObserver,
-    /// Register one existing Git project as the initial Workstream location.
-    Register {
-        checkout: PathBuf,
-        /// Provider to use when more than one provider is eligible.
-        #[arg(long)]
-        provider: Option<String>,
-    },
-    /// Create and start an independent Workstream from one registered project location.
-    NewWorkstream {
-        source_workstream_id: String,
-        /// Provider to use when the source provider is not an eligible default.
-        #[arg(long)]
-        provider: Option<String>,
-    },
     /// Fork one live Workstream at its last completed native provider turn.
     ForkWorkstream { source_workstream_id: String },
     /// Start the Workstream's native provider in its private tmux server.

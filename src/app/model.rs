@@ -4,18 +4,6 @@ pub(super) fn parse_workstream(value: &str) -> Result<WorkstreamId, AppError> {
     WorkstreamId::from_str(value).map_err(AppError::InvalidWorkstreamId)
 }
 
-pub(super) fn parse_optional_provider(
-    value: Option<&str>,
-) -> Result<Option<crate::domain::ProviderKind>, AppError> {
-    value
-        .map(|value| {
-            value
-                .parse()
-                .map_err(|error| AppError::State(StateError::Domain(error)))
-        })
-        .transpose()
-}
-
 pub(super) fn parse_provider(value: &str) -> Result<crate::domain::ProviderKind, AppError> {
     value
         .parse()
@@ -114,4 +102,6 @@ pub(crate) enum AppError {
     D17ShellControlUnavailable,
     #[error("the D17 runtime attachment is unavailable")]
     D17AttachmentUnavailable,
+    #[error("close the existing Navigator presentation before D17 cutover")]
+    D17CutoverNeedsPresentationClosed,
 }

@@ -5,13 +5,14 @@ Date: 2026-08-26
 Status: D0-D16 complete; D16 host-local implementation, disposable repository
 gate, and operator-gated live local and SSH-entered-host acceptance complete;
 source-installed operator beta. D17 shell-first managed-session onboarding is
-the approved next checkpoint. Its D17.0 falsification studies plus the D17.2
-test-only ownership/private-runtime model and dormant D17.3 grammar,
-command-classification, onboarding-phase, capability-journal, and atomic
-reservation/ownership-consumption foundations are in progress; no D17 user-facing behavior or
-provider launch path is implemented yet. The explicit schema-13-to-14
-migration, stable provisional lease, lease-bound reservation, and ownership-consumption seams are
-dormant, and no product path can invoke any of them.
+the approved next checkpoint. Its D17.0 falsification studies, D17.2 test-only
+ownership/private-runtime model, dormant presentation-private marker storage,
+and dormant D17.3 grammar, command-classification, onboarding-phase,
+capability-journal, atomic reservation, and ownership-consumption foundations
+are in progress; no D17 user-facing behavior or provider launch path is
+implemented yet. The explicit schema-13-to-14 migration, stable provisional
+lease, marker storage, lease-bound reservation, and ownership-consumption seams
+are dormant, and no product path can invoke any of them.
 
 The D0-D15 entries below preserve truthful historical implementation and
 acceptance evidence. D3 and later SSH, remote, cross-host, and combined
@@ -4269,12 +4270,14 @@ D16 closes only when all of the following are true:
 
 ## D17 - Shell-first managed-session onboarding
 
-Status: in progress. The product contract is approved; D17.0 studies and the
-D17.2 test-only ownership/private-runtime model and dormant D17.3 grammar,
-command-classification, onboarding-phase, and capability-journal foundations
-have begun. No D17 user-facing behavior or provider launch path is implemented.
-The explicit schema-13-to-14 migration and stable provisional-lease foundations
-remain dormant, and no D17 acceptance is complete.
+Status: in progress. The product contract is approved; D17.0 studies, the
+D17.2 test-only ownership/private-runtime model, dormant presentation-private
+marker storage, and dormant D17.3 grammar, command-classification,
+onboarding-phase, capability-journal, reservation, and ownership-consumption
+foundations have begun. No D17 user-facing behavior or provider launch path is
+implemented. The explicit schema-13-to-14 migration, stable provisional-lease,
+and marker storage foundations remain dormant, and no D17 acceptance is
+complete.
 
 ### Goal
 

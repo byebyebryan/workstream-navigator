@@ -21,7 +21,7 @@ use ratatui::{
 };
 
 use crate::{
-    d17_snapshot::{D17Snapshot, D17WorkstreamSnapshot},
+    d17_snapshot::{D17OnboardingStatus, D17Snapshot, D17WorkstreamSnapshot},
     domain::{ProviderKind, Revision, RuntimeId, WorkstreamId},
 };
 
@@ -254,6 +254,7 @@ impl D17Model {
             Some(D17RowId::ProvisionalShell) => D17Command::MaterializeProvisionalShell,
             Some(D17RowId::Workstream(workstream_id)) => self
                 .selected_workstream(workstream_id)
+                .filter(|workstream| workstream.onboarding.is_none())
                 .and_then(|workstream| {
                     workstream.runtime.map(|runtime| D17Command::Attach {
                         workstream_id,
@@ -272,7 +273,7 @@ impl D17Model {
             return D17Command::None;
         };
         self.selected_workstream(workstream_id)
-            .filter(|workstream| !workstream.archived)
+            .filter(|workstream| !workstream.archived && workstream.onboarding.is_none())
             .map_or(D17Command::None, |workstream| {
                 D17Command::NewAtSameLocation {
                     source_workstream_id: workstream.workstream_id,
@@ -354,7 +355,7 @@ fn render_model(frame: &mut Frame<'_>, area: Rect, model: &D17Model) {
         layout[0],
     );
     frame.render_widget(
-        Paragraph::new(controls(model.page())).style(Style::default().fg(Color::Gray)),
+        Paragraph::new(controls(model)).style(Style::default().fg(Color::Gray)),
         layout[1],
     );
 }
@@ -380,14 +381,20 @@ fn row_lines(row: &D17Row) -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD),
         ))],
         D17Row::Workstream(workstream) => {
-            let runtime = workstream
-                .runtime
-                .map_or("stopped", |runtime| runtime_status_label(runtime.status));
+            let runtime = match workstream.onboarding {
+                Some(D17OnboardingStatus::ActionFenced) => "onboarding",
+                Some(D17OnboardingStatus::RecoveryRequired) => "recovery",
+                None => workstream
+                    .runtime
+                    .map_or("stopped", |runtime| runtime_status_label(runtime.status)),
+            };
             let title = workstream
                 .native_name
                 .clone()
                 .unwrap_or_else(|| workstream.workstream_id.short());
-            let indicator = if workstream.recovery_unseen {
+            let indicator = if workstream.onboarding == Some(D17OnboardingStatus::RecoveryRequired)
+                || workstream.recovery_unseen
+            {
                 ("!", Color::Red)
             } else if workstream.result_unseen {
                 ("✓", Color::Green)
@@ -440,11 +447,23 @@ const fn runtime_status_label(status: crate::domain::RuntimeStatus) -> &'static 
     }
 }
 
-const fn controls(page: D17Page) -> &'static str {
-    match page {
-        D17Page::Workstreams => {
-            " ↑↓ select  ·  Enter open  ·  n new here  ·  . archived  ·  q quit"
-        }
+fn controls(model: &D17Model) -> &'static str {
+    match model.page() {
+        D17Page::Workstreams => match model.selected() {
+            Some(D17RowId::Workstream(workstream_id))
+                if model
+                    .selected_workstream(workstream_id)
+                    .is_some_and(|workstream| {
+                        !workstream.archived && workstream.onboarding.is_none()
+                    }) =>
+            {
+                " ↑↓ select  ·  Enter open  ·  n new here  ·  . archived  ·  q quit"
+            }
+            Some(D17RowId::ProvisionalShell) => {
+                " ↑↓ select  ·  Enter shell  ·  . archived  ·  q quit"
+            }
+            _ => " ↑↓ select  ·  . archived  ·  q quit",
+        },
         D17Page::Archived => " ↑↓ select  ·  w workstreams  ·  q quit",
     }
 }
@@ -456,9 +475,12 @@ mod tests {
     use super::{D17Command, D17Model, D17Page, D17Row, D17RowId};
     use crate::{
         d17_snapshot::{
-            D17LocationSnapshot, D17ProjectSnapshot, D17Snapshot, D17WorkstreamSnapshot,
+            D17LocationSnapshot, D17OnboardingStatus, D17ProjectSnapshot, D17RuntimeSnapshot,
+            D17Snapshot, D17WorkstreamSnapshot,
         },
-        domain::{LocationId, ProjectId, ProviderKind, Revision, WorkstreamId},
+        domain::{
+            LocationId, ProjectId, ProviderKind, Revision, RuntimeId, RuntimeStatus, WorkstreamId,
+        },
     };
 
     fn snapshot() -> (D17Snapshot, WorkstreamId, WorkstreamId) {
@@ -487,6 +509,7 @@ mod tests {
                         archived: false,
                         revision: Revision::INITIAL,
                         runtime: None,
+                        onboarding: None,
                         native_name: None,
                         result_unseen: false,
                         recovery_unseen: false,
@@ -499,6 +522,7 @@ mod tests {
                         archived: true,
                         revision: Revision::INITIAL,
                         runtime: None,
+                        onboarding: None,
                         native_name: None,
                         result_unseen: false,
                         recovery_unseen: false,
@@ -559,6 +583,41 @@ mod tests {
                 expected_workstream_revision: Revision::INITIAL,
                 provider: ProviderKind::Codex,
             }
+        );
+    }
+
+    #[test]
+    fn onboarding_runtime_stays_visible_but_refuses_attach_and_new() {
+        let (mut snapshot, active, _) = snapshot();
+        snapshot.workstreams[0].runtime = Some(D17RuntimeSnapshot {
+            runtime_id: RuntimeId::from(Uuid::from_u128(5)),
+            status: RuntimeStatus::Starting,
+            revision: Revision::INITIAL,
+        });
+        snapshot.workstreams[0].onboarding = Some(D17OnboardingStatus::ActionFenced);
+        let mut model = D17Model::new(snapshot);
+        model.select_next();
+
+        assert_eq!(model.selected(), Some(D17RowId::Workstream(active)));
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Enter),
+            D17Command::None
+        );
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('n')),
+            D17Command::None
+        );
+        let rows = model.rows();
+        let workstream = rows
+            .iter()
+            .find(|row| row.id() == Some(D17RowId::Workstream(active)))
+            .expect("active onboarding row");
+        let lines = super::row_lines(workstream);
+        assert!(
+            lines[0]
+                .spans
+                .iter()
+                .any(|span| span.content == "onboarding")
         );
     }
 

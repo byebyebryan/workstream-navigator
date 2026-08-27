@@ -12,7 +12,7 @@
 )]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fmt::Write as _,
     fs::{self, File, OpenOptions},
     io::{Read, Seek, SeekFrom, Write},
@@ -50,7 +50,7 @@ use super::{
         ProviderBinding, RuntimeRecord,
     },
     runtime::{load_binding, load_current_binding, load_opencode_handle, row_to_runtime},
-    schema::HOST_SCHEMA_SQL,
+    schema::{HOST_SCHEMA_SQL, MAX_NAVIGATOR_WORKSTREAM_QUERY, MAX_NAVIGATOR_WORKSTREAMS},
     utils::{
         operation_phase_from_text, operation_phase_text, resolve_project_browser_root,
         runtime_status_from_text, validate_project_display_name, validate_provider_metadata,
@@ -710,6 +710,35 @@ pub(crate) struct OnboardingOwnership {
     pub(crate) operation_revision: Revision,
 }
 
+/// The only D17 onboarding states that alter the passive Workstreams
+/// projection. A reservation remains presentation-private until the helper
+/// has committed Runtime ownership; later unproven or recovery states stay
+/// visible but never grant ordinary action authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "the D17 Workstreams projection remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) enum D17OnboardingVisibility {
+    Reserved,
+    ActionFenced,
+    RecoveryRequired,
+}
+
+/// A bounded relationship between one D17 onboarding journal and its exact
+/// reserved Runtime. It intentionally excludes operation IDs, paths, shell
+/// evidence, capability metadata, and provider payloads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "the D17 Workstreams projection remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) struct D17OnboardingWorkstreamProjection {
+    pub(crate) workstream_id: WorkstreamId,
+    pub(crate) runtime_id: RuntimeId,
+    pub(crate) visibility: D17OnboardingVisibility,
+}
+
 /// Bounded file identity captured from the exact native provider executable
 /// immediately before the helper transfers into provider preparation. It is
 /// durable proof input only: the executable path and command line are never
@@ -1029,6 +1058,109 @@ impl D16State {
         ensure_d17_current_mode(self.mode)?;
         validate_schema14(&self.connection)?;
         load_project_projections(&self.connection)
+    }
+
+    /// Projects the only onboarding states that change D17 Workstreams
+    /// visibility or action authority. The journal is read as a bounded,
+    /// exact Runtime relationship: a malformed or duplicate relationship
+    /// refuses the whole snapshot instead of exposing a possibly unowned
+    /// Runtime card.
+    #[allow(
+        dead_code,
+        reason = "the D17 Workstreams projection remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn d17_onboarding_workstream_projections(
+        &self,
+    ) -> Result<Vec<D17OnboardingWorkstreamProjection>, StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        validate_schema14(&self.connection)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT phase, expected_revisions_json
+                 FROM compound_operations
+                 WHERE kind = 'onboard'
+                 ORDER BY operation_id
+                 LIMIT ?1",
+            )
+            .map_err(StateError::Sqlite)?;
+        let operations = statement
+            .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(StateError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::Sqlite)?;
+        if operations.len() > MAX_NAVIGATOR_WORKSTREAMS {
+            return Err(StateError::NavigatorSnapshotTooLarge);
+        }
+
+        let mut seen_workstreams = BTreeSet::new();
+        let mut projections = BTreeMap::new();
+        for (phase, encoded_intent) in operations {
+            let phase =
+                operation_phase_from_text(&phase).map_err(|_| StateError::MalformedHostSchema)?;
+            let phase = OnboardingPhase::from_operation_phase(phase)
+                .ok_or(StateError::MalformedHostSchema)?;
+            let intent: PersistedOnboardingIntent = serde_json::from_str(&encoded_intent)
+                .map_err(|_| StateError::MalformedHostSchema)?;
+            if intent.version != 1 || !seen_workstreams.insert(intent.workstream_id) {
+                return Err(StateError::MalformedHostSchema);
+            }
+
+            let runtime: Option<(String, String)> = self
+                .connection
+                .query_row(
+                    "SELECT workstream_id, provider
+                     FROM runtimes WHERE runtime_id = ?1",
+                    [intent.candidate_runtime_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(StateError::Sqlite)?;
+            if phase == OnboardingPhase::RolledBack {
+                if runtime.is_some() {
+                    return Err(StateError::MalformedHostSchema);
+                }
+                continue;
+            }
+            let Some((workstream_id, provider)) = runtime else {
+                return Err(StateError::MalformedHostSchema);
+            };
+            if workstream_id != intent.workstream_id.to_string()
+                || provider != intent.provider.as_str()
+            {
+                return Err(StateError::MalformedHostSchema);
+            }
+
+            let visibility = match phase {
+                OnboardingPhase::CapabilityIssued => D17OnboardingVisibility::Reserved,
+                OnboardingPhase::RuntimeOwnedLaunching
+                | OnboardingPhase::ProviderPreparation
+                | OnboardingPhase::ProviderExternalEffectStarted
+                | OnboardingPhase::ProviderExecStarted
+                | OnboardingPhase::KnownAbsentExec => D17OnboardingVisibility::ActionFenced,
+                OnboardingPhase::RecoveryRequired => D17OnboardingVisibility::RecoveryRequired,
+                OnboardingPhase::ProviderExecProven => continue,
+                OnboardingPhase::Prepared | OnboardingPhase::RolledBack => {
+                    return Err(StateError::MalformedHostSchema);
+                }
+            };
+            if projections
+                .insert(
+                    intent.workstream_id,
+                    D17OnboardingWorkstreamProjection {
+                        workstream_id: intent.workstream_id,
+                        runtime_id: intent.candidate_runtime_id,
+                        visibility,
+                    },
+                )
+                .is_some()
+            {
+                return Err(StateError::MalformedHostSchema);
+            }
+        }
+        Ok(projections.into_values().collect())
     }
 
     /// Reads all schema-13 Projects in deterministic opaque-ID order and

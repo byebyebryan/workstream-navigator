@@ -8,8 +8,8 @@ source-installed operator beta. D17 shell-first managed-session onboarding is
 the approved next checkpoint. Its D17.0 falsification studies plus the D17.2
 test-only ownership/private-runtime model and dormant D17.3 grammar,
 command-classification, and onboarding-phase contracts are in progress; no D17
-user-facing behavior, schema migration, or provider launch path is implemented
-yet.
+user-facing behavior or provider launch path is implemented yet. The explicit
+schema-13-to-14 groundwork is dormant and no product path can invoke it.
 
 The D0-D15 entries below preserve truthful historical implementation and
 acceptance evidence. D3 and later SSH, remote, cross-host, and combined
@@ -4270,8 +4270,8 @@ D16 closes only when all of the following are true:
 Status: in progress. The product contract is approved; D17.0 studies and the
 D17.2 test-only ownership/private-runtime model and dormant D17.3 grammar,
 command-classification, and onboarding-phase contracts have begun. No D17
-user-facing behavior, schema migration, or provider launch path is implemented,
-and no D17 acceptance is complete.
+user-facing behavior or provider launch path is implemented. The explicit
+schema-13-to-14 groundwork remains dormant, and no D17 acceptance is complete.
 
 ### Goal
 

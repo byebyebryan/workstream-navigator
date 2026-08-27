@@ -53,6 +53,10 @@ use super::{
 
 /// The D16 host schema version and sole fresh/current production boundary.
 pub const D16_HOST_SCHEMA_VERSION: i64 = 13;
+/// The D17 host schema version. It is understood only by the explicit,
+/// currently dormant cutover migration; ordinary D16 opens continue to reject
+/// it as a future schema until the replacement application boundary exists.
+pub const D17_HOST_SCHEMA_VERSION: i64 = 14;
 /// The only legacy host schema accepted by the confirmed-cutover migration and
 /// its exact fixture.
 pub const D16_SCHEMA_12_VERSION: i64 = 12;
@@ -104,6 +108,31 @@ pub const HOST_SCHEMA_13_PROJECT_SQL: &str = "
                                       native_session_id, settled_message_id);
 ";
 
+/// D17's minimal schema-14 cutover fragment. The later atomic Navigator
+/// replacement consumes the pending lock metadata before any actor creates or
+/// recognizes `provisional.lock`; the metadata itself is not a Runtime/card
+/// row and contains no provider command or shell data.
+pub const HOST_SCHEMA_14_ONBOARDING_SQL: &str = "
+    DROP TABLE project_browser_settings;
+    CREATE TABLE host_operational_metadata (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        provisional_lease_generation INTEGER NOT NULL CHECK (provisional_lease_generation > 0),
+        provisional_lock_phase TEXT NOT NULL
+            CHECK (provisional_lock_phase IN ('pending', 'ready')),
+        provisional_lock_device INTEGER,
+        provisional_lock_inode INTEGER,
+        CHECK (
+            (provisional_lock_phase = 'pending'
+                AND provisional_lock_device IS NULL
+                AND provisional_lock_inode IS NULL)
+            OR
+            (provisional_lock_phase = 'ready'
+                AND provisional_lock_device IS NOT NULL
+                AND provisional_lock_inode IS NOT NULL)
+        )
+    );
+";
+
 /// Returns the exact schema-12 fixture used by D16 migration tests.  It is a
 /// borrowed view of the authoritative pre-D16 schema and performs no I/O.
 #[must_use]
@@ -134,6 +163,7 @@ pub enum StateRecoveryReason {
     LockedTransitionLease,
     TransitionLeasePresent,
     ForeignTransitionLease,
+    ProvisionalLockPresent,
     InvalidObserverJournal,
     ObserverJournalPresent,
     LegacyClientArtifact,
@@ -1517,6 +1547,48 @@ impl D16State {
         lease.revalidate_for_mutation(&self.root)
     }
 
+    /// Performs the explicit, lease-bound schema-13 to schema-14 groundwork
+    /// step for D17's later atomic Navigator cutover.
+    ///
+    /// This method is intentionally not reachable from an ordinary command:
+    /// D16 continues to own the active schema-13 UI and state path until its
+    /// shell-first replacement is complete. The migration only removes the
+    /// obsolete browser settings table and records pending provisional-lock
+    /// installation metadata; it never creates or adopts `provisional.lock`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the caller lacks the exact transition lease, the
+    /// database is not an intact schema-13 root, or a pre-schema-14
+    /// provisional-lock artifact is present.
+    pub fn migrate_schema13_to14(&mut self, lease: &TransitionLease) -> Result<(), StateError> {
+        ensure_cutover_transition_mode(self.mode)?;
+        lease.revalidate_for_mutation(&self.root)?;
+        if !validate_d16_host_database_path(&self.root.join("host.sqlite"))? {
+            return Err(StateError::StateRecoveryRequired(
+                StateRecoveryReason::MissingHostDatabase,
+            ));
+        }
+        match schema_version(&self.connection)? {
+            D16_HOST_SCHEMA_VERSION => {
+                reject_pre_schema14_provisional_lock(&self.root)?;
+                migrate_schema13_to14(&mut self.connection, lease)?;
+            }
+            D17_HOST_SCHEMA_VERSION => validate_schema14(&self.connection)?,
+            0..=12 => {
+                return Err(StateError::HostStateResetRequired(schema_version(
+                    &self.connection,
+                )?));
+            }
+            value if value > D17_HOST_SCHEMA_VERSION => {
+                return Err(StateError::UnsupportedFutureHostSchema(value));
+            }
+            _ => return Err(StateError::MalformedHostSchema),
+        }
+        validate_schema14(&self.connection)?;
+        lease.revalidate_for_mutation(&self.root)
+    }
+
     /// Lists only deterministic, current `OpenCode` observer handles whose
     /// Runtime lifecycle is itself non-stopped. Runtime IDs are ordered by
     /// their opaque persisted spelling and handles are provider/generation/
@@ -2370,6 +2442,20 @@ fn reject_transition_lease_artifact(root: &Path) -> Result<(), StateError> {
     Ok(())
 }
 
+/// Schema-13 knows nothing about D17's stable provisional lease. Any such
+/// artifact is therefore ambiguous pre-migration evidence, not a candidate to
+/// adopt or clean up. The explicit D17 migration refuses before beginning its
+/// transaction and leaves the path untouched.
+fn reject_pre_schema14_provisional_lock(root: &Path) -> Result<(), StateError> {
+    let path = root.join("provisional.lock");
+    if exact_artifact_metadata(&path)?.is_some() {
+        return Err(StateError::StateRecoveryRequired(
+            StateRecoveryReason::ProvisionalLockPresent,
+        ));
+    }
+    Ok(())
+}
+
 fn reject_current_only_artifacts(
     root: &Path,
     client_means_cutover: bool,
@@ -2469,6 +2555,58 @@ fn validate_schema13(connection: &Connection) -> Result<(), StateError> {
     for (table, columns) in required_schema12_tables() {
         validate_table_columns(connection, table, columns)?;
     }
+    validate_schema13_extensions(connection)
+}
+
+fn validate_schema14(connection: &Connection) -> Result<(), StateError> {
+    if schema_version(connection)? != D17_HOST_SCHEMA_VERSION {
+        return Err(StateError::MalformedHostSchema);
+    }
+    validate_host_identity(connection, D17_HOST_SCHEMA_VERSION)?;
+    for (table, columns) in required_schema12_tables() {
+        if table != "project_browser_settings" {
+            validate_table_columns(connection, table, columns)?;
+        }
+    }
+    if table_exists(connection, "project_browser_settings")? {
+        return Err(StateError::MalformedHostSchema);
+    }
+    validate_schema13_extensions(connection)?;
+    validate_table_columns(
+        connection,
+        "host_operational_metadata",
+        &[
+            "singleton",
+            "provisional_lease_generation",
+            "provisional_lock_phase",
+            "provisional_lock_device",
+            "provisional_lock_inode",
+        ],
+    )?;
+    let metadata: Option<(i64, String, Option<i64>, Option<i64>)> = connection
+        .query_row(
+            "SELECT provisional_lease_generation, provisional_lock_phase,
+                    provisional_lock_device, provisional_lock_inode
+             FROM host_operational_metadata WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?;
+    let Some((generation, phase, device, inode)) = metadata else {
+        return Err(StateError::MalformedHostSchema);
+    };
+    if generation <= 0
+        || !matches!(phase.as_str(), "pending" | "ready")
+        || matches!(phase.as_str(), "pending") && (device.is_some() || inode.is_some())
+        || matches!(phase.as_str(), "ready") && (device.is_none() || inode.is_none())
+    {
+        return Err(StateError::MalformedHostSchema);
+    }
+    Ok(())
+}
+
+fn validate_schema13_extensions(connection: &Connection) -> Result<(), StateError> {
     validate_table_columns(
         connection,
         "projects",
@@ -2865,6 +3003,66 @@ fn table_has_column_readonly(
         .map_err(StateError::Sqlite)?
         .iter()
         .any(|value| value == column))
+}
+
+fn migrate_schema13_to14(
+    connection: &mut Connection,
+    lease: &TransitionLease,
+) -> Result<(), StateError> {
+    let previous_busy_timeout = connection
+        .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+        .map_err(StateError::Sqlite)?;
+    connection
+        .busy_timeout(Duration::ZERO)
+        .map_err(StateError::Sqlite)?;
+    let migration = migrate_schema13_to14_with_zero_timeout(connection, lease);
+    let restore = connection.busy_timeout(Duration::from_millis(
+        u64::try_from(previous_busy_timeout.max(0)).unwrap_or(0),
+    ));
+    match (migration, restore) {
+        (Err(error), _) => Err(error),
+        (Ok(()), Err(error)) => Err(StateError::Sqlite(error)),
+        (Ok(()), Ok(())) => Ok(()),
+    }
+}
+
+fn migrate_schema13_to14_with_zero_timeout(
+    connection: &mut Connection,
+    lease: &TransitionLease,
+) -> Result<(), StateError> {
+    lease.revalidate(lease.root())?;
+    validate_schema13(connection)?;
+    reject_pre_schema14_provisional_lock(lease.root())?;
+    let deadline = Instant::now() + MIGRATION_BUDGET;
+    let transaction = begin_migration_transaction(&*connection, deadline)?;
+    check_migration_deadline(deadline)?;
+    lease.revalidate(lease.root())?;
+    reject_pre_schema14_provisional_lock(lease.root())?;
+    transaction
+        .execute_batch(HOST_SCHEMA_14_ONBOARDING_SQL)
+        .map_err(StateError::Sqlite)?;
+    transaction
+        .execute(
+            "INSERT INTO host_operational_metadata (
+                singleton, provisional_lease_generation, provisional_lock_phase,
+                provisional_lock_device, provisional_lock_inode
+             ) VALUES (1, 1, 'pending', NULL, NULL)",
+            [],
+        )
+        .map_err(StateError::Sqlite)?;
+    transaction
+        .execute("PRAGMA user_version = 14", [])
+        .map_err(StateError::Sqlite)?;
+    transaction
+        .execute(
+            "UPDATE host_identity SET schema_version = 14 WHERE singleton = 1",
+            [],
+        )
+        .map_err(StateError::Sqlite)?;
+    check_migration_deadline(deadline)?;
+    validate_schema14(&transaction)?;
+    check_migration_deadline(deadline)?;
+    transaction.commit().map_err(StateError::Sqlite)
 }
 
 fn migrate_schema12_to13(
@@ -5423,6 +5621,8 @@ mod tests {
     }
 
     fn authoritative_snapshot(connection: &Connection) -> Vec<(String, Vec<Vec<Value>>)> {
+        let browser_settings_present = table_exists(connection, "project_browser_settings")
+            .expect("browser settings table inspection");
         let queries = [
             (
                 "host_identity",
@@ -5490,6 +5690,7 @@ mod tests {
         ];
         queries
             .into_iter()
+            .filter(|(name, _)| *name != "project_browser_settings" || browser_settings_present)
             .map(|(name, query)| {
                 let mut statement = connection.prepare(query).expect("snapshot query");
                 let columns = statement.column_count();
@@ -5834,6 +6035,96 @@ mod tests {
         assert_eq!(before, after);
         assert_eq!(state.schema_version().unwrap(), D16_HOST_SCHEMA_VERSION);
         assert_eq!(state.projects().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn schema13_to14_removes_only_browser_settings_and_records_pending_lock_metadata() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+        let fresh = fresh_create(&state_path, &SequenceIds::default()).unwrap();
+        fresh
+            .connection
+            .execute(
+                "INSERT INTO project_browser_settings (singleton, root_path, revision)
+                 VALUES (1, '/fixture/browser-root', 7)",
+                [],
+            )
+            .unwrap();
+        let before = authoritative_snapshot(&fresh.connection)
+            .into_iter()
+            .filter(|(name, _)| name != "project_browser_settings")
+            .collect::<Vec<_>>();
+        drop(fresh);
+
+        let lease = transition_lease(&state_path);
+        let mut state = open_cutover_transition(&root, &lease).unwrap();
+        state.migrate_schema13_to14(&lease).unwrap();
+        assert_eq!(state.schema_version().unwrap(), D17_HOST_SCHEMA_VERSION);
+        validate_schema14(&state.connection).unwrap();
+        assert_eq!(
+            authoritative_snapshot(&state.connection),
+            before,
+            "schema 14 must preserve every non-browser authoritative row"
+        );
+        assert!(!table_exists(&state.connection, "project_browser_settings").unwrap());
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT provisional_lease_generation, provisional_lock_phase,
+                            provisional_lock_device, provisional_lock_inode
+                     FROM host_operational_metadata WHERE singleton = 1",
+                    [],
+                    |row| Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                        row.get::<_, Option<i64>>(3)?
+                    )),
+                )
+                .unwrap(),
+            (1, "pending".to_owned(), None, None)
+        );
+
+        state.migrate_schema13_to14(&lease).unwrap();
+        drop(state);
+        drop(lease);
+        fs::remove_file(state_path.join(TRANSITION_LOCK_FILE)).unwrap();
+        assert!(matches!(
+            open_current_only(&root),
+            Err(StateError::UnsupportedFutureHostSchema(
+                D17_HOST_SCHEMA_VERSION
+            ))
+        ));
+    }
+
+    #[test]
+    fn schema13_to14_refuses_a_pre_schema_provisional_lock_without_mutation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+        let fresh = fresh_create(&state_path, &SequenceIds::default()).unwrap();
+        let before = authoritative_snapshot(&fresh.connection);
+        drop(fresh);
+        let provisional = state_path.join("provisional.lock");
+        let marker = b"foreign pre-schema evidence";
+        fs::write(&provisional, marker).unwrap();
+        set_private_file_permissions(&provisional).unwrap();
+        let lease = transition_lease(&state_path);
+        let mut state = open_cutover_transition(&root, &lease).unwrap();
+        assert!(matches!(
+            state.migrate_schema13_to14(&lease),
+            Err(StateError::StateRecoveryRequired(
+                StateRecoveryReason::ProvisionalLockPresent
+            ))
+        ));
+        assert_eq!(
+            schema_version(&state.connection).unwrap(),
+            D16_HOST_SCHEMA_VERSION
+        );
+        assert_eq!(authoritative_snapshot(&state.connection), before);
+        assert_eq!(fs::read(&provisional).unwrap(), marker);
     }
 
     #[test]

@@ -244,7 +244,7 @@ mod tests {
 
     use super::{BrokerError, PrepareContext, WorktreeInspector, consume, prepare};
     use crate::{
-        d17_helper::{advance_to_provider_exec_fence, begin_provider_preparation},
+        d17_helper::{advance_codex_to_provider_exec_fence, begin_provider_preparation},
         d17_reconcile::{
             ExpectedProviderExecutable, ProviderExecutableProbe, ReconcileError,
             prove_provider_exec,
@@ -511,9 +511,14 @@ mod tests {
             .is_err(),
             "a helper after a different boot must not consume the handoff"
         );
-        let exec_fence =
-            advance_to_provider_exec_fence(&mut state, &provisional_lease, &context, &token, 11)
-                .unwrap();
+        let exec_fence = advance_codex_to_provider_exec_fence(
+            &mut state,
+            &provisional_lease,
+            &context,
+            &token,
+            11,
+        )
+        .unwrap();
         assert_eq!(exec_fence.operation_id(), handoff.operation_id());
         assert_eq!(exec_fence.runtime_id(), slot.candidate_runtime_id());
         assert!(matches!(

@@ -40,6 +40,7 @@ use crate::runtime::RuntimePaths;
 
 use super::{
     StateError, StateRoot,
+    compound::bind_opencode_session_in_transaction,
     lifecycle::{
         LifecycleEventContext, apply_lifecycle_event, apply_opencode_lifecycle_transition,
         validate_opencode_observation,
@@ -2671,6 +2672,75 @@ impl D16State {
             ownership,
             D17OnboardingAdvance::OpenCodeExternalEffectStarted,
         )
+    }
+
+    /// Persists the exact blank `OpenCode` session returned after the already
+    /// recorded non-idempotent POST boundary. The binding is written only
+    /// while the D17 journal remains at that boundary, so a different session
+    /// can never be adopted and a future native exec has one durable root
+    /// session to revalidate.
+    #[allow(
+        dead_code,
+        reason = "the D17 OpenCode helper remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn record_d17_opencode_created_session_current(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        request: &OnboardingPrepareRequest,
+        ownership: OnboardingOwnership,
+        session: &ProviderSessionId,
+    ) -> Result<OnboardingOwnership, StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        if session.provider() != ProviderKind::OpenCode {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        validate_schema14(&self.connection)?;
+        validate_onboarding_prepare_request(request, &self.root)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        let registry_generation = load_registry_generation(&transaction)?;
+        let (phase, _) = validate_d17_owned_onboarding_transaction(
+            &transaction,
+            request,
+            provisional_lease.lease_generation(),
+            &registry_generation,
+            ownership,
+        )?;
+        if phase != OnboardingPhase::ProviderExternalEffectStarted {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+        let encoded_intent: String = transaction
+            .query_row(
+                "SELECT expected_revisions_json FROM compound_operations
+                 WHERE operation_id = ?1 AND kind = 'onboard'",
+                [ownership.operation_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StateError::Sqlite)?;
+        let intent: PersistedOnboardingIntent =
+            serde_json::from_str(&encoded_intent).map_err(|_| StateError::MalformedHostSchema)?;
+        if intent.provider != ProviderKind::OpenCode
+            || intent.runtime_generation.is_empty()
+            || intent.candidate_runtime_id != ownership.runtime_id
+        {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+        bind_opencode_session_in_transaction(
+            &transaction,
+            ownership.runtime_id,
+            &intent.runtime_generation,
+            session,
+            "new",
+        )?;
+        validate_schema14(&transaction)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        Ok(ownership)
     }
 
     /// Records the final durable boundary immediately before the helper would
@@ -9100,6 +9170,102 @@ mod tests {
             73
         );
         validate_schema14(&state.connection).unwrap();
+    }
+
+    #[test]
+    fn schema14_opencode_session_binding_requires_the_exact_post_boundary() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+        drop(fresh_create(&state_path, &SequenceIds::default()).unwrap());
+        let transition = transition_lease(&state_path);
+        let mut migrating = open_cutover_transition(&root, &transition).unwrap();
+        migrating.migrate_schema13_to14(&transition).unwrap();
+        drop(migrating);
+        drop(transition);
+        fs::remove_file(state_path.join(TRANSITION_LOCK_FILE)).unwrap();
+
+        let mut state = open_d17_current_only(&root).unwrap();
+        let provisional = state.acquire_d17_provisional_lease().unwrap();
+        let candidate_runtime_id = RuntimeId::from(Uuid::from_u128(793));
+        let mut request = onboarding_prepare_request(&state_path, candidate_runtime_id);
+        request.provider = ProviderKind::OpenCode;
+        let ShellCommandDecision::ManagedFresh(launch) = classify_shell_command(
+            ProviderKind::OpenCode,
+            &[OsString::from("--model"), OsString::from("openai/gpt-5.6")],
+        )
+        .unwrap() else {
+            panic!("fixture must use a fresh OpenCode command");
+        };
+        request.argv_digest = launch.argv_digest().to_owned();
+        let ids = SequenceIds::default();
+        let issued = match state
+            .prepare_d17_onboarding_current(&provisional, &request, &ids)
+            .unwrap()
+        {
+            OnboardingPreparation::Issued(reservation) => reservation,
+            OnboardingPreparation::Existing(_) => panic!("first preparation must issue"),
+        };
+        let ownership = state
+            .consume_d17_onboarding_current(
+                &provisional,
+                &request,
+                issued.capability().token(),
+                request.now_monotonic_millis + 1,
+            )
+            .unwrap();
+        let preparation = state
+            .record_d17_provider_preparation_current(&provisional, &request, ownership)
+            .unwrap();
+        let external_effect = state
+            .record_d17_provider_external_effect_started_current(
+                &provisional,
+                &request,
+                preparation,
+            )
+            .unwrap();
+        let session = ProviderSessionId::new(ProviderKind::OpenCode, "new-session").unwrap();
+        let bound = state
+            .record_d17_opencode_created_session_current(
+                &provisional,
+                &request,
+                external_effect,
+                &session,
+            )
+            .unwrap();
+        assert_eq!(bound, external_effect);
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT provider, native_session_id, start_source
+                     FROM provider_bindings WHERE runtime_id = ?1",
+                    [candidate_runtime_id.to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "opencode".to_owned(),
+                "new-session".to_owned(),
+                "new".to_owned()
+            )
+        );
+        assert!(
+            state
+                .record_d17_opencode_created_session_current(
+                    &provisional,
+                    &request,
+                    bound,
+                    &ProviderSessionId::new(ProviderKind::OpenCode, "other-session").unwrap(),
+                )
+                .is_err()
+        );
     }
 
     #[test]

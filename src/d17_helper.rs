@@ -76,6 +76,33 @@ impl std::fmt::Debug for OpenCodeExternalEffectFence {
     }
 }
 
+/// Type-level proof that the session returned after `OpenCode`'s potential
+/// external effect is durably bound to the exact Runtime. Only this proof may
+/// cross the final native-exec fence.
+pub(crate) struct OpenCodeSessionFence {
+    ownership: Box<OnboardingOwnership>,
+    session: crate::domain::ProviderSessionId,
+}
+
+impl std::fmt::Debug for OpenCodeSessionFence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenCodeSessionFence")
+            .field("ownership", &"<opaque>")
+            .field("session", &"<opaque>")
+            .finish()
+    }
+}
+
+impl OpenCodeSessionFence {
+    /// Returns the opaque native session only to the final direct provider
+    /// command builder. It is never exposed through snapshots or diagnostics.
+    #[must_use]
+    pub(crate) fn session(&self) -> &crate::domain::ProviderSessionId {
+        &self.session
+    }
+}
+
 impl std::fmt::Debug for ProviderExecFence {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -165,6 +192,30 @@ pub(crate) fn record_opencode_external_effect_started(
     })
 }
 
+/// Binds the exact blank `OpenCode` session that the already-recorded POST
+/// returned. An error after the POST must be reconciled as a possible external
+/// effect; this method never retries or creates another session.
+pub(crate) fn record_opencode_created_session(
+    state: &mut D16State,
+    provisional_lease: &ProvisionalLease,
+    context: &PrepareContext<'_, '_>,
+    effect_fence: OpenCodeExternalEffectFence,
+    session: crate::domain::ProviderSessionId,
+) -> Result<OpenCodeSessionFence, HelperError> {
+    let OpenCodeExternalEffectFence { ownership } = effect_fence;
+    let (_, request) = request_from_context(state, provisional_lease, context)?;
+    let ownership = state.record_d17_opencode_created_session_current(
+        provisional_lease,
+        &request,
+        *ownership,
+        &session,
+    )?;
+    Ok(OpenCodeSessionFence {
+        ownership: Box::new(ownership),
+        session,
+    })
+}
+
 /// Records Codex's final native-exec fence. Returning successfully still
 /// proves no provider execution.
 pub(crate) fn record_codex_provider_exec_started(
@@ -196,9 +247,9 @@ pub(crate) fn record_opencode_provider_exec_started(
     state: &mut D16State,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
-    effect_fence: OpenCodeExternalEffectFence,
+    session_fence: OpenCodeSessionFence,
 ) -> Result<ProviderExecFence, HelperError> {
-    let OpenCodeExternalEffectFence { ownership } = effect_fence;
+    let OpenCodeSessionFence { ownership, .. } = session_fence;
     let (_, request) = request_from_context(state, provisional_lease, context)?;
     let ownership =
         state.record_d17_provider_exec_started_current(provisional_lease, &request, *ownership)?;
@@ -208,18 +259,20 @@ pub(crate) fn record_opencode_provider_exec_started(
     })
 }
 
-/// Advances one revalidated shell handoff through every durable fence required
-/// immediately before a native provider exec. It deliberately performs no
-/// executable resolution, HTTP request, process inspection, or provider exec:
-/// the caller must make the provider-specific external effect directly after
-/// receiving this proof.
-pub(crate) fn advance_to_provider_exec_fence(
+/// Advances a revalidated Codex handoff through the exact durable fences
+/// immediately before its direct native exec. `OpenCode` cannot use this path:
+/// it must bind the blank session returned after its separately fenced POST
+/// before it may record the final native-exec boundary.
+pub(crate) fn advance_codex_to_provider_exec_fence(
     state: &mut D16State,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
     token: &str,
     now_monotonic_millis: i64,
 ) -> Result<ProviderExecFence, HelperError> {
+    if context.provider != ProviderKind::Codex {
+        return Err(HelperError::CodexPreparationProviderMismatch);
+    }
     let preparation = begin_provider_preparation(
         state,
         provisional_lease,
@@ -227,20 +280,7 @@ pub(crate) fn advance_to_provider_exec_fence(
         token,
         now_monotonic_millis,
     )?;
-    match context.provider {
-        ProviderKind::Codex => {
-            record_codex_provider_exec_started(state, provisional_lease, context, preparation)
-        }
-        ProviderKind::OpenCode => {
-            let effect_fence = record_opencode_external_effect_started(
-                state,
-                provisional_lease,
-                context,
-                preparation,
-            )?;
-            record_opencode_provider_exec_started(state, provisional_lease, context, effect_fence)
-        }
-    }
+    record_codex_provider_exec_started(state, provisional_lease, context, preparation)
 }
 
 /// Records a final direct-Codex-`execve` failure only after the caller has

@@ -22,7 +22,7 @@ use crate::{
     d17_account_shell::{AccountShellContext, AccountShellError},
     d17_broker::{PrepareContext, PreparedHandoff},
     d17_clock::{D17Clock, SystemD17Clock},
-    d17_helper::{advance_to_provider_exec_fence, record_codex_exec_failed_known_absent},
+    d17_helper::{advance_codex_to_provider_exec_fence, record_codex_exec_failed_known_absent},
     d17_reconcile::ExpectedProviderExecutable,
     d17_shell_gate::{
         ShellGateContext, ShellGateDecision, ShellGateError, ShellGateInvocation,
@@ -198,7 +198,7 @@ pub(crate) fn exec_codex_from_account_shell(
         id_generator: &ids,
         worktree_inspector: &crate::d17_broker::SystemWorktreeInspector,
     };
-    let exec_fence = advance_to_provider_exec_fence(
+    let exec_fence = advance_codex_to_provider_exec_fence(
         &mut state,
         &provisional_lease,
         &context,

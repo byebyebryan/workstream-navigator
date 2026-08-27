@@ -259,6 +259,98 @@ impl OperationPhase {
     }
 }
 
+/// The provider-exec lifecycle for one D17 shell-promotion attempt.
+///
+/// This is deliberately separate from the existing `Start` and `Fork`
+/// operation phases: D17 promotion has a durable ownership boundary before a
+/// provider effect, and no ordinary action authority exists until exact exec
+/// proof or recovery resolves it.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OnboardingPhase {
+    Prepared,
+    CapabilityIssued,
+    RuntimeOwnedLaunching,
+    ProviderPreparation,
+    ProviderExternalEffectStarted,
+    ProviderExecStarted,
+    ProviderExecProven,
+    KnownAbsentExec,
+    RecoveryRequired,
+    RolledBack,
+}
+
+impl OnboardingPhase {
+    /// Returns whether a Runtime in this phase must refuse ordinary
+    /// attach/action authority.
+    #[must_use]
+    pub const fn action_fenced(self) -> bool {
+        !matches!(
+            self,
+            Self::Prepared | Self::CapabilityIssued | Self::ProviderExecProven | Self::RolledBack
+        )
+    }
+
+    /// Returns whether this phase cannot make further progress without exact
+    /// recovery evidence.
+    #[must_use]
+    pub const fn requires_reconciliation(self) -> bool {
+        matches!(self, Self::KnownAbsentExec | Self::RecoveryRequired)
+    }
+
+    /// Validates one monotonic D17 onboarding transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a caller tries to bypass the one-shot capability,
+    /// Runtime-ownership, or provider-exec evidence boundaries.
+    pub fn transition(self, next: Self) -> Result<Self, DomainError> {
+        if permits_onboarding_transition(self, next) {
+            Ok(next)
+        } else {
+            Err(DomainError::InvalidOnboardingTransition {
+                from: self,
+                to: next,
+            })
+        }
+    }
+}
+
+const fn permits_onboarding_transition(from: OnboardingPhase, to: OnboardingPhase) -> bool {
+    matches!(
+        (from, to),
+        (
+            OnboardingPhase::Prepared,
+            OnboardingPhase::CapabilityIssued | OnboardingPhase::RolledBack
+        ) | (
+            OnboardingPhase::CapabilityIssued,
+            OnboardingPhase::RuntimeOwnedLaunching | OnboardingPhase::RolledBack
+        ) | (
+            OnboardingPhase::RuntimeOwnedLaunching,
+            OnboardingPhase::ProviderPreparation | OnboardingPhase::RecoveryRequired
+        ) | (
+            OnboardingPhase::ProviderPreparation,
+            OnboardingPhase::ProviderExternalEffectStarted
+                | OnboardingPhase::ProviderExecStarted
+                | OnboardingPhase::RecoveryRequired
+        ) | (
+            OnboardingPhase::ProviderExternalEffectStarted,
+            OnboardingPhase::ProviderExecStarted | OnboardingPhase::RecoveryRequired
+        ) | (
+            OnboardingPhase::ProviderExecStarted,
+            OnboardingPhase::ProviderExecProven
+                | OnboardingPhase::KnownAbsentExec
+                | OnboardingPhase::RecoveryRequired
+        ) | (
+            OnboardingPhase::KnownAbsentExec,
+            OnboardingPhase::RolledBack | OnboardingPhase::RecoveryRequired
+        ) | (
+            OnboardingPhase::RecoveryRequired,
+            OnboardingPhase::ProviderExecProven | OnboardingPhase::RolledBack
+        )
+    )
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct CompoundOperation {
     pub id: OperationId,
@@ -521,6 +613,11 @@ pub enum DomainError {
         from: OperationPhase,
         to: OperationPhase,
     },
+    #[error("invalid onboarding phase transition from {from:?} to {to:?}")]
+    InvalidOnboardingTransition {
+        from: OnboardingPhase,
+        to: OnboardingPhase,
+    },
     #[error("invalid provider identifier")]
     InvalidProviderIdentifier,
     #[error("unknown provider kind: {0}")]
@@ -607,6 +704,68 @@ mod tests {
             .transition(OperationPhase::Committed, None, None)
             .unwrap();
         assert!(operation.phase.is_terminal());
+    }
+
+    #[test]
+    fn onboarding_phases_fence_actions_until_exact_exec_proof() {
+        let mut phase = OnboardingPhase::Prepared;
+        assert!(!phase.action_fenced());
+        phase = phase.transition(OnboardingPhase::CapabilityIssued).unwrap();
+        assert!(!phase.action_fenced());
+        phase = phase
+            .transition(OnboardingPhase::RuntimeOwnedLaunching)
+            .unwrap();
+        assert!(phase.action_fenced());
+        phase = phase
+            .transition(OnboardingPhase::ProviderPreparation)
+            .unwrap();
+        phase = phase
+            .transition(OnboardingPhase::ProviderExecStarted)
+            .unwrap();
+        phase = phase
+            .transition(OnboardingPhase::ProviderExecProven)
+            .unwrap();
+        assert!(!phase.action_fenced());
+        assert!(!phase.requires_reconciliation());
+    }
+
+    #[test]
+    fn onboarding_refuses_to_skip_capability_or_exec_proof() {
+        assert!(matches!(
+            OnboardingPhase::Prepared.transition(OnboardingPhase::RuntimeOwnedLaunching),
+            Err(DomainError::InvalidOnboardingTransition { .. })
+        ));
+        assert!(matches!(
+            OnboardingPhase::ProviderExecStarted.transition(OnboardingPhase::RolledBack),
+            Err(DomainError::InvalidOnboardingTransition { .. })
+        ));
+    }
+
+    #[test]
+    fn onboarding_known_absence_and_ambiguity_remain_fenced_for_reconciliation() {
+        let known_absent = OnboardingPhase::ProviderExecStarted
+            .transition(OnboardingPhase::KnownAbsentExec)
+            .unwrap();
+        assert!(known_absent.action_fenced());
+        assert!(known_absent.requires_reconciliation());
+        assert_eq!(
+            known_absent
+                .transition(OnboardingPhase::RolledBack)
+                .unwrap(),
+            OnboardingPhase::RolledBack
+        );
+
+        let ambiguous = OnboardingPhase::ProviderPreparation
+            .transition(OnboardingPhase::RecoveryRequired)
+            .unwrap();
+        assert!(ambiguous.action_fenced());
+        assert!(ambiguous.requires_reconciliation());
+        assert_eq!(
+            ambiguous
+                .transition(OnboardingPhase::ProviderExecProven)
+                .unwrap(),
+            OnboardingPhase::ProviderExecProven
+        );
     }
 
     #[test]

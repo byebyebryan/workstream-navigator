@@ -1751,14 +1751,12 @@ mod tests {
             .expect("test directory is UTF-8")
             .to_owned();
         let expect_status = metadata_status == 200
-            && serde_json::from_slice::<Value>(&metadata_body)
-                .ok()
-                .is_some_and(|value| {
-                    value.get("id").and_then(Value::as_str) == Some(expected_id.as_str())
-                        && value.get("directory").and_then(Value::as_str)
-                            == Some(expected_directory_text.as_str())
-                        && value.get("parentID").is_none_or(Value::is_null)
-                });
+            && serde_json::from_slice::<Value>(&metadata_body).is_ok_and(|value| {
+                value.get("id").and_then(Value::as_str) == Some(expected_id.as_str())
+                    && value.get("directory").and_then(Value::as_str)
+                        == Some(expected_directory_text.as_str())
+                    && value.get("parentID").is_none_or(Value::is_null)
+            });
         let worker = std::thread::spawn(move || {
             for _ in 0..=usize::from(expect_status) {
                 let (mut stream, _) = listener.accept().unwrap();

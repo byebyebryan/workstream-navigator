@@ -245,6 +245,7 @@ mod tests {
 
     use super::{BrokerError, PrepareContext, WorktreeInspector, consume, prepare};
     use crate::{
+        d17_helper::{begin_provider_preparation, record_codex_provider_exec_started},
         domain::{IdGenerator, ProviderKind, Revision, RuntimeId},
         provisional::{
             PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, SlotGeneration,
@@ -459,8 +460,16 @@ mod tests {
             prepare(&mut state, &provisional_lease, &context),
             Err(BrokerError::ExistingOperation)
         ));
-        let ownership = consume(&mut state, &provisional_lease, &context, &token, 11).unwrap();
-        assert_eq!(ownership.operation_id, handoff.operation_id());
+        let preparation =
+            begin_provider_preparation(&mut state, &provisional_lease, &context, &token, 11)
+                .unwrap();
+        assert_eq!(preparation.operation_id(), handoff.operation_id());
+        assert_eq!(preparation.provider(), ProviderKind::Codex);
+        let exec_fence =
+            record_codex_provider_exec_started(&mut state, &provisional_lease, preparation)
+                .unwrap();
+        assert_eq!(exec_fence.operation_id(), handoff.operation_id());
+        assert_eq!(exec_fence.runtime_id(), slot.candidate_runtime_id());
         assert_eq!(
             read_marker(&state_path, &presentation).unwrap().phase(),
             ProvisionalPhase::RuntimeOwnedLaunching

@@ -7,10 +7,11 @@ gate, and operator-gated live local and SSH-entered-host acceptance complete;
 source-installed operator beta. D17 shell-first managed-session onboarding is
 the approved next checkpoint. Its D17.0 falsification studies, D17.2 test-only
 ownership/private-runtime model, dormant presentation-private marker-backed
-materialization/evidence storage, marker-to-state prepare/consume broker, and
-dormant D17.3 grammar, command-classification, onboarding-phase,
-capability-journal, atomic reservation, and ownership-consumption foundations
-are in progress; no D17 user-facing behavior or provider launch path is
+materialization/evidence storage, marker-to-state prepare/consume broker,
+typed no-provider-effect helper fences, and dormant D17.3 grammar,
+command-classification, onboarding-phase, capability-journal, atomic
+reservation, and ownership-consumption foundations are in progress; no D17
+user-facing behavior or provider launch path is
 implemented yet. The explicit schema-13-to-14 migration, stable provisional
 lease, schema-14-only open, lease acquisition, reservation, and
 ownership-consumption seams, plus marker-backed materialization/evidence
@@ -4275,9 +4276,10 @@ D16 closes only when all of the following are true:
 Status: in progress. The product contract is approved; D17.0 studies, the
 D17.2 test-only ownership/private-runtime model, dormant presentation-private
 marker-backed materialization/evidence storage, marker-to-state prepare/consume
-broker, and dormant D17.3 grammar, command-classification, onboarding-phase,
-capability-journal, reservation, and ownership-consumption foundations have
-begun. No D17 user-facing behavior or provider launch path is
+broker, typed no-provider-effect helper fences, and dormant D17.3 grammar,
+command-classification, onboarding-phase, capability-journal, reservation, and
+ownership-consumption foundations have begun. No D17 user-facing behavior or
+provider launch path is
 implemented. The explicit schema-13-to-14 migration, stable provisional-lease,
 schema-14-only open, lease acquisition, reservation, ownership consumption,
 and marker-backed materialization/evidence storage foundations remain dormant,

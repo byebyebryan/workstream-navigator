@@ -109,6 +109,10 @@ pub enum StateError {
     OnboardingOperationUnavailable,
     #[error("D17 onboarding preparation evidence is invalid")]
     InvalidOnboardingPreparation,
+    #[error("D17 onboarding capability is expired")]
+    OnboardingCapabilityExpired,
+    #[error("D17 onboarding capability does not match the prepared handoff")]
+    OnboardingCapabilityRejected,
     #[error("request key was reused with different workstream intent")]
     OperationRequestMismatch,
     #[error("the source Workstream has no live exact settled conversation boundary")]

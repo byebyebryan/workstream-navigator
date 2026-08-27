@@ -290,6 +290,29 @@ impl std::fmt::Debug for LaunchCapabilityMetadata {
 }
 
 impl LaunchCapabilityMetadata {
+    /// Reconstructs the bounded metadata that the broker persisted for a
+    /// helper-side verification. The live capability token remains absent.
+    pub(crate) fn from_persisted(
+        token_id: String,
+        verifier: String,
+        expiry_monotonic_millis: i64,
+        claims_digest: String,
+    ) -> Result<Self, CapabilityError> {
+        if Uuid::parse_str(&token_id).is_err()
+            || expiry_monotonic_millis <= 0
+            || !is_versioned_sha256(&verifier, TOKEN_VERIFIER_VERSION)
+            || !is_versioned_sha256(&claims_digest, CLAIM_DIGEST_VERSION)
+        {
+            return Err(CapabilityError::InvalidToken);
+        }
+        Ok(Self {
+            token_id,
+            verifier,
+            expiry_monotonic_millis,
+            claims_digest,
+        })
+    }
+
     #[must_use]
     pub(crate) fn token_id(&self) -> &str {
         &self.token_id

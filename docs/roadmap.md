@@ -8,9 +8,9 @@ source-installed operator beta. D17 shell-first managed-session onboarding is
 the approved next checkpoint. Its D17.0 falsification studies plus the D17.2
 test-only ownership/private-runtime model and dormant D17.3 grammar,
 command-classification, onboarding-phase, capability-journal, and atomic
-reservation foundations are in progress; no D17 user-facing behavior or
+reservation/ownership-consumption foundations are in progress; no D17 user-facing behavior or
 provider launch path is implemented yet. The explicit schema-13-to-14
-migration, stable provisional lease, and lease-bound reservation seam are
+migration, stable provisional lease, lease-bound reservation, and ownership-consumption seams are
 dormant, and no product path can invoke any of them.
 
 The D0-D15 entries below preserve truthful historical implementation and

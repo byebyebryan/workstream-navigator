@@ -30,7 +30,10 @@ use crate::domain::{
     OperationKind, ProjectId, ProviderKind, ProviderSessionId, Revision, RuntimeId, RuntimeStatus,
     SystemClock, WorkstreamId,
 };
-use crate::onboarding::{CapabilityError, LaunchCapability, LaunchCapabilityClaims};
+use crate::onboarding::{
+    CapabilityError, LaunchCapability, LaunchCapabilityClaims, LaunchCapabilityMetadata,
+    verify_launch_capability,
+};
 use crate::provider::lifecycle::{LifecycleEvent, LifecycleHint, LifecycleObservation};
 use crate::repository::RepositoryRegistration;
 use crate::runtime::RuntimePaths;
@@ -672,6 +675,23 @@ pub(crate) struct ExistingOnboardingReservation {
 pub(crate) enum OnboardingPreparation {
     Issued(OnboardingReservation),
     Existing(ExistingOnboardingReservation),
+}
+
+/// The only state-side result of an exact helper capability consumption. It
+/// establishes durable Runtime ownership but deliberately does not grant
+/// attach/action authority or imply provider exec proof.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    clippy::struct_field_names,
+    reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) struct OnboardingOwnership {
+    pub(crate) operation_id: OperationId,
+    pub(crate) location_id: LocationId,
+    pub(crate) workstream_id: WorkstreamId,
+    pub(crate) runtime_id: RuntimeId,
+    pub(crate) operation_revision: Revision,
 }
 
 impl std::fmt::Debug for OnboardingPreparation {
@@ -2212,6 +2232,156 @@ impl D16State {
         }))
     }
 
+    /// Atomically consumes one revalidated D17 launch capability and records
+    /// the durable Runtime-owned launch fence.  The caller is responsible for
+    /// marker/process/cwd proof before this seam; this state transition does
+    /// not launch, attach, signal, or otherwise contact a provider.
+    #[allow(
+        dead_code,
+        reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn consume_d17_onboarding(
+        &mut self,
+        transition_lease: &TransitionLease,
+        provisional_lease: &ProvisionalLease,
+        request: &OnboardingPrepareRequest,
+        token: &str,
+        now_monotonic_millis: i64,
+    ) -> Result<OnboardingOwnership, StateError> {
+        let previous_busy_timeout = self
+            .connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+            .map_err(StateError::Sqlite)?;
+        self.connection
+            .busy_timeout(Duration::ZERO)
+            .map_err(StateError::Sqlite)?;
+        let ownership = self.consume_d17_onboarding_with_zero_timeout(
+            transition_lease,
+            provisional_lease,
+            request,
+            token,
+            now_monotonic_millis,
+        );
+        let restore = self.connection.busy_timeout(Duration::from_millis(
+            u64::try_from(previous_busy_timeout.max(0)).unwrap_or(0),
+        ));
+        match (ownership, restore) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(StateError::Sqlite(error)),
+            (Ok(ownership), Ok(())) => Ok(ownership),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        clippy::too_many_lines,
+        reason = "the single transaction keeps the one-shot ownership boundary auditable"
+    )]
+    fn consume_d17_onboarding_with_zero_timeout(
+        &mut self,
+        transition_lease: &TransitionLease,
+        provisional_lease: &ProvisionalLease,
+        request: &OnboardingPrepareRequest,
+        token: &str,
+        now_monotonic_millis: i64,
+    ) -> Result<OnboardingOwnership, StateError> {
+        ensure_cutover_transition_mode(self.mode)?;
+        transition_lease.revalidate_for_mutation(&self.root)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        validate_schema14(&self.connection)?;
+        validate_onboarding_prepare_request(request, &self.root)?;
+
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        transition_lease.revalidate_for_mutation(&self.root)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        let registry_generation = load_registry_generation(&transaction)?;
+        let existing = load_existing_onboarding_preparation(
+            &transaction,
+            request,
+            provisional_lease.lease_generation(),
+            &registry_generation,
+            &self.root,
+        )?
+        .ok_or_else(|| StateError::MissingOperation(request.request_key.clone()))?;
+        let persisted: (String, String, i64, String, String, i64) = transaction
+            .query_row(
+                "SELECT launch_token_id, launch_token_verifier,
+                        launch_token_expiry_monotonic, launch_claims_digest,
+                        expected_revisions_json, revision
+                 FROM compound_operations
+                 WHERE operation_id = ?1 AND kind = 'onboard'
+                   AND phase = 'capability_issued'",
+                [existing.operation_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
+            )
+            .map_err(StateError::Sqlite)?;
+        let intent: PersistedOnboardingIntent =
+            serde_json::from_str(&persisted.4).map_err(|_| StateError::MalformedHostSchema)?;
+        let metadata = LaunchCapabilityMetadata::from_persisted(
+            persisted.0,
+            persisted.1,
+            persisted.2,
+            persisted.3,
+        )
+        .map_err(|_| StateError::MalformedHostSchema)?;
+        let claims = onboarding_claims(
+            existing.operation_id,
+            existing.location_id,
+            &intent.runtime_generation,
+            &registry_generation,
+            provisional_lease.lease_generation(),
+            request,
+        )?;
+        verify_launch_capability(token, &metadata, &claims, now_monotonic_millis)
+            .map_err(map_onboarding_capability_error)?;
+        OnboardingPhase::CapabilityIssued.transition(OnboardingPhase::RuntimeOwnedLaunching)?;
+        let operation_revision = Revision::try_from(persisted.5)?;
+        let next_revision = next_revision(operation_revision)?;
+        transition_lease.revalidate_for_mutation(&self.root)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        let updated = transaction
+            .execute(
+                "UPDATE compound_operations
+                 SET phase = 'runtime_owned_launching', revision = ?1
+                 WHERE operation_id = ?2 AND kind = 'onboard'
+                   AND phase = 'capability_issued' AND revision = ?3",
+                params![
+                    next_revision.value(),
+                    existing.operation_id.to_string(),
+                    operation_revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if updated != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        validate_schema14(&transaction)?;
+        transition_lease.revalidate_for_mutation(&self.root)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        transition_lease.revalidate_for_mutation(&self.root)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        Ok(OnboardingOwnership {
+            operation_id: existing.operation_id,
+            location_id: existing.location_id,
+            workstream_id: existing.workstream_id,
+            runtime_id: existing.runtime_id,
+            operation_revision: next_revision,
+        })
+    }
+
     /// Lists only deterministic, current `OpenCode` observer handles whose
     /// Runtime lifecycle is itself non-stopped. Runtime IDs are ordered by
     /// their opaque persisted spelling and handles are provider/generation/
@@ -3071,6 +3241,20 @@ fn onboarding_claims(
         request.boot_provenance.clone(),
     )
     .map_err(|_error: CapabilityError| StateError::InvalidOnboardingPreparation)
+}
+
+#[allow(
+    dead_code,
+    reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
+)]
+fn map_onboarding_capability_error(error: CapabilityError) -> StateError {
+    match error {
+        CapabilityError::Expired => StateError::OnboardingCapabilityExpired,
+        CapabilityError::InvalidClaims
+        | CapabilityError::InvalidExpiry
+        | CapabilityError::InvalidToken
+        | CapabilityError::ClaimMismatch => StateError::OnboardingCapabilityRejected,
+    }
 }
 
 #[allow(
@@ -7599,7 +7783,7 @@ mod tests {
             state.prepare_d17_onboarding(&transition, &provisional, &mismatched, &ids),
             Err(StateError::OperationRequestMismatch)
         ));
-        let mut invalid_path = request;
+        let mut invalid_path = request.clone();
         invalid_path.runtime_paths.session_name = "wsnav-replacement".to_owned();
         assert!(matches!(
             state.prepare_d17_onboarding(&transition, &provisional, &invalid_path, &ids),
@@ -7614,6 +7798,97 @@ mod tests {
                 .unwrap(),
             1
         );
+
+        assert!(matches!(
+            state.consume_d17_onboarding(
+                &transition,
+                &provisional,
+                &request,
+                &token,
+                request.expiry_monotonic_millis,
+            ),
+            Err(StateError::OnboardingCapabilityExpired)
+        ));
+        let mut rejected_token = token.clone();
+        let final_character = rejected_token.pop().unwrap();
+        rejected_token.push(if final_character == '0' { '1' } else { '0' });
+        assert!(matches!(
+            state.consume_d17_onboarding(
+                &transition,
+                &provisional,
+                &request,
+                &rejected_token,
+                request.now_monotonic_millis + 1,
+            ),
+            Err(StateError::OnboardingCapabilityRejected)
+        ));
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT phase FROM compound_operations WHERE operation_id = ?1",
+                    [issued.operation_id().to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "capability_issued"
+        );
+
+        let ownership = state
+            .consume_d17_onboarding(
+                &transition,
+                &provisional,
+                &request,
+                &token,
+                request.now_monotonic_millis + 1,
+            )
+            .unwrap();
+        assert_eq!(ownership.operation_id, issued.operation_id());
+        assert_eq!(ownership.location_id, issued.location_id());
+        assert_eq!(ownership.workstream_id, issued.workstream_id());
+        assert_eq!(ownership.runtime_id, candidate_runtime_id);
+        assert_eq!(ownership.operation_revision.value(), 3);
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT phase, revision FROM compound_operations WHERE operation_id = ?1",
+                    [issued.operation_id().to_string()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            ("runtime_owned_launching".to_owned(), 3)
+        );
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT lifecycle FROM runtimes WHERE runtime_id = ?1",
+                    [candidate_runtime_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "starting",
+            "ownership alone must not claim provider execution or attach authority"
+        );
+        assert!(matches!(
+            state.consume_d17_onboarding(
+                &transition,
+                &provisional,
+                &request,
+                &token,
+                request.now_monotonic_millis + 1,
+            ),
+            Err(StateError::OnboardingOperationUnavailable)
+        ));
+        assert_eq!(
+            state
+                .connection
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            73
+        );
+        validate_schema14(&state.connection).unwrap();
     }
 
     #[test]

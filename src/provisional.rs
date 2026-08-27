@@ -12,7 +12,7 @@
 
 use std::{
     fs::{self, File, OpenOptions},
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
@@ -28,7 +28,8 @@ use crate::{
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SlotGeneration(Uuid);
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum ProvisionalPhase {
     Materialized,
     HandoffIssued,
@@ -92,6 +93,8 @@ pub(crate) enum SlotError {
     MarkerOwnershipChanged,
     #[error("provisional marker I/O failed")]
     MarkerIo,
+    #[error("provisional marker transition is invalid")]
+    MarkerTransitionInvalid,
 }
 
 const PROVISIONAL_MARKER_VERSION: u8 = 1;
@@ -113,6 +116,8 @@ struct ProvisionalMarker {
     session_name: String,
     seed_cwd: PathBuf,
     slot_generation: Uuid,
+    phase: ProvisionalPhase,
+    handoff_request: Option<Uuid>,
 }
 
 impl ProvisionalMarker {
@@ -129,6 +134,8 @@ impl ProvisionalMarker {
             session_name: slot.runtime_paths.session_name.clone(),
             seed_cwd: slot.seed_cwd.clone(),
             slot_generation: slot.slot_generation.0,
+            phase: slot.phase,
+            handoff_request: slot.handoff_request,
         }
     }
 
@@ -149,7 +156,7 @@ impl ProvisionalMarker {
         if marker.version != PROVISIONAL_MARKER_VERSION {
             return Err(SlotError::MarkerMalformed);
         }
-        let slot = ProvisionalSlot::materialized(
+        let mut slot = ProvisionalSlot::materialized(
             state_root,
             marker.presentation_id,
             marker.presentation_revision,
@@ -165,6 +172,9 @@ impl ProvisionalMarker {
         {
             return Err(SlotError::MarkerRuntimePathsMismatch);
         }
+        slot.phase = marker.phase;
+        slot.handoff_request = marker.handoff_request;
+        slot.validate_lifecycle()?;
         Ok(slot)
     }
 }
@@ -177,6 +187,7 @@ pub(crate) fn write_new_marker(
     presentation_directory: &Path,
     slot: &ProvisionalSlot,
 ) -> Result<PathBuf, SlotError> {
+    slot.validate_lifecycle()?;
     let marker_path = marker_path(state_root, presentation_directory, slot)?;
     let bytes = ProvisionalMarker::from_slot(slot).encode()?;
     let mut file = open_new_private_marker(&marker_path)?;
@@ -233,6 +244,59 @@ pub(crate) fn read_marker(
         return Err(SlotError::MarkerOwnershipChanged);
     }
     ProvisionalMarker::decode(&state_root, &bytes)
+}
+
+/// Persists one legal provisional-slot phase change while preserving the
+/// marker inode. The caller must hold the stable provisional lease; a crash
+/// during the in-place replacement leaves malformed evidence that fails closed
+/// rather than making a new marker authoritative.
+pub(crate) fn update_marker(
+    state_root: &Path,
+    presentation_directory: &Path,
+    expected: &ProvisionalSlot,
+    next: &ProvisionalSlot,
+) -> Result<(), SlotError> {
+    let state_root = canonical_state_root(state_root)?;
+    let presentation_directory =
+        canonical_presentation_directory(&state_root, presentation_directory)?;
+    expected.validate_lifecycle()?;
+    ensure_same_slot_identity(expected, next)?;
+    expected.phase.transition(next.phase)?;
+    let marker_path = presentation_directory.join(PROVISIONAL_MARKER_FILE);
+    let before = fs::symlink_metadata(&marker_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            SlotError::MarkerUnavailable
+        } else {
+            map_marker_io(error)
+        }
+    })?;
+    if !is_private_regular_file(&before) {
+        return Err(SlotError::MarkerOwnershipChanged);
+    }
+    let mut options = OpenOptions::new();
+    options.read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_CLOEXEC | nix::libc::O_NOFOLLOW);
+    }
+    let mut file = options.open(&marker_path).map_err(map_marker_io)?;
+    let opened = file.metadata().map_err(map_marker_io)?;
+    if !is_private_regular_file(&opened) || !same_file_identity(&before, &opened) {
+        return Err(SlotError::MarkerOwnershipChanged);
+    }
+    let persisted = read_marker_from_open_file(&mut file, &state_root)?;
+    if persisted != *expected {
+        return Err(SlotError::MarkerOwnershipChanged);
+    }
+    let bytes = ProvisionalMarker::from_slot(next).encode()?;
+    file.set_len(0).map_err(map_marker_io)?;
+    file.seek(SeekFrom::Start(0)).map_err(map_marker_io)?;
+    file.write_all(&bytes)
+        .and_then(|()| file.sync_all())
+        .map_err(map_marker_io)?;
+    validate_marker_file_matches_path(&file, &marker_path)?;
+    sync_directory(&presentation_directory)
 }
 
 fn marker_path(
@@ -318,6 +382,21 @@ fn open_existing_private_marker(path: &Path) -> Result<File, SlotError> {
             map_marker_io(error)
         }
     })
+}
+
+fn read_marker_from_open_file(
+    file: &mut File,
+    state_root: &Path,
+) -> Result<ProvisionalSlot, SlotError> {
+    file.seek(SeekFrom::Start(0)).map_err(map_marker_io)?;
+    let mut bytes = Vec::new();
+    file.take((MAX_PROVISIONAL_MARKER_BYTES as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(map_marker_io)?;
+    if bytes.len() > MAX_PROVISIONAL_MARKER_BYTES {
+        return Err(SlotError::MarkerOversized);
+    }
+    ProvisionalMarker::decode(state_root, &bytes)
 }
 
 fn set_private_marker_permissions(file: &File) -> Result<(), SlotError> {
@@ -426,6 +505,14 @@ impl ProvisionalSlot {
         matches!(self.phase, ProvisionalPhase::ProviderExecProven)
     }
 
+    fn validate_lifecycle(&self) -> Result<(), SlotError> {
+        let request_required = !matches!(self.phase, ProvisionalPhase::Materialized);
+        if request_required != self.handoff_request.is_some() {
+            return Err(SlotError::MarkerTransitionInvalid);
+        }
+        Ok(())
+    }
+
     fn issue_handoff(&mut self, request: Uuid) -> Result<(), SlotError> {
         if self.phase != ProvisionalPhase::Materialized || self.handoff_request.is_some() {
             return Err(SlotError::HandoffUnavailable);
@@ -466,6 +553,41 @@ impl ProvisionalSlot {
     }
 }
 
+impl ProvisionalPhase {
+    fn transition(self, next: Self) -> Result<(), SlotError> {
+        if matches!(
+            (self, next),
+            (Self::Materialized, Self::HandoffIssued)
+                | (
+                    Self::HandoffIssued,
+                    Self::RuntimeOwnedLaunching | Self::Cancelled
+                )
+                | (Self::RuntimeOwnedLaunching, Self::ProviderExecProven)
+        ) {
+            Ok(())
+        } else {
+            Err(SlotError::MarkerTransitionInvalid)
+        }
+    }
+}
+
+fn ensure_same_slot_identity(
+    expected: &ProvisionalSlot,
+    next: &ProvisionalSlot,
+) -> Result<(), SlotError> {
+    if expected.presentation_id != next.presentation_id
+        || expected.presentation_revision != next.presentation_revision
+        || expected.lease_generation != next.lease_generation
+        || expected.candidate_runtime_id != next.candidate_runtime_id
+        || expected.runtime_paths != next.runtime_paths
+        || expected.seed_cwd != next.seed_cwd
+        || expected.slot_generation != next.slot_generation
+    {
+        return Err(SlotError::MarkerTransitionInvalid);
+    }
+    next.validate_lifecycle()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{cell::RefCell, collections::BTreeMap, ffi::OsString, fs, str::FromStr};
@@ -474,7 +596,7 @@ mod tests {
 
     use super::{
         CleanupAuthority, PROVISIONAL_MARKER_FILE, ProvisionalMarker, ProvisionalPhase,
-        ProvisionalSlot, SlotError, SlotGeneration, read_marker, write_new_marker,
+        ProvisionalSlot, SlotError, SlotGeneration, read_marker, update_marker, write_new_marker,
     };
     use crate::{
         domain::{Revision, RuntimeId},
@@ -676,6 +798,34 @@ mod tests {
         assert_eq!(
             read_marker(&state_root, &presentation),
             Err(SlotError::MarkerMalformed)
+        );
+    }
+
+    #[test]
+    fn marker_storage_persists_only_one_legal_handoff_lifecycle() {
+        let (temporary, slot) = fixture();
+        let state_root = temporary.path().join("state");
+        let presentation = state_root.join("presentation");
+        fs::create_dir(&presentation).unwrap();
+        write_new_marker(&state_root, &presentation, &slot).unwrap();
+
+        let request = Uuid::parse_str("01234567-0000-0000-0000-000000000004").unwrap();
+        let mut issued = slot.clone();
+        issued.issue_handoff(request).unwrap();
+        update_marker(&state_root, &presentation, &slot, &issued).unwrap();
+        assert_eq!(read_marker(&state_root, &presentation).unwrap(), issued);
+
+        let mut owned = issued.clone();
+        owned.consume_handoff(request).unwrap();
+        update_marker(&state_root, &presentation, &issued, &owned).unwrap();
+        assert_eq!(read_marker(&state_root, &presentation).unwrap(), owned);
+        assert_eq!(
+            update_marker(&state_root, &presentation, &slot, &issued),
+            Err(SlotError::MarkerOwnershipChanged)
+        );
+        assert_eq!(
+            update_marker(&state_root, &presentation, &owned, &issued),
+            Err(SlotError::MarkerTransitionInvalid)
         );
     }
 

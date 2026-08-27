@@ -917,10 +917,12 @@ fn nested_runtime_literal_ctrl_b_reaches_the_provider_as_one_byte() {
     }
     let state_root = tempfile::tempdir().unwrap();
     let capture = state_root.path().join("literal-byte");
+    let ready = state_root.path().join("literal-ready");
     let marker = state_root.path().join("runtime-prefix-marker");
     let script = format!(
-        "stty -icanon min 1 time 0; dd if=/dev/stdin of={} bs=1 count=1 status=none; sleep 60",
-        shell_quote_for_test(&capture)
+        "stty -icanon min 1 time 0; touch {}; dd if=/dev/stdin of={} bs=1 count=1 status=none; sleep 60",
+        shell_quote_for_test(&ready),
+        shell_quote_for_test(&capture),
     );
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
@@ -940,6 +942,14 @@ fn nested_runtime_literal_ctrl_b_reaches_the_provider_as_one_byte() {
             environment: std::collections::BTreeMap::new(),
         })
         .unwrap();
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    while !ready.exists() && Instant::now() < deadline {
+        thread::sleep(READINESS_POLL);
+    }
+    assert!(
+        ready.exists(),
+        "provider input fixture did not become ready"
+    );
     let marker_command = format!("touch {}", shell_quote_for_test(&marker));
     let status = tmux_command(&runtime.paths().socket)
         .args(["bind-key", "-T", "prefix", "C-b", "run-shell"])
@@ -980,7 +990,6 @@ fn nested_runtime_literal_ctrl_b_reaches_the_provider_as_one_byte() {
     assert!(status.success());
     let mut outer_client = attach_tmux_session_client(&outer_socket, outer_session);
 
-    thread::sleep(Duration::from_millis(50));
     let runtime_client = wait_for_runtime_client(&runtime.paths().socket);
     runtime.send_literal_ctrl_b().unwrap();
 

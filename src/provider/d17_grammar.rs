@@ -1,7 +1,11 @@
-//! Test-only D17 fresh-TUI grammar contract.
+//! D17 fresh-TUI grammar contract.
 //!
-//! This mirrors the pinned 0.150.0/1.18.23 study in typed Rust before the
-//! broker/helper is introduced. It does not intercept or launch a provider.
+//! This mirrors the pinned 0.150.0/1.18.23 study in typed Rust and feeds the
+//! dormant broker command boundary. It does not intercept or launch a provider.
+#![allow(
+    dead_code,
+    reason = "the pure D17 command boundary stays dormant until atomic cutover so D16 command behavior remains unchanged"
+)]
 
 use std::collections::BTreeSet;
 
@@ -12,20 +16,23 @@ const MAX_ARGUMENT_BYTES: usize = 160;
 const MAX_REPLAY_LIMIT: u16 = 10_000;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-enum Classification {
+pub(crate) enum Classification {
     ManagedFresh(Vec<String>),
     ExplicitlyUnmanaged,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GrammarError {
+pub(crate) enum GrammarError {
     UnsupportedShape,
     UnsafeArgument,
     DuplicateOption,
     InvalidValue,
 }
 
-fn classify(provider: ProviderKind, arguments: &[String]) -> Result<Classification, GrammarError> {
+pub(crate) fn classify(
+    provider: ProviderKind,
+    arguments: &[String],
+) -> Result<Classification, GrammarError> {
     validate_shape(arguments)?;
     match provider {
         ProviderKind::Codex => classify_codex(arguments),

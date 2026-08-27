@@ -6,6 +6,7 @@ pub mod application;
 pub mod cutover;
 pub mod domain;
 pub mod navigator;
+pub(crate) mod onboarding;
 pub mod presentation;
 mod private_tmux;
 pub mod process;

@@ -1,9 +1,10 @@
 //! Bounded, read-only Git repository registration metadata.
 //!
-//! A supplied Git path is normalized to its primary project root. Remote URLs
-//! are normalized in memory and discarded; only a versioned SHA-256
-//! fingerprint and credential-free canonical display label are returned to
-//! callers.
+//! The D16 registration path normalizes a supplied Git path to its primary
+//! project root. D17's dormant broker seam instead preserves the exact
+//! containing worktree root. Remote URLs are normalized in memory and
+//! discarded; only a versioned SHA-256 fingerprint and credential-free
+//! canonical display label are returned to callers.
 
 use std::{
     collections::BTreeSet,
@@ -35,6 +36,60 @@ pub struct RepositoryRegistration {
     pub remote_identity_fingerprint: Option<String>,
     /// Credential-free normalized fetch-remote label for display only.
     pub remote_identity_display: Option<String>,
+}
+
+/// Resolves the exact non-bare worktree containing a shell's current
+/// directory without registering it or contacting a remote.
+///
+/// This is deliberately distinct from [`inspect`]: D16 registration groups a
+/// linked worktree under its primary repository, whereas D17 promotion must
+/// retain the linked worktree as its own immutable launch Location.
+///
+/// # Errors
+///
+/// Returns an error when `checkout` cannot be proved to be inside one
+/// canonical non-bare worktree. The command environment is stripped of the
+/// Git path overrides that could otherwise redirect discovery away from the
+/// shell's actual directory.
+pub fn inspect_containing_worktree(
+    checkout: &Path,
+) -> Result<RepositoryRegistration, RepositoryError> {
+    let checkout = checkout
+        .canonicalize()
+        .map_err(RepositoryError::Canonicalize)?;
+    let bare = git_single_line_isolated(&checkout, ["rev-parse", "--is-bare-repository"])?;
+    match bare.as_str() {
+        "false" => {}
+        "true" => return Err(RepositoryError::BareRepository),
+        _ => return Err(RepositoryError::InvalidGitOutput),
+    }
+    let project_root = PathBuf::from(git_single_line_isolated(
+        &checkout,
+        ["rev-parse", "--path-format=absolute", "--show-toplevel"],
+    )?)
+    .canonicalize()
+    .map_err(RepositoryError::Canonicalize)?;
+    if !checkout.starts_with(&project_root) {
+        return Err(RepositoryError::InvalidGitOutput);
+    }
+    let display_name = project_root
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .ok_or(RepositoryError::InvalidGitOutput)?
+        .chars()
+        .take(64)
+        .collect::<String>();
+    let remote_identity = discover_remote_identity(&project_root)?;
+
+    Ok(RepositoryRegistration {
+        project_root,
+        display_name,
+        remote_identity_fingerprint: remote_identity
+            .as_ref()
+            .map(|identity| identity.fingerprint.clone()),
+        remote_identity_display: remote_identity.map(|identity| identity.display),
+    })
 }
 
 /// Inspects a local non-bare Git checkout without contacting a network.
@@ -310,6 +365,21 @@ fn git_single_line(
     Ok(lines[0].to_owned())
 }
 
+fn git_single_line_isolated(
+    repository: &Path,
+    arguments: impl IntoIterator<Item = &'static str>,
+) -> Result<String, RepositoryError> {
+    let output = run_git_isolated(repository, arguments.into_iter().map(OsString::from))?;
+    if !output.status.success() {
+        return Err(RepositoryError::GitRejected);
+    }
+    let lines = bounded_lines(&output.stdout)?;
+    if lines.len() != 1 {
+        return Err(RepositoryError::InvalidGitOutput);
+    }
+    Ok(lines[0].to_owned())
+}
+
 fn bounded_lines(output: &[u8]) -> Result<Vec<&str>, RepositoryError> {
     let output = std::str::from_utf8(output).map_err(|_| RepositoryError::InvalidGitOutput)?;
     if output.contains('\r') {
@@ -329,6 +399,26 @@ fn run_git(
 ) -> Result<Output, RepositoryError> {
     let mut command = Command::new("git");
     command.arg("-C").arg(repository).args(arguments);
+    output_bounded(&mut command, MAX_GIT_OUTPUT_BYTES, MAX_GIT_OUTPUT_BYTES)
+        .map_err(RepositoryError::Process)
+}
+
+fn run_git_isolated(
+    repository: &Path,
+    arguments: impl IntoIterator<Item = OsString>,
+) -> Result<Output, RepositoryError> {
+    let mut command = Command::new("git");
+    command
+        .arg("-C")
+        .arg(repository)
+        .args(arguments)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_CEILING_DIRECTORIES");
     output_bounded(&mut command, MAX_GIT_OUTPUT_BYTES, MAX_GIT_OUTPUT_BYTES)
         .map_err(RepositoryError::Process)
 }
@@ -475,6 +565,32 @@ mod tests {
             registration.remote_identity_display.as_deref(),
             Some("github.com/owner/cubey")
         );
+
+        let onboarding = inspect_containing_worktree(&linked.join("nested")).unwrap();
+        assert_eq!(onboarding.project_root, linked.canonicalize().unwrap());
+        assert_eq!(onboarding.display_name, "cubey-worktree1");
+        assert!(onboarding.remote_identity_fingerprint.is_some());
+        assert_eq!(
+            onboarding.remote_identity_display.as_deref(),
+            Some("github.com/owner/cubey")
+        );
+    }
+
+    #[test]
+    fn containing_worktree_rejects_a_bare_repository_without_registration() {
+        let temporary = tempfile::tempdir().unwrap();
+        let bare = temporary.path().join("bare.git");
+        let status = Command::new("git")
+            .args(["init", "--bare", "-q"])
+            .arg(&bare)
+            .status()
+            .unwrap();
+        assert!(status.success());
+
+        assert!(matches!(
+            inspect_containing_worktree(&bare),
+            Err(RepositoryError::BareRepository)
+        ));
     }
 
     fn run<'a>(repository: &Path, arguments: impl IntoIterator<Item = &'a str>) {

@@ -237,6 +237,7 @@ pub enum RuntimeStatus {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OperationKind {
+    Onboard,
     Start,
     Fork,
 }
@@ -245,7 +246,14 @@ pub enum OperationKind {
 #[serde(rename_all = "snake_case")]
 pub enum OperationPhase {
     Prepared,
+    CapabilityIssued,
+    RuntimeOwnedLaunching,
+    ProviderPreparation,
     ExternalEffectStarted,
+    ProviderExecStarted,
+    ProviderExecProven,
+    ExecFailedKnownAbsent,
+    RolledBack,
     AwaitingReconciliation,
     Committed,
     RecoveryRequired,
@@ -255,7 +263,10 @@ pub enum OperationPhase {
 impl OperationPhase {
     #[must_use]
     pub const fn is_terminal(self) -> bool {
-        matches!(self, Self::Committed | Self::Failed)
+        matches!(
+            self,
+            Self::Committed | Self::Failed | Self::ProviderExecProven | Self::RolledBack
+        )
     }
 }
 
@@ -281,6 +292,45 @@ pub enum OnboardingPhase {
 }
 
 impl OnboardingPhase {
+    /// Maps the durable compound-operation phase used by the D17 journal to
+    /// the onboarding-only transition contract.
+    #[must_use]
+    pub const fn from_operation_phase(phase: OperationPhase) -> Option<Self> {
+        match phase {
+            OperationPhase::Prepared => Some(Self::Prepared),
+            OperationPhase::CapabilityIssued => Some(Self::CapabilityIssued),
+            OperationPhase::RuntimeOwnedLaunching => Some(Self::RuntimeOwnedLaunching),
+            OperationPhase::ProviderPreparation => Some(Self::ProviderPreparation),
+            OperationPhase::ExternalEffectStarted => Some(Self::ProviderExternalEffectStarted),
+            OperationPhase::ProviderExecStarted => Some(Self::ProviderExecStarted),
+            OperationPhase::ProviderExecProven => Some(Self::ProviderExecProven),
+            OperationPhase::ExecFailedKnownAbsent => Some(Self::KnownAbsentExec),
+            OperationPhase::RecoveryRequired => Some(Self::RecoveryRequired),
+            OperationPhase::RolledBack => Some(Self::RolledBack),
+            OperationPhase::AwaitingReconciliation
+            | OperationPhase::Committed
+            | OperationPhase::Failed => None,
+        }
+    }
+
+    /// Returns the exact durable compound-operation phase for this D17
+    /// onboarding state.
+    #[must_use]
+    pub const fn operation_phase(self) -> OperationPhase {
+        match self {
+            Self::Prepared => OperationPhase::Prepared,
+            Self::CapabilityIssued => OperationPhase::CapabilityIssued,
+            Self::RuntimeOwnedLaunching => OperationPhase::RuntimeOwnedLaunching,
+            Self::ProviderPreparation => OperationPhase::ProviderPreparation,
+            Self::ProviderExternalEffectStarted => OperationPhase::ExternalEffectStarted,
+            Self::ProviderExecStarted => OperationPhase::ProviderExecStarted,
+            Self::ProviderExecProven => OperationPhase::ProviderExecProven,
+            Self::KnownAbsentExec => OperationPhase::ExecFailedKnownAbsent,
+            Self::RecoveryRequired => OperationPhase::RecoveryRequired,
+            Self::RolledBack => OperationPhase::RolledBack,
+        }
+    }
+
     /// Returns whether a Runtime in this phase must refuse ordinary
     /// attach/action authority.
     #[must_use]
@@ -358,6 +408,12 @@ pub struct CompoundOperation {
     pub kind: OperationKind,
     pub phase: OperationPhase,
     pub expected_revisions_json: String,
+    /// D17-only one-shot capability metadata. D16 operations retain `None`
+    /// for every field and never query schema-14 columns.
+    pub launch_token_id: Option<String>,
+    pub launch_token_verifier: Option<String>,
+    pub launch_token_expiry_monotonic: Option<i64>,
+    pub launch_claims_digest: Option<String>,
     pub effect_watermark: Option<String>,
     pub outcome_json: Option<String>,
     pub revision: Revision,
@@ -416,6 +472,10 @@ impl CompoundOperation {
             kind,
             phase: OperationPhase::Prepared,
             expected_revisions_json,
+            launch_token_id: None,
+            launch_token_verifier: None,
+            launch_token_expiry_monotonic: None,
+            launch_claims_digest: None,
             effect_watermark: None,
             outcome_json: None,
             revision: Revision::INITIAL,
@@ -434,6 +494,9 @@ impl CompoundOperation {
         effect_watermark: Option<String>,
         outcome_json: Option<String>,
     ) -> Result<(), DomainError> {
+        if self.kind == OperationKind::Onboard {
+            return Err(DomainError::OnboardingOperationRequired);
+        }
         if !permits_transition(self.phase, next) {
             return Err(DomainError::InvalidOperationTransition {
                 from: self.phase,
@@ -446,6 +509,48 @@ impl CompoundOperation {
         }
 
         self.phase = next;
+        self.effect_watermark = effect_watermark;
+        self.outcome_json = outcome_json;
+        self.revision = self.revision.next();
+        Ok(())
+    }
+
+    /// Returns the D17-specific phase only for an onboarding operation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a Start/Fork operation is treated as onboarding
+    /// state or the persisted phase is outside the D17 lifecycle.
+    pub fn onboarding_phase(&self) -> Result<OnboardingPhase, DomainError> {
+        if self.kind != OperationKind::Onboard {
+            return Err(DomainError::OnboardingOperationRequired);
+        }
+        OnboardingPhase::from_operation_phase(self.phase)
+            .ok_or(DomainError::InvalidOnboardingOperationPhase(self.phase))
+    }
+
+    /// Advances one onboarding operation through the D17 ownership and
+    /// provider-exec state machine without permitting the generic Start/Fork
+    /// transition graph to bypass it.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the operation is not onboarding state, the phase
+    /// change skips an authority boundary, or the optional outcome is invalid
+    /// JSON.
+    pub fn transition_onboarding(
+        &mut self,
+        next: OnboardingPhase,
+        effect_watermark: Option<String>,
+        outcome_json: Option<String>,
+    ) -> Result<(), DomainError> {
+        let current = self.onboarding_phase()?;
+        current.transition(next)?;
+        if let Some(outcome) = &outcome_json {
+            serde_json::from_str::<serde_json::Value>(outcome)
+                .map_err(DomainError::InvalidOperationOutcome)?;
+        }
+        self.phase = next.operation_phase();
         self.effect_watermark = effect_watermark;
         self.outcome_json = outcome_json;
         self.revision = self.revision.next();
@@ -618,6 +723,10 @@ pub enum DomainError {
         from: OnboardingPhase,
         to: OnboardingPhase,
     },
+    #[error("the operation is not a D17 onboarding operation")]
+    OnboardingOperationRequired,
+    #[error("the compound operation phase is not valid for D17 onboarding: {0:?}")]
+    InvalidOnboardingOperationPhase(OperationPhase),
     #[error("invalid provider identifier")]
     InvalidProviderIdentifier,
     #[error("unknown provider kind: {0}")]
@@ -766,6 +875,42 @@ mod tests {
                 .unwrap(),
             OnboardingPhase::ProviderExecProven
         );
+    }
+
+    #[test]
+    fn onboarding_compound_operation_uses_only_the_onboarding_transition_graph() {
+        let mut operation = CompoundOperation::with_id(
+            OperationId::from(Uuid::from_u128(84)),
+            "onboard-84".to_owned(),
+            OperationKind::Onboard,
+            "{}".to_owned(),
+        )
+        .unwrap();
+        assert_eq!(
+            operation.onboarding_phase().unwrap(),
+            OnboardingPhase::Prepared
+        );
+        assert!(matches!(
+            operation.transition(OperationPhase::ExternalEffectStarted, None, None),
+            Err(DomainError::OnboardingOperationRequired)
+        ));
+        operation
+            .transition_onboarding(OnboardingPhase::CapabilityIssued, None, None)
+            .unwrap();
+        assert_eq!(operation.phase, OperationPhase::CapabilityIssued);
+        operation
+            .transition_onboarding(OnboardingPhase::RuntimeOwnedLaunching, None, None)
+            .unwrap();
+        assert_eq!(
+            operation.onboarding_phase().unwrap(),
+            OnboardingPhase::RuntimeOwnedLaunching
+        );
+        assert!(matches!(
+            CompoundOperation::new("start-84".to_owned(), OperationKind::Start, "{}".to_owned())
+                .unwrap()
+                .onboarding_phase(),
+            Err(DomainError::OnboardingOperationRequired)
+        ));
     }
 
     #[test]

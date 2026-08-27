@@ -20,6 +20,7 @@ pub(in crate::state) fn to_from_sql_error(
 
 pub(in crate::state) const fn operation_kind_text(kind: OperationKind) -> &'static str {
     match kind {
+        OperationKind::Onboard => "onboard",
         OperationKind::Start => "start",
         OperationKind::Fork => "fork",
     }
@@ -27,6 +28,7 @@ pub(in crate::state) const fn operation_kind_text(kind: OperationKind) -> &'stat
 
 pub(in crate::state) fn operation_kind_from_text(value: &str) -> Result<OperationKind, StateError> {
     match value {
+        "onboard" => Ok(OperationKind::Onboard),
         "start" => Ok(OperationKind::Start),
         "fork" => Ok(OperationKind::Fork),
         _ => Err(StateError::InvalidPersistedValue(value.to_owned())),
@@ -44,7 +46,14 @@ pub(in crate::state) const fn workstream_origin_text(origin: WorkstreamOrigin) -
 pub(in crate::state) const fn operation_phase_text(phase: OperationPhase) -> &'static str {
     match phase {
         OperationPhase::Prepared => "prepared",
+        OperationPhase::CapabilityIssued => "capability_issued",
+        OperationPhase::RuntimeOwnedLaunching => "runtime_owned_launching",
+        OperationPhase::ProviderPreparation => "provider_preparation",
         OperationPhase::ExternalEffectStarted => "external_effect_started",
+        OperationPhase::ProviderExecStarted => "provider_exec_started",
+        OperationPhase::ProviderExecProven => "provider_exec_proven",
+        OperationPhase::ExecFailedKnownAbsent => "exec_failed_known_absent",
+        OperationPhase::RolledBack => "rolled_back",
         OperationPhase::AwaitingReconciliation => "awaiting_reconciliation",
         OperationPhase::Committed => "committed",
         OperationPhase::RecoveryRequired => "recovery_required",
@@ -57,7 +66,14 @@ pub(in crate::state) fn operation_phase_from_text(
 ) -> Result<OperationPhase, StateError> {
     match value {
         "prepared" => Ok(OperationPhase::Prepared),
+        "capability_issued" => Ok(OperationPhase::CapabilityIssued),
+        "runtime_owned_launching" => Ok(OperationPhase::RuntimeOwnedLaunching),
+        "provider_preparation" => Ok(OperationPhase::ProviderPreparation),
         "external_effect_started" => Ok(OperationPhase::ExternalEffectStarted),
+        "provider_exec_started" => Ok(OperationPhase::ProviderExecStarted),
+        "provider_exec_proven" => Ok(OperationPhase::ProviderExecProven),
+        "exec_failed_known_absent" => Ok(OperationPhase::ExecFailedKnownAbsent),
+        "rolled_back" => Ok(OperationPhase::RolledBack),
         "awaiting_reconciliation" => Ok(OperationPhase::AwaitingReconciliation),
         "committed" => Ok(OperationPhase::Committed),
         "recovery_required" => Ok(OperationPhase::RecoveryRequired),

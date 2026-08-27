@@ -701,6 +701,9 @@ impl HostRegistry {
             .map(|(operation_id, kind, phase, effect_watermark, revision)| {
                 let kind = operation_kind_from_text(&kind)?;
                 let provider = match kind {
+                    OperationKind::Onboard => {
+                        return Err(StateError::OnboardingOperationUnavailable);
+                    }
                     OperationKind::Fork => {
                         PersistedForkPlan::decode(effect_watermark.as_deref())?.provider
                     }
@@ -1865,6 +1868,10 @@ pub(in crate::state) fn row_to_operation(
         kind: operation_kind_from_text(&kind).map_err(to_from_sql_error)?,
         phase: operation_phase_from_text(&phase).map_err(to_from_sql_error)?,
         expected_revisions_json: row.get(4)?,
+        launch_token_id: None,
+        launch_token_verifier: None,
+        launch_token_expiry_monotonic: None,
+        launch_claims_digest: None,
         effect_watermark: row.get(5)?,
         outcome_json: row.get(6)?,
         revision: Revision::try_from(revision).map_err(to_from_sql_error)?,

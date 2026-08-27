@@ -26,8 +26,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::domain::{
-    Clock, HostId, IdGenerator, LocationId, ProjectId, ProviderKind, ProviderSessionId, Revision,
-    RuntimeId, RuntimeStatus, SystemClock, WorkstreamId,
+    Clock, HostId, IdGenerator, LocationId, OnboardingPhase, ProjectId, ProviderKind,
+    ProviderSessionId, Revision, RuntimeId, RuntimeStatus, SystemClock, WorkstreamId,
 };
 use crate::provider::lifecycle::{LifecycleEvent, LifecycleHint, LifecycleObservation};
 
@@ -44,9 +44,10 @@ use super::{
     runtime::{load_binding, load_current_binding, load_opencode_handle, row_to_runtime},
     schema::HOST_SCHEMA_SQL,
     utils::{
-        resolve_project_browser_root, runtime_status_from_text, validate_project_display_name,
-        validate_provider_metadata, validate_registry_text, validate_remote_identity_display,
-        validate_repository_fingerprint, workstream_lifecycle_from_text,
+        operation_phase_from_text, resolve_project_browser_root, runtime_status_from_text,
+        validate_project_display_name, validate_provider_metadata, validate_registry_text,
+        validate_remote_identity_display, validate_repository_fingerprint,
+        workstream_lifecycle_from_text,
     },
     workstream::{next_activity_sequence, touch_workstream},
 };
@@ -111,10 +112,10 @@ pub const HOST_SCHEMA_13_PROJECT_SQL: &str = "
                                       native_session_id, settled_message_id);
 ";
 
-/// D17's minimal schema-14 cutover fragment. The later atomic Navigator
-/// replacement consumes the pending lock metadata before any actor creates or
-/// recognizes `provisional.lock`; the metadata itself is not a Runtime/card
-/// row and contains no provider command or shell data.
+/// D17's schema-14 cutover fragment. The later atomic Navigator replacement
+/// consumes the pending lock metadata before any actor creates or recognizes
+/// `provisional.lock`; the dormant capability-journal columns retain only
+/// bounded verifier/digest references, never provider command or shell data.
 pub const HOST_SCHEMA_14_ONBOARDING_SQL: &str = "
     DROP TABLE project_browser_settings;
     CREATE TABLE host_operational_metadata (
@@ -134,6 +135,13 @@ pub const HOST_SCHEMA_14_ONBOARDING_SQL: &str = "
                 AND provisional_lock_inode IS NOT NULL)
         )
     );
+    ALTER TABLE compound_operations ADD COLUMN launch_token_id TEXT;
+    ALTER TABLE compound_operations ADD COLUMN launch_token_verifier TEXT;
+    ALTER TABLE compound_operations ADD COLUMN launch_token_expiry_monotonic INTEGER;
+    ALTER TABLE compound_operations ADD COLUMN launch_claims_digest TEXT;
+    CREATE UNIQUE INDEX compound_operations_launch_token_id_idx
+        ON compound_operations(launch_token_id)
+        WHERE launch_token_id IS NOT NULL;
 ";
 
 /// Returns the exact schema-12 fixture used by D16 migration tests.  It is a
@@ -2820,7 +2828,108 @@ fn validate_schema14(connection: &Connection) -> Result<(), StateError> {
     {
         return Err(StateError::MalformedHostSchema);
     }
+    validate_schema14_onboarding_operation_columns(connection)
+}
+
+fn validate_schema14_onboarding_operation_columns(
+    connection: &Connection,
+) -> Result<(), StateError> {
+    validate_table_columns(
+        connection,
+        "compound_operations",
+        &[
+            "launch_token_id",
+            "launch_token_verifier",
+            "launch_token_expiry_monotonic",
+            "launch_claims_digest",
+        ],
+    )?;
+    let mut statement = connection
+        .prepare(
+            "SELECT kind, phase, launch_token_id, launch_token_verifier,
+                    launch_token_expiry_monotonic, launch_claims_digest
+             FROM compound_operations ORDER BY operation_id",
+        )
+        .map_err(StateError::Sqlite)?;
+    let mut rows = statement.query([]).map_err(StateError::Sqlite)?;
+    while let Some(row) = rows.next().map_err(StateError::Sqlite)? {
+        let kind: String = row.get(0).map_err(StateError::Sqlite)?;
+        let phase: String = row.get(1).map_err(StateError::Sqlite)?;
+        let token_id: Option<String> = row.get(2).map_err(StateError::Sqlite)?;
+        let token_verifier: Option<String> = row.get(3).map_err(StateError::Sqlite)?;
+        let token_expiry: Option<i64> = row.get(4).map_err(StateError::Sqlite)?;
+        let claims_digest: Option<String> = row.get(5).map_err(StateError::Sqlite)?;
+        if kind == "onboard" {
+            validate_schema14_onboarding_operation(
+                &phase,
+                token_id.as_deref(),
+                token_verifier.as_deref(),
+                token_expiry,
+                claims_digest.as_deref(),
+            )?;
+        } else if token_id.is_some()
+            || token_verifier.is_some()
+            || token_expiry.is_some()
+            || claims_digest.is_some()
+        {
+            return Err(StateError::MalformedHostSchema);
+        }
+    }
     Ok(())
+}
+
+fn validate_schema14_onboarding_operation(
+    phase: &str,
+    token_id: Option<&str>,
+    token_verifier: Option<&str>,
+    token_expiry: Option<i64>,
+    claims_digest: Option<&str>,
+) -> Result<(), StateError> {
+    let phase = operation_phase_from_text(phase).map_err(|_| StateError::MalformedHostSchema)?;
+    let phase =
+        OnboardingPhase::from_operation_phase(phase).ok_or(StateError::MalformedHostSchema)?;
+    let capability_is_absent = token_id.is_none()
+        && token_verifier.is_none()
+        && token_expiry.is_none()
+        && claims_digest.is_none();
+    let capability_is_complete = matches!(
+        (token_id, token_verifier, token_expiry, claims_digest),
+        (Some(_), Some(_), Some(_), Some(_))
+    );
+    match phase {
+        OnboardingPhase::Prepared if !capability_is_absent => {
+            return Err(StateError::MalformedHostSchema);
+        }
+        OnboardingPhase::RolledBack if !(capability_is_absent || capability_is_complete) => {
+            return Err(StateError::MalformedHostSchema);
+        }
+        OnboardingPhase::Prepared | OnboardingPhase::RolledBack => {}
+        _ if !capability_is_complete => return Err(StateError::MalformedHostSchema),
+        _ => {}
+    }
+    if capability_is_complete {
+        let token_id = token_id.ok_or(StateError::MalformedHostSchema)?;
+        let token_verifier = token_verifier.ok_or(StateError::MalformedHostSchema)?;
+        let token_expiry = token_expiry.ok_or(StateError::MalformedHostSchema)?;
+        let claims_digest = claims_digest.ok_or(StateError::MalformedHostSchema)?;
+        if Uuid::parse_str(token_id).is_err()
+            || token_expiry <= 0
+            || !is_versioned_sha256(token_verifier, "d17-launch-verifier-v1:sha256:")
+            || !is_versioned_sha256(claims_digest, "d17-launch-claims-v1:sha256:")
+        {
+            return Err(StateError::MalformedHostSchema);
+        }
+    }
+    Ok(())
+}
+
+fn is_versioned_sha256(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    })
 }
 
 fn load_provisional_lock_metadata(
@@ -6486,6 +6595,88 @@ mod tests {
         );
         assert_eq!(authoritative_snapshot(&state.connection), before);
         assert_eq!(fs::read(&provisional).unwrap(), marker);
+    }
+
+    #[test]
+    fn schema14_validates_the_bounded_onboarding_capability_journal_shape() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+        drop(fresh_create(&state_path, &SequenceIds::default()).unwrap());
+        let transition = transition_lease(&state_path);
+        let mut state = open_cutover_transition(&root, &transition).unwrap();
+        state.migrate_schema13_to14(&transition).unwrap();
+        state
+            .connection
+            .execute(
+                "INSERT INTO compound_operations (
+                    operation_id, request_key, kind, phase, expected_revisions_json,
+                    effect_watermark, outcome_json, revision,
+                    launch_token_id, launch_token_verifier,
+                    launch_token_expiry_monotonic, launch_claims_digest
+                 ) VALUES (?1, 'onboard-journal', 'onboard', 'prepared', '{}',
+                    NULL, NULL, 1, NULL, NULL, NULL, NULL)",
+                [Uuid::from_u128(901).to_string()],
+            )
+            .unwrap();
+        validate_schema14(&state.connection).unwrap();
+
+        state
+            .connection
+            .execute(
+                "UPDATE compound_operations SET phase = 'capability_issued'
+                 WHERE request_key = 'onboard-journal'",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            validate_schema14(&state.connection),
+            Err(StateError::MalformedHostSchema)
+        ));
+
+        let token_id = Uuid::from_u128(902).to_string();
+        let verifier = format!("d17-launch-verifier-v1:sha256:{}", "a".repeat(64));
+        let claims_digest = format!("d17-launch-claims-v1:sha256:{}", "b".repeat(64));
+        state
+            .connection
+            .execute(
+                "UPDATE compound_operations
+                 SET launch_token_id = ?1,
+                     launch_token_verifier = ?2,
+                     launch_token_expiry_monotonic = 17,
+                     launch_claims_digest = ?3
+                 WHERE request_key = 'onboard-journal'",
+                params![token_id, verifier, claims_digest],
+            )
+            .unwrap();
+        validate_schema14(&state.connection).unwrap();
+
+        state
+            .connection
+            .execute(
+                "UPDATE compound_operations
+                 SET launch_claims_digest = 'not-a-digest'
+                 WHERE request_key = 'onboard-journal'",
+                [],
+            )
+            .unwrap();
+        assert!(matches!(
+            validate_schema14(&state.connection),
+            Err(StateError::MalformedHostSchema)
+        ));
+        state
+            .connection
+            .execute(
+                "UPDATE compound_operations
+                 SET launch_claims_digest = ?1, kind = 'start'
+                 WHERE request_key = 'onboard-journal'",
+                [format!("d17-launch-claims-v1:sha256:{}", "b".repeat(64))],
+            )
+            .unwrap();
+        assert!(matches!(
+            validate_schema14(&state.connection),
+            Err(StateError::MalformedHostSchema)
+        ));
     }
 
     #[test]

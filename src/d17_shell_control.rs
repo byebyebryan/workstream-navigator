@@ -32,7 +32,8 @@ use crate::{
         record_codex_exec_failed_known_absent, record_opencode_created_session,
         record_opencode_effect_recovery_required, record_opencode_exec_recovery_required,
         record_opencode_external_effect_started, record_opencode_provider_exec_started,
-        record_opencode_session_recovery_required, record_provider_preparation_recovery_required,
+        record_opencode_runtime_handle, record_opencode_session_recovery_required,
+        record_provider_preparation_recovery_required,
     },
     d17_reconcile::{
         ExpectedProviderExecutable, LinuxProviderExecutableProbe, ReconcileError,
@@ -502,7 +503,7 @@ pub(crate) fn exec_opencode_from_account_shell(
         }
     };
     let mut effect_fence = None;
-    let session = crate::provider::opencode::create_blank_session_with_before_create(
+    let created = crate::provider::opencode::create_blank_session_with_before_create_and_health(
         &executable,
         &repository.project_root,
         endpoint.clone(),
@@ -518,8 +519,8 @@ pub(crate) fn exec_opencode_from_account_shell(
             Ok(())
         },
     );
-    let session = match session {
-        Ok(session) => session,
+    let created = match created {
+        Ok(created) => created,
         Err(error) => {
             if let Some(fence) = effect_fence.as_ref() {
                 record_opencode_effect_recovery_required(
@@ -549,7 +550,7 @@ pub(crate) fn exec_opencode_from_account_shell(
         &provisional_lease,
         &context,
         &effect_fence,
-        session,
+        created.session,
     ) else {
         record_opencode_effect_recovery_required(
             &mut state,
@@ -560,11 +561,28 @@ pub(crate) fn exec_opencode_from_account_shell(
         .map_err(|_| AccountShellOpenCodeLaunchError::Helper)?;
         return Err(AccountShellOpenCodeLaunchError::Helper);
     };
-    let Ok(exec_fence) = record_opencode_provider_exec_started(
+    let Ok(handle_fence) = record_opencode_runtime_handle(
         &mut state,
         &provisional_lease,
         &context,
         &session_fence,
+        endpoint.port,
+        &created.version,
+    ) else {
+        record_opencode_session_recovery_required(
+            &mut state,
+            &provisional_lease,
+            &context,
+            &session_fence,
+        )
+        .map_err(|_| AccountShellOpenCodeLaunchError::Helper)?;
+        return Err(AccountShellOpenCodeLaunchError::Helper);
+    };
+    let Ok(exec_fence) = record_opencode_provider_exec_started(
+        &mut state,
+        &provisional_lease,
+        &context,
+        &handle_fence,
     ) else {
         record_opencode_session_recovery_required(
             &mut state,
@@ -579,7 +597,7 @@ pub(crate) fn exec_opencode_from_account_shell(
         executable,
         &repository.project_root,
         &endpoint,
-        session_fence.session(),
+        handle_fence.session(),
     );
     program.extend(launch.arguments().iter().map(OsString::from));
     let _ = exec_program(&program);

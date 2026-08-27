@@ -55,10 +55,10 @@ use super::{
     runtime::{load_binding, load_current_binding, load_opencode_handle, row_to_runtime},
     schema::{HOST_SCHEMA_SQL, MAX_NAVIGATOR_WORKSTREAM_QUERY, MAX_NAVIGATOR_WORKSTREAMS},
     utils::{
-        operation_phase_from_text, operation_phase_text, resolve_project_browser_root,
-        runtime_status_from_text, validate_project_display_name, validate_provider_metadata,
-        validate_registry_text, validate_remote_identity_display, validate_repository_fingerprint,
-        workstream_lifecycle_from_text,
+        operation_phase_from_text, operation_phase_text, provider_kind_from_text,
+        resolve_project_browser_root, runtime_status_from_text, validate_project_display_name,
+        validate_provider_metadata, validate_registry_text, validate_remote_identity_display,
+        validate_repository_fingerprint, workstream_lifecycle_from_text,
     },
     workstream::{next_activity_sequence, touch_workstream},
 };
@@ -3088,6 +3088,144 @@ impl D16State {
         transaction.commit().map_err(StateError::Sqlite)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
         Ok(ownership)
+    }
+
+    /// Binds the exact loopback endpoint/version/session creation record to a
+    /// D17 `OpenCode` onboarding attempt before the final native exec.  The
+    /// temporary precreation server is already gone when this commits; this
+    /// row is only durable identity evidence for the later detached observer,
+    /// never authority to contact or replace a provider.
+    #[allow(
+        dead_code,
+        reason = "the D17 OpenCode observer controller remains unreachable until the atomic Navigator cutover"
+    )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the transaction keeps D17 handle identity validation and its one insert boundary auditable together"
+    )]
+    pub(crate) fn record_d17_opencode_runtime_handle_current(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        request: &OnboardingPrepareRequest,
+        ownership: OnboardingOwnership,
+        endpoint_port: u16,
+        version: &str,
+        session: &ProviderSessionId,
+    ) -> Result<OpenCodeRuntimeHandle, StateError> {
+        if endpoint_port == 0 || session.provider() != ProviderKind::OpenCode {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+        validate_provider_metadata(version)?;
+        ensure_d17_current_mode(self.mode)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        validate_schema14(&self.connection)?;
+        validate_onboarding_prepare_request(request, &self.root)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        let registry_generation = load_registry_generation(&transaction)?;
+        let (phase, _) = validate_d17_owned_onboarding_transaction(
+            &transaction,
+            request,
+            provisional_lease.lease_generation(),
+            &registry_generation,
+            ownership,
+        )?;
+        if phase != OnboardingPhase::ProviderExternalEffectStarted {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+        let encoded_intent: String = transaction
+            .query_row(
+                "SELECT expected_revisions_json FROM compound_operations
+                 WHERE operation_id = ?1 AND kind = 'onboard'",
+                [ownership.operation_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StateError::Sqlite)?;
+        let intent: PersistedOnboardingIntent =
+            serde_json::from_str(&encoded_intent).map_err(|_| StateError::MalformedHostSchema)?;
+        if intent.provider != ProviderKind::OpenCode
+            || intent.runtime_generation.is_empty()
+            || intent.candidate_runtime_id != ownership.runtime_id
+        {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+        let runtime: (String, String, String, Option<i64>, Option<String>) = transaction
+            .query_row(
+                "SELECT provider, tmux_generation, lifecycle, provider_pid, process_birth
+                 FROM runtimes WHERE runtime_id = ?1 AND workstream_id = ?2",
+                params![
+                    ownership.runtime_id.to_string(),
+                    ownership.workstream_id.to_string(),
+                ],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .map_err(StateError::Sqlite)?;
+        if provider_kind_from_text(&runtime.0)? != ProviderKind::OpenCode
+            || runtime.1 != intent.runtime_generation
+            || runtime.2 != "starting"
+            || runtime.3.is_some()
+            || runtime.4.is_some()
+        {
+            return Err(StateError::HookEvidenceMismatch);
+        }
+        let binding = load_binding(&transaction, ownership.runtime_id)?
+            .ok_or(StateError::HookEvidenceMismatch)?;
+        if binding.provider != ProviderKind::OpenCode
+            || binding.runtime_generation != intent.runtime_generation
+            || binding.native_session_id != *session
+        {
+            return Err(StateError::ProviderIdentityMismatch);
+        }
+        if let Some(existing) = load_opencode_handle(&transaction, ownership.runtime_id)? {
+            if existing.runtime_generation == intent.runtime_generation
+                && existing.endpoint_host == crate::provider::opencode::LOOPBACK_HOST
+                && existing.endpoint_port == endpoint_port
+                && existing.version == version
+                && existing.native_session_id == *session
+                && existing.observer_status == OpenCodeObserverStatus::Starting
+                && existing.observer_pid.is_none()
+                && existing.observer_birth.is_none()
+            {
+                transaction.commit().map_err(StateError::Sqlite)?;
+                provisional_lease.revalidate_for_mutation(&self.root)?;
+                return Ok(existing);
+            }
+            return Err(StateError::ConcurrentWrite);
+        }
+        transaction
+            .execute(
+                "INSERT INTO opencode_runtime_handles (
+                    runtime_id, runtime_generation, endpoint_host, endpoint_port,
+                    version, native_session_id, observer_pid, observer_birth,
+                    observer_status, revision
+                 ) VALUES (?1, ?2, '127.0.0.1', ?3, ?4, ?5, NULL, NULL, 'starting', 1)",
+                params![
+                    ownership.runtime_id.to_string(),
+                    intent.runtime_generation,
+                    i64::from(endpoint_port),
+                    version,
+                    session.native_id(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        let handle = load_opencode_handle(&transaction, ownership.runtime_id)?
+            .ok_or(StateError::ConcurrentWrite)?;
+        validate_schema14(&transaction)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        Ok(handle)
     }
 
     /// Fences one Runtime-owned D17 onboarding attempt for explicit recovery.
@@ -9860,6 +9998,49 @@ mod tests {
                 "new-session".to_owned(),
                 "new".to_owned()
             )
+        );
+        let handle = state
+            .record_d17_opencode_runtime_handle_current(
+                &provisional,
+                &request,
+                bound,
+                43123,
+                "1.18.23",
+                &session,
+            )
+            .unwrap();
+        assert_eq!(handle.runtime_id, candidate_runtime_id);
+        assert_eq!(handle.endpoint_host, "127.0.0.1");
+        assert_eq!(handle.endpoint_port, 43123);
+        assert_eq!(handle.version, "1.18.23");
+        assert_eq!(handle.native_session_id, session);
+        assert_eq!(handle.observer_status, OpenCodeObserverStatus::Starting);
+        assert_eq!(handle.revision.value(), 1);
+        assert_eq!(
+            state
+                .record_d17_opencode_runtime_handle_current(
+                    &provisional,
+                    &request,
+                    bound,
+                    43123,
+                    "1.18.23",
+                    &session,
+                )
+                .unwrap(),
+            handle,
+            "only an exact crash replay may reuse the pre-exec handle"
+        );
+        assert!(
+            state
+                .record_d17_opencode_runtime_handle_current(
+                    &provisional,
+                    &request,
+                    bound,
+                    43124,
+                    "1.18.23",
+                    &session,
+                )
+                .is_err()
         );
         assert!(
             state

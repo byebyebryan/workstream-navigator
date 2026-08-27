@@ -96,6 +96,31 @@ pub(crate) struct OpenCodeSessionFence {
     session: crate::domain::ProviderSessionId,
 }
 
+/// Type-level proof that the temporary-server creation record was persisted as
+/// the exact future observer handle.  A native `OpenCode` exec cannot cross
+/// its final fence without this record.
+pub(crate) struct OpenCodeHandleFence {
+    ownership: Box<OnboardingOwnership>,
+    session: crate::domain::ProviderSessionId,
+}
+
+impl OpenCodeHandleFence {
+    #[must_use]
+    pub(crate) fn session(&self) -> &crate::domain::ProviderSessionId {
+        &self.session
+    }
+}
+
+impl std::fmt::Debug for OpenCodeHandleFence {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("OpenCodeHandleFence")
+            .field("ownership", &"<opaque>")
+            .field("session", &"<opaque>")
+            .finish()
+    }
+}
+
 impl std::fmt::Debug for OpenCodeSessionFence {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -232,6 +257,31 @@ pub(crate) fn record_opencode_created_session(
     })
 }
 
+/// Persists the exact temporary-server endpoint fingerprint before the final
+/// native `OpenCode` exec.  It performs no observer or provider I/O.
+pub(crate) fn record_opencode_runtime_handle(
+    state: &mut D16State,
+    provisional_lease: &ProvisionalLease,
+    context: &PrepareContext<'_, '_>,
+    session_fence: &OpenCodeSessionFence,
+    endpoint_port: u16,
+    version: &str,
+) -> Result<OpenCodeHandleFence, HelperError> {
+    let (_, request) = request_from_context(state, provisional_lease, context)?;
+    state.record_d17_opencode_runtime_handle_current(
+        provisional_lease,
+        &request,
+        *session_fence.ownership,
+        endpoint_port,
+        version,
+        &session_fence.session,
+    )?;
+    Ok(OpenCodeHandleFence {
+        ownership: Box::new(*session_fence.ownership),
+        session: session_fence.session.clone(),
+    })
+}
+
 /// Records Codex's final native-exec fence. Returning successfully still
 /// proves no provider execution.
 pub(crate) fn record_codex_provider_exec_started(
@@ -263,13 +313,13 @@ pub(crate) fn record_opencode_provider_exec_started(
     state: &mut D16State,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
-    session_fence: &OpenCodeSessionFence,
+    handle_fence: &OpenCodeHandleFence,
 ) -> Result<ProviderExecFence, HelperError> {
     let (_, request) = request_from_context(state, provisional_lease, context)?;
     let ownership = state.record_d17_provider_exec_started_current(
         provisional_lease,
         &request,
-        *session_fence.ownership,
+        *handle_fence.ownership,
     )?;
     Ok(ProviderExecFence {
         ownership,

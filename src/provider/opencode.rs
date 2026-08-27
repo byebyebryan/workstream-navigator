@@ -163,6 +163,16 @@ pub struct OpenCodeHealth {
     pub version: String,
 }
 
+/// Exact bounded evidence returned by a freshly created blank session.  The
+/// version is sampled before the non-idempotent POST and retained only as the
+/// native endpoint fingerprint needed to bind a later observer; no provider
+/// payload is retained.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OpenCodeCreatedSession {
+    pub session: ProviderSessionId,
+    pub version: String,
+}
+
 /// Exact status returned by the bounded `/session/status` map.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpenCodeSessionStatus {
@@ -818,6 +828,34 @@ where
     E: From<OpenCodeError>,
     F: FnOnce() -> Result<(), E>,
 {
+    create_blank_session_with_before_create_and_health(
+        executable,
+        project_root,
+        endpoint,
+        before_create,
+    )
+    .map(|created| created.session)
+}
+
+/// Runs the short-lived blank-session transaction and retains the exact
+/// healthy server version that preceded its one POST.  Callers that will
+/// replace the temporary server with a persistent native process use this
+/// bounded creation record to bind their future observer before `execve`.
+///
+/// # Errors
+///
+/// Returns an error when serving, health, callback, session creation,
+/// blankness, or conclusive process shutdown fails.
+pub fn create_blank_session_with_before_create_and_health<E, F>(
+    executable: impl AsRef<OsStr>,
+    project_root: &Path,
+    endpoint: OpenCodeEndpoint,
+    before_create: F,
+) -> Result<OpenCodeCreatedSession, E>
+where
+    E: From<OpenCodeError>,
+    F: FnOnce() -> Result<(), E>,
+{
     create_blank_session_with_lease(
         executable,
         project_root,
@@ -868,7 +906,7 @@ fn create_blank_session_with_lease<E, F, L, S>(
     endpoint: OpenCodeEndpoint,
     before_create: F,
     spawn: S,
-) -> Result<ProviderSessionId, E>
+) -> Result<OpenCodeCreatedSession, E>
 where
     E: From<OpenCodeError>,
     F: FnOnce() -> Result<(), E>,
@@ -880,7 +918,7 @@ where
     let result = wait_for_blank_session(&mut lease, &client, before_create);
     let stop_result = lease.close_and_wait().map_err(E::from);
     match (result, stop_result) {
-        (Ok(session), Ok(())) => Ok(session),
+        (Ok(created), Ok(())) => Ok(created),
         (Err(error), Ok(())) | (Ok(_) | Err(_), Err(error)) => Err(error),
     }
 }
@@ -889,7 +927,7 @@ fn wait_for_blank_session<E, F, L>(
     lease: &mut L,
     client: &OpenCodeClient,
     before_create: F,
-) -> Result<ProviderSessionId, E>
+) -> Result<OpenCodeCreatedSession, E>
 where
     E: From<OpenCodeError>,
     F: FnOnce() -> Result<(), E>,
@@ -901,7 +939,7 @@ where
     let deadline = Instant::now() + SERVE_READY_TIMEOUT;
     loop {
         lease.ensure_alive().map_err(E::from)?;
-        if client.health().is_ok() {
+        if let Ok(health) = client.health() {
             lease.ensure_alive().map_err(E::from)?;
             lease
                 .ensure_endpoint_owned(client.endpoint())
@@ -921,7 +959,10 @@ where
             lease
                 .ensure_endpoint_owned(client.endpoint())
                 .map_err(E::from)?;
-            return Ok(session);
+            return Ok(OpenCodeCreatedSession {
+                session,
+                version: health.version,
+            });
         }
         if Instant::now() >= deadline {
             return Err(E::from(OpenCodeError::ServeTimedOut));
@@ -1479,7 +1520,7 @@ mod tests {
         )
         .unwrap();
         worker.join().unwrap();
-        assert_eq!(session.native_id(), "created-session");
+        assert_eq!(session.session.native_id(), "created-session");
         assert_eq!(
             *events.lock().unwrap(),
             vec![
@@ -1529,7 +1570,7 @@ mod tests {
             stream.write_all(body).unwrap();
         });
         let callback_identity = Arc::clone(&observed_identity);
-        let result: Result<ProviderSessionId, OpenCodeError> = create_blank_session_with_lease(
+        let result: Result<OpenCodeCreatedSession, OpenCodeError> = create_blank_session_with_lease(
             &executable,
             temporary.path(),
             OpenCodeEndpoint::loopback(port).unwrap(),

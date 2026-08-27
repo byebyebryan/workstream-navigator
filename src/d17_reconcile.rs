@@ -227,6 +227,44 @@ pub(crate) fn prove_provider_exec(
     complete_proven_marker(state, provisional_lease, presentation_directory, &slot)
 }
 
+/// Finishes the `OpenCode` half of an already-observed native exec only after
+/// the detached observer has committed `Ready`.  It repeats the provisional
+/// marker, runtime, process-group, cwd, provider, and PID/birth checks but
+/// performs no provider I/O or process control.
+pub(crate) fn finalize_opencode_observer_ready(
+    state: &mut D16State,
+    provisional_lease: &ProvisionalLease,
+    presentation_directory: &Path,
+    runtime: &PrivateRuntime<'_>,
+    process_group_probe: &dyn ProcessGroupProbe,
+) -> Result<(), ReconcileError> {
+    provisional_lease.revalidate_for_mutation(state.root())?;
+    let slot = read_marker(state.root(), presentation_directory)?;
+    if slot.phase() != ProvisionalPhase::RuntimeOwnedLaunching {
+        return Err(ReconcileError::SlotNotReady);
+    }
+    let operation_id = slot
+        .handoff_request()
+        .map(OperationId::from)
+        .ok_or(ReconcileError::HandoffIdentityUnavailable)?;
+    let target = state.d17_onboarding_exec_proof_target_current(provisional_lease, operation_id)?;
+    if target.provider() != ProviderKind::OpenCode {
+        return Err(ReconcileError::ProviderIdentityMismatch);
+    }
+    validate_slot_target(&slot, &target)?;
+    let live = slot.revalidate_live_shell(runtime, process_group_probe)?;
+    if live.cwd != target.project_root() {
+        return Err(ReconcileError::ProviderCwdMismatch);
+    }
+    let evidence = OnboardingProviderExecEvidence::new(live.shell_pid, live.shell_birth)?;
+    state.record_d17_provider_exec_proven_current(
+        provisional_lease,
+        target.ownership(),
+        &evidence,
+    )?;
+    complete_proven_marker(state, provisional_lease, presentation_directory, &slot)
+}
+
 fn validate_slot_target(
     slot: &ProvisionalSlot,
     target: &OnboardingProviderExecTarget,

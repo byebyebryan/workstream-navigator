@@ -37,7 +37,7 @@ use crate::{
     },
     d17_reconcile::{
         ExpectedProviderExecutable, LinuxProviderExecutableProbe, ReconcileError,
-        prove_provider_exec,
+        finalize_opencode_observer_ready, prove_provider_exec,
     },
     d17_shell_gate::{
         ShellGateContext, ShellGateDecision, ShellGateError, ShellGateInvocation,
@@ -138,6 +138,8 @@ pub(crate) enum ProviderExecReconciliationError {
     State,
     #[error("D17 provider-exec proof is unavailable")]
     Reconcile(#[from] ReconcileError),
+    #[error("D17 OpenCode observer handoff is unavailable")]
+    Observer,
 }
 
 /// Reopens the private D17 presentation marker before any account-shell path
@@ -188,6 +190,76 @@ pub(crate) fn reconcile_provider_exec_from_presentation(
         &runtime,
         &process_probe,
         &LinuxProviderExecutableProbe,
+    )?;
+    Ok(())
+}
+
+/// Performs the dormant D17 `OpenCode` post-exec handoff. It first records
+/// only exact native process evidence, then starts one detached observer from
+/// the controller, and finally commits provider-exec proof only if that
+/// observer became `Ready`. It never starts, replaces, signals, or otherwise
+/// controls the native provider.
+pub(crate) fn reconcile_opencode_observer_from_presentation(
+    state_root: &std::path::Path,
+    presentation_directory: &std::path::Path,
+) -> Result<(), ProviderExecReconciliationError> {
+    let account_context = AccountShellContext::new(state_root, presentation_directory)?;
+    let presentation_binding = presentation_binding_from_account_context(&account_context)
+        .map_err(ProviderExecReconciliationError::Context)?;
+    let root = StateRoot::select(account_context.state_root());
+    let mut state =
+        open_d17_current_only(&root).map_err(|_| ProviderExecReconciliationError::State)?;
+    let provisional_lease = state
+        .acquire_d17_provisional_lease()
+        .map_err(|_| ProviderExecReconciliationError::State)?;
+    let slot = read_marker(state.root(), account_context.presentation_directory())
+        .map_err(ReconcileError::from)?;
+    presentation_binding.validate_slot(&slot).map_err(|_| {
+        ProviderExecReconciliationError::Context(AccountShellError::ContextUnavailable)
+    })?;
+    let operation_id = slot
+        .handoff_request()
+        .map(crate::domain::OperationId::from)
+        .ok_or(ReconcileError::HandoffIdentityUnavailable)?;
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, slot.runtime_paths().clone());
+    prove_provider_exec(
+        &mut state,
+        &provisional_lease,
+        account_context.presentation_directory(),
+        &runtime,
+        &process_probe,
+        &LinuxProviderExecutableProbe,
+    )?;
+    let target = state
+        .d17_onboarding_exec_proof_target_current(&provisional_lease, operation_id)
+        .map_err(ReconcileError::from)?;
+    if target.provider() != ProviderKind::OpenCode {
+        return Err(ReconcileError::ProviderIdentityMismatch.into());
+    }
+    let mut registry = state
+        .into_d17_host_registry()
+        .map_err(|_| ProviderExecReconciliationError::State)?;
+    let record = registry
+        .observer_runtime_by_id(target.ownership().runtime_id)
+        .map_err(|_| ProviderExecReconciliationError::State)?
+        .ok_or(ProviderExecReconciliationError::Observer)?;
+    let handle = registry
+        .observer_opencode_runtime_handle(target.ownership().runtime_id)
+        .map_err(|_| ProviderExecReconciliationError::State)?
+        .ok_or(ProviderExecReconciliationError::Observer)?;
+    crate::actions::spawn_d17_opencode_observer(&mut registry, root.base(), &record, &handle)
+        .map_err(|_| ProviderExecReconciliationError::Observer)?;
+    drop(registry);
+    let mut state =
+        open_d17_current_only(&root).map_err(|_| ProviderExecReconciliationError::State)?;
+    finalize_opencode_observer_ready(
+        &mut state,
+        &provisional_lease,
+        account_context.presentation_directory(),
+        &runtime,
+        &process_probe,
     )?;
     Ok(())
 }

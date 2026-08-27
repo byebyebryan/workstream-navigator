@@ -786,7 +786,11 @@ fn prepare<A: ObserverAuthority>(
         observer_pid,
         &observer_birth,
     )?;
-    if let Some(current) = authority.runtime_by_id(context.runtime_id)?
+    // D17 deliberately retains `starting` until its presentation controller
+    // commits the onboarding proof after this exact Ready handle.  D16 has no
+    // such journal phase and preserves its existing immediate Started hint.
+    if context.mode == OpenCodeObserverMode::D16
+        && let Some(current) = authority.runtime_by_id(context.runtime_id)?
         && current.status == RuntimeStatus::Starting
     {
         let evidence = ObserverEvidence {

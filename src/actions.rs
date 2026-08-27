@@ -20,6 +20,7 @@ pub use creation::{fork_workstream, recover_managed_operation, start_independent
 pub use lifecycle::{archive, await_deliberate_park, park, rename, restore};
 pub use model::{ActionError, StartOutcome, reconcile_observer_trust};
 pub use providers::{codex_launch_program, codex_recovery_program};
+pub(crate) use start::spawn_d17_opencode_observer;
 pub use start::{reconcile_lost_runtimes, recover, start};
 
 pub(super) use std::{

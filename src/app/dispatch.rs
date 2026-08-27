@@ -21,6 +21,7 @@ use crate::application::{
     operating_system_hostname,
 };
 use crate::domain::ProviderKind;
+use crate::onboarding::valid_launch_capability_token;
 
 pub(super) fn execute(cli: Cli) -> Result<(), AppError> {
     let Cli {
@@ -118,7 +119,7 @@ fn d17_shell_gate(
         }
         crate::d17_shell_control::AccountShellGateOutcome::Prepared(handoff) => {
             let capability = handoff.capability().token();
-            if !valid_d17_capability(capability) {
+            if !valid_launch_capability_token(capability) {
                 return Err(AppError::D17ShellControlUnavailable);
             }
             let mut stdout = std::io::stdout().lock();
@@ -138,7 +139,7 @@ fn d17_launch_helper(
     provider: &str,
     arguments: &[std::ffi::OsString],
 ) -> Result<(), AppError> {
-    if !valid_d17_capability(capability) {
+    if !valid_launch_capability_token(capability) {
         return Err(AppError::D17ShellControlUnavailable);
     }
     let provider = parse_provider(provider).map_err(|_| AppError::D17ShellControlUnavailable)?;
@@ -152,14 +153,6 @@ fn d17_launch_helper(
                 .map_err(|_| AppError::D17ShellControlUnavailable)
         }
     }
-}
-
-fn valid_d17_capability(value: &str) -> bool {
-    !value.is_empty()
-        && value.len() <= 512
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'.')
 }
 
 fn execute_root_command(root: &StateRoot, command: Commands) -> Result<(), AppError> {

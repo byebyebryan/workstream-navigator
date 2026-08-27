@@ -413,11 +413,9 @@ pub(crate) fn verify_launch_capability(
     {
         return Err(CapabilityError::InvalidToken);
     }
-    let (token_id, secret) = token.split_once('.').ok_or(CapabilityError::InvalidToken)?;
-    if token_id != metadata.token_id
-        || Uuid::parse_str(token_id).is_err()
-        || secret.len() != 64
-        || !secret.bytes().all(is_lower_hex)
+    let (token_id, _) = token.split_once('.').ok_or(CapabilityError::InvalidToken)?;
+    if !valid_launch_capability_token(token)
+        || token_id != metadata.token_id
         || !constant_time_eq(verifier(token).as_bytes(), metadata.verifier.as_bytes())
     {
         return Err(CapabilityError::InvalidToken);
@@ -429,6 +427,21 @@ pub(crate) fn verify_launch_capability(
         return Err(CapabilityError::ClaimMismatch);
     }
     Ok(())
+}
+
+/// Validates the exact private-channel grammar emitted by
+/// [`LaunchCapability::issue`]. Keeping this next to the issuer prevents CLI
+/// transport preflight from drifting away from the helper's token grammar.
+pub(crate) fn valid_launch_capability_token(token: &str) -> bool {
+    let Some((token_id, secret)) = token.split_once('.') else {
+        return false;
+    };
+    let Ok(parsed_token_id) = Uuid::parse_str(token_id) else {
+        return false;
+    };
+    parsed_token_id.to_string() == token_id
+        && secret.len() == 64
+        && secret.bytes().all(is_lower_hex)
 }
 
 fn verifier(token: &str) -> String {
@@ -582,7 +595,8 @@ mod tests {
 
     use super::{
         CapabilityError, FreshProviderLaunch, LaunchCapability, LaunchCapabilityClaims,
-        ShellCommandDecision, classify_shell_command, verify_launch_capability,
+        ShellCommandDecision, classify_shell_command, valid_launch_capability_token,
+        verify_launch_capability,
     };
     use crate::{
         domain::{IdGenerator, LocationId, OperationId, ProviderKind, Revision, RuntimeId},
@@ -709,6 +723,7 @@ mod tests {
         let ids = SequenceIds::default();
         let capability = LaunchCapability::issue(&capability_claims, 10, 1_010, &ids).unwrap();
         let metadata = capability.metadata().clone();
+        assert!(valid_launch_capability_token(capability.token()));
         assert_ne!(metadata.token_id(), capability.token());
         assert!(!format!("{capability:?}").contains(capability.token()));
         assert!(
@@ -723,6 +738,15 @@ mod tests {
         );
         assert_eq!(metadata.expiry_monotonic_millis(), 1_010);
         verify_launch_capability(capability.token(), &metadata, &capability_claims, 11).unwrap();
+
+        for invalid in [
+            "00000000000000000000000000000001.0000000000000000000000000000000000000000000000000000000000000000",
+            "00000000-0000-0000-0000-000000000001.0000",
+            "00000000-0000-0000-0000-000000000001.000000000000000000000000000000000000000000000000000000000000000G",
+            "00000000-0000-0000-0000-000000000001.0000000000000000000000000000000000000000000000000000000000000000.extra",
+        ] {
+            assert!(!valid_launch_capability_token(invalid));
+        }
 
         let different_provider = claims(ProviderKind::OpenCode, "birth-a");
         assert_eq!(

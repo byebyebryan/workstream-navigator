@@ -2648,7 +2648,7 @@ impl D16State {
             provisional_lease,
             request,
             ownership,
-            OnboardingPhase::ProviderPreparation,
+            D17OnboardingAdvance::Normal(OnboardingPhase::ProviderPreparation),
         )
     }
 
@@ -2669,7 +2669,7 @@ impl D16State {
             provisional_lease,
             request,
             ownership,
-            OnboardingPhase::ProviderExternalEffectStarted,
+            D17OnboardingAdvance::OpenCodeExternalEffectStarted,
         )
     }
 
@@ -2690,7 +2690,29 @@ impl D16State {
             provisional_lease,
             request,
             ownership,
-            OnboardingPhase::ProviderExecStarted,
+            D17OnboardingAdvance::Normal(OnboardingPhase::ProviderExecStarted),
+        )
+    }
+
+    /// Records a Codex final-`execve` failure only after exact durable proof
+    /// that neither a provider process nor a binding can exist. This is a
+    /// terminal onboarding fact, not ordinary attachment/action authority;
+    /// later recovery decides guarded rollback.
+    #[allow(
+        dead_code,
+        reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn record_d17_codex_exec_failed_known_absent_current(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        request: &OnboardingPrepareRequest,
+        ownership: OnboardingOwnership,
+    ) -> Result<OnboardingOwnership, StateError> {
+        self.advance_d17_onboarding_current(
+            provisional_lease,
+            request,
+            ownership,
+            D17OnboardingAdvance::CodexExecFailedKnownAbsent,
         )
     }
 
@@ -2703,7 +2725,7 @@ impl D16State {
         provisional_lease: &ProvisionalLease,
         request: &OnboardingPrepareRequest,
         ownership: OnboardingOwnership,
-        next: OnboardingPhase,
+        advance: D17OnboardingAdvance,
     ) -> Result<OnboardingOwnership, StateError> {
         let previous_busy_timeout = self
             .connection
@@ -2716,7 +2738,7 @@ impl D16State {
             provisional_lease,
             request,
             ownership,
-            next,
+            advance,
         );
         let restore = self.connection.busy_timeout(Duration::from_millis(
             u64::try_from(previous_busy_timeout.max(0)).unwrap_or(0),
@@ -2733,7 +2755,7 @@ impl D16State {
         provisional_lease: &ProvisionalLease,
         request: &OnboardingPrepareRequest,
         ownership: OnboardingOwnership,
-        next: OnboardingPhase,
+        advance: D17OnboardingAdvance,
     ) -> Result<OnboardingOwnership, StateError> {
         ensure_d17_current_mode(self.mode)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
@@ -2753,24 +2775,54 @@ impl D16State {
             &registry_generation,
             ownership,
         )?;
+        let next = advance.next();
         current.transition(next)?;
+        if advance.requires_codex_known_absence() {
+            validate_d17_codex_known_absence(&transaction, ownership)?;
+        }
+        if advance.requires_opencode_external_effect() {
+            validate_d17_opencode_external_effect(&transaction, ownership)?;
+        }
+        if next == OnboardingPhase::ProviderExecStarted {
+            validate_d17_provider_exec_start(&transaction, ownership, request.provider)?;
+        }
         let next_revision = next_revision(persisted_revision)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
-        let updated = transaction
-            .execute(
-                "UPDATE compound_operations
-                 SET phase = ?1, revision = ?2
-                 WHERE operation_id = ?3 AND kind = 'onboard'
-                   AND phase = ?4 AND revision = ?5",
-                params![
-                    operation_phase_text(next.operation_phase()),
-                    next_revision.value(),
-                    ownership.operation_id.to_string(),
-                    operation_phase_text(current.operation_phase()),
-                    persisted_revision.value(),
-                ],
-            )
-            .map_err(StateError::Sqlite)?;
+        let updated = if let Some(watermark) = advance.effect_watermark() {
+            transaction
+                .execute(
+                    "UPDATE compound_operations
+                     SET phase = ?1, effect_watermark = ?2, revision = ?3
+                     WHERE operation_id = ?4 AND kind = 'onboard'
+                       AND phase = ?5 AND revision = ?6
+                       AND effect_watermark IS NULL AND outcome_json IS NULL",
+                    params![
+                        operation_phase_text(next.operation_phase()),
+                        watermark,
+                        next_revision.value(),
+                        ownership.operation_id.to_string(),
+                        operation_phase_text(current.operation_phase()),
+                        persisted_revision.value(),
+                    ],
+                )
+                .map_err(StateError::Sqlite)?
+        } else {
+            transaction
+                .execute(
+                    "UPDATE compound_operations
+                     SET phase = ?1, revision = ?2
+                     WHERE operation_id = ?3 AND kind = 'onboard'
+                       AND phase = ?4 AND revision = ?5",
+                    params![
+                        operation_phase_text(next.operation_phase()),
+                        next_revision.value(),
+                        ownership.operation_id.to_string(),
+                        operation_phase_text(current.operation_phase()),
+                        persisted_revision.value(),
+                    ],
+                )
+                .map_err(StateError::Sqlite)?
+        };
         if updated != 1 {
             return Err(StateError::ConcurrentWrite);
         }
@@ -3768,6 +3820,48 @@ enum D17OnboardingAuthority<'lease> {
     Current,
 }
 
+/// The private mutation class for one D17 onboarding journal transition.
+/// Known-absent Codex exec failure is deliberately distinct from ordinary
+/// phase progression because it can be recorded only after exact proof that
+/// no provider process, binding, or earlier external effect exists.
+#[derive(Clone, Copy)]
+enum D17OnboardingAdvance {
+    Normal(OnboardingPhase),
+    OpenCodeExternalEffectStarted,
+    CodexExecFailedKnownAbsent,
+}
+
+impl D17OnboardingAdvance {
+    const fn next(self) -> OnboardingPhase {
+        match self {
+            Self::Normal(next) => next,
+            Self::OpenCodeExternalEffectStarted => OnboardingPhase::ProviderExternalEffectStarted,
+            Self::CodexExecFailedKnownAbsent => OnboardingPhase::KnownAbsentExec,
+        }
+    }
+
+    const fn effect_watermark(self) -> Option<&'static str> {
+        match self {
+            Self::Normal(_) => None,
+            Self::OpenCodeExternalEffectStarted => {
+                Some(D17_OPENCODE_EXTERNAL_EFFECT_STARTED_WATERMARK)
+            }
+            Self::CodexExecFailedKnownAbsent => Some(D17_CODEX_EXEC_FAILED_KNOWN_ABSENT_WATERMARK),
+        }
+    }
+
+    const fn requires_codex_known_absence(self) -> bool {
+        matches!(self, Self::CodexExecFailedKnownAbsent)
+    }
+
+    const fn requires_opencode_external_effect(self) -> bool {
+        matches!(self, Self::OpenCodeExternalEffectStarted)
+    }
+}
+
+const D17_OPENCODE_EXTERNAL_EFFECT_STARTED_WATERMARK: &str = "d17-opencode-external-effect-started";
+const D17_CODEX_EXEC_FAILED_KNOWN_ABSENT_WATERMARK: &str = "d17-codex-exec-failed-known-absent";
+
 impl D17OnboardingAuthority<'_> {
     fn revalidate(self, mode: D16OpenMode, root: &Path) -> Result<(), StateError> {
         match self {
@@ -4175,6 +4269,118 @@ fn validate_d17_owned_onboarding_transaction(
     )
     .ok_or(StateError::MalformedHostSchema)?;
     Ok((phase, persisted_revision))
+}
+
+/// Proves the narrow Codex-only condition under which an exact final `execve`
+/// error can be considered known-absent. Any recorded provider identity,
+/// binding, prior effect watermark, or non-starting Runtime is ambiguous and
+/// must remain fenced for recovery instead.
+fn validate_d17_codex_known_absence(
+    transaction: &rusqlite::Transaction<'_>,
+    ownership: OnboardingOwnership,
+) -> Result<(), StateError> {
+    let runtime: (String, Option<i64>, Option<String>, String) = transaction
+        .query_row(
+            "SELECT provider, provider_pid, process_birth, lifecycle
+             FROM runtimes WHERE runtime_id = ?1 AND workstream_id = ?2",
+            params![
+                ownership.runtime_id.to_string(),
+                ownership.workstream_id.to_string(),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .map_err(StateError::Sqlite)?;
+    let bindings: i64 = transaction
+        .query_row(
+            "SELECT COUNT(*) FROM provider_bindings WHERE runtime_id = ?1",
+            [ownership.runtime_id.to_string()],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)?;
+    let operation_effects: (Option<String>, Option<String>) = transaction
+        .query_row(
+            "SELECT effect_watermark, outcome_json
+             FROM compound_operations WHERE operation_id = ?1",
+            [ownership.operation_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(StateError::Sqlite)?;
+    if runtime.0 != ProviderKind::Codex.as_str()
+        || runtime.1.is_some()
+        || runtime.2.is_some()
+        || runtime.3 != "starting"
+        || bindings != 0
+        || operation_effects.0.is_some()
+        || operation_effects.1.is_some()
+    {
+        return Err(StateError::OnboardingOperationUnavailable);
+    }
+    Ok(())
+}
+
+/// Records only `OpenCode`'s pre-effect boundary. The subsequent native exec or
+/// any failed/unknown POST must retain this watermark, so no later path can
+/// misclassify that attempt as a clean Codex-style known absence.
+fn validate_d17_opencode_external_effect(
+    transaction: &rusqlite::Transaction<'_>,
+    ownership: OnboardingOwnership,
+) -> Result<(), StateError> {
+    let provider: String = transaction
+        .query_row(
+            "SELECT provider FROM runtimes WHERE runtime_id = ?1 AND workstream_id = ?2",
+            params![
+                ownership.runtime_id.to_string(),
+                ownership.workstream_id.to_string(),
+            ],
+            |row| row.get(0),
+        )
+        .map_err(StateError::Sqlite)?;
+    if provider != ProviderKind::OpenCode.as_str() {
+        return Err(StateError::OnboardingOperationUnavailable);
+    }
+    Ok(())
+}
+
+/// Requires the provider-specific pre-exec history that the journal retains
+/// after the transient helper exits. `Codex` has no provider pre-effect path;
+/// `OpenCode` must retain its exact potential-effect watermark before native
+/// exec can begin.
+fn validate_d17_provider_exec_start(
+    transaction: &rusqlite::Transaction<'_>,
+    ownership: OnboardingOwnership,
+    provider: ProviderKind,
+) -> Result<(), StateError> {
+    let persisted: (String, Option<String>, Option<String>) = transaction
+        .query_row(
+            "SELECT runtimes.provider, compound_operations.effect_watermark,
+                    compound_operations.outcome_json
+             FROM runtimes
+             JOIN compound_operations ON compound_operations.operation_id = ?1
+             WHERE runtimes.runtime_id = ?2 AND runtimes.workstream_id = ?3",
+            params![
+                ownership.operation_id.to_string(),
+                ownership.runtime_id.to_string(),
+                ownership.workstream_id.to_string(),
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(StateError::Sqlite)?;
+    let valid = match provider {
+        ProviderKind::Codex => {
+            persisted.0 == ProviderKind::Codex.as_str()
+                && persisted.1.is_none()
+                && persisted.2.is_none()
+        }
+        ProviderKind::OpenCode => {
+            persisted.0 == ProviderKind::OpenCode.as_str()
+                && persisted.1.as_deref() == Some(D17_OPENCODE_EXTERNAL_EFFECT_STARTED_WATERMARK)
+                && persisted.2.is_none()
+        }
+    };
+    if !valid {
+        return Err(StateError::OnboardingOperationUnavailable);
+    }
+    Ok(())
 }
 
 type D17ExecProofRuntimeRow = (
@@ -9028,18 +9234,18 @@ mod tests {
             state.record_d17_provider_preparation_current(&provisional, &request, ownership),
             Err(StateError::ConcurrentWrite),
         ));
-        let effect_started = state
-            .record_d17_provider_external_effect_started_current(
+        assert!(matches!(
+            state.record_d17_provider_external_effect_started_current(
                 &provisional,
                 &request,
                 preparation,
-            )
-            .unwrap();
-        assert_eq!(effect_started.operation_revision.value(), 5);
+            ),
+            Err(StateError::OnboardingOperationUnavailable),
+        ));
         let exec_started = state
-            .record_d17_provider_exec_started_current(&provisional, &request, effect_started)
+            .record_d17_provider_exec_started_current(&provisional, &request, preparation)
             .unwrap();
-        assert_eq!(exec_started.operation_revision.value(), 6);
+        assert_eq!(exec_started.operation_revision.value(), 5);
         assert_eq!(
             state
                 .connection
@@ -9049,7 +9255,7 @@ mod tests {
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
                 )
                 .unwrap(),
-            ("provider_exec_started".to_owned(), 6)
+            ("provider_exec_started".to_owned(), 5)
         );
         assert!(matches!(
             state.record_d17_provider_preparation_current(&provisional, &request, exec_started),
@@ -9100,22 +9306,31 @@ mod tests {
                 ],
             )
             .unwrap();
-        let provider_evidence =
-            OnboardingProviderExecEvidence::new(711, "birth-711".to_owned()).unwrap();
-        let exec_proven = state
-            .record_d17_provider_exec_proven_current(&provisional, exec_started, &provider_evidence)
+        let known_absent = state
+            .record_d17_codex_exec_failed_known_absent_current(&provisional, &request, exec_started)
             .unwrap();
-        assert_eq!(exec_proven.operation_revision.value(), 7);
+        assert_eq!(known_absent.operation_revision.value(), 6);
         assert_eq!(
             state
                 .connection
                 .query_row(
-                    "SELECT phase, revision FROM compound_operations WHERE operation_id = ?1",
+                    "SELECT phase, effect_watermark, revision
+                     FROM compound_operations WHERE operation_id = ?1",
                     [issued.operation_id().to_string()],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
                 )
                 .unwrap(),
-            ("provider_exec_proven".to_owned(), 7)
+            (
+                "exec_failed_known_absent".to_owned(),
+                D17_CODEX_EXEC_FAILED_KNOWN_ABSENT_WATERMARK.to_owned(),
+                6,
+            )
         );
         assert_eq!(
             state
@@ -9126,16 +9341,16 @@ mod tests {
                     [candidate_runtime_id.to_string()],
                     |row| {
                         Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<i64>>(0)?,
+                            row.get::<_, Option<String>>(1)?,
                             row.get::<_, String>(2)?,
                             row.get::<_, i64>(3)?,
                         ))
                     },
                 )
                 .unwrap(),
-            (711, "birth-711".to_owned(), "starting".to_owned(), 2),
-            "exec proof records only the exact process identity, not a binding or lifecycle claim"
+            (None, None, "starting".to_owned(), 1),
+            "known-absent exec failure cannot manufacture a provider identity or lifecycle claim"
         );
         assert!(matches!(
             state.d17_onboarding_exec_proof_ownership_current(
@@ -9143,6 +9358,16 @@ mod tests {
                 exec_started.operation_id,
             ),
             Err(StateError::OnboardingOperationUnavailable),
+        ));
+        assert!(matches!(
+            state.record_d17_codex_exec_failed_known_absent_current(
+                &provisional,
+                &request,
+                known_absent,
+            ),
+            Err(StateError::Domain(
+                crate::domain::DomainError::InvalidOnboardingTransition { .. }
+            )),
         ));
         assert_eq!(
             state

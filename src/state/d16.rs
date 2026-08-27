@@ -2111,6 +2111,45 @@ impl D16State {
         request: &OnboardingPrepareRequest,
         id_generator: &dyn IdGenerator,
     ) -> Result<OnboardingPreparation, StateError> {
+        self.prepare_d17_onboarding_authorized(
+            D17OnboardingAuthority::Cutover(transition_lease),
+            provisional_lease,
+            request,
+            id_generator,
+        )
+    }
+
+    /// Transactionally reserves the D17 graph from a normal schema-14
+    /// opening. The caller must retain the exact D17 provisional lease; a
+    /// pre-schema-14 migration lease cannot authorize this path.
+    ///
+    /// This remains an unreachable broker seam. It creates no marker, tmux
+    /// artifact, Runtime process, or provider process.
+    #[allow(
+        dead_code,
+        reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn prepare_d17_onboarding_current(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        request: &OnboardingPrepareRequest,
+        id_generator: &dyn IdGenerator,
+    ) -> Result<OnboardingPreparation, StateError> {
+        self.prepare_d17_onboarding_authorized(
+            D17OnboardingAuthority::Current,
+            provisional_lease,
+            request,
+            id_generator,
+        )
+    }
+
+    fn prepare_d17_onboarding_authorized(
+        &mut self,
+        authority: D17OnboardingAuthority<'_>,
+        provisional_lease: &ProvisionalLease,
+        request: &OnboardingPrepareRequest,
+        id_generator: &dyn IdGenerator,
+    ) -> Result<OnboardingPreparation, StateError> {
         let previous_busy_timeout = self
             .connection
             .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
@@ -2119,7 +2158,7 @@ impl D16State {
             .busy_timeout(Duration::ZERO)
             .map_err(StateError::Sqlite)?;
         let preparation = self.prepare_d17_onboarding_with_zero_timeout(
-            transition_lease,
+            authority,
             provisional_lease,
             request,
             id_generator,
@@ -2141,13 +2180,12 @@ impl D16State {
     )]
     fn prepare_d17_onboarding_with_zero_timeout(
         &mut self,
-        transition_lease: &TransitionLease,
+        authority: D17OnboardingAuthority<'_>,
         provisional_lease: &ProvisionalLease,
         request: &OnboardingPrepareRequest,
         id_generator: &dyn IdGenerator,
     ) -> Result<OnboardingPreparation, StateError> {
-        ensure_cutover_transition_mode(self.mode)?;
-        transition_lease.revalidate_for_mutation(&self.root)?;
+        authority.revalidate(self.mode, &self.root)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
         validate_schema14(&self.connection)?;
         validate_onboarding_prepare_request(request, &self.root)?;
@@ -2156,7 +2194,7 @@ impl D16State {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
-        transition_lease.revalidate_for_mutation(&self.root)?;
+        authority.revalidate(self.mode, &self.root)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
         let registry_generation = load_registry_generation(&transaction)?;
 
@@ -2168,7 +2206,7 @@ impl D16State {
             &self.root,
         )? {
             transaction.commit().map_err(StateError::Sqlite)?;
-            transition_lease.revalidate_for_mutation(&self.root)?;
+            authority.revalidate(self.mode, &self.root)?;
             provisional_lease.revalidate_for_mutation(&self.root)?;
             return Ok(OnboardingPreparation::Existing(existing));
         }
@@ -2311,10 +2349,10 @@ impl D16State {
             .map_err(StateError::Sqlite)?;
         validate_project_membership_transaction(&transaction)?;
         validate_schema14(&transaction)?;
-        transition_lease.revalidate_for_mutation(&self.root)?;
+        authority.revalidate(self.mode, &self.root)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
         transaction.commit().map_err(StateError::Sqlite)?;
-        transition_lease.revalidate_for_mutation(&self.root)?;
+        authority.revalidate(self.mode, &self.root)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
         Ok(OnboardingPreparation::Issued(OnboardingReservation {
             operation_id,
@@ -2341,6 +2379,46 @@ impl D16State {
         token: &str,
         now_monotonic_millis: i64,
     ) -> Result<OnboardingOwnership, StateError> {
+        self.consume_d17_onboarding_authorized(
+            D17OnboardingAuthority::Cutover(transition_lease),
+            provisional_lease,
+            request,
+            token,
+            now_monotonic_millis,
+        )
+    }
+
+    /// Atomically consumes one D17 launch capability from a normal
+    /// schema-14 opening. The provisional lease remains the only mutable
+    /// shell-slot authority; provider execution remains outside this seam.
+    #[allow(
+        dead_code,
+        reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn consume_d17_onboarding_current(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        request: &OnboardingPrepareRequest,
+        token: &str,
+        now_monotonic_millis: i64,
+    ) -> Result<OnboardingOwnership, StateError> {
+        self.consume_d17_onboarding_authorized(
+            D17OnboardingAuthority::Current,
+            provisional_lease,
+            request,
+            token,
+            now_monotonic_millis,
+        )
+    }
+
+    fn consume_d17_onboarding_authorized(
+        &mut self,
+        authority: D17OnboardingAuthority<'_>,
+        provisional_lease: &ProvisionalLease,
+        request: &OnboardingPrepareRequest,
+        token: &str,
+        now_monotonic_millis: i64,
+    ) -> Result<OnboardingOwnership, StateError> {
         let previous_busy_timeout = self
             .connection
             .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
@@ -2349,7 +2427,7 @@ impl D16State {
             .busy_timeout(Duration::ZERO)
             .map_err(StateError::Sqlite)?;
         let ownership = self.consume_d17_onboarding_with_zero_timeout(
-            transition_lease,
+            authority,
             provisional_lease,
             request,
             token,
@@ -2372,14 +2450,13 @@ impl D16State {
     )]
     fn consume_d17_onboarding_with_zero_timeout(
         &mut self,
-        transition_lease: &TransitionLease,
+        authority: D17OnboardingAuthority<'_>,
         provisional_lease: &ProvisionalLease,
         request: &OnboardingPrepareRequest,
         token: &str,
         now_monotonic_millis: i64,
     ) -> Result<OnboardingOwnership, StateError> {
-        ensure_cutover_transition_mode(self.mode)?;
-        transition_lease.revalidate_for_mutation(&self.root)?;
+        authority.revalidate(self.mode, &self.root)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
         validate_schema14(&self.connection)?;
         validate_onboarding_prepare_request(request, &self.root)?;
@@ -2388,7 +2465,7 @@ impl D16State {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
-        transition_lease.revalidate_for_mutation(&self.root)?;
+        authority.revalidate(self.mode, &self.root)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
         let registry_generation = load_registry_generation(&transaction)?;
         let existing = load_existing_onboarding_preparation(
@@ -2442,7 +2519,7 @@ impl D16State {
         OnboardingPhase::CapabilityIssued.transition(OnboardingPhase::RuntimeOwnedLaunching)?;
         let operation_revision = Revision::try_from(persisted.5)?;
         let next_revision = next_revision(operation_revision)?;
-        transition_lease.revalidate_for_mutation(&self.root)?;
+        authority.revalidate(self.mode, &self.root)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
         let updated = transaction
             .execute(
@@ -2461,10 +2538,10 @@ impl D16State {
             return Err(StateError::ConcurrentWrite);
         }
         validate_schema14(&transaction)?;
-        transition_lease.revalidate_for_mutation(&self.root)?;
+        authority.revalidate(self.mode, &self.root)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
         transaction.commit().map_err(StateError::Sqlite)?;
-        transition_lease.revalidate_for_mutation(&self.root)?;
+        authority.revalidate(self.mode, &self.root)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
         Ok(OnboardingOwnership {
             operation_id: existing.operation_id,
@@ -3245,6 +3322,28 @@ fn ensure_d17_current_mode(mode: D16OpenMode) -> Result<(), StateError> {
         Err(StateError::StateRecoveryRequired(
             StateRecoveryReason::UnsupportedLegacySchema,
         ))
+    }
+}
+
+/// The only two authority sources permitted to mutate D17 onboarding state.
+/// The cutover variant is retained solely for the one-time schema migration
+/// checkpoint; normal D17 execution can use only the schema-14 opening and
+/// its separately retained provisional lease.
+#[derive(Clone, Copy)]
+enum D17OnboardingAuthority<'lease> {
+    Cutover(&'lease TransitionLease),
+    Current,
+}
+
+impl D17OnboardingAuthority<'_> {
+    fn revalidate(self, mode: D16OpenMode, root: &Path) -> Result<(), StateError> {
+        match self {
+            Self::Cutover(transition_lease) => {
+                ensure_cutover_transition_mode(mode)?;
+                transition_lease.revalidate_for_mutation(root)
+            }
+            Self::Current => ensure_d17_current_mode(mode),
+        }
     }
 }
 
@@ -8107,6 +8206,124 @@ mod tests {
                 .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
             73
+        );
+        validate_schema14(&state.connection).unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn schema14_current_onboarding_uses_only_the_retained_provisional_lease() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+        drop(fresh_create(&state_path, &SequenceIds::default()).unwrap());
+
+        let transition = transition_lease(&state_path);
+        let mut migrating = open_cutover_transition(&root, &transition).unwrap();
+        migrating.migrate_schema13_to14(&transition).unwrap();
+        drop(migrating);
+        drop(transition);
+        fs::remove_file(state_path.join(TRANSITION_LOCK_FILE)).unwrap();
+
+        let mut state = open_d17_current_only(&root).unwrap();
+        let provisional = state.acquire_d17_provisional_lease().unwrap();
+        let candidate_runtime_id = RuntimeId::from(Uuid::from_u128(703));
+        let request = onboarding_prepare_request(&state_path, candidate_runtime_id);
+        let ids = SequenceIds::default();
+        state
+            .connection
+            .busy_timeout(Duration::from_millis(81))
+            .unwrap();
+
+        let issued = match state
+            .prepare_d17_onboarding_current(&provisional, &request, &ids)
+            .unwrap()
+        {
+            OnboardingPreparation::Issued(reservation) => reservation,
+            OnboardingPreparation::Existing(_) => panic!("first preparation must issue"),
+        };
+        let token = issued.capability().token().to_owned();
+        assert_eq!(issued.runtime().runtime_id, candidate_runtime_id);
+        assert_eq!(issued.runtime().status, RuntimeStatus::Starting);
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT phase FROM compound_operations WHERE operation_id = ?1",
+                    [issued.operation_id().to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "capability_issued"
+        );
+        assert_eq!(
+            state
+                .connection
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            81
+        );
+
+        match state
+            .prepare_d17_onboarding_current(&provisional, &request, &ids)
+            .unwrap()
+        {
+            OnboardingPreparation::Existing(existing) => {
+                assert_eq!(existing.operation_id, issued.operation_id());
+                assert_eq!(existing.runtime_id, candidate_runtime_id);
+            }
+            OnboardingPreparation::Issued(_) => panic!("replay must not reissue a token"),
+        }
+
+        let ownership = state
+            .consume_d17_onboarding_current(
+                &provisional,
+                &request,
+                &token,
+                request.now_monotonic_millis + 1,
+            )
+            .unwrap();
+        assert_eq!(ownership.operation_id, issued.operation_id());
+        assert_eq!(ownership.runtime_id, candidate_runtime_id);
+        assert_eq!(ownership.operation_revision.value(), 3);
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT phase, revision FROM compound_operations WHERE operation_id = ?1",
+                    [issued.operation_id().to_string()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            ("runtime_owned_launching".to_owned(), 3)
+        );
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT lifecycle FROM runtimes WHERE runtime_id = ?1",
+                    [candidate_runtime_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "starting",
+            "current ownership alone must not claim provider execution"
+        );
+        assert!(matches!(
+            state.consume_d17_onboarding_current(
+                &provisional,
+                &request,
+                &token,
+                request.now_monotonic_millis + 1,
+            ),
+            Err(StateError::OnboardingOperationUnavailable)
+        ));
+        assert_eq!(
+            state
+                .connection
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            81
         );
         validate_schema14(&state.connection).unwrap();
     }

@@ -1048,6 +1048,7 @@ impl Presentation {
         d17: Option<(uuid::Uuid, &Path)>,
     ) -> Result<Option<D17PresentationContext>, PresentationError> {
         create_paths(&self.paths)?;
+        let is_d17 = d17.is_some();
         let context = d17
             .map(|(presentation_id, seed_cwd)| {
                 self.complete_start_stage(
@@ -1064,7 +1065,12 @@ impl Presentation {
             "-n".into(),
             NAVIGATOR_WINDOW.into(),
         ];
-        arguments.extend(self.navigator_command());
+        let navigator_command = if is_d17 {
+            self.d17_navigator_command()
+        } else {
+            self.navigator_command()
+        };
+        arguments.extend(navigator_command);
         let result = self.invoke(Some(&self.paths.config), arguments);
         self.complete_start_stage("server creation", result)?;
         let result = self.capture_ownership_socket_identity();
@@ -2307,11 +2313,19 @@ impl Presentation {
     }
 
     fn navigator_command(&self) -> Vec<OsString> {
+        self.navigator_command_for("_navigator")
+    }
+
+    fn d17_navigator_command(&self) -> Vec<OsString> {
+        self.navigator_command_for("_navigator_d17")
+    }
+
+    fn navigator_command_for(&self, pane_command: &str) -> Vec<OsString> {
         vec![
             self.executable.clone().into_os_string(),
             "--state-root".into(),
             self.state_root.clone().into_os_string(),
-            "_navigator".into(),
+            pane_command.into(),
             "--presentation-socket".into(),
             self.paths.socket.clone().into_os_string(),
             "--presentation-session".into(),
@@ -7010,6 +7024,25 @@ mod tests {
         assert_eq!(arguments[1], "-t");
         assert_eq!(arguments[3], "-x");
         assert_eq!(arguments[4], "32");
+    }
+
+    #[test]
+    fn d17_navigator_command_cannot_fall_back_to_the_d16_pane() {
+        let temporary = tempfile::tempdir().unwrap();
+        let presentation = Presentation {
+            paths: PresentationPaths::fresh(temporary.path()),
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+
+        let command = presentation
+            .d17_navigator_command()
+            .into_iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(command[3], "_navigator_d17");
+        assert_ne!(command[3], "_navigator");
     }
 
     #[test]

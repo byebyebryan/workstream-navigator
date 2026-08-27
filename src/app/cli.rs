@@ -79,6 +79,14 @@ pub(super) enum Commands {
         #[arg(long)]
         presentation_session: String,
     },
+    /// Internal schema-14 Ratatui process run inside a D17 presentation pane.
+    #[command(name = "_navigator_d17", hide = true)]
+    NavigatorPaneD17 {
+        #[arg(long)]
+        presentation_socket: PathBuf,
+        #[arg(long)]
+        presentation_session: String,
+    },
     /// Internal fixed presentation control helper.
     #[command(name = "_presentation_control", hide = true)]
     PresentationControl {

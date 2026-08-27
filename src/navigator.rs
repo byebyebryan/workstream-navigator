@@ -7,6 +7,7 @@
 mod d16;
 mod d16_controller;
 pub(crate) mod d17;
+mod d17_controller;
 
 pub use d16::{
     D16Command, D16ListGeometry, D16LocationRow, D16Modal, D16Model, D16Navigator, D16OperationRow,
@@ -14,3 +15,4 @@ pub use d16::{
     D16RowId, D16WorkstreamRow,
 };
 pub use d16_controller::{D16NavigatorError, run_local_navigator};
+pub(crate) use d17_controller::{D17NavigatorError, run_d17_navigator};

@@ -24,7 +24,7 @@ pub(super) use thiserror::Error;
 
 pub(super) use crate::{
     domain::{OperationId, ProviderSessionId, Revision, RuntimeId, WorkstreamId},
-    navigator::run_local_navigator,
+    navigator::{run_d17_navigator, run_local_navigator},
     presentation::{AttachmentPhase, Presentation},
     provider::codex::app_server::EphemeralAppServer,
     provider::codex::profile::{OBSERVER_PROFILE_SCHEMA_VERSION, ObserverProfile},

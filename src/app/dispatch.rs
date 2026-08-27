@@ -1,4 +1,4 @@
-use super::{Presentation, StateRoot, run_local_navigator};
+use super::{Presentation, StateRoot, run_d17_navigator, run_local_navigator};
 use super::{
     cli::{Cli, Commands},
     launch::{
@@ -94,6 +94,11 @@ fn execute_root_command(root: &StateRoot, command: Commands) -> Result<(), AppEr
             presentation_session,
         } => run_local_navigator(root, presentation_socket, presentation_session)
             .map_err(AppError::D16Navigator),
+        Commands::NavigatorPaneD17 {
+            presentation_socket,
+            presentation_session,
+        } => run_d17_navigator(root, presentation_socket, presentation_session)
+            .map_err(AppError::D17Navigator),
         Commands::PresentationControl {
             presentation_socket,
             presentation_session,
@@ -201,6 +206,7 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
         | Commands::Acknowledge { .. } => execute_d16_local_command(root, command),
         Commands::Navigator
         | Commands::NavigatorPane { .. }
+        | Commands::NavigatorPaneD17 { .. }
         | Commands::PresentationControl { .. }
         | Commands::PresentationShell { .. }
         | Commands::ProviderWait

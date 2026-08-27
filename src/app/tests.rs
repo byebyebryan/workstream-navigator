@@ -86,6 +86,24 @@ fn opencode_observer_entrypoint_is_hidden_and_typed() {
 }
 
 #[test]
+fn d17_navigator_entrypoint_is_hidden_and_typed() {
+    let parsed = Cli::try_parse_from([
+        "wsnav",
+        "_navigator_d17",
+        "--presentation-socket",
+        "/state/presentation/presentation-0123456789ab/tmux.sock",
+        "--presentation-session",
+        "wsnav-presentation-0123456789ab",
+    ])
+    .unwrap();
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::NavigatorPaneD17 { .. })
+    ));
+    assert!(Cli::try_parse_from(["wsnav", "navigator_d17"]).is_err());
+}
+
+#[test]
 fn state_free_opencode_helpers_are_hidden_and_not_observer_or_provider_pane_commands() {
     let parsed = Cli::try_parse_from([
         "wsnav",

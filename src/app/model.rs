@@ -83,6 +83,8 @@ pub(crate) enum AppError {
     #[error(transparent)]
     D16Navigator(#[from] crate::navigator::D16NavigatorError),
     #[error(transparent)]
+    D17Navigator(#[from] crate::navigator::D17NavigatorError),
+    #[error(transparent)]
     Presentation(#[from] crate::presentation::PresentationError),
     #[error(transparent)]
     Runtime(#[from] crate::runtime::RuntimeError),

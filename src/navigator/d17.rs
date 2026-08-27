@@ -12,6 +12,13 @@
 use std::collections::BTreeMap;
 
 use crossterm::event::KeyCode;
+use ratatui::{
+    Frame,
+    layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
+    widgets::{Block, Borders, List, ListItem, Paragraph},
+};
 
 use crate::{
     d17_snapshot::{D17Snapshot, D17WorkstreamSnapshot},
@@ -92,6 +99,47 @@ pub(crate) struct D17Model {
     snapshot: D17Snapshot,
     page: D17Page,
     selected: Option<D17RowId>,
+}
+
+/// Thin D17 Navigator wrapper. It owns only presentation-local selection and
+/// rendering state; state, shell materialization, provider launch, and tmux
+/// attachment stay outside this dormant seam until the atomic cutover.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct D17Navigator {
+    model: D17Model,
+}
+
+impl D17Navigator {
+    #[must_use]
+    pub(crate) fn new(snapshot: D17Snapshot) -> Self {
+        Self {
+            model: D17Model::new(snapshot),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn model(&self) -> &D17Model {
+        &self.model
+    }
+
+    pub(crate) const fn model_mut(&mut self) -> &mut D17Model {
+        &mut self.model
+    }
+
+    pub(crate) fn replace_snapshot(&mut self, snapshot: D17Snapshot) {
+        self.model.replace_snapshot(snapshot);
+    }
+
+    #[must_use]
+    pub(crate) fn handle_key(&mut self, key: KeyCode) -> D17Command {
+        self.model.handle_key(key)
+    }
+
+    /// Renders the D17-only Workstreams/Archived surface. The renderer has no
+    /// provider-pane, shell, state, or filesystem effect.
+    pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect) {
+        render_model(frame, area, &self.model);
+    }
 }
 
 impl D17Model {
@@ -272,6 +320,135 @@ fn rows_for(snapshot: &D17Snapshot, page: D17Page) -> Vec<D17Row> {
     rows
 }
 
+fn render_model(frame: &mut Frame<'_>, area: Rect, model: &D17Model) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .split(area);
+    let selected = model.selected();
+    let rows = model.rows();
+    let items = rows
+        .iter()
+        .map(|row| {
+            let item = ListItem::new(row_lines(row));
+            if row.id() == selected {
+                item.style(Style::default().bg(Color::DarkGray))
+            } else {
+                item
+            }
+        })
+        .collect::<Vec<_>>();
+    let title = format!(" {} ", model.page().title());
+    frame.render_widget(
+        List::new(items).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )),
+        ),
+        layout[0],
+    );
+    frame.render_widget(
+        Paragraph::new(controls(model.page())).style(Style::default().fg(Color::Gray)),
+        layout[1],
+    );
+}
+
+fn row_lines(row: &D17Row) -> Vec<Line<'static>> {
+    match row {
+        D17Row::ProvisionalShell => vec![
+            Line::from(Span::styled(
+                " New session · shell ",
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "   Choose a directory, then run codex or opencode",
+                Style::default().fg(Color::Gray),
+            )),
+        ],
+        D17Row::ProjectHeader { display_name } => vec![Line::from(Span::styled(
+            display_name.clone(),
+            Style::default()
+                .fg(Color::Magenta)
+                .add_modifier(Modifier::BOLD),
+        ))],
+        D17Row::Workstream(workstream) => {
+            let runtime = workstream
+                .runtime
+                .map_or("stopped", |runtime| runtime_status_label(runtime.status));
+            let title = workstream
+                .native_name
+                .clone()
+                .unwrap_or_else(|| workstream.workstream_id.short());
+            let indicator = if workstream.recovery_unseen {
+                ("!", Color::Red)
+            } else if workstream.result_unseen {
+                ("✓", Color::Green)
+            } else {
+                ("·", Color::Gray)
+            };
+            vec![
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(
+                        provider_label(workstream.provider),
+                        provider_color(workstream.provider),
+                    ),
+                    Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(runtime, Style::default().fg(Color::Gray)),
+                ]),
+                Line::from(vec![
+                    Span::raw("  "),
+                    Span::styled(indicator.0, Style::default().fg(indicator.1)),
+                    Span::raw(" "),
+                    Span::styled(title, Style::default().fg(Color::White)),
+                ]),
+            ]
+        }
+    }
+}
+
+const fn provider_label(provider: ProviderKind) -> &'static str {
+    match provider {
+        ProviderKind::Codex => "Codex",
+        ProviderKind::OpenCode => "OpenCode",
+    }
+}
+
+const fn provider_color(provider: ProviderKind) -> Style {
+    match provider {
+        ProviderKind::Codex => Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
+        ProviderKind::OpenCode => Style::new().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+    }
+}
+
+const fn runtime_status_label(status: crate::domain::RuntimeStatus) -> &'static str {
+    match status {
+        crate::domain::RuntimeStatus::Starting => "starting",
+        crate::domain::RuntimeStatus::Working => "working",
+        crate::domain::RuntimeStatus::Idle => "idle",
+        crate::domain::RuntimeStatus::Attention => "attention",
+        crate::domain::RuntimeStatus::Stopped => "stopped",
+        crate::domain::RuntimeStatus::Unknown => "recovery",
+    }
+}
+
+const fn controls(page: D17Page) -> &'static str {
+    match page {
+        D17Page::Workstreams => {
+            " ↑↓ select  ·  Enter open  ·  n new here  ·  . archived  ·  q quit"
+        }
+        D17Page::Archived => " ↑↓ select  ·  w workstreams  ·  q quit",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use uuid::Uuid;
@@ -346,6 +523,26 @@ mod tests {
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Enter),
             D17Command::MaterializeProvisionalShell
+        );
+    }
+
+    #[test]
+    fn shell_card_renders_native_provider_choice_without_a_picker() {
+        let (snapshot, _, _) = snapshot();
+        let model = D17Model::new(snapshot);
+        let rows = model.rows();
+        let shell = super::row_lines(&rows[0]);
+
+        assert_eq!(shell[0].spans[0].content.as_ref(), " New session · shell ");
+        assert_eq!(
+            shell[1].spans[0].content.as_ref(),
+            "   Choose a directory, then run codex or opencode"
+        );
+        assert!(
+            shell
+                .iter()
+                .flat_map(|line| &line.spans)
+                .all(|span| !span.content.contains("picker"))
         );
     }
 

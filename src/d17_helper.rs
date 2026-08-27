@@ -52,6 +52,11 @@ impl ProviderPreparation {
     pub(crate) const fn runtime_id(&self) -> RuntimeId {
         self.ownership.runtime_id
     }
+
+    #[must_use]
+    pub(crate) const fn ownership(&self) -> OnboardingOwnership {
+        *self.ownership
+    }
 }
 
 /// The only D17 result that is eligible to cross the helper's final native
@@ -281,6 +286,21 @@ pub(crate) fn record_opencode_effect_recovery_required(
         &request,
         effect_fence.ownership(),
     )?;
+    Ok(())
+}
+
+/// Marks a post-capability but pre-POST provider-preparation failure for
+/// recovery. The helper deliberately stays conservative here: a later D17
+/// reconciler may prove known absence and roll back, but this boundary never
+/// guesses from a failed temporary-server operation.
+pub(crate) fn record_provider_preparation_recovery_required(
+    state: &mut D16State,
+    provisional_lease: &ProvisionalLease,
+    context: &PrepareContext<'_, '_>,
+    ownership: OnboardingOwnership,
+) -> Result<(), HelperError> {
+    let (_, request) = request_from_context(state, provisional_lease, context)?;
+    state.record_d17_recovery_required_current(provisional_lease, &request, ownership)?;
     Ok(())
 }
 

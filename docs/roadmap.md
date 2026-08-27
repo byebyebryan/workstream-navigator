@@ -10,7 +10,8 @@ ownership/private-runtime model, dormant presentation-private marker-backed
 materialization/evidence storage, marker-to-state prepare/consume broker,
 typed helper/pre-exec/post-exec reconciliation fences, dormant account-shell
 bootstrap, account-shell context/system-gate composition, dormant direct-Codex
-exec preparation, and dormant D17.3 grammar, command-classification,
+and OpenCode exec preparation with the provider-specific final-effect fences,
+and dormant D17.3 grammar, command-classification,
 onboarding-phase, capability-journal, atomic
 reservation, and ownership-consumption foundations are in progress; no D17
 user-facing behavior or routed provider launch path is
@@ -247,6 +248,19 @@ overrides, and cannot accept source-less arbitrary creation.
 
 Passive process detection, hook-only adoption, pane-text inference, and
 provider launches that bypass the broker remain unmanaged.
+
+The dormant account-shell control adapter now has no routed CLI but composes
+both provider-specific final handoffs under the retained lease. Codex resolves
+an exact native executable, commits `provider_exec_started`, and can classify
+only a direct `execve` error as known absence. OpenCode instead resolves its
+exact executable and worktree, commits `provider_preparation`, then records an
+external-effect fence in the same callback immediately before its temporary
+private server can `POST /session`. It binds only the exact returned blank
+session before recording `provider_exec_started`. Any failure after ownership
+consumption that is not Codex's direct-exec known absence becomes
+`recovery_required`; OpenCode never retries or invents a replacement session.
+These adapters remain dormant and have exercised only disposable unit seams,
+not a user shell, provider installation, or live Runtime.
 
 [Spike 0019](evidence/spikes/0019-brokered-onboarding-shell.md) validates a
 single-phase controlled-function-plus-`exec` candidate in a synthetic

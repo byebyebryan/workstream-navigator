@@ -18,10 +18,10 @@ use thiserror::Error;
 use crate::{
     domain::{IdGenerator, OperationId, ProviderKind},
     onboarding::{LaunchCapability, ShellCommandDecision, classify_shell_command},
-    provisional::{ProvisionalSlot, SlotError, read_marker, update_marker},
+    provisional::{ProvisionalPhase, ProvisionalSlot, SlotError, read_marker, update_marker},
     repository::{RepositoryError, RepositoryRegistration, inspect_containing_worktree},
     runtime::{PrivateRuntime, ProcessGroupProbe},
-    state::d16::{OnboardingPreparation, OnboardingPrepareRequest},
+    state::d16::{OnboardingOwnership, OnboardingPreparation, OnboardingPrepareRequest},
     state::{D16State, ProvisionalLease, StateError},
 };
 
@@ -117,6 +117,69 @@ pub(crate) fn prepare(
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
 ) -> Result<PreparedHandoff, BrokerError> {
+    let (slot, request) = request_from_context(state, provisional_lease, context)?;
+    let OnboardingPreparation::Issued(reservation) =
+        state.prepare_d17_onboarding_current(provisional_lease, &request, context.id_generator)?
+    else {
+        return Err(BrokerError::ExistingOperation);
+    };
+
+    provisional_lease.revalidate_for_mutation(state.root())?;
+    let operation_id = reservation.operation_id();
+    let mut handoff_slot = slot.clone();
+    handoff_slot.issue_handoff(operation_id.as_uuid())?;
+    update_marker(
+        state.root(),
+        context.presentation_directory,
+        &slot,
+        &handoff_slot,
+    )?;
+    provisional_lease.revalidate_for_mutation(state.root())?;
+    Ok(PreparedHandoff {
+        operation_id,
+        capability: reservation.into_capability(),
+    })
+}
+
+/// Atomically consumes a revalidated capability and then removes provisional
+/// cleanup authority from the marker. This still performs no provider effect:
+/// a marker-update failure after durable ownership is recovery evidence and
+/// leaves the provider launch fenced.
+pub(crate) fn consume(
+    state: &mut D16State,
+    provisional_lease: &ProvisionalLease,
+    context: &PrepareContext<'_, '_>,
+    token: &str,
+    now_monotonic_millis: i64,
+) -> Result<OnboardingOwnership, BrokerError> {
+    let (slot, request) = request_from_context(state, provisional_lease, context)?;
+    if slot.phase() != ProvisionalPhase::HandoffIssued {
+        return Err(SlotError::HandoffUnavailable.into());
+    }
+    let ownership = state.consume_d17_onboarding_current(
+        provisional_lease,
+        &request,
+        token,
+        now_monotonic_millis,
+    )?;
+    provisional_lease.revalidate_for_mutation(state.root())?;
+    let mut owned_slot = slot.clone();
+    owned_slot.consume_handoff(ownership.operation_id.as_uuid())?;
+    update_marker(
+        state.root(),
+        context.presentation_directory,
+        &slot,
+        &owned_slot,
+    )?;
+    provisional_lease.revalidate_for_mutation(state.root())?;
+    Ok(ownership)
+}
+
+fn request_from_context(
+    state: &D16State,
+    provisional_lease: &ProvisionalLease,
+    context: &PrepareContext<'_, '_>,
+) -> Result<(ProvisionalSlot, OnboardingPrepareRequest), BrokerError> {
     provisional_lease.revalidate_for_mutation(state.root())?;
     let slot = read_marker(state.root(), context.presentation_directory)?;
     if slot.lease_generation() != provisional_lease.lease_generation() {
@@ -151,27 +214,7 @@ pub(crate) fn prepare(
         now_monotonic_millis: context.now_monotonic_millis,
         expiry_monotonic_millis: context.expiry_monotonic_millis,
     };
-    let OnboardingPreparation::Issued(reservation) =
-        state.prepare_d17_onboarding_current(provisional_lease, &request, context.id_generator)?
-    else {
-        return Err(BrokerError::ExistingOperation);
-    };
-
-    provisional_lease.revalidate_for_mutation(state.root())?;
-    let operation_id = reservation.operation_id();
-    let mut handoff_slot = slot.clone();
-    handoff_slot.issue_handoff(operation_id.as_uuid())?;
-    update_marker(
-        state.root(),
-        context.presentation_directory,
-        &slot,
-        &handoff_slot,
-    )?;
-    provisional_lease.revalidate_for_mutation(state.root())?;
-    Ok(PreparedHandoff {
-        operation_id,
-        capability: reservation.into_capability(),
-    })
+    Ok((slot, request))
 }
 
 fn request_key(slot: &ProvisionalSlot) -> String {
@@ -200,12 +243,12 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::{BrokerError, PrepareContext, WorktreeInspector, prepare};
+    use super::{BrokerError, PrepareContext, WorktreeInspector, consume, prepare};
     use crate::{
         domain::{IdGenerator, ProviderKind, Revision, RuntimeId},
         provisional::{
-            PROVISIONAL_MARKER_FILE, ProvisionalSlot, SlotGeneration, materialize_private_shell,
-            read_marker,
+            PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, SlotGeneration,
+            materialize_private_shell, read_marker,
         },
         repository::{RepositoryError, RepositoryRegistration},
         runtime::{
@@ -337,7 +380,7 @@ mod tests {
     }
 
     #[test]
-    fn broker_reserves_once_after_exact_marker_shell_and_grammar_proof() {
+    fn broker_reserves_and_consumes_once_after_exact_marker_shell_and_grammar_proof() {
         let temporary = tempfile::tempdir().unwrap();
         let state_path = temporary.path().join("state");
         let repository_root = temporary.path().join("worktree");
@@ -415,6 +458,18 @@ mod tests {
         assert!(matches!(
             prepare(&mut state, &provisional_lease, &context),
             Err(BrokerError::ExistingOperation)
+        ));
+        let ownership = consume(&mut state, &provisional_lease, &context, &token, 11).unwrap();
+        assert_eq!(ownership.operation_id, handoff.operation_id());
+        assert_eq!(
+            read_marker(&state_path, &presentation).unwrap().phase(),
+            ProvisionalPhase::RuntimeOwnedLaunching
+        );
+        assert!(matches!(
+            consume(&mut state, &provisional_lease, &context, &token, 11),
+            Err(BrokerError::Slot(
+                crate::provisional::SlotError::HandoffUnavailable
+            ))
         ));
         assert!(presentation.join(PROVISIONAL_MARKER_FILE).is_file());
     }

@@ -703,6 +703,11 @@ impl ProvisionalSlot {
         self.slot_generation.0
     }
 
+    #[must_use]
+    pub(crate) const fn phase(&self) -> ProvisionalPhase {
+        self.phase
+    }
+
     /// Repeats the exact private pane/process comparison required before a
     /// broker or helper may use this marker. Current cwd is deliberately live
     /// evidence rather than a stored cwd history.

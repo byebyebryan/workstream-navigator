@@ -6,8 +6,8 @@ Status: D0-D16 complete; D16 host-local implementation, disposable repository
 gate, and operator-gated live local and SSH-entered-host acceptance complete;
 source-installed operator beta. D17 shell-first managed-session onboarding is
 the approved next checkpoint. Its D17.0 falsification studies and D17.2
-test-only ownership model are in progress; no D17 user-facing behavior, schema
-migration, or provider launch path is implemented yet.
+test-only ownership/private-runtime model are in progress; no D17 user-facing
+behavior, schema migration, or provider launch path is implemented yet.
 
 The D0-D15 entries below preserve truthful historical implementation and
 acceptance evidence. D3 and later SSH, remote, cross-host, and combined
@@ -4266,7 +4266,7 @@ D16 closes only when all of the following are true:
 ## D17 - Shell-first managed-session onboarding
 
 Status: in progress. The product contract is approved; D17.0 studies and the
-D17.2 test-only ownership model have begun. No D17 user-facing behavior,
+D17.2 test-only ownership/private-runtime model have begun. No D17 user-facing behavior,
 schema migration, or provider launch path is implemented, and no D17 acceptance
 is complete.
 

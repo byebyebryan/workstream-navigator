@@ -147,15 +147,42 @@ impl ProvisionalSlot {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, str::FromStr};
+    use std::{cell::RefCell, collections::BTreeMap, ffi::OsString, fs, str::FromStr};
 
     use uuid::Uuid;
 
     use super::{CleanupAuthority, ProvisionalPhase, ProvisionalSlot, SlotError, SlotGeneration};
     use crate::{
         domain::{Revision, RuntimeId},
-        runtime::RuntimePaths,
+        runtime::{
+            NativeLaunch, PrivateRuntime, ProcessProbe, RuntimeError, RuntimePaths, TmuxClient,
+            TmuxInvocation, TmuxResponse,
+        },
     };
+
+    #[derive(Default)]
+    struct FakeTmux {
+        calls: RefCell<Vec<TmuxInvocation>>,
+    }
+
+    impl TmuxClient for FakeTmux {
+        fn invoke(&self, invocation: &TmuxInvocation) -> Result<TmuxResponse, RuntimeError> {
+            self.calls.borrow_mut().push(invocation.clone());
+            Ok(TmuxResponse {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            })
+        }
+    }
+
+    struct FakeProcessProbe;
+
+    impl ProcessProbe for FakeProcessProbe {
+        fn process_birth(&self, _pid: u32) -> Option<String> {
+            None
+        }
+    }
 
     fn fixture() -> (tempfile::TempDir, ProvisionalSlot) {
         let temporary = tempfile::tempdir().unwrap();
@@ -232,6 +259,32 @@ mod tests {
         );
         slot.prove_provider_exec().unwrap();
         assert!(slot.action_allowed());
+    }
+
+    #[test]
+    fn provisional_shell_uses_the_exact_final_private_runtime_path_set() {
+        let (_temporary, slot) = fixture();
+        let tmux = FakeTmux::default();
+        let process_probe = FakeProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, slot.runtime_paths.clone());
+        let launch = NativeLaunch {
+            cwd: slot.seed_cwd.clone(),
+            program: vec![OsString::from("synthetic-provisional-shell")],
+            environment: BTreeMap::new(),
+        };
+
+        runtime.start(&launch).unwrap();
+
+        assert!(slot.runtime_paths.directory.is_dir());
+        assert!(slot.runtime_paths.config.is_file());
+        let calls = tmux.calls.borrow();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].socket, slot.runtime_paths.socket);
+        assert!(
+            calls[0]
+                .arguments
+                .contains(&OsString::from("synthetic-provisional-shell"))
+        );
     }
 
     #[test]

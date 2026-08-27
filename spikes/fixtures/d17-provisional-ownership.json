@@ -1,0 +1,26 @@
+{
+  "assertions": {
+    "all_case_assertions_pass": true,
+    "cancelled_helper_cannot_promote": true,
+    "cleanup_cancels_without_owned_runtime_or_residue": true,
+    "cleanup_wins_before_helper_consume": true,
+    "duplicate_helper_refuses_after_consume": true,
+    "exec_proof_releases_action_fence": true,
+    "foreign_candidate_collision_refuses_without_adoption": true,
+    "git_root_keeps_linked_worktree_exact": true,
+    "marker_only_candidate_is_excluded_from_registry": true,
+    "markerless_runtime_shape_blocks_fresh_materialization": true,
+    "materialization_uses_full_uuid_final_paths": true,
+    "non_git_seed_refuses": true,
+    "ownership_commit_precedes_marker_cleanup": true,
+    "post_ownership_cleanup_never_signals_or_removes_runtime": true,
+    "promotion_derives_one_fresh_provisional_candidate": true,
+    "runtime_stays_fenced_until_exec_proof": true,
+    "second_presentation_is_busy_without_second_candidate": true,
+    "temporary_root_removed": true,
+    "unproven_runtime_is_action_fenced": true
+  },
+  "contract": "marker-lease-promotion-v1",
+  "reason": "marker-backed-provisional-ownership-observed",
+  "status": "pass"
+}

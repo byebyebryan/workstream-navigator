@@ -70,6 +70,9 @@ leaving the cross-actor onboarding races as D17.0 work.
 [Spike 0024](spikes/0024-d17-provider-grammar.md) pins the conservative fresh
 native-TUI grammar for Codex `0.150.0` and OpenCode `1.18.23`, without claiming
 provider-effect or recovery integration.
+[Spike 0025](spikes/0025-d17-provisional-ownership.md) validates the serialized
+marker-to-owned-runtime winner model and its action fence, without claiming the
+concurrent production implementation.
 
 ## Provider studies
 

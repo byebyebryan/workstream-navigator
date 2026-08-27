@@ -2677,8 +2677,11 @@ acceptance gate. [Spike
 0020](evidence/spikes/0020-opencode-1.18.23-revalidation.md) reruns the bounded
 OpenCode fresh-session/provider lifecycle contract on `1.18.23`; it supports
 the provider adapter assumptions but is not, by itself, proof of the D17 broker
-implementation. Bash and Zsh controlled-function acceptance remains an exit
-gate for D17.
+implementation. [Spike
+0025](evidence/spikes/0025-d17-provisional-ownership.md) validates the
+serialized marker-backed ownership winner model and action fence, while leaving
+the concurrent state/journal/provider implementation as a D17.0 gate. Bash and
+Zsh controlled-function acceptance remains an exit gate for D17.
 
 The implemented checkpoints and their acceptance records corroborate the
 following behavior without widening the product:

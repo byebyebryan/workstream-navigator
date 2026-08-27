@@ -13,7 +13,7 @@
 use thiserror::Error;
 
 use crate::{
-    d17_broker::{BrokerError, PrepareContext, consume},
+    d17_broker::{BrokerError, PrepareContext, consume, request_from_context},
     domain::{OperationId, ProviderKind, RuntimeId},
     state::d16::OnboardingOwnership,
     state::{D16State, ProvisionalLease, StateError},
@@ -129,7 +129,9 @@ pub(crate) fn begin_provider_preparation(
         token,
         now_monotonic_millis,
     )?;
-    let ownership = state.record_d17_provider_preparation_current(provisional_lease, ownership)?;
+    let (_, request) = request_from_context(state, provisional_lease, context)?;
+    let ownership =
+        state.record_d17_provider_preparation_current(provisional_lease, &request, ownership)?;
     Ok(ProviderPreparation {
         ownership: Box::new(ownership),
         provider: context.provider,
@@ -142,6 +144,7 @@ pub(crate) fn begin_provider_preparation(
 pub(crate) fn record_opencode_external_effect_started(
     state: &mut D16State,
     provisional_lease: &ProvisionalLease,
+    context: &PrepareContext<'_, '_>,
     preparation: ProviderPreparation,
 ) -> Result<OpenCodeExternalEffectFence, HelperError> {
     let ProviderPreparation {
@@ -151,8 +154,12 @@ pub(crate) fn record_opencode_external_effect_started(
     if provider != ProviderKind::OpenCode {
         return Err(HelperError::ExternalEffectProviderMismatch);
     }
-    let ownership =
-        state.record_d17_provider_external_effect_started_current(provisional_lease, *ownership)?;
+    let (_, request) = request_from_context(state, provisional_lease, context)?;
+    let ownership = state.record_d17_provider_external_effect_started_current(
+        provisional_lease,
+        &request,
+        *ownership,
+    )?;
     Ok(OpenCodeExternalEffectFence {
         ownership: Box::new(ownership),
     })
@@ -163,6 +170,7 @@ pub(crate) fn record_opencode_external_effect_started(
 pub(crate) fn record_codex_provider_exec_started(
     state: &mut D16State,
     provisional_lease: &ProvisionalLease,
+    context: &PrepareContext<'_, '_>,
     preparation: ProviderPreparation,
 ) -> Result<ProviderExecFence, HelperError> {
     let ProviderPreparation {
@@ -172,8 +180,9 @@ pub(crate) fn record_codex_provider_exec_started(
     if provider != ProviderKind::Codex {
         return Err(HelperError::CodexPreparationProviderMismatch);
     }
+    let (_, request) = request_from_context(state, provisional_lease, context)?;
     let ownership =
-        state.record_d17_provider_exec_started_current(provisional_lease, *ownership)?;
+        state.record_d17_provider_exec_started_current(provisional_lease, &request, *ownership)?;
     Ok(ProviderExecFence {
         ownership,
         provider,
@@ -186,11 +195,13 @@ pub(crate) fn record_codex_provider_exec_started(
 pub(crate) fn record_opencode_provider_exec_started(
     state: &mut D16State,
     provisional_lease: &ProvisionalLease,
+    context: &PrepareContext<'_, '_>,
     effect_fence: OpenCodeExternalEffectFence,
 ) -> Result<ProviderExecFence, HelperError> {
     let OpenCodeExternalEffectFence { ownership } = effect_fence;
+    let (_, request) = request_from_context(state, provisional_lease, context)?;
     let ownership =
-        state.record_d17_provider_exec_started_current(provisional_lease, *ownership)?;
+        state.record_d17_provider_exec_started_current(provisional_lease, &request, *ownership)?;
     Ok(ProviderExecFence {
         ownership,
         provider: ProviderKind::OpenCode,

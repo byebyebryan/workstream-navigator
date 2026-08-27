@@ -175,7 +175,10 @@ pub(crate) fn consume(
     Ok(ownership)
 }
 
-fn request_from_context(
+/// Rebuilds the complete state request from live marker, shell, grammar, and
+/// worktree evidence. The helper repeats this before every post-consume phase
+/// transition so stale provider preparation cannot advance a changed slot.
+pub(crate) fn request_from_context(
     state: &D16State,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
@@ -465,9 +468,13 @@ mod tests {
                 .unwrap();
         assert_eq!(preparation.operation_id(), handoff.operation_id());
         assert_eq!(preparation.provider(), ProviderKind::Codex);
-        let exec_fence =
-            record_codex_provider_exec_started(&mut state, &provisional_lease, preparation)
-                .unwrap();
+        let exec_fence = record_codex_provider_exec_started(
+            &mut state,
+            &provisional_lease,
+            &context,
+            preparation,
+        )
+        .unwrap();
         assert_eq!(exec_fence.operation_id(), handoff.operation_id());
         assert_eq!(exec_fence.runtime_id(), slot.candidate_runtime_id());
         assert_eq!(

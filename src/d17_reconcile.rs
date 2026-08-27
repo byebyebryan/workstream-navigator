@@ -11,6 +11,7 @@
 )]
 
 use std::{
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
 };
@@ -54,6 +55,32 @@ impl ExpectedProviderExecutable {
             provider,
             canonical_path,
         })
+    }
+
+    /// Resolves only the native executable fixed by the already selected
+    /// provider. Every `PATH` component must be absolute so resolution cannot
+    /// depend on an ambient helper cwd; no shell, provider, or process is
+    /// launched while resolving it.
+    pub(crate) fn resolve_from_path(
+        provider: ProviderKind,
+        search_path: &OsStr,
+    ) -> Result<Self, ReconcileError> {
+        let executable_name = match provider {
+            ProviderKind::Codex => "codex",
+            ProviderKind::OpenCode => "opencode",
+        };
+        for directory in std::env::split_paths(search_path) {
+            if !directory.is_absolute() {
+                return Err(ReconcileError::ExecutableUnavailable);
+            }
+            let candidate = directory.join(executable_name);
+            match fs::symlink_metadata(&candidate) {
+                Ok(_) => return Self::new(provider, &candidate),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err(ReconcileError::ExecutableUnavailable),
+            }
+        }
+        Err(ReconcileError::ExecutableUnavailable)
     }
 }
 
@@ -171,4 +198,66 @@ fn complete_proven_marker(
     update_marker(state.root(), presentation_directory, slot, &proven_slot)?;
     provisional_lease.revalidate_for_mutation(state.root())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        env, fs,
+        path::{Path, PathBuf},
+    };
+
+    use super::{ExpectedProviderExecutable, ReconcileError};
+    use crate::domain::ProviderKind;
+
+    fn write_executable(directory: &Path, name: &str) -> PathBuf {
+        let executable = directory.join(name);
+        fs::write(&executable, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        executable
+    }
+
+    #[test]
+    fn provider_executable_resolution_uses_the_first_exact_provider_binary() {
+        let temporary = tempfile::tempdir().unwrap();
+        let first = temporary.path().join("first");
+        let second = temporary.path().join("second");
+        fs::create_dir(&first).unwrap();
+        fs::create_dir(&second).unwrap();
+        let expected = write_executable(&first, "codex");
+        write_executable(&second, "codex");
+        let search_path = env::join_paths([&first, &second]).unwrap();
+
+        let resolved =
+            ExpectedProviderExecutable::resolve_from_path(ProviderKind::Codex, &search_path)
+                .unwrap();
+
+        assert_eq!(resolved.canonical_path, expected.canonicalize().unwrap());
+        assert_eq!(resolved.provider, ProviderKind::Codex);
+    }
+
+    #[test]
+    fn provider_executable_resolution_refuses_cwd_dependent_or_wrong_provider_paths() {
+        let temporary = tempfile::tempdir().unwrap();
+        let directory = temporary.path().join("provider-bin");
+        fs::create_dir(&directory).unwrap();
+        write_executable(&directory, "codex");
+        let absolute_path = env::join_paths([&directory]).unwrap();
+
+        assert!(matches!(
+            ExpectedProviderExecutable::resolve_from_path(ProviderKind::OpenCode, &absolute_path),
+            Err(ReconcileError::ExecutableUnavailable),
+        ));
+        assert!(matches!(
+            ExpectedProviderExecutable::resolve_from_path(
+                ProviderKind::Codex,
+                &env::join_paths([Path::new(".")]).unwrap(),
+            ),
+            Err(ReconcileError::ExecutableUnavailable),
+        ));
+    }
 }

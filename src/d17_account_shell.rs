@@ -269,7 +269,10 @@ impl AccountShellLaunch {
         let original_zdotdir = match kind {
             AccountShellKind::Bash => None,
             AccountShellKind::Zsh => Some(canonical_directory(
-                original_zdotdir.ok_or(AccountShellError::ZdotdirUnavailable)?,
+                // Zsh uses HOME when ZDOTDIR is unset. Preserve that native
+                // account-shell default before redirecting startup through the
+                // private wrapper.
+                original_zdotdir.unwrap_or(original_home.as_path()),
                 AccountShellError::ZdotdirUnavailable,
             )?),
         };
@@ -802,6 +805,36 @@ mod tests {
                     .unwrap()
                     .into_os_string()
             )
+        );
+    }
+
+    #[test]
+    fn zsh_launch_uses_original_home_when_zdotdir_is_unset() {
+        let temporary = tempfile::tempdir().unwrap();
+        let seed_cwd = temporary.path().join("seed");
+        let original_home = temporary.path().join("home");
+        make_directory(&seed_cwd);
+        make_directory(&original_home);
+        let shell = temporary.path().join("zsh");
+        let wsnav = temporary.path().join("wsnav");
+        executable(&shell);
+        executable(&wsnav);
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+
+        let plan = AccountShellLaunch::new(
+            &account_context(temporary.path()),
+            &paths,
+            &seed_cwd,
+            &shell,
+            &original_home,
+            None,
+            &wsnav,
+        )
+        .unwrap();
+
+        assert_eq!(
+            environment_value(plan.launch(), ORIGINAL_ZDOTDIR_ENV),
+            Some(fs::canonicalize(&original_home).unwrap().into_os_string())
         );
     }
 

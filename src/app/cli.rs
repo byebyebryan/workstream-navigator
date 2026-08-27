@@ -143,6 +143,17 @@ pub(super) enum Commands {
         cwd: PathBuf,
         provider_birth: String,
     },
+    /// Internal D17 generation-bound `OpenCode` lifecycle observer.
+    #[command(name = "_opencode_observer_d17", hide = true)]
+    OpenCodeObserverD17 {
+        runtime_id: String,
+        generation: String,
+        port: u16,
+        session_id: String,
+        pane_pid: u32,
+        cwd: PathBuf,
+        provider_birth: String,
+    },
     /// Internal state-free D16 standby observer.
     #[command(name = "_opencode_observer_standby", hide = true)]
     OpenCodeObserverStandby {
@@ -187,6 +198,10 @@ pub(super) const fn is_provider_pane_command(command: Option<&Commands>) -> bool
 pub(super) const fn is_observer_command(command: Option<&Commands>) -> bool {
     matches!(
         command,
-        Some(Commands::OpenCodeObserverD16 { .. } | Commands::OpenCodeObserverStandby { .. })
+        Some(
+            Commands::OpenCodeObserverD16 { .. }
+                | Commands::OpenCodeObserverD17 { .. }
+                | Commands::OpenCodeObserverStandby { .. }
+        )
     )
 }

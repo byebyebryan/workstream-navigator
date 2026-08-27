@@ -159,6 +159,27 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
                 mode: crate::provider::opencode::OpenCodeObserverMode::D16,
             },
         ),
+        Commands::OpenCodeObserverD17 {
+            runtime_id,
+            generation,
+            port,
+            session_id,
+            pane_pid,
+            cwd,
+            provider_birth,
+        } => opencode_observer(
+            root,
+            OpenCodeObserverArguments {
+                runtime_id,
+                generation,
+                port,
+                session_id,
+                pane_pid,
+                cwd,
+                provider_birth,
+                mode: crate::provider::opencode::OpenCodeObserverMode::D17,
+            },
+        ),
         Commands::OpenCodeObserverStandby { .. } => {
             unreachable!("standby observer is dispatched before state-root creation")
         }

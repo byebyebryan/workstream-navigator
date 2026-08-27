@@ -21,7 +21,7 @@ use crate::{
     state::{
         D16State, HostRegistry, ObserverDatabaseDeadline, ObserverHandoverActivationAck,
         ObserverProcessIdentity, OpenCodeLifecycleObservation, OpenCodeRuntimeHandle,
-        RuntimeRecord, StateError, StateRoot, open_observer_transition,
+        RuntimeRecord, StateError, StateRoot, open_d17_current_only, open_observer_transition,
         write_observer_handover_activation_ack,
     },
 };
@@ -50,6 +50,9 @@ const STANDBY_ACTIVATION_ACK_LINE_MAX_BYTES: usize = 512;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OpenCodeObserverMode {
     D16,
+    /// D17's observer can open only the explicit schema-14 current boundary.
+    /// It is still started solely by the dormant presentation controller.
+    D17,
     D16Standby,
 }
 
@@ -58,6 +61,7 @@ impl OpenCodeObserverMode {
     pub const fn command_name(self) -> &'static str {
         match self {
             Self::D16 => "_opencode_observer_d16",
+            Self::D17 => "_opencode_observer_d17",
             Self::D16Standby => "_opencode_observer_standby",
         }
     }
@@ -200,6 +204,68 @@ impl ObserverAuthority for D16State {
     }
 }
 
+impl ObserverAuthority for HostRegistry {
+    fn runtime_by_id(
+        &mut self,
+        runtime_id: RuntimeId,
+    ) -> Result<Option<RuntimeRecord>, StateError> {
+        HostRegistry::runtime_by_id(self, runtime_id)
+    }
+
+    fn opencode_runtime_handle(
+        &mut self,
+        runtime_id: RuntimeId,
+    ) -> Result<Option<OpenCodeRuntimeHandle>, StateError> {
+        HostRegistry::opencode_runtime_handle(self, runtime_id)
+    }
+
+    fn mark_ready(
+        &mut self,
+        runtime_id: RuntimeId,
+        generation: &str,
+        expected_revision: crate::domain::Revision,
+        observer_pid: u32,
+        observer_birth: &str,
+    ) -> Result<(), StateError> {
+        HostRegistry::mark_opencode_observer_ready(
+            self,
+            runtime_id,
+            generation,
+            expected_revision,
+            observer_pid,
+            observer_birth,
+        )
+        .map(|_| ())
+    }
+
+    fn mark_unknown(
+        &mut self,
+        runtime_id: RuntimeId,
+        generation: &str,
+        expected_revision: crate::domain::Revision,
+        observer_pid: u32,
+        observer_birth: &str,
+    ) -> Result<(), StateError> {
+        HostRegistry::mark_opencode_observer_unknown_exact(
+            self,
+            runtime_id,
+            generation,
+            expected_revision,
+            observer_pid,
+            observer_birth,
+        )
+    }
+
+    fn apply_observation(
+        &mut self,
+        runtime_id: RuntimeId,
+        observation: &OpenCodeLifecycleObservation,
+    ) -> Result<(), StateError> {
+        HostRegistry::apply_opencode_lifecycle_observation(self, runtime_id, observation)
+            .map(|_| ())
+    }
+}
+
 /// Runs one exact `OpenCode` observer until its Runtime disappears or a
 /// fail-closed ownership/identity check fails.
 ///
@@ -211,14 +277,23 @@ pub fn run_observer(
     root: &StateRoot,
     context: &OpenCodeObserverContext,
 ) -> Result<(), OpenCodeObserverError> {
-    if context.mode != OpenCodeObserverMode::D16 {
-        return Err(OpenCodeObserverError::StandbyActivationUnavailable);
-    }
     if !observer_context_valid(context) {
         return Err(OpenCodeObserverError::RuntimeProbeAmbiguous);
     }
-    let mut state = open_observer_transition(root)?;
-    run_observer_with_authority(&mut state, context)
+    match context.mode {
+        OpenCodeObserverMode::D16 => {
+            let mut state = open_observer_transition(root)?;
+            run_observer_with_authority(&mut state, context)
+        }
+        OpenCodeObserverMode::D17 => {
+            let state = open_d17_current_only(root)?;
+            let mut registry = state.into_d17_host_registry()?;
+            run_observer_with_authority(&mut registry, context)
+        }
+        OpenCodeObserverMode::D16Standby => {
+            Err(OpenCodeObserverError::StandbyActivationUnavailable)
+        }
+    }
 }
 
 fn run_observer_with_authority<A: ObserverAuthority>(

@@ -371,6 +371,14 @@ mod tests {
         }
     }
 
+    struct UnavailableExecutableProbe;
+
+    impl ProviderExecutableProbe for UnavailableExecutableProbe {
+        fn executable_for_pid(&self, _pid: u32) -> Result<Option<PathBuf>, ReconcileError> {
+            Err(ReconcileError::ProviderExecutableMismatch)
+        }
+    }
+
     impl WorktreeInspector for FixtureWorktreeInspector {
         fn inspect_containing_worktree(
             &self,
@@ -569,6 +577,29 @@ mod tests {
             read_marker(&state_path, &presentation).unwrap().phase(),
             ProvisionalPhase::ProviderExecProven
         );
-        assert!(presentation.join(PROVISIONAL_MARKER_FILE).is_file());
+        let marker_path = presentation.join(PROVISIONAL_MARKER_FILE);
+        assert!(marker_path.is_file());
+        let stale_marker = fs::read_to_string(&marker_path).unwrap().replacen(
+            "\"provider_exec_proven\"",
+            "\"runtime_owned_launching\"",
+            1,
+        );
+        assert!(stale_marker.contains("\"runtime_owned_launching\""));
+        fs::write(&marker_path, stale_marker).unwrap();
+        prove_provider_exec(
+            &mut state,
+            &provisional_lease,
+            &presentation,
+            &runtime,
+            &ShellGroup,
+            &expected_executable,
+            &UnavailableExecutableProbe,
+        )
+        .unwrap();
+        assert_eq!(
+            read_marker(&state_path, &presentation).unwrap().phase(),
+            ProvisionalPhase::ProviderExecProven,
+            "a state-before-marker crash is repaired without probing the provider again"
+        );
     }
 }

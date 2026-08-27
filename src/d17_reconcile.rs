@@ -1,8 +1,9 @@
 //! Dormant D17 post-exec reconciliation boundary.
 //!
 //! The reconciler can only turn an already recorded `provider_exec_started`
-//! attempt into `provider_exec_proven`; it never launches, signals, attaches,
-//! or otherwise controls a provider.
+//! attempt into `provider_exec_proven`, or finish the marker half of an
+//! already durable proof; it never launches, signals, attaches, or otherwise
+//! controls a provider.
 
 #![allow(
     dead_code,
@@ -18,9 +19,9 @@ use thiserror::Error;
 
 use crate::{
     domain::{OperationId, ProviderKind},
-    provisional::{ProvisionalPhase, SlotError, read_marker, update_marker},
+    provisional::{ProvisionalPhase, ProvisionalSlot, SlotError, read_marker, update_marker},
     runtime::{PrivateRuntime, ProcessGroupProbe},
-    state::d16::OnboardingProviderExecEvidence,
+    state::d16::{OnboardingProviderExecEvidence, OnboardingProviderExecTarget},
     state::{D16State, ProvisionalLease, StateError},
 };
 
@@ -87,7 +88,9 @@ pub(crate) enum ReconcileError {
 /// Commits exact post-exec proof for one already Runtime-owned provisional
 /// slot. The caller supplies only a pre-resolved expected executable and a
 /// read-only executable probe; all marker, pane/process-group, state revision,
-/// Runtime generation, cwd, and provider checks are repeated here.
+/// Runtime generation, cwd, and provider checks are repeated here. If the
+/// durable proof committed before a marker-write failure, this instead repairs
+/// the exact marker phase without re-executing or probing the provider.
 pub(crate) fn prove_provider_exec(
     state: &mut D16State,
     provisional_lease: &ProvisionalLease,
@@ -99,20 +102,30 @@ pub(crate) fn prove_provider_exec(
 ) -> Result<(), ReconcileError> {
     provisional_lease.revalidate_for_mutation(state.root())?;
     let slot = read_marker(state.root(), presentation_directory)?;
-    if slot.phase() != ProvisionalPhase::RuntimeOwnedLaunching {
-        return Err(ReconcileError::SlotNotReady);
-    }
     let operation_id = slot
         .handoff_request()
         .map(OperationId::from)
         .ok_or(ReconcileError::HandoffIdentityUnavailable)?;
+    if slot.phase() == ProvisionalPhase::ProviderExecProven {
+        let target =
+            state.d17_onboarding_exec_proven_target_current(provisional_lease, operation_id)?;
+        validate_slot_target(&slot, &target, expected_executable)?;
+        return Ok(());
+    }
+    if slot.phase() != ProvisionalPhase::RuntimeOwnedLaunching {
+        return Err(ReconcileError::SlotNotReady);
+    }
+    match state.d17_onboarding_exec_proven_target_current(provisional_lease, operation_id) {
+        Ok(target) => {
+            validate_slot_target(&slot, &target, expected_executable)?;
+            return complete_proven_marker(state, provisional_lease, presentation_directory, &slot);
+        }
+        Err(StateError::OnboardingOperationUnavailable) => {}
+        Err(error) => return Err(error.into()),
+    }
     let live = slot.revalidate_live_shell(runtime, process_group_probe)?;
     let target = state.d17_onboarding_exec_proof_target_current(provisional_lease, operation_id)?;
-    if target.ownership().runtime_id != slot.candidate_runtime_id()
-        || target.provider() != expected_executable.provider
-    {
-        return Err(ReconcileError::ProviderIdentityMismatch);
-    }
+    validate_slot_target(&slot, &target, expected_executable)?;
     if target.project_root() != live.cwd {
         return Err(ReconcileError::ProviderCwdMismatch);
     }
@@ -130,10 +143,32 @@ pub(crate) fn prove_provider_exec(
         target.ownership(),
         &evidence,
     )?;
+    complete_proven_marker(state, provisional_lease, presentation_directory, &slot)
+}
+
+fn validate_slot_target(
+    slot: &ProvisionalSlot,
+    target: &OnboardingProviderExecTarget,
+    expected_executable: &ExpectedProviderExecutable,
+) -> Result<(), ReconcileError> {
+    if target.ownership().runtime_id != slot.candidate_runtime_id()
+        || target.provider() != expected_executable.provider
+    {
+        return Err(ReconcileError::ProviderIdentityMismatch);
+    }
+    Ok(())
+}
+
+fn complete_proven_marker(
+    state: &D16State,
+    provisional_lease: &ProvisionalLease,
+    presentation_directory: &Path,
+    slot: &ProvisionalSlot,
+) -> Result<(), ReconcileError> {
     provisional_lease.revalidate_for_mutation(state.root())?;
     let mut proven_slot = slot.clone();
     proven_slot.prove_provider_exec()?;
-    update_marker(state.root(), presentation_directory, &slot, &proven_slot)?;
+    update_marker(state.root(), presentation_directory, slot, &proven_slot)?;
     provisional_lease.revalidate_for_mutation(state.root())?;
     Ok(())
 }

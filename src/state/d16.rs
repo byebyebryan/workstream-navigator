@@ -2820,7 +2820,43 @@ impl D16State {
             .unchecked_transaction()
             .map_err(StateError::Sqlite)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
-        let target = load_d17_exec_proof_target(&transaction, &self.root, operation_id)?;
+        let target = load_d17_exec_proof_target(
+            &transaction,
+            &self.root,
+            operation_id,
+            OnboardingPhase::ProviderExecStarted,
+        )?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        Ok(target)
+    }
+
+    /// Loads an already proven provider-exec target so presentation-private
+    /// marker reconciliation can complete after a state-before-marker crash.
+    /// It performs no provider I/O and exposes no public snapshot data.
+    #[allow(
+        dead_code,
+        reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn d17_onboarding_exec_proven_target_current(
+        &self,
+        provisional_lease: &ProvisionalLease,
+        operation_id: OperationId,
+    ) -> Result<OnboardingProviderExecTarget, StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        validate_schema14(&self.connection)?;
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        let target = load_d17_exec_proof_target(
+            &transaction,
+            &self.root,
+            operation_id,
+            OnboardingPhase::ProviderExecProven,
+        )?;
         transaction.commit().map_err(StateError::Sqlite)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
         Ok(target)
@@ -2877,7 +2913,12 @@ impl D16State {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
-        let current = load_d17_exec_proof_target(&transaction, &self.root, ownership.operation_id)?;
+        let current = load_d17_exec_proof_target(
+            &transaction,
+            &self.root,
+            ownership.operation_id,
+            OnboardingPhase::ProviderExecStarted,
+        )?;
         if current.ownership != ownership {
             return Err(StateError::ConcurrentWrite);
         }
@@ -4136,18 +4177,32 @@ fn validate_d17_owned_onboarding_transaction(
     Ok((phase, persisted_revision))
 }
 
-/// Loads one exact D17 provider-exec-started operation and its retained graph
+type D17ExecProofRuntimeRow = (
+    String,
+    String,
+    String,
+    String,
+    String,
+    String,
+    Option<i64>,
+    Option<String>,
+    String,
+);
+
+/// Loads one exact D17 provider-exec operation and its retained graph
 /// identity. This is deliberately narrower than a snapshot: it returns no
 /// command, path, provider payload, or marker data, and it refuses every phase
-/// except the final pre-exec reconciliation fence.
+/// except the requested final pre-exec or already-proven reconciliation fence.
 #[allow(
     dead_code,
+    clippy::too_many_lines,
     reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
 )]
 fn load_d17_exec_proof_target(
     transaction: &rusqlite::Transaction<'_>,
     state_root: &Path,
     operation_id: OperationId,
+    required_phase: OnboardingPhase,
 ) -> Result<OnboardingProviderExecTarget, StateError> {
     let persisted: Option<(String, String, String, i64)> = transaction
         .query_row(
@@ -4161,7 +4216,7 @@ fn load_d17_exec_proof_target(
     let Some((kind, phase, encoded_intent, revision)) = persisted else {
         return Err(StateError::UnknownOperation(operation_id));
     };
-    if kind != "onboard" || phase != "provider_exec_started" {
+    if kind != "onboard" || phase != operation_phase_text(required_phase.operation_phase()) {
         return Err(StateError::OnboardingOperationUnavailable);
     }
     let intent: PersistedOnboardingIntent =
@@ -4169,10 +4224,11 @@ fn load_d17_exec_proof_target(
     if intent.version != 1 {
         return Err(StateError::MalformedHostSchema);
     }
-    let runtime: Option<(String, String, String, String, String, String)> = transaction
+    let runtime: Option<D17ExecProofRuntimeRow> = transaction
         .query_row(
             "SELECT runtimes.workstream_id, workstreams.location_id, runtimes.provider,
-                    runtimes.tmux_generation, runtimes.tmux_session, runtimes.cwd
+                    runtimes.tmux_generation, runtimes.tmux_session, runtimes.cwd,
+                    runtimes.provider_pid, runtimes.process_birth, runtimes.lifecycle
              FROM runtimes
              JOIN workstreams ON workstreams.workstream_id = runtimes.workstream_id
              WHERE runtimes.runtime_id = ?1",
@@ -4185,12 +4241,25 @@ fn load_d17_exec_proof_target(
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
                 ))
             },
         )
         .optional()
         .map_err(StateError::Sqlite)?;
-    let Some((workstream_id, location_id, provider, runtime_generation, session, cwd)) = runtime
+    let Some((
+        workstream_id,
+        location_id,
+        provider,
+        runtime_generation,
+        session,
+        cwd,
+        provider_pid,
+        provider_birth,
+        lifecycle,
+    )) = runtime
     else {
         return Err(StateError::MalformedHostSchema);
     };
@@ -4202,12 +4271,28 @@ fn load_d17_exec_proof_target(
         fs::canonicalize(state_root).map_err(|_| StateError::InvalidOnboardingPreparation)?;
     let expected_runtime_paths =
         RuntimePaths::for_runtime(&state_root, intent.candidate_runtime_id);
+    let process_identity_matches = match required_phase {
+        OnboardingPhase::ProviderExecStarted => {
+            provider_pid.is_none() && provider_birth.is_none() && lifecycle == "starting"
+        }
+        OnboardingPhase::ProviderExecProven => {
+            provider_pid
+                .and_then(|pid| u32::try_from(pid).ok())
+                .is_some_and(|pid| pid > 0)
+                && provider_birth
+                    .as_deref()
+                    .is_some_and(|birth| validate_registry_text("provider birth", birth).is_ok())
+                && lifecycle == "starting"
+        }
+        _ => return Err(StateError::MalformedHostSchema),
+    };
     if workstream_id != intent.workstream_id.to_string()
         || location_id != intent.location_id.to_string()
         || provider != intent.provider
         || runtime_generation != intent.runtime_generation
         || session != expected_runtime_paths.session_name
         || !is_normalized_absolute_utf8_path(&project_root)
+        || !process_identity_matches
     {
         return Err(StateError::MalformedHostSchema);
     }

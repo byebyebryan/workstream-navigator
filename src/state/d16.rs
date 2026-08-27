@@ -150,6 +150,12 @@ pub const HOST_SCHEMA_14_ONBOARDING_SQL: &str = "
     CREATE UNIQUE INDEX compound_operations_launch_token_id_idx
         ON compound_operations(launch_token_id)
         WHERE launch_token_id IS NOT NULL;
+    CREATE TABLE d17_onboarding_exec_targets (
+        operation_id TEXT PRIMARY KEY REFERENCES compound_operations(operation_id),
+        provider TEXT NOT NULL CHECK (provider IN ('codex', 'opencode')),
+        executable_device INTEGER NOT NULL CHECK (executable_device >= 0),
+        executable_inode INTEGER NOT NULL CHECK (executable_inode > 0)
+    );
 ";
 
 /// Returns the exact schema-12 fixture used by D16 migration tests.  It is a
@@ -704,6 +710,49 @@ pub(crate) struct OnboardingOwnership {
     pub(crate) operation_revision: Revision,
 }
 
+/// Bounded file identity captured from the exact native provider executable
+/// immediately before the helper transfers into provider preparation. It is
+/// durable proof input only: the executable path and command line are never
+/// stored in the onboarding journal or exposed through a snapshot.
+#[derive(Clone, Copy, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) struct OnboardingProviderExecutableIdentity {
+    device: u64,
+    inode: u64,
+}
+
+impl std::fmt::Debug for OnboardingProviderExecutableIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("OnboardingProviderExecutableIdentity(<opaque>)")
+    }
+}
+
+#[allow(
+    dead_code,
+    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
+)]
+impl OnboardingProviderExecutableIdentity {
+    pub(crate) fn new(device: u64, inode: u64) -> Result<Self, StateError> {
+        if inode == 0 || i64::try_from(device).is_err() || i64::try_from(inode).is_err() {
+            return Err(StateError::InvalidOnboardingPreparation);
+        }
+        Ok(Self { device, inode })
+    }
+
+    #[must_use]
+    pub(crate) const fn device(self) -> u64 {
+        self.device
+    }
+
+    #[must_use]
+    pub(crate) const fn inode(self) -> u64 {
+        self.inode
+    }
+}
+
 /// Bounded process evidence supplied only after an external reconciler has
 /// proved that the adopted private pane still contains the expected native
 /// provider executable. State stores no executable path or command line.
@@ -749,6 +798,7 @@ pub(crate) struct OnboardingProviderExecTarget {
     provider: ProviderKind,
     project_root: PathBuf,
     runtime_generation: String,
+    executable_identity: OnboardingProviderExecutableIdentity,
 }
 
 #[allow(
@@ -774,6 +824,11 @@ impl OnboardingProviderExecTarget {
     #[must_use]
     pub(crate) fn runtime_generation(&self) -> &str {
         &self.runtime_generation
+    }
+
+    #[must_use]
+    pub(crate) const fn executable_identity(&self) -> OnboardingProviderExecutableIdentity {
+        self.executable_identity
     }
 }
 
@@ -2633,8 +2688,9 @@ impl D16State {
     }
 
     /// Records the helper's durable provider-preparation fence after exact
-    /// Runtime ownership has committed. This changes only the bounded D17
-    /// journal; it neither invokes nor proves a provider.
+    /// Runtime ownership has committed. The identity comes from the resolved
+    /// canonical native executable and is committed atomically with the
+    /// preparation phase; no executable path or command line is stored.
     #[allow(
         dead_code,
         reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
@@ -2644,12 +2700,14 @@ impl D16State {
         provisional_lease: &ProvisionalLease,
         request: &OnboardingPrepareRequest,
         ownership: OnboardingOwnership,
+        executable_identity: OnboardingProviderExecutableIdentity,
     ) -> Result<OnboardingOwnership, StateError> {
         self.advance_d17_onboarding_current(
             provisional_lease,
             request,
             ownership,
             D17OnboardingAdvance::Normal(OnboardingPhase::ProviderPreparation),
+            Some(executable_identity),
         )
     }
 
@@ -2671,6 +2729,7 @@ impl D16State {
             request,
             ownership,
             D17OnboardingAdvance::OpenCodeExternalEffectStarted,
+            None,
         )
     }
 
@@ -2762,6 +2821,7 @@ impl D16State {
             request,
             ownership,
             D17OnboardingAdvance::Normal(OnboardingPhase::RecoveryRequired),
+            None,
         )
     }
 
@@ -2783,6 +2843,7 @@ impl D16State {
             request,
             ownership,
             D17OnboardingAdvance::Normal(OnboardingPhase::ProviderExecStarted),
+            None,
         )
     }
 
@@ -2805,6 +2866,7 @@ impl D16State {
             request,
             ownership,
             D17OnboardingAdvance::CodexExecFailedKnownAbsent,
+            None,
         )
     }
 
@@ -2818,6 +2880,7 @@ impl D16State {
         request: &OnboardingPrepareRequest,
         ownership: OnboardingOwnership,
         advance: D17OnboardingAdvance,
+        executable_identity: Option<OnboardingProviderExecutableIdentity>,
     ) -> Result<OnboardingOwnership, StateError> {
         let previous_busy_timeout = self
             .connection
@@ -2831,6 +2894,7 @@ impl D16State {
             request,
             ownership,
             advance,
+            executable_identity,
         );
         let restore = self.connection.busy_timeout(Duration::from_millis(
             u64::try_from(previous_busy_timeout.max(0)).unwrap_or(0),
@@ -2842,12 +2906,17 @@ impl D16State {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the lease-held journal update and its identity insert must remain one atomic audit boundary"
+    )]
     fn advance_d17_onboarding_with_zero_timeout(
         &mut self,
         provisional_lease: &ProvisionalLease,
         request: &OnboardingPrepareRequest,
         ownership: OnboardingOwnership,
         advance: D17OnboardingAdvance,
+        executable_identity: Option<OnboardingProviderExecutableIdentity>,
     ) -> Result<OnboardingOwnership, StateError> {
         ensure_d17_current_mode(self.mode)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
@@ -2869,6 +2938,12 @@ impl D16State {
         )?;
         let next = advance.next();
         current.transition(next)?;
+        if next == OnboardingPhase::ProviderPreparation && executable_identity.is_none() {
+            return Err(StateError::InvalidOnboardingPreparation);
+        }
+        if next != OnboardingPhase::ProviderPreparation && executable_identity.is_some() {
+            return Err(StateError::InvalidOnboardingPreparation);
+        }
         if advance.requires_codex_known_absence() {
             validate_d17_codex_known_absence(&transaction, ownership)?;
         }
@@ -2917,6 +2992,26 @@ impl D16State {
         };
         if updated != 1 {
             return Err(StateError::ConcurrentWrite);
+        }
+        if let Some(executable_identity) = executable_identity {
+            let inserted = transaction
+                .execute(
+                    "INSERT INTO d17_onboarding_exec_targets (
+                        operation_id, provider, executable_device, executable_inode
+                     ) VALUES (?1, ?2, ?3, ?4)",
+                    params![
+                        ownership.operation_id.to_string(),
+                        request.provider.as_str(),
+                        i64::try_from(executable_identity.device())
+                            .map_err(|_| StateError::InvalidOnboardingPreparation)?,
+                        i64::try_from(executable_identity.inode())
+                            .map_err(|_| StateError::InvalidOnboardingPreparation)?,
+                    ],
+                )
+                .map_err(StateError::Sqlite)?;
+            if inserted != 1 {
+                return Err(StateError::ConcurrentWrite);
+            }
         }
         validate_schema14(&transaction)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
@@ -4472,6 +4567,17 @@ fn validate_d17_provider_exec_start(
     if !valid {
         return Err(StateError::OnboardingOperationUnavailable);
     }
+    let target_provider: Option<String> = transaction
+        .query_row(
+            "SELECT provider FROM d17_onboarding_exec_targets WHERE operation_id = ?1",
+            [ownership.operation_id.to_string()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?;
+    if target_provider.as_deref() != Some(provider.as_str()) {
+        return Err(StateError::OnboardingOperationUnavailable);
+    }
     Ok(())
 }
 
@@ -4522,6 +4628,26 @@ fn load_d17_exec_proof_target(
     if intent.version != 1 {
         return Err(StateError::MalformedHostSchema);
     }
+    let executable_identity: Option<(String, i64, i64)> = transaction
+        .query_row(
+            "SELECT provider, executable_device, executable_inode
+             FROM d17_onboarding_exec_targets WHERE operation_id = ?1",
+            [operation_id.to_string()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?;
+    let Some((target_provider, device, inode)) = executable_identity else {
+        return Err(StateError::OnboardingOperationUnavailable);
+    };
+    let target_provider = target_provider
+        .parse::<ProviderKind>()
+        .map_err(|_| StateError::MalformedHostSchema)?;
+    let executable_identity = OnboardingProviderExecutableIdentity::new(
+        u64::try_from(device).map_err(|_| StateError::MalformedHostSchema)?,
+        u64::try_from(inode).map_err(|_| StateError::MalformedHostSchema)?,
+    )
+    .map_err(|_| StateError::MalformedHostSchema)?;
     let runtime: Option<D17ExecProofRuntimeRow> = transaction
         .query_row(
             "SELECT runtimes.workstream_id, workstreams.location_id, runtimes.provider,
@@ -4587,6 +4713,7 @@ fn load_d17_exec_proof_target(
     if workstream_id != intent.workstream_id.to_string()
         || location_id != intent.location_id.to_string()
         || provider != intent.provider
+        || target_provider != intent.provider
         || runtime_generation != intent.runtime_generation
         || session != expected_runtime_paths.session_name
         || !is_normalized_absolute_utf8_path(&project_root)
@@ -4605,6 +4732,7 @@ fn load_d17_exec_proof_target(
         provider,
         project_root,
         runtime_generation,
+        executable_identity,
     })
 }
 
@@ -5022,7 +5150,8 @@ fn validate_schema14(connection: &Connection) -> Result<(), StateError> {
     {
         return Err(StateError::MalformedHostSchema);
     }
-    validate_schema14_onboarding_operation_columns(connection)
+    validate_schema14_onboarding_operation_columns(connection)?;
+    validate_schema14_onboarding_exec_targets(connection)
 }
 
 fn validate_schema14_onboarding_operation_columns(
@@ -5066,6 +5195,73 @@ fn validate_schema14_onboarding_operation_columns(
             || token_expiry.is_some()
             || claims_digest.is_some()
         {
+            return Err(StateError::MalformedHostSchema);
+        }
+    }
+    Ok(())
+}
+
+fn validate_schema14_onboarding_exec_targets(connection: &Connection) -> Result<(), StateError> {
+    validate_table_columns(
+        connection,
+        "d17_onboarding_exec_targets",
+        &[
+            "operation_id",
+            "provider",
+            "executable_device",
+            "executable_inode",
+        ],
+    )?;
+    let mut statement = connection
+        .prepare(
+            "SELECT targets.operation_id, targets.provider,
+                    targets.executable_device, targets.executable_inode,
+                    operations.kind, operations.phase, operations.expected_revisions_json
+             FROM d17_onboarding_exec_targets AS targets
+             JOIN compound_operations AS operations
+               ON operations.operation_id = targets.operation_id
+             ORDER BY targets.operation_id",
+        )
+        .map_err(StateError::Sqlite)?;
+    let mut rows = statement.query([]).map_err(StateError::Sqlite)?;
+    while let Some(row) = rows.next().map_err(StateError::Sqlite)? {
+        let operation_id: String = row.get(0).map_err(StateError::Sqlite)?;
+        let provider: String = row.get(1).map_err(StateError::Sqlite)?;
+        let device: i64 = row.get(2).map_err(StateError::Sqlite)?;
+        let inode: i64 = row.get(3).map_err(StateError::Sqlite)?;
+        let kind: String = row.get(4).map_err(StateError::Sqlite)?;
+        let phase: String = row.get(5).map_err(StateError::Sqlite)?;
+        let encoded_intent: String = row.get(6).map_err(StateError::Sqlite)?;
+        if operation_id.parse::<OperationId>().is_err() || kind != "onboard" {
+            return Err(StateError::MalformedHostSchema);
+        }
+        let provider = provider
+            .parse::<ProviderKind>()
+            .map_err(|_| StateError::MalformedHostSchema)?;
+        OnboardingProviderExecutableIdentity::new(
+            u64::try_from(device).map_err(|_| StateError::MalformedHostSchema)?,
+            u64::try_from(inode).map_err(|_| StateError::MalformedHostSchema)?,
+        )
+        .map_err(|_| StateError::MalformedHostSchema)?;
+        let phase =
+            operation_phase_from_text(&phase).map_err(|_| StateError::MalformedHostSchema)?;
+        let phase =
+            OnboardingPhase::from_operation_phase(phase).ok_or(StateError::MalformedHostSchema)?;
+        if !matches!(
+            phase,
+            OnboardingPhase::ProviderPreparation
+                | OnboardingPhase::ProviderExternalEffectStarted
+                | OnboardingPhase::ProviderExecStarted
+                | OnboardingPhase::ProviderExecProven
+                | OnboardingPhase::KnownAbsentExec
+                | OnboardingPhase::RecoveryRequired
+                | OnboardingPhase::RolledBack
+        ) {
+            return Err(StateError::MalformedHostSchema);
+        }
+        let intent: PersistedOnboardingIntent =
+            serde_json::from_str(&encoded_intent).map_err(|_| StateError::MalformedHostSchema)?;
+        if intent.version != 1 || intent.provider != provider {
             return Err(StateError::MalformedHostSchema);
         }
     }
@@ -8310,6 +8506,10 @@ mod tests {
         }
     }
 
+    fn onboarding_executable_identity() -> OnboardingProviderExecutableIdentity {
+        OnboardingProviderExecutableIdentity::new(31, 37).unwrap()
+    }
+
     fn sample_journal() -> ObserverHandoverJournal {
         ObserverHandoverJournal {
             version: 1,
@@ -9238,8 +9438,32 @@ mod tests {
             )
             .unwrap();
         let preparation = state
-            .record_d17_provider_preparation_current(&provisional, &request, ownership)
+            .record_d17_provider_preparation_current(
+                &provisional,
+                &request,
+                ownership,
+                onboarding_executable_identity(),
+            )
             .unwrap();
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT provider, executable_device, executable_inode
+                     FROM d17_onboarding_exec_targets WHERE operation_id = ?1",
+                    [issued.operation_id().to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, i64>(2)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            ("opencode".to_owned(), 31, 37),
+            "the external-effect boundary must inherit an exact pre-POST executable identity"
+        );
         let external_effect = state
             .record_d17_provider_external_effect_started_current(
                 &provisional,
@@ -9424,6 +9648,7 @@ mod tests {
                 &provisional,
                 &changed_request,
                 ownership,
+                onboarding_executable_identity(),
             ),
             Err(StateError::OperationRequestMismatch),
         ));
@@ -9434,11 +9659,21 @@ mod tests {
             ))
         ));
         let preparation = state
-            .record_d17_provider_preparation_current(&provisional, &request, ownership)
+            .record_d17_provider_preparation_current(
+                &provisional,
+                &request,
+                ownership,
+                onboarding_executable_identity(),
+            )
             .unwrap();
         assert_eq!(preparation.operation_revision.value(), 4);
         assert!(matches!(
-            state.record_d17_provider_preparation_current(&provisional, &request, ownership),
+            state.record_d17_provider_preparation_current(
+                &provisional,
+                &request,
+                ownership,
+                onboarding_executable_identity(),
+            ),
             Err(StateError::ConcurrentWrite),
         ));
         assert!(matches!(
@@ -9465,7 +9700,12 @@ mod tests {
             ("provider_exec_started".to_owned(), 5)
         );
         assert!(matches!(
-            state.record_d17_provider_preparation_current(&provisional, &request, exec_started),
+            state.record_d17_provider_preparation_current(
+                &provisional,
+                &request,
+                exec_started,
+                onboarding_executable_identity(),
+            ),
             Err(StateError::Domain(
                 crate::domain::DomainError::InvalidOnboardingTransition { .. }
             ))

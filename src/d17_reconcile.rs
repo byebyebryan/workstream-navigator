@@ -22,17 +22,21 @@ use crate::{
     domain::{OperationId, ProviderKind},
     provisional::{ProvisionalPhase, ProvisionalSlot, SlotError, read_marker, update_marker},
     runtime::{PrivateRuntime, ProcessGroupProbe},
-    state::d16::{OnboardingProviderExecEvidence, OnboardingProviderExecTarget},
+    state::d16::{
+        OnboardingProviderExecEvidence, OnboardingProviderExecTarget,
+        OnboardingProviderExecutableIdentity,
+    },
     state::{D16State, ProvisionalLease, StateError},
 };
 
-/// Exact native executable expected after the helper's final `execve`. The
-/// path is private proof input and is neither persisted nor returned in a
-/// public snapshot.
+/// Exact native executable selected before the helper's final `execve`. Its
+/// canonical path is private launch input; only its bounded device/inode
+/// identity enters the onboarding journal for post-exec proof.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ExpectedProviderExecutable {
     provider: ProviderKind,
     canonical_path: PathBuf,
+    identity: OnboardingProviderExecutableIdentity,
 }
 
 impl ExpectedProviderExecutable {
@@ -51,9 +55,11 @@ impl ExpectedProviderExecutable {
                 return Err(ReconcileError::ExecutableUnavailable);
             }
         }
+        let identity = identity_from_metadata(&metadata)?;
         Ok(Self {
             provider,
             canonical_path,
+            identity,
         })
     }
 
@@ -92,12 +98,43 @@ impl ExpectedProviderExecutable {
             .chain(arguments.iter().map(OsString::from))
             .collect()
     }
+
+    #[must_use]
+    pub(crate) const fn identity(&self) -> OnboardingProviderExecutableIdentity {
+        self.identity
+    }
 }
 
 /// Read-only process-executable evidence. A missing process is distinct from
 /// an inaccessible or malformed process and neither can prove provider exec.
 pub(crate) trait ProviderExecutableProbe {
-    fn executable_for_pid(&self, pid: u32) -> Result<Option<PathBuf>, ReconcileError>;
+    fn executable_identity_for_pid(
+        &self,
+        pid: u32,
+    ) -> Result<Option<OnboardingProviderExecutableIdentity>, ReconcileError>;
+}
+
+/// Linux read-only proof of the exact file currently executable by one PID.
+/// The `/proc/<pid>/exe` metadata remains tied to a live executable even if
+/// its original pathname later changes, so reconciliation never resolves an
+/// ambient `PATH` or trusts a replacement file.
+pub(crate) struct LinuxProviderExecutableProbe;
+
+impl ProviderExecutableProbe for LinuxProviderExecutableProbe {
+    fn executable_identity_for_pid(
+        &self,
+        pid: u32,
+    ) -> Result<Option<OnboardingProviderExecutableIdentity>, ReconcileError> {
+        if pid == 0 {
+            return Err(ReconcileError::ProviderExecutableMismatch);
+        }
+        let path = PathBuf::from(format!("/proc/{pid}/exe"));
+        match fs::metadata(path) {
+            Ok(metadata) => identity_from_metadata(&metadata).map(Some),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(ReconcileError::ProviderExecutableMismatch),
+        }
+    }
 }
 
 /// Bounded reconciliation errors. They intentionally never render private
@@ -123,18 +160,18 @@ pub(crate) enum ReconcileError {
 }
 
 /// Commits exact post-exec proof for one already Runtime-owned provisional
-/// slot. The caller supplies only a pre-resolved expected executable and a
-/// read-only executable probe; all marker, pane/process-group, state revision,
-/// Runtime generation, cwd, and provider checks are repeated here. If the
-/// durable proof committed before a marker-write failure, this instead repairs
-/// the exact marker phase without re-executing or probing the provider.
+/// slot. The caller supplies only a read-only executable probe; the expected
+/// file identity is loaded from the durable preparation record. All marker,
+/// pane/process-group, state revision, Runtime generation, cwd, and provider
+/// checks are repeated here. If the durable proof committed before a
+/// marker-write failure, this instead repairs the exact marker phase without
+/// re-executing or probing the provider.
 pub(crate) fn prove_provider_exec(
     state: &mut D16State,
     provisional_lease: &ProvisionalLease,
     presentation_directory: &Path,
     runtime: &PrivateRuntime<'_>,
     process_group_probe: &dyn ProcessGroupProbe,
-    expected_executable: &ExpectedProviderExecutable,
     executable_probe: &dyn ProviderExecutableProbe,
 ) -> Result<(), ReconcileError> {
     provisional_lease.revalidate_for_mutation(state.root())?;
@@ -146,7 +183,7 @@ pub(crate) fn prove_provider_exec(
     if slot.phase() == ProvisionalPhase::ProviderExecProven {
         let target =
             state.d17_onboarding_exec_proven_target_current(provisional_lease, operation_id)?;
-        validate_slot_target(&slot, &target, expected_executable)?;
+        validate_slot_target(&slot, &target)?;
         return Ok(());
     }
     if slot.phase() != ProvisionalPhase::RuntimeOwnedLaunching {
@@ -154,7 +191,7 @@ pub(crate) fn prove_provider_exec(
     }
     match state.d17_onboarding_exec_proven_target_current(provisional_lease, operation_id) {
         Ok(target) => {
-            validate_slot_target(&slot, &target, expected_executable)?;
+            validate_slot_target(&slot, &target)?;
             return complete_proven_marker(state, provisional_lease, presentation_directory, &slot);
         }
         Err(StateError::OnboardingOperationUnavailable) => {}
@@ -162,16 +199,14 @@ pub(crate) fn prove_provider_exec(
     }
     let live = slot.revalidate_live_shell(runtime, process_group_probe)?;
     let target = state.d17_onboarding_exec_proof_target_current(provisional_lease, operation_id)?;
-    validate_slot_target(&slot, &target, expected_executable)?;
+    validate_slot_target(&slot, &target)?;
     if target.project_root() != live.cwd {
         return Err(ReconcileError::ProviderCwdMismatch);
     }
     let actual = executable_probe
-        .executable_for_pid(live.shell_pid)?
+        .executable_identity_for_pid(live.shell_pid)?
         .ok_or(ReconcileError::ProviderExecutableMismatch)?;
-    let actual =
-        fs::canonicalize(actual).map_err(|_| ReconcileError::ProviderExecutableMismatch)?;
-    if actual != expected_executable.canonical_path {
+    if actual != target.executable_identity() {
         return Err(ReconcileError::ProviderExecutableMismatch);
     }
     let evidence = OnboardingProviderExecEvidence::new(live.shell_pid, live.shell_birth)?;
@@ -186,14 +221,28 @@ pub(crate) fn prove_provider_exec(
 fn validate_slot_target(
     slot: &ProvisionalSlot,
     target: &OnboardingProviderExecTarget,
-    expected_executable: &ExpectedProviderExecutable,
 ) -> Result<(), ReconcileError> {
-    if target.ownership().runtime_id != slot.candidate_runtime_id()
-        || target.provider() != expected_executable.provider
-    {
+    if target.ownership().runtime_id != slot.candidate_runtime_id() {
         return Err(ReconcileError::ProviderIdentityMismatch);
     }
     Ok(())
+}
+
+fn identity_from_metadata(
+    metadata: &fs::Metadata,
+) -> Result<OnboardingProviderExecutableIdentity, ReconcileError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+
+        OnboardingProviderExecutableIdentity::new(metadata.dev(), metadata.ino())
+            .map_err(|_| ReconcileError::ExecutableUnavailable)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        Err(ReconcileError::ExecutableUnavailable)
+    }
 }
 
 fn complete_proven_marker(

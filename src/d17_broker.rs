@@ -245,10 +245,7 @@ mod tests {
     use super::{BrokerError, PrepareContext, WorktreeInspector, consume, prepare};
     use crate::{
         d17_helper::{advance_codex_to_provider_exec_fence, begin_provider_preparation},
-        d17_reconcile::{
-            ExpectedProviderExecutable, ProviderExecutableProbe, ReconcileError,
-            prove_provider_exec,
-        },
+        d17_reconcile::{ProviderExecutableProbe, ReconcileError, prove_provider_exec},
         domain::{IdGenerator, ProviderKind, Revision, RuntimeId},
         provisional::{
             PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, SlotGeneration,
@@ -259,6 +256,7 @@ mod tests {
             NativeLaunch, PrivateRuntime, ProcessGroupInfo, ProcessGroupProbe, ProcessProbe,
             ProcessProbeError, RuntimeError, TmuxClient, TmuxInvocation, TmuxResponse,
         },
+        state::d16::OnboardingProviderExecutableIdentity,
         state::{
             StateRoot, TRANSITION_LOCK_FILE, acquire_transition_lease, fresh_create,
             open_cutover_transition, open_d17_current_only,
@@ -357,19 +355,25 @@ mod tests {
     }
 
     struct FixtureExecutableProbe {
-        executable: PathBuf,
+        identity: OnboardingProviderExecutableIdentity,
     }
 
     impl ProviderExecutableProbe for FixtureExecutableProbe {
-        fn executable_for_pid(&self, pid: u32) -> Result<Option<PathBuf>, ReconcileError> {
-            Ok((pid == 4242).then(|| self.executable.clone()))
+        fn executable_identity_for_pid(
+            &self,
+            pid: u32,
+        ) -> Result<Option<OnboardingProviderExecutableIdentity>, ReconcileError> {
+            Ok((pid == 4242).then_some(self.identity))
         }
     }
 
     struct UnavailableExecutableProbe;
 
     impl ProviderExecutableProbe for UnavailableExecutableProbe {
-        fn executable_for_pid(&self, _pid: u32) -> Result<Option<PathBuf>, ReconcileError> {
+        fn executable_identity_for_pid(
+            &self,
+            _pid: u32,
+        ) -> Result<Option<OnboardingProviderExecutableIdentity>, ReconcileError> {
             Err(ReconcileError::ProviderExecutableMismatch)
         }
     }
@@ -467,6 +471,10 @@ mod tests {
             },
         };
         let ids = SequenceIds::default();
+        let expected_executable_identity =
+            OnboardingProviderExecutableIdentity::new(17, 19).unwrap();
+        let unexpected_executable_identity =
+            OnboardingProviderExecutableIdentity::new(23, 29).unwrap();
         let context = PrepareContext {
             presentation_directory: &presentation,
             runtime: &runtime,
@@ -507,6 +515,7 @@ mod tests {
                 &after_reboot_context,
                 &token,
                 11,
+                expected_executable_identity,
             )
             .is_err(),
             "a helper after a different boot must not consume the handoff"
@@ -517,6 +526,7 @@ mod tests {
             &context,
             &token,
             11,
+            expected_executable_identity,
         )
         .unwrap();
         assert_eq!(exec_fence.operation_id(), handoff.operation_id());
@@ -527,18 +537,6 @@ mod tests {
                 crate::provisional::SlotError::HandoffUnavailable
             ))
         ));
-        let executable = temporary.path().join("synthetic-codex");
-        fs::write(&executable, b"#!/bin/sh\nexit 0\n").unwrap();
-        let unexpected_executable = temporary.path().join("synthetic-unexpected");
-        fs::write(&unexpected_executable, b"#!/bin/sh\nexit 0\n").unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
-            fs::set_permissions(&unexpected_executable, fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        let expected_executable =
-            ExpectedProviderExecutable::new(ProviderKind::Codex, &executable).unwrap();
         assert!(matches!(
             prove_provider_exec(
                 &mut state,
@@ -546,9 +544,8 @@ mod tests {
                 &presentation,
                 &runtime,
                 &ShellGroup,
-                &expected_executable,
                 &FixtureExecutableProbe {
-                    executable: unexpected_executable.clone(),
+                    identity: unexpected_executable_identity,
                 },
             ),
             Err(ReconcileError::ProviderCwdMismatch),
@@ -566,9 +563,8 @@ mod tests {
                 &presentation,
                 &runtime,
                 &ShellGroup,
-                &expected_executable,
                 &FixtureExecutableProbe {
-                    executable: unexpected_executable,
+                    identity: unexpected_executable_identity,
                 },
             ),
             Err(ReconcileError::ProviderExecutableMismatch),
@@ -584,8 +580,9 @@ mod tests {
             &presentation,
             &runtime,
             &ShellGroup,
-            &expected_executable,
-            &FixtureExecutableProbe { executable },
+            &FixtureExecutableProbe {
+                identity: expected_executable_identity,
+            },
         )
         .unwrap();
         assert_eq!(
@@ -607,7 +604,6 @@ mod tests {
             &presentation,
             &runtime,
             &ShellGroup,
-            &expected_executable,
             &UnavailableExecutableProbe,
         )
         .unwrap();

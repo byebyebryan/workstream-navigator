@@ -15,7 +15,7 @@ use thiserror::Error;
 use crate::{
     d17_broker::{BrokerError, PrepareContext, consume, request_from_context},
     domain::{OperationId, ProviderKind, RuntimeId},
-    state::d16::OnboardingOwnership,
+    state::d16::{OnboardingOwnership, OnboardingProviderExecutableIdentity},
     state::{D16State, ProvisionalLease, StateError},
 };
 
@@ -160,6 +160,7 @@ pub(crate) fn begin_provider_preparation(
     context: &PrepareContext<'_, '_>,
     token: &str,
     now_monotonic_millis: i64,
+    executable_identity: OnboardingProviderExecutableIdentity,
 ) -> Result<ProviderPreparation, HelperError> {
     let ownership = consume(
         state,
@@ -169,8 +170,12 @@ pub(crate) fn begin_provider_preparation(
         now_monotonic_millis,
     )?;
     let (_, request) = request_from_context(state, provisional_lease, context)?;
-    let ownership =
-        state.record_d17_provider_preparation_current(provisional_lease, &request, ownership)?;
+    let ownership = state.record_d17_provider_preparation_current(
+        provisional_lease,
+        &request,
+        ownership,
+        executable_identity,
+    )?;
     Ok(ProviderPreparation {
         ownership: Box::new(ownership),
         provider: context.provider,
@@ -356,6 +361,7 @@ pub(crate) fn advance_codex_to_provider_exec_fence(
     context: &PrepareContext<'_, '_>,
     token: &str,
     now_monotonic_millis: i64,
+    executable_identity: OnboardingProviderExecutableIdentity,
 ) -> Result<ProviderExecFence, HelperError> {
     if context.provider != ProviderKind::Codex {
         return Err(HelperError::CodexPreparationProviderMismatch);
@@ -366,6 +372,7 @@ pub(crate) fn advance_codex_to_provider_exec_fence(
         context,
         token,
         now_monotonic_millis,
+        executable_identity,
     )?;
     record_codex_provider_exec_started(state, provisional_lease, context, preparation)
 }

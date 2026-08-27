@@ -234,6 +234,7 @@ pub(crate) fn exec_codex_from_account_shell(
         &context,
         capability,
         now_monotonic_millis,
+        executable.identity(),
     )
     .map_err(|_| AccountShellCodexLaunchError::Helper)?;
     let error = exec_program(&executable.native_program(launch.arguments()));
@@ -332,6 +333,7 @@ pub(crate) fn exec_opencode_from_account_shell(
         &context,
         capability,
         now_monotonic_millis,
+        expected.identity(),
     )
     .map_err(|_| AccountShellOpenCodeLaunchError::Helper)?;
     let preparation_ownership = preparation.ownership();

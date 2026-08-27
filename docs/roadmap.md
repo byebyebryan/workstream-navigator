@@ -250,17 +250,20 @@ Passive process detection, hook-only adoption, pane-text inference, and
 provider launches that bypass the broker remain unmanaged.
 
 The dormant account-shell control adapter now has no routed CLI but composes
-both provider-specific final handoffs under the retained lease. Codex resolves
-an exact native executable, commits `provider_exec_started`, and can classify
-only a direct `execve` error as known absence. OpenCode instead resolves its
-exact executable and worktree, commits `provider_preparation`, then records an
-external-effect fence in the same callback immediately before its temporary
-private server can `POST /session`. It binds only the exact returned blank
-session before recording `provider_exec_started`. Any failure after ownership
-consumption that is not Codex's direct-exec known absence becomes
-`recovery_required`; OpenCode never retries or invents a replacement session.
-These adapters remain dormant and have exercised only disposable unit seams,
-not a user shell, provider installation, or live Runtime.
+both provider-specific final handoffs under the retained lease. Before either
+provider preparation it resolves the canonical native executable and commits
+only its bounded device/inode identity with `provider_preparation`; paths and
+argv remain transient. Post-exec proof compares that durable identity with
+`/proc/<pid>/exe`, never a later ambient `PATH` resolution. Codex then commits
+`provider_exec_started` and can classify only a direct `execve` error as known
+absence. OpenCode records an external-effect fence in the same callback
+immediately before its temporary private server can `POST /session`, binds only
+the exact returned blank session, then records `provider_exec_started`. Any
+failure after ownership consumption that is not Codex's direct-exec known
+absence becomes `recovery_required`; OpenCode never retries or invents a
+replacement session. These adapters remain dormant and have exercised only
+disposable unit seams, not a user shell, provider installation, or live
+Runtime.
 
 [Spike 0019](evidence/spikes/0019-brokered-onboarding-shell.md) validates a
 single-phase controlled-function-plus-`exec` candidate in a synthetic

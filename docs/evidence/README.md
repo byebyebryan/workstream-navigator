@@ -61,6 +61,9 @@ OpenCode `1.18.23` revalidation of the historical fresh-session contract.
 [Spike 0021](spikes/0021-d17-two-phase-handshake.md) validates the narrow D17
 prepare-capability-helper-exec topology across synthetic Bash/Zsh and
 Codex/OpenCode routes while preserving the remaining D17.0 acceptance gates.
+[Spike 0022](spikes/0022-d17-account-shell-wrapper.md) validates the controlled
+non-login Bash/Zsh account-wrapper candidate and records the mandatory Bash
+login preflight boundary.
 
 ## Provider studies
 

@@ -118,9 +118,11 @@ validated presentation environment, original `HOME`, and (for Zsh) original
 system/user order exactly once, then remove conflicting `codex`/`opencode`
 aliases/functions and install exact WSNav functions. Observable environment,
 options, aliases, functions, and prompt readiness match an ordinary disposable
-baseline except bounded wrapper state and intentional interception. WSNav
-never parses or persists RC contents; login-shell mode, startup-abort, wrapper
-replacement, and ambiguous startup contexts fail closed with guidance.
+baseline except bounded wrapper state and intentional interception. The launcher
+rejects login mode before startup because Bash login mode does not load a
+supplied `--rcfile`; a later nested login shell is unmanaged. WSNav never parses
+or persists RC contents; startup-abort, wrapper replacement, and ambiguous
+startup contexts fail closed with guidance.
 
 For a promotable fresh interactive native TUI shape, the controlled function
 invokes a bounded prepare broker as a child over private non-terminal control

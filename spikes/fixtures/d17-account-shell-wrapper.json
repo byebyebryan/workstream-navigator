@@ -1,0 +1,68 @@
+{
+  "assertions": {
+    "all_case_assertions_pass": true,
+    "cleanup_complete": true,
+    "ordinary_tmux_unchanged": true,
+    "private_tmux_only": true,
+    "temporary_root_mode_0700": true
+  },
+  "cases": {
+    "bash_login_refusal": {
+      "bash_login_does_not_load_rcfile": true,
+      "launcher_preflight_required": true,
+      "provider_functions_not_installed": true,
+      "refusal_observation": "0:none:file:file"
+    },
+    "bash_parity": {
+      "baseline_keeps_user_codex_alias": true,
+      "baseline_keeps_user_opencode_function": true,
+      "observable_user_state_matches_baseline": true,
+      "user_rc_once_in_baseline": true,
+      "user_rc_once_in_wrapper": true,
+      "wrapped_startup_observation": "1:none:function:function",
+      "wrapper_does_not_refuse_normal_startup": true,
+      "wrapper_marks_only_wrapped_startup": true,
+      "wrapper_replaces_codex_alias": true,
+      "wrapper_replaces_opencode_function": true
+    },
+    "bash_startup_abort": {
+      "aborted_user_rc_not_counted": true,
+      "provider_functions_not_installed": true,
+      "reason_is_reported": true,
+      "refusal_observation": "0:startup_abort:file:file"
+    },
+    "zsh_login_refusal": {
+      "aborted_user_rc_not_counted": true,
+      "provider_functions_not_installed": true,
+      "reason_is_reported": true,
+      "refusal_observation": "0:login:none:none"
+    },
+    "zsh_parity": {
+      "baseline_keeps_user_codex_alias": true,
+      "baseline_keeps_user_opencode_function": true,
+      "observable_user_state_matches_baseline": true,
+      "user_rc_once_in_baseline": true,
+      "user_rc_once_in_wrapper": true,
+      "wrapped_startup_observation": "1:none:function:function",
+      "wrapper_does_not_refuse_normal_startup": true,
+      "wrapper_marks_only_wrapped_startup": true,
+      "wrapper_replaces_codex_alias": true,
+      "wrapper_replaces_opencode_function": true
+    },
+    "zsh_startup_abort": {
+      "aborted_user_rc_not_counted": true,
+      "provider_functions_not_installed": true,
+      "reason_is_reported": true,
+      "refusal_observation": "0:startup_abort:none:none"
+    }
+  },
+  "contract_fingerprint": "account-shell-wrapper-parity-v1",
+  "environment": {
+    "bash_version": "GNU bash, version 5.3.15(1)-release (x86_64-pc-linux-gnu)",
+    "tmux_version": "tmux 3.7c",
+    "zsh_version": "zsh 5.9.2 (x86_64-pc-linux-gnu)"
+  },
+  "reason": "account-shell-wrapper-parity-observed",
+  "status": "pass",
+  "study": "d17-account-shell-wrapper"
+}

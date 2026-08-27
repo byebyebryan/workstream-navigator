@@ -696,20 +696,24 @@ rolled back and never issues a second POST. A possible POST effect remains
 
 ### Account-shell bootstrap and broker handshake
 
-D17 supports Bash and Zsh interactive non-login shells only. WSNav starts the
-provisional slot with a shell-specific private wrapper startup file while
-preserving the validated presentation environment, original `HOME`, and, for
-Zsh, original `ZDOTDIR`. The wrapper reproduces that shell's ordinary
-non-login interactive startup graph, including system/user ordering, exactly
-once; it does not select a vaguely named RC file or promise arbitrary
-login-shell mode. Observable environment, options, aliases, functions, and prompt
-readiness must match an ordinary disposable baseline except bounded wrapper
-state and the intentional provider interception. The wrapper then removes any
-`codex` and `opencode` aliases or functions before installing the exact
-WSNav-owned functions. WSNav never parses, stores, or modifies ordinary RC
-contents. Login-shell mode, startup abort, an `exec` that replaces the wrapper, or
-any ambiguous startup context leaves the card visible but unavailable with
-bounded guidance; it does not expose a partially intercepted shell.
+D17 supports Bash and Zsh interactive non-login shells only. The launcher
+rejects login-shell mode before it starts either shell: interactive login Bash
+does not load a supplied `--rcfile`, so a Bash wrapper cannot be the enforcement
+point. A later nested login shell bypasses the controlled function and remains
+unmanaged. WSNav starts the provisional slot with a shell-specific private
+wrapper startup file while preserving the validated presentation environment,
+original `HOME`, and, for Zsh, original `ZDOTDIR`. The wrapper reproduces that
+shell's ordinary non-login interactive startup graph, including system/user
+ordering, exactly once; it does not select a vaguely named RC file or promise
+arbitrary login-shell mode. Observable environment, options, aliases,
+functions, and prompt readiness must match an ordinary disposable baseline
+except bounded wrapper state and the intentional provider interception. The
+wrapper then removes any `codex` and `opencode` aliases or functions before
+installing the exact WSNav-owned functions. WSNav never parses, stores, or
+modifies ordinary RC contents. Startup abort, an `exec` that replaces the
+wrapper, or any ambiguous startup context leaves the card visible but
+unavailable with bounded guidance; it does not expose a partially intercepted
+shell.
 
 When a controlled function receives a provider invocation, it first applies
 the provider adapter's closed command grammar. Only a proven fresh
@@ -2831,9 +2835,10 @@ following behavior without widening the product:
     original `HOME`/Zsh `ZDOTDIR` match ordinary non-login baseline matrices
     (system/user startup order, environment, options, aliases, functions,
     prompt readiness), reproduce the ordinary non-login interactive startup
-    graph exactly once, remove conflicting provider
-    definitions, and fail closed on login-shell mode, abort, replacement, or
-    ambiguity.
+    graph exactly once, and remove conflicting provider definitions. The
+    launcher rejects login mode before startup because Bash login mode ignores a
+    supplied `--rcfile`; a later nested login shell is unmanaged. The wrappers
+    fail closed on abort, replacement, or ambiguity.
     Prove Git-root detection keeps linked-worktree roots exact, non-Git and
     conflicting arguments fail before effects, shell exit and conclusive launch
     failure leave no durable residue, post-effect ambiguity stays visibly

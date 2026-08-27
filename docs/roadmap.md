@@ -199,7 +199,10 @@ slot is never reusable. Codex may remain managed `starting` and unbound until
 same Runtime/Workstream/binding for exact recovery/resume after a final TUI
 failure and is never rolled back or posted again.
 
-D17 supports Bash and Zsh interactive non-login account shells only. Shell-
+D17 supports Bash and Zsh interactive non-login account shells only. The
+launcher rejects login-shell mode before it starts either shell: interactive
+login Bash does not load a supplied `--rcfile`, so a Bash wrapper cannot be the
+enforcement point. A later nested login shell is an unmanaged bypass. Shell-
 specific private wrapper startup files inherit the validated presentation
 environment, original `HOME`, and (for Zsh) original `ZDOTDIR`, reproduce the
 ordinary non-login interactive startup graph in system/user order exactly once,
@@ -207,8 +210,8 @@ then remove conflicting `codex`/`opencode` aliases/functions and install exact
 WSNav functions. Observable environment, options, aliases, functions, and
 prompt readiness match an ordinary disposable baseline except bounded wrapper
 state and intentional interception. WSNav never parses or persists RC
-contents. Login-shell mode, startup abort, wrapper replacement, and ambiguous
-startup contexts leave onboarding unavailable with guidance. Provider grammar
+contents. Startup abort, wrapper replacement, and ambiguous startup contexts
+leave onboarding unavailable with guidance. Provider grammar
 is closed and adapter/version-contract validated: only fresh native TUI shapes
 promote; broker-owned cwd/profile, resume/session, attach/server,
 host/port/endpoint, and equivalent identity flags refuse before reservation.
@@ -4285,16 +4288,18 @@ private Runtime, recovery, privacy, and completed-output guarantees.
   seed. Missing, deleted, unsafe, or ambiguous seed evidence makes onboarding
   unavailable with guidance and never falls back.
 - The provisional account shell supports Bash and Zsh interactive non-login
-  shells only. Shell-specific private wrapper startup files inherit the
-  validated presentation environment, original `HOME`, and (for Zsh) original
-  `ZDOTDIR`, reproduce the ordinary non-login interactive startup graph in
-  system/user order exactly once, remove conflicting `codex`/`opencode`
-  aliases/functions, and install exact WSNav-owned functions. Observable
-  environment, options, aliases, functions, and prompt readiness match an
-  ordinary disposable baseline except bounded wrapper state and intentional
-  interception. WSNav never parses or persists RC contents; login-shell mode,
-  startup abort, wrapper replacement, or ambiguity leave onboarding
-  unavailable.
+  shells only. The launcher rejects login mode before it starts either shell:
+  interactive login Bash does not load a supplied `--rcfile`, so the wrapper
+  cannot be the enforcement point. A later nested login shell is an unmanaged
+  bypass. Shell-specific private wrapper startup files inherit the validated
+  presentation environment, original `HOME`, and (for Zsh) original `ZDOTDIR`,
+  reproduce the ordinary non-login interactive startup graph in system/user
+  order exactly once, remove conflicting `codex`/`opencode` aliases/functions,
+  and install exact WSNav-owned functions. Observable environment, options,
+  aliases, functions, and prompt readiness match an ordinary disposable
+  baseline except bounded wrapper state and intentional interception. WSNav
+  never parses or persists RC contents; startup abort, wrapper replacement, or
+  ambiguity leave onboarding unavailable.
 - For a promotable fresh interactive native TUI shape, the exact function
   invokes a bounded prepare broker as a child over presentation-private
   non-terminal control I/O. One exact stable host-private `provisional.lock`
@@ -4800,9 +4805,11 @@ D17 closes only when all of the following are true:
 - Bash and Zsh interactive non-login wrapper/functions inherit the validated
   environment and original `HOME`/Zsh `ZDOTDIR`, match ordinary non-login
   baseline matrices (system/user startup ordering, environment, options,
-  aliases, functions, and prompt readiness), reproduce the ordinary non-login
-  interactive startup graph exactly once without parsing RC contents, and fail
-  closed on login-shell mode, abort, replacement, or ambiguity. They pass
+  aliases, functions, and prompt readiness), and reproduce the ordinary
+  non-login interactive startup graph exactly once without parsing RC contents.
+  The launcher rejects login mode before startup because Bash login mode ignores
+  a supplied `--rcfile`; a later nested login shell is unmanaged. The wrappers
+  fail closed on abort, replacement, or ambiguity. They pass
   bounded grammar/quoting/argument/signal tests, invoke a child prepare broker
   that returns only an exact one-shot capability, and hand it to the hidden
   helper. The helper opens `provisional.lock`, retains its lease, and

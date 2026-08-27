@@ -23,7 +23,8 @@ use uuid::Uuid;
 use crate::{
     domain::{Revision, RuntimeId},
     presentation::{
-        D17ProvisionalInventory, D17ProvisionalInventoryError, classify_d17_provisional_inventory,
+        D17ProvisionalInventory, D17ProvisionalInventoryError, Presentation,
+        classify_d17_provisional_inventory,
     },
     runtime::{
         NativeLaunch, PrivateRuntime, ProcessGroupProbe, RuntimePaths, RuntimeProbe, RuntimeStartup,
@@ -132,6 +133,30 @@ pub(crate) enum HostInventoryError {
     Inventory(#[from] D17ProvisionalInventoryError),
 }
 
+/// Bounded refusal from the lease-held D17 shell materialization boundary.
+/// It intentionally retains neither the presentation directory nor candidate
+/// Runtime path, so a caller cannot turn an unavailable or occupied host into
+/// a discovery oracle.
+#[derive(Debug, Error)]
+#[allow(
+    dead_code,
+    reason = "the D17 materialization boundary remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) enum HostMaterializationError {
+    #[error("D17 provisional state is unavailable")]
+    Inventory(#[from] HostInventoryError),
+    #[error("D17 provisional presentation context is unavailable")]
+    Presentation,
+    #[error("the D17 provisional lease does not match the candidate")]
+    Lease,
+    #[error("another D17 provisional shell is already materialized")]
+    Occupied,
+    #[error("the D17 provisional candidate Runtime is already in use")]
+    CandidateInUse,
+    #[error("D17 provisional materialization is unavailable")]
+    Slot(#[from] SlotError),
+}
+
 const PROVISIONAL_MARKER_VERSION: u8 = 2;
 const MAX_PROVISIONAL_MARKER_BYTES: usize = 8 * 1024;
 const MAX_SHELL_BIRTH_BYTES: usize = 256;
@@ -156,6 +181,155 @@ pub(crate) fn classify_host_inventory(
     provisional_lease.revalidate_for_mutation(state.root())?;
     classify_d17_provisional_inventory(state.root(), &registered_runtime_paths, &operations)
         .map_err(HostInventoryError::from)
+}
+
+/// Proves that this exact unregistered candidate may create its first private
+/// artifact while the caller retains the host-wide provisional lease. This
+/// performs no marker, runtime, tmux, process, provider, or state mutation.
+///
+/// The raw materializer is deliberately test-only. Production callers must
+/// pass through this proof and revalidate the same lease immediately after
+/// their marker-first materialization attempt.
+#[allow(
+    dead_code,
+    reason = "the D17 materialization boundary remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) fn validate_fresh_host_materialization(
+    state: &D16State,
+    provisional_lease: &ProvisionalLease,
+    presentation_directory: &Path,
+    slot: &ProvisionalSlot,
+) -> Result<(), HostMaterializationError> {
+    let context = Presentation::d17_context_from_directory(state.root(), presentation_directory)
+        .map_err(|_| HostMaterializationError::Presentation)?;
+    if context.presentation_id() != slot.presentation_id()
+        || context.presentation_revision() != slot.presentation_revision()
+        || context.seed_cwd() != slot.seed_cwd
+    {
+        return Err(HostMaterializationError::Presentation);
+    }
+    if provisional_lease.lease_generation() != slot.lease_generation() {
+        return Err(HostMaterializationError::Lease);
+    }
+
+    match classify_host_inventory(state, provisional_lease)? {
+        D17ProvisionalInventory::Vacant => {}
+        D17ProvisionalInventory::Occupied => return Err(HostMaterializationError::Occupied),
+    }
+    revalidate_host_materialization_lease(state, provisional_lease)?;
+
+    let registered_runtime_paths = state
+        .d17_registered_runtime_paths()
+        .map_err(HostInventoryError::from)?;
+    if registered_runtime_paths
+        .iter()
+        .any(|paths| paths == slot.runtime_paths())
+    {
+        return Err(HostMaterializationError::CandidateInUse);
+    }
+    revalidate_host_materialization_lease(state, provisional_lease)?;
+
+    match fs::symlink_metadata(&slot.runtime_paths().directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) | Ok(_) => return Err(HostMaterializationError::CandidateInUse),
+    }
+    revalidate_host_materialization_lease(state, provisional_lease)
+}
+
+/// Materializes a D17 provisional shell only after the caller proves an exact
+/// D17 presentation, vacant host-wide slot, and unused candidate Runtime
+/// under the same retained lease. A post-attempt lease revalidation keeps any
+/// crash evidence conservative rather than returning a usable candidate.
+#[allow(
+    dead_code,
+    reason = "the D17 materialization boundary remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) fn materialize_private_shell_under_lease(
+    state: &D16State,
+    provisional_lease: &ProvisionalLease,
+    presentation_directory: &Path,
+    slot: &ProvisionalSlot,
+    runtime: &PrivateRuntime<'_>,
+    launch: &NativeLaunch,
+    process_group_probe: &dyn ProcessGroupProbe,
+) -> Result<ProvisionalSlot, HostMaterializationError> {
+    materialize_private_shell_under_lease_inner(
+        state,
+        provisional_lease,
+        presentation_directory,
+        slot,
+        runtime,
+        launch,
+        None,
+        process_group_probe,
+    )
+}
+
+/// Lease-held variant of [`materialize_private_shell_under_lease`] that first
+/// writes a fixed account-shell startup plan for this exact private Runtime.
+#[allow(
+    clippy::too_many_arguments,
+    dead_code,
+    reason = "the exact lease, presentation, Runtime, launch, startup, and process evidence must remain visible at one D17 materialization fence"
+)]
+pub(crate) fn materialize_private_shell_with_startup_under_lease(
+    state: &D16State,
+    provisional_lease: &ProvisionalLease,
+    presentation_directory: &Path,
+    slot: &ProvisionalSlot,
+    runtime: &PrivateRuntime<'_>,
+    launch: &NativeLaunch,
+    startup: &dyn RuntimeStartup,
+    process_group_probe: &dyn ProcessGroupProbe,
+) -> Result<ProvisionalSlot, HostMaterializationError> {
+    materialize_private_shell_under_lease_inner(
+        state,
+        provisional_lease,
+        presentation_directory,
+        slot,
+        runtime,
+        launch,
+        Some(startup),
+        process_group_probe,
+    )
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the exact lease, presentation, Runtime, launch, startup, and process evidence must remain visible at one materialization fence"
+)]
+fn materialize_private_shell_under_lease_inner(
+    state: &D16State,
+    provisional_lease: &ProvisionalLease,
+    presentation_directory: &Path,
+    slot: &ProvisionalSlot,
+    runtime: &PrivateRuntime<'_>,
+    launch: &NativeLaunch,
+    startup: Option<&dyn RuntimeStartup>,
+    process_group_probe: &dyn ProcessGroupProbe,
+) -> Result<ProvisionalSlot, HostMaterializationError> {
+    validate_fresh_host_materialization(state, provisional_lease, presentation_directory, slot)?;
+    let materialized = materialize_private_shell_inner(
+        state.root(),
+        presentation_directory,
+        slot,
+        runtime,
+        launch,
+        startup,
+        process_group_probe,
+    );
+    revalidate_host_materialization_lease(state, provisional_lease)?;
+    Ok(materialized?)
+}
+
+fn revalidate_host_materialization_lease(
+    state: &D16State,
+    provisional_lease: &ProvisionalLease,
+) -> Result<(), HostMaterializationError> {
+    provisional_lease
+        .revalidate_for_mutation(state.root())
+        .map_err(HostInventoryError::from)
+        .map_err(HostMaterializationError::from)
 }
 
 /// Exact private-pane/process evidence that binds a materialized provisional
@@ -423,6 +597,7 @@ pub(crate) fn update_marker(
 /// handed to the broker. Every failure after marker creation deliberately
 /// leaves the materializing marker in place for conservative reconciliation;
 /// this seam never removes, adopts, attaches, or signals an artifact.
+#[cfg(test)]
 pub(crate) fn materialize_private_shell(
     state_root: &Path,
     presentation_directory: &Path,
@@ -445,6 +620,7 @@ pub(crate) fn materialize_private_shell(
 /// Materializes a provisional shell only after a startup plan bound to this
 /// exact candidate Runtime has written its private artifacts. This remains a
 /// dormant D17 composition seam; it does not alter the D16 materializer.
+#[cfg(test)]
 pub(crate) fn materialize_private_shell_with_startup(
     state_root: &Path,
     presentation_directory: &Path,

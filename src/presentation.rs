@@ -6652,6 +6652,96 @@ mod tests {
     }
 
     #[test]
+    fn d17_host_materialization_validation_requires_exact_vacant_context_and_lease() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        drop(crate::state::fresh_create(&state_path, &crate::domain::RandomIdGenerator).unwrap());
+
+        let root = crate::state::StateRoot::select(&state_path);
+        let transition_lock = state_path.join(crate::state::TRANSITION_LOCK_FILE);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&transition_lock)
+            .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&transition_lock, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let transition = crate::state::acquire_transition_lease(&state_path).unwrap();
+        let mut migrating = crate::state::open_cutover_transition(&root, &transition).unwrap();
+        migrating.migrate_schema13_to14(&transition).unwrap();
+        drop(migrating);
+        drop(transition);
+        fs::remove_file(&transition_lock).unwrap();
+
+        let presentation =
+            Presentation::fresh_with_executable(&state_path, PathBuf::from("/workspace/wsnav"));
+        create_paths(presentation.paths()).unwrap();
+        let presentation_id = uuid::Uuid::from_u128(81);
+        let context = presentation
+            .initialize_d17_context(presentation_id, &seed)
+            .unwrap();
+        let mut state = crate::state::open_d17_current_only(&root).unwrap();
+        let provisional_lease = state.acquire_d17_provisional_lease().unwrap();
+        let slot = crate::provisional::ProvisionalSlot::materializing(
+            &state_path,
+            presentation_id,
+            context.presentation_revision(),
+            provisional_lease.lease_generation(),
+            crate::domain::RuntimeId::from(uuid::Uuid::from_u128(82)),
+            crate::provisional::SlotGeneration::new(uuid::Uuid::from_u128(83)),
+            &seed,
+        )
+        .unwrap();
+
+        assert!(
+            crate::provisional::validate_fresh_host_materialization(
+                &state,
+                &provisional_lease,
+                &presentation.paths().directory,
+                &slot,
+            )
+            .is_ok()
+        );
+
+        let mismatched_lease_slot = crate::provisional::ProvisionalSlot::materializing(
+            &state_path,
+            presentation_id,
+            context.presentation_revision(),
+            provisional_lease.lease_generation() + 1,
+            crate::domain::RuntimeId::from(uuid::Uuid::from_u128(84)),
+            crate::provisional::SlotGeneration::new(uuid::Uuid::from_u128(85)),
+            &seed,
+        )
+        .unwrap();
+        assert!(matches!(
+            crate::provisional::validate_fresh_host_materialization(
+                &state,
+                &provisional_lease,
+                &presentation.paths().directory,
+                &mismatched_lease_slot,
+            ),
+            Err(crate::provisional::HostMaterializationError::Lease)
+        ));
+
+        crate::provisional::write_new_marker(&state_path, &presentation.paths().directory, &slot)
+            .unwrap();
+        assert!(matches!(
+            crate::provisional::validate_fresh_host_materialization(
+                &state,
+                &provisional_lease,
+                &presentation.paths().directory,
+                &slot,
+            ),
+            Err(crate::provisional::HostMaterializationError::Occupied)
+        ));
+    }
+
+    #[test]
     fn ordinary_presentation_marker_omits_the_dormant_d17_shape() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = PresentationPaths::fresh(temporary.path());

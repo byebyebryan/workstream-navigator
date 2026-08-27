@@ -21,10 +21,14 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    provisional::{ProvisionalSlot, SlotError, materialize_private_shell_with_startup},
+    provisional::{
+        HostMaterializationError, ProvisionalSlot,
+        materialize_private_shell_with_startup_under_lease,
+    },
     runtime::{
         NativeLaunch, PrivateRuntime, ProcessGroupProbe, RuntimeError, RuntimePaths, RuntimeStartup,
     },
+    state::{D16State, ProvisionalLease},
 };
 
 const BASH_WRAPPER_FILE: &str = ".wsnav-d17-bashrc";
@@ -337,16 +341,18 @@ impl AccountShellLaunch {
     /// Materializes this exact account shell through the marker-first
     /// provisional seam. The atomic D17 cutover is the only future caller;
     /// this method does not add a D16 launch route.
-    pub(crate) fn materialize(
+    pub(crate) fn materialize_under_lease(
         &self,
-        state_root: &Path,
+        state: &D16State,
+        provisional_lease: &ProvisionalLease,
         presentation_directory: &Path,
         slot: &ProvisionalSlot,
         runtime: &PrivateRuntime<'_>,
         process_group_probe: &dyn ProcessGroupProbe,
-    ) -> Result<ProvisionalSlot, SlotError> {
-        materialize_private_shell_with_startup(
-            state_root,
+    ) -> Result<ProvisionalSlot, HostMaterializationError> {
+        materialize_private_shell_with_startup_under_lease(
+            state,
+            provisional_lease,
             presentation_directory,
             slot,
             runtime,
@@ -487,7 +493,9 @@ mod tests {
     };
     use crate::{
         domain::{Revision, RuntimeId},
-        provisional::{ProvisionalSlot, SlotGeneration, read_marker},
+        provisional::{
+            ProvisionalSlot, SlotGeneration, materialize_private_shell_with_startup, read_marker,
+        },
         runtime::{
             PrivateRuntime, ProcessGroupInfo, ProcessGroupProbe, ProcessProbe, ProcessProbeError,
             RuntimeError, RuntimePaths, RuntimeStartup, TmuxClient, TmuxInvocation, TmuxResponse,
@@ -888,15 +896,16 @@ mod tests {
         let process_probe = AccountMaterializationProcess;
         let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
 
-        let materialized = plan
-            .materialize(
-                &state_root,
-                &presentation,
-                &slot,
-                &runtime,
-                &AccountMaterializationGroup,
-            )
-            .unwrap();
+        let materialized = materialize_private_shell_with_startup(
+            &state_root,
+            &presentation,
+            &slot,
+            &runtime,
+            plan.launch(),
+            plan.bootstrap(),
+            &AccountMaterializationGroup,
+        )
+        .unwrap();
 
         assert_eq!(
             read_marker(&state_root, &presentation).unwrap(),

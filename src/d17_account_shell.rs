@@ -29,6 +29,8 @@ use crate::{
 const BASH_WRAPPER_FILE: &str = ".wsnav-d17-bashrc";
 const ZSH_WRAPPER_FILE: &str = ".zshrc";
 const HOME_ENV: &str = "HOME";
+const STATE_ROOT_ENV: &str = "WSNAV_D17_STATE_ROOT";
+const PRESENTATION_DIRECTORY_ENV: &str = "WSNAV_D17_PRESENTATION_DIRECTORY";
 const ORIGINAL_HOME_ENV: &str = "WSNAV_D17_ORIGINAL_HOME";
 const ORIGINAL_ZDOTDIR_ENV: &str = "WSNAV_D17_ORIGINAL_ZDOTDIR";
 const EXECUTABLE_ENV: &str = "WSNAV_D17_EXECUTABLE";
@@ -44,10 +46,11 @@ fi
 unalias codex opencode 2>/dev/null || true
 unset -f codex opencode 2>/dev/null || true
 codex() {
-    "${WSNAV_D17_EXECUTABLE:?}" _d17_shell_gate codex "$@"
+    local wsnav_capability
+    wsnav_capability="$("${WSNAV_D17_EXECUTABLE:?}" _d17_shell_gate --provider codex --shell-leader-pid "$$" -- "$@")"
     local wsnav_status=$?
-    if [[ "$wsnav_status" -eq 0 ]]; then
-        exec "${WSNAV_D17_EXECUTABLE}" _d17_launch_helper codex "$@"
+    if [[ "$wsnav_status" -eq 0 && -n "$wsnav_capability" && ${#wsnav_capability} -le 512 && "$wsnav_capability" != *$'\n'* && "$wsnav_capability" != *$'\r'* ]]; then
+        exec "${WSNAV_D17_EXECUTABLE}" _d17_launch_helper --capability "$wsnav_capability" --provider codex -- "$@"
         printf '%s\n' 'WSNav D17 onboarding command is unavailable' >&2
         return 64
     fi
@@ -59,10 +62,11 @@ codex() {
     return 64
 }
 opencode() {
-    "${WSNAV_D17_EXECUTABLE:?}" _d17_shell_gate opencode "$@"
+    local wsnav_capability
+    wsnav_capability="$("${WSNAV_D17_EXECUTABLE:?}" _d17_shell_gate --provider opencode --shell-leader-pid "$$" -- "$@")"
     local wsnav_status=$?
-    if [[ "$wsnav_status" -eq 0 ]]; then
-        exec "${WSNAV_D17_EXECUTABLE}" _d17_launch_helper opencode "$@"
+    if [[ "$wsnav_status" -eq 0 && -n "$wsnav_capability" && ${#wsnav_capability} -le 512 && "$wsnav_capability" != *$'\n'* && "$wsnav_capability" != *$'\r'* ]]; then
+        exec "${WSNAV_D17_EXECUTABLE}" _d17_launch_helper --capability "$wsnav_capability" --provider opencode -- "$@"
         printf '%s\n' 'WSNav D17 onboarding command is unavailable' >&2
         return 64
     fi
@@ -89,10 +93,11 @@ if (( $+aliases[opencode] )); then unalias opencode || return 64; fi
 if (( $+functions[codex] )); then unfunction codex || return 64; fi
 if (( $+functions[opencode] )); then unfunction opencode || return 64; fi
 codex() {
-    "${WSNAV_D17_EXECUTABLE:?}" _d17_shell_gate codex "$@"
+    local wsnav_capability
+    wsnav_capability="$("${WSNAV_D17_EXECUTABLE:?}" _d17_shell_gate --provider codex --shell-leader-pid "$$" -- "$@")"
     local wsnav_status=$?
-    if [[ "$wsnav_status" -eq 0 ]]; then
-        exec "${WSNAV_D17_EXECUTABLE}" _d17_launch_helper codex "$@"
+    if [[ "$wsnav_status" -eq 0 && -n "$wsnav_capability" && ${#wsnav_capability} -le 512 && "$wsnav_capability" != *$'\n'* && "$wsnav_capability" != *$'\r'* ]]; then
+        exec "${WSNAV_D17_EXECUTABLE}" _d17_launch_helper --capability "$wsnav_capability" --provider codex -- "$@"
         print -r -- 'WSNav D17 onboarding command is unavailable' >&2
         return 64
     fi
@@ -104,10 +109,11 @@ codex() {
     return 64
 }
 opencode() {
-    "${WSNAV_D17_EXECUTABLE:?}" _d17_shell_gate opencode "$@"
+    local wsnav_capability
+    wsnav_capability="$("${WSNAV_D17_EXECUTABLE:?}" _d17_shell_gate --provider opencode --shell-leader-pid "$$" -- "$@")"
     local wsnav_status=$?
-    if [[ "$wsnav_status" -eq 0 ]]; then
-        exec "${WSNAV_D17_EXECUTABLE}" _d17_launch_helper opencode "$@"
+    if [[ "$wsnav_status" -eq 0 && -n "$wsnav_capability" && ${#wsnav_capability} -le 512 && "$wsnav_capability" != *$'\n'* && "$wsnav_capability" != *$'\r'* ]]; then
+        exec "${WSNAV_D17_EXECUTABLE}" _d17_launch_helper --capability "$wsnav_capability" --provider opencode -- "$@"
         print -r -- 'WSNav D17 onboarding command is unavailable' >&2
         return 64
     fi
@@ -152,6 +158,49 @@ impl AccountShellKind {
     }
 }
 
+/// Non-authoritative discovery paths inherited by a provisional shell's hidden
+/// children. Each child must reopen and revalidate the marker, Runtime, and
+/// schema-14 lease; this context alone can never grant ownership.
+#[derive(Clone)]
+pub(crate) struct AccountShellContext {
+    state_root: PathBuf,
+    presentation_directory: PathBuf,
+}
+
+impl std::fmt::Debug for AccountShellContext {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("AccountShellContext")
+            .field("state_root", &"<private>")
+            .field("presentation_directory", &"<private>")
+            .finish()
+    }
+}
+
+impl AccountShellContext {
+    /// Binds the wrapper to an existing presentation directory contained by
+    /// the exact state root. The values are discovery inputs only; every
+    /// helper must treat changes as an authority mismatch.
+    pub(crate) fn new(
+        state_root: &Path,
+        presentation_directory: &Path,
+    ) -> Result<Self, AccountShellError> {
+        let state_root = canonical_directory(state_root, AccountShellError::ContextUnavailable)?;
+        let presentation_directory = canonical_directory(
+            presentation_directory,
+            AccountShellError::ContextUnavailable,
+        )?;
+        if presentation_directory == state_root || !presentation_directory.starts_with(&state_root)
+        {
+            return Err(AccountShellError::ContextUnavailable);
+        }
+        Ok(Self {
+            state_root,
+            presentation_directory,
+        })
+    }
+}
+
 /// A fully fixed provisional account-shell launch and its private bootstrap.
 /// Its debug representation deliberately omits filesystem paths and retained
 /// environment values.
@@ -173,6 +222,7 @@ impl AccountShellLaunch {
     /// Builds only a non-login Bash/Zsh startup plan. The caller must provide
     /// exact new Runtime paths so the wrapper never lands in user state.
     pub(crate) fn new(
+        context: &AccountShellContext,
         runtime_paths: &RuntimePaths,
         seed_cwd: &Path,
         shell: &Path,
@@ -194,6 +244,14 @@ impl AccountShellLaunch {
         };
         let wrapper = runtime_paths.directory.join(kind.wrapper_file());
         let mut environment = BTreeMap::new();
+        environment.insert(
+            OsString::from(STATE_ROOT_ENV),
+            path_environment_value(&context.state_root)?,
+        );
+        environment.insert(
+            OsString::from(PRESENTATION_DIRECTORY_ENV),
+            path_environment_value(&context.presentation_directory)?,
+        );
         environment.insert(
             OsString::from(HOME_ENV),
             path_environment_value(&original_home)?,
@@ -297,6 +355,8 @@ pub(crate) enum AccountShellError {
     UnsupportedShell,
     #[error("the presentation seed cwd is unavailable")]
     SeedCwdUnavailable,
+    #[error("the D17 account-shell context is unavailable")]
+    ContextUnavailable,
     #[error("the original account home is unavailable")]
     HomeUnavailable,
     #[error("the original Zsh directory is unavailable")]
@@ -373,8 +433,9 @@ mod tests {
     };
 
     use super::{
-        AccountShellError, AccountShellLaunch, BASH_WRAPPER, BASH_WRAPPER_FILE, EXECUTABLE_ENV,
-        HOME_ENV, ORIGINAL_HOME_ENV, ORIGINAL_ZDOTDIR_ENV, ZSH_WRAPPER, ZSH_WRAPPER_FILE,
+        AccountShellContext, AccountShellError, AccountShellLaunch, BASH_WRAPPER,
+        BASH_WRAPPER_FILE, EXECUTABLE_ENV, HOME_ENV, ORIGINAL_HOME_ENV, ORIGINAL_ZDOTDIR_ENV,
+        PRESENTATION_DIRECTORY_ENV, STATE_ROOT_ENV, ZSH_WRAPPER, ZSH_WRAPPER_FILE,
     };
     use crate::{
         domain::{Revision, RuntimeId},
@@ -388,6 +449,14 @@ mod tests {
 
     fn make_directory(path: &Path) {
         fs::create_dir(path).unwrap();
+    }
+
+    fn account_context(root: &Path) -> AccountShellContext {
+        let presentation = root.join("presentation");
+        if !presentation.exists() {
+            make_directory(&presentation);
+        }
+        AccountShellContext::new(root, &presentation).unwrap()
     }
 
     fn executable(path: &Path) {
@@ -431,7 +500,7 @@ mod tests {
         fs::write(
             &wsnav,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = _d17_shell_gate ]; then exit {gate_status}; fi\nif [ \"$1\" = _d17_launch_helper ]; then printf '%s\\n' managed > \"${{WSNAV_PROBE_OUT:?}}\"; exit 0; fi\nexit 64\n"
+                "#!/bin/sh\nif [ \"$1\" = _d17_shell_gate ]; then [ \"$2\" = --provider ] && [ \"$3\" = codex ] && [ \"$4\" = --shell-leader-pid ] && [ \"$6\" = -- ] || exit 64; [ {gate_status} -eq 0 ] && printf opaque-capability; exit {gate_status}; fi\nif [ \"$1\" = _d17_launch_helper ]; then [ \"$2\" = --capability ] && [ \"$3\" = opaque-capability ] && [ \"$4\" = --provider ] && [ \"$5\" = codex ] && [ \"$6\" = -- ] || exit 64; printf '%s\\n' managed > \"${{WSNAV_PROBE_OUT:?}}\"; exit 0; fi\nexit 64\n"
             ),
         )
         .unwrap();
@@ -462,6 +531,7 @@ mod tests {
         .unwrap();
         let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
         let plan = AccountShellLaunch::new(
+            &account_context(temporary.path()),
             &paths,
             &seed_cwd,
             &shell,
@@ -580,8 +650,16 @@ mod tests {
         executable(&wsnav);
         let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
 
-        let plan = AccountShellLaunch::new(&paths, &seed_cwd, &shell, &original_home, None, &wsnav)
-            .unwrap();
+        let plan = AccountShellLaunch::new(
+            &account_context(temporary.path()),
+            &paths,
+            &seed_cwd,
+            &shell,
+            &original_home,
+            None,
+            &wsnav,
+        )
+        .unwrap();
         let launch = plan.launch();
 
         assert_eq!(launch.cwd, fs::canonicalize(&seed_cwd).unwrap());
@@ -602,6 +680,18 @@ mod tests {
         assert_eq!(
             environment_value(launch, HOME_ENV),
             Some(fs::canonicalize(&original_home).unwrap().into_os_string())
+        );
+        assert_eq!(
+            environment_value(launch, STATE_ROOT_ENV),
+            Some(fs::canonicalize(temporary.path()).unwrap().into_os_string())
+        );
+        assert_eq!(
+            environment_value(launch, PRESENTATION_DIRECTORY_ENV),
+            Some(
+                fs::canonicalize(temporary.path().join("presentation"))
+                    .unwrap()
+                    .into_os_string()
+            )
         );
         assert_eq!(
             environment_value(launch, EXECUTABLE_ENV),
@@ -627,6 +717,7 @@ mod tests {
         let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
 
         let plan = AccountShellLaunch::new(
+            &account_context(temporary.path()),
             &paths,
             &seed_cwd,
             &shell,
@@ -671,8 +762,16 @@ mod tests {
         executable(&wsnav);
         let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
         let other_paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
-        let plan = AccountShellLaunch::new(&paths, &seed_cwd, &shell, &original_home, None, &wsnav)
-            .unwrap();
+        let plan = AccountShellLaunch::new(
+            &account_context(temporary.path()),
+            &paths,
+            &seed_cwd,
+            &shell,
+            &original_home,
+            None,
+            &wsnav,
+        )
+        .unwrap();
         fs::create_dir_all(&paths.directory).unwrap();
         fs::create_dir_all(&other_paths.directory).unwrap();
 
@@ -723,8 +822,16 @@ mod tests {
         )
         .unwrap();
         let paths = RuntimePaths::for_runtime(&state_root, runtime_id);
-        let plan = AccountShellLaunch::new(&paths, &seed_cwd, &shell, &original_home, None, &wsnav)
-            .unwrap();
+        let plan = AccountShellLaunch::new(
+            &AccountShellContext::new(&state_root, &presentation).unwrap(),
+            &paths,
+            &seed_cwd,
+            &shell,
+            &original_home,
+            None,
+            &wsnav,
+        )
+        .unwrap();
         let tmux = AccountMaterializationTmux {
             calls: RefCell::new(Vec::new()),
             wrapper: paths.directory.join(BASH_WRAPPER_FILE),
@@ -765,18 +872,47 @@ mod tests {
         let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
 
         assert_eq!(
-            AccountShellLaunch::new(&paths, &seed_cwd, &shell, &original_home, None, &wsnav,)
-                .unwrap_err(),
+            AccountShellLaunch::new(
+                &account_context(temporary.path()),
+                &paths,
+                &seed_cwd,
+                &shell,
+                &original_home,
+                None,
+                &wsnav,
+            )
+            .unwrap_err(),
             AccountShellError::UnsupportedShell
         );
         assert!(!paths.directory.exists());
     }
 
     #[test]
+    fn account_context_refuses_a_presentation_outside_its_state_root() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_root = temporary.path().join("state");
+        let foreign_presentation = temporary.path().join("foreign-presentation");
+        make_directory(&state_root);
+        make_directory(&foreign_presentation);
+
+        assert_eq!(
+            AccountShellContext::new(&state_root, &foreign_presentation).unwrap_err(),
+            AccountShellError::ContextUnavailable
+        );
+    }
+
+    #[test]
     fn zsh_wrapper_body_is_the_only_startup_file_that_restores_zdotdir() {
         assert!(ZSH_WRAPPER.contains("export ZDOTDIR=\"${WSNAV_D17_ORIGINAL_ZDOTDIR:?}\""));
-        assert!(ZSH_WRAPPER.contains("_d17_shell_gate opencode"));
-        assert!(BASH_WRAPPER.contains("_d17_shell_gate codex"));
+        assert!(
+            ZSH_WRAPPER
+                .contains("_d17_shell_gate --provider opencode --shell-leader-pid \"$$\" --")
+        );
+        assert!(
+            BASH_WRAPPER.contains(
+                "_d17_launch_helper --capability \"$wsnav_capability\" --provider codex --"
+            )
+        );
         assert_eq!(ZSH_WRAPPER_FILE, ".zshrc");
     }
 

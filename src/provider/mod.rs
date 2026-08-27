@@ -12,6 +12,8 @@ use crate::{
 };
 
 pub mod codex;
+#[cfg(test)]
+mod d17_grammar;
 pub mod lifecycle;
 pub mod names;
 pub mod opencode;

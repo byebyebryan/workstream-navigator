@@ -21,6 +21,18 @@ lease, schema-14-only open, lease acquisition, reservation, and
 ownership-consumption seams, plus marker-backed materialization/evidence
 storage, are dormant, and no product path can invoke any of them.
 
+### 2026-08-27 D17 presentation-start falsification
+
+The dormant `Presentation::start_d17` path records the required D17 seed
+context, but its private tmux server still invokes the D16-only `_navigator`
+pane command. That command opens the schema-13 application boundary and thus
+cannot render or operate a schema-14 D17 presentation. This falsifies any
+claim that the current dormant presentation seam is ready for atomic D17 UI
+activation. Do not route the shell card, materializer, or broker through it.
+The next D17 cutover slice must make presentation startup select a dedicated
+schema-14 Navigator controller and prove it with disposable presentation
+acceptance before any user-facing route is enabled.
+
 The D0-D15 entries below preserve truthful historical implementation and
 acceptance evidence. D3 and later SSH, remote, cross-host, and combined
 local/remote descriptions document the former WSNav-managed surface and are

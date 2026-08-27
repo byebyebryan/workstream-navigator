@@ -3564,6 +3564,91 @@ impl D16State {
         }
     }
 
+    /// Records exact native process identity while retaining the D17 journal
+    /// at `provider_exec_started`.  This is the only state a post-exec
+    /// `OpenCode` observer may adopt; ordinary attachment remains fenced until
+    /// the controller has independently established the exact observer.
+    #[allow(
+        dead_code,
+        reason = "the D17 OpenCode observer controller remains unreachable until the atomic Navigator cutover"
+    )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the transaction keeps D17 process evidence and its no-activation invariant auditable together"
+    )]
+    pub(crate) fn record_d17_provider_exec_observed_current(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        ownership: OnboardingOwnership,
+        evidence: &OnboardingProviderExecEvidence,
+    ) -> Result<OnboardingOwnership, StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        validate_schema14(&self.connection)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        let current = load_d17_exec_proof_target(
+            &transaction,
+            &self.root,
+            ownership.operation_id,
+            OnboardingPhase::ProviderExecStarted,
+        )?;
+        if current.ownership != ownership {
+            return Err(StateError::ConcurrentWrite);
+        }
+        let runtime: (Option<i64>, Option<String>, String, i64) = transaction
+            .query_row(
+                "SELECT provider_pid, process_birth, lifecycle, revision
+                 FROM runtimes WHERE runtime_id = ?1 AND workstream_id = ?2",
+                params![
+                    ownership.runtime_id.to_string(),
+                    ownership.workstream_id.to_string(),
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .map_err(StateError::Sqlite)?;
+        if runtime.2 != "starting" {
+            return Err(StateError::MalformedHostSchema);
+        }
+        match (runtime.0, runtime.1) {
+            (Some(pid), Some(birth))
+                if pid == i64::from(evidence.provider_pid) && birth == evidence.provider_birth => {}
+            (None, None) => {
+                let runtime_revision = Revision::try_from(runtime.3)?;
+                let next_runtime_revision = next_revision(runtime_revision)?;
+                let changed = transaction
+                    .execute(
+                        "UPDATE runtimes
+                         SET provider_pid = ?1, process_birth = ?2, revision = ?3
+                         WHERE runtime_id = ?4 AND workstream_id = ?5
+                           AND provider_pid IS NULL AND process_birth IS NULL
+                           AND lifecycle = 'starting' AND revision = ?6",
+                        params![
+                            i64::from(evidence.provider_pid),
+                            evidence.provider_birth,
+                            next_runtime_revision.value(),
+                            ownership.runtime_id.to_string(),
+                            ownership.workstream_id.to_string(),
+                            runtime_revision.value(),
+                        ],
+                    )
+                    .map_err(StateError::Sqlite)?;
+                if changed != 1 {
+                    return Err(StateError::ConcurrentWrite);
+                }
+            }
+            _ => return Err(StateError::ConcurrentWrite),
+        }
+        validate_schema14(&transaction)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        Ok(ownership)
+    }
+
     fn record_d17_provider_exec_proven_with_zero_timeout(
         &mut self,
         provisional_lease: &ProvisionalLease,
@@ -3600,29 +3685,36 @@ impl D16State {
             )
             .map_err(StateError::Sqlite)?;
         let runtime_revision = Revision::try_from(runtime.3)?;
-        if runtime.0.is_some() || runtime.1.is_some() || runtime.2 != "starting" {
+        if runtime.2 != "starting" {
             return Err(StateError::MalformedHostSchema);
         }
-        let next_runtime_revision = next_revision(runtime_revision)?;
-        let runtime_updated = transaction
-            .execute(
-                "UPDATE runtimes
-                 SET provider_pid = ?1, process_birth = ?2, revision = ?3
-                 WHERE runtime_id = ?4 AND workstream_id = ?5
-                   AND provider_pid IS NULL AND process_birth IS NULL
-                   AND lifecycle = 'starting' AND revision = ?6",
-                params![
-                    i64::from(evidence.provider_pid),
-                    evidence.provider_birth,
-                    next_runtime_revision.value(),
-                    ownership.runtime_id.to_string(),
-                    ownership.workstream_id.to_string(),
-                    runtime_revision.value(),
-                ],
-            )
-            .map_err(StateError::Sqlite)?;
-        if runtime_updated != 1 {
-            return Err(StateError::ConcurrentWrite);
+        match (runtime.0, runtime.1) {
+            (Some(pid), Some(birth))
+                if pid == i64::from(evidence.provider_pid) && birth == evidence.provider_birth => {}
+            (None, None) => {
+                let next_runtime_revision = next_revision(runtime_revision)?;
+                let runtime_updated = transaction
+                    .execute(
+                        "UPDATE runtimes
+                         SET provider_pid = ?1, process_birth = ?2, revision = ?3
+                         WHERE runtime_id = ?4 AND workstream_id = ?5
+                           AND provider_pid IS NULL AND process_birth IS NULL
+                           AND lifecycle = 'starting' AND revision = ?6",
+                        params![
+                            i64::from(evidence.provider_pid),
+                            evidence.provider_birth,
+                            next_runtime_revision.value(),
+                            ownership.runtime_id.to_string(),
+                            ownership.workstream_id.to_string(),
+                            runtime_revision.value(),
+                        ],
+                    )
+                    .map_err(StateError::Sqlite)?;
+                if runtime_updated != 1 {
+                    return Err(StateError::ConcurrentWrite);
+                }
+            }
+            _ => return Err(StateError::ConcurrentWrite),
         }
         let operation_updated = transaction
             .execute(
@@ -5122,9 +5214,16 @@ fn load_d17_exec_proof_target(
     let expected_runtime_paths =
         RuntimePaths::for_runtime(&state_root, intent.candidate_runtime_id);
     let process_identity_matches = match required_phase {
-        OnboardingPhase::ProviderExecStarted => {
-            provider_pid.is_none() && provider_birth.is_none() && lifecycle == "starting"
-        }
+        OnboardingPhase::ProviderExecStarted => match (provider_pid, provider_birth.as_deref()) {
+            (None, None) => lifecycle == "starting",
+            (Some(pid), Some(birth)) => {
+                provider == ProviderKind::OpenCode
+                    && u32::try_from(pid).is_ok_and(|pid| pid > 0)
+                    && validate_registry_text("provider birth", birth).is_ok()
+                    && lifecycle == "starting"
+            }
+            _ => false,
+        },
         OnboardingPhase::ProviderExecProven => {
             provider_pid
                 .and_then(|pid| u32::try_from(pid).ok())
@@ -10052,12 +10151,46 @@ mod tests {
                 )
                 .is_err()
         );
+        let exec_started = state
+            .record_d17_provider_exec_started_current(&provisional, &request, bound)
+            .unwrap();
+        let observed = state
+            .record_d17_provider_exec_observed_current(
+                &provisional,
+                exec_started,
+                &OnboardingProviderExecEvidence::new(9123, "birth-opencode".to_owned()).unwrap(),
+            )
+            .unwrap();
+        assert_eq!(observed, exec_started);
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT phase FROM compound_operations WHERE operation_id = ?1",
+                    [issued.operation_id().to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "provider_exec_started",
+            "OpenCode identity alone must not make the Runtime actionable"
+        );
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT provider_pid, process_birth FROM runtimes WHERE runtime_id = ?1",
+                    [candidate_runtime_id.to_string()],
+                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+                )
+                .unwrap(),
+            (9123, "birth-opencode".to_owned())
+        );
         let recovery = state
-            .record_d17_recovery_required_current(&provisional, &request, bound)
+            .record_d17_recovery_required_current(&provisional, &request, observed)
             .unwrap();
         assert_eq!(
             recovery.operation_revision.value(),
-            bound.operation_revision.value() + 1
+            observed.operation_revision.value() + 1
         );
         assert_eq!(
             state

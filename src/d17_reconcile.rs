@@ -1,8 +1,9 @@
 //! Dormant D17 post-exec reconciliation boundary.
 //!
-//! The reconciler can only turn an already recorded `provider_exec_started`
-//! attempt into `provider_exec_proven`, or finish the marker half of an
-//! already durable proof; it never launches, signals, attaches, or otherwise
+//! The reconciler can only record exact native exec evidence. Codex may then
+//! finish its provider-exec proof directly, while `OpenCode` remains action
+//! fenced until the presentation controller has established its exact
+//! detached observer; it never launches, signals, attaches, or otherwise
 //! controls a provider.
 
 #![allow(
@@ -159,13 +160,13 @@ pub(crate) enum ReconcileError {
     ProviderExecutableMismatch,
 }
 
-/// Commits exact post-exec proof for one already Runtime-owned provisional
+/// Records exact post-exec evidence for one already Runtime-owned provisional
 /// slot. The caller supplies only a read-only executable probe; the expected
 /// file identity is loaded from the durable preparation record. All marker,
 /// pane/process-group, state revision, Runtime generation, cwd, and provider
-/// checks are repeated here. If the durable proof committed before a
-/// marker-write failure, this instead repairs the exact marker phase without
-/// re-executing or probing the provider.
+/// checks are repeated here. Codex advances to final proof and repairs a
+/// marker-write failure; `OpenCode` records only its exact process identity and
+/// deliberately remains action-fenced for its detached observer controller.
 pub(crate) fn prove_provider_exec(
     state: &mut D16State,
     provisional_lease: &ProvisionalLease,
@@ -210,6 +211,14 @@ pub(crate) fn prove_provider_exec(
         return Err(ReconcileError::ProviderExecutableMismatch);
     }
     let evidence = OnboardingProviderExecEvidence::new(live.shell_pid, live.shell_birth)?;
+    if target.provider() == ProviderKind::OpenCode {
+        state.record_d17_provider_exec_observed_current(
+            provisional_lease,
+            target.ownership(),
+            &evidence,
+        )?;
+        return Ok(());
+    }
     state.record_d17_provider_exec_proven_current(
         provisional_lease,
         target.ownership(),

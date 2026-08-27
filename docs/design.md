@@ -1,11 +1,14 @@
 # Workstream Navigator V1 Design
 
-Date: 2026-08-26
+Date: 2026-08-27
 
-Status: D16 host-local simplification complete, including operator-gated live
-local and SSH-entered-host acceptance. D17 shell-first managed-session
-onboarding is the approved target design and planned implementation checkpoint;
-the current binary still implements D16. V1 remains a source-installed
+Status: D16 host-local simplification is complete, including operator-gated
+live local and SSH-entered-host acceptance. The current binary routes ordinary
+Navigator startup through D17 shell-first managed-session onboarding: fresh
+state is schema 14, idle schema-13 state migrates without a wipe only after a
+legacy presentation is absent, and interrupted schema-14 transition recovery
+is explicit. D17 disposable acceptance is in progress; no D17 live-provider
+acceptance has been performed in this checkpoint. V1 remains a source-installed
 operator beta with no compatibility contract.
 
 The design is the current product and architecture contract. Dated acceptance,
@@ -550,7 +553,7 @@ The lifecycle therefore has these observable rules:
 D17.0 must race close and presentation loss against lazy materialization,
 prepare and token issuance, helper consumption, OpenCode preparation and
 `POST /session`, and provider `exec`; it must also race passive snapshot,
-new attachment, Park/Resume/Fork/contextual `n`/`new-workstream`/archive/
+new attachment, Park/Resume/Fork/contextual `n`/archive/
 rename/recovery/start retry, helper exit, exec error, exec success proof,
 immediate provider exit, and restart across every post-commit phase. The
 evidence must show one deterministic lease winner, no managed kill, no helper
@@ -650,7 +653,7 @@ that Runtime. Selecting/materializing the fresh derived singleton card attaches
 only its separate provisional server under `provisional.lock` and grants no
 authority over the unproven Runtime. Every new attachment to that Runtime and
 ordinary Runtime action or mutation—Park, Resume, Fork, contextual
-`n`/`new-workstream` from this source, archive, Rename, recovery/start retry,
+`n` from this source, archive, Rename, recovery/start retry,
 and cleanup—refuses or waits with bounded `onboarding-in-progress` guidance.
 Passive snapshot/probe may render the managed Runtime as `starting`/`onboarding`
 and run exact reconciliation, but it must not treat the hidden helper or
@@ -2182,7 +2185,7 @@ user selects New session · shell and presses Enter
 -> selecting/materializing the fresh derived singleton card attaches only its
    separate provisional server under `provisional.lock` and grants no authority
    over the unproven Runtime; no new attachment to that Runtime is allowed
--> ordinary Park/Resume/Fork/contextual n/new-workstream, archive, Rename,
+-> ordinary Park/Resume/Fork/contextual n, archive, Rename,
    recovery/start retry, and cleanup actions for that Runtime refuse or wait
    with bounded onboarding-in-progress guidance
 -> helper advances to `provider_exec_started` immediately before `execve`, then
@@ -2392,11 +2395,11 @@ The normal human workflow begins with bare `wsnav` and requires no later
 `wsnav` command typed by the user. The apparent `codex` and `opencode` shell
 commands are controlled functions that use the two-phase presentation-private
 broker and hidden launch helper described above; this is product interaction,
-not a public CLI workflow. Public CLI equivalents for supported actions remain
-available for scripting, diagnosis, direct attachment, and break-glass
-recovery, including only source-based `new-workstream` parity and no arbitrary
-registration. The documentation and empty states never send the user to them
-for an ordinary WSNav operation.
+not a public CLI workflow. Public CLI equivalents for supported non-creation
+actions remain available for scripting, diagnosis, direct attachment, and
+break-glass recovery. There is no public Workstream creation or arbitrary
+registration command. The documentation and empty states never send the user
+to those commands for an ordinary WSNav operation.
 Installing or upgrading the host-local executable, establishing an outer SSH
 connection, cloning repositories, native provider input and any provider-
 specific observer/trust approval, and deferred Git cleanup remain external
@@ -2464,7 +2467,7 @@ while using the same host/runtime contracts.
 | Normal local tmux detach and reattach to the same owned presentation | Preserve the exact provisional shell server, pane, process, actual cwd, and pending request; never create a duplicate shell. Every managed host Runtime also continues |
 | Confirmed presentation close | Acquire the shared `provisional.lock` lease and revalidate marker, journal, and revisions. Before the helper successfully revalidates every bound marker/process/cwd/path/revision/token claim and atomically consumes the capability while committing durable `Runtime-owned` authority, close may win only by atomically revoking the unconsumed capability and proving pre-effect absence; then roll back attempt-only rows and terminate only exact provisional artifacts. After that exact helper commit, never signal that server; managed Runtime servers and provider processes continue |
 | Conclusive presentation loss | Under the same `provisional.lock` lease, clean only exact pre-handoff provisional artifacts whose ownership and pre-effect absence are proven; after the exact helper commit leave the Runtime-owned server untouched and let onboarding recovery reconcile. After conclusive cleanup, the next presentation's derived singleton card is available but unmaterialized; ambiguous evidence leaves it unavailable. Managed Runtime servers and provider processes continue |
-| Runtime-owned onboarding before `provider_exec_proven` | Fence attachment/action authority for that unproven Runtime. Its originating presentation may retain its existing tmux Runtime attachment/pane or detach through ordinary card switching, but no new attachment to that Runtime is allowed. Selecting/materializing the fresh derived singleton card attaches only its separate provisional server under `provisional.lock` and grants no authority over the unproven Runtime. Refuse or wait on ordinary Park, Resume, Fork, contextual `n`/`new-workstream`, archive, Rename, recovery/start retry, and cleanup for that Runtime with bounded `onboarding-in-progress` guidance. Passive snapshot/probe may show `starting`/`onboarding` and reconcile, but never adopts the helper/preparation process, marks the Runtime lost, or signals it |
+| Runtime-owned onboarding before `provider_exec_proven` | Fence attachment/action authority for that unproven Runtime. Its originating presentation may retain its existing tmux Runtime attachment/pane or detach through ordinary card switching, but no new attachment to that Runtime is allowed. Selecting/materializing the fresh derived singleton card attaches only its separate provisional server under `provisional.lock` and grants no authority over the unproven Runtime. Refuse or wait on ordinary Park, Resume, Fork, contextual `n`, archive, Rename, recovery/start retry, and cleanup for that Runtime with bounded `onboarding-in-progress` guidance. Passive snapshot/probe may show `starting`/`onboarding` and reconcile, but never adopts the helper/preparation process, marks the Runtime lost, or signals it |
 | Hidden helper exits before `provider_exec_started` | Reconcile the exact journal and classify a conclusive no-effect exit as known-absent; never infer provider identity or expose ordinary Runtime action from the helper process |
 | `execve` returns an exact error | Record terminal known-absent failure for the final provider TUI exec before helper exit when possible; the reconciler grants no action from that evidence alone and ends onboarding through guarded rollback only when provider-specific journal evidence proves no prior effect or binding, or through the exact stopped/recovery state when a known OpenCode binding must be preserved |
 | Crash after `provider_exec_started` without proof | Leave the Runtime and operation ambiguous/recovery-required; a possible live provider is never rolled back, and no second provider effect is attempted |
@@ -2821,7 +2824,7 @@ following behavior without widening the product:
     unlink/recreate refusal, and CLOEXEC noninheritance. Race close/loss against
     prepare and token issuance, helper consumption, OpenCode preparation and
     `POST /session`, provider `exec`, snapshot/attachment, Park/Resume/Fork,
-    contextual `n`/`new-workstream`, archive/Rename/recovery/start retry,
+    contextual `n`, archive/Rename/recovery/start retry,
     helper exit, exec error, exec proof, immediate provider exit, and restart;
     prove one deterministic winner, no managed kill, helper adoption,
     premature signal/action, stuck operation, blind rollback, duplicate
@@ -3196,24 +3199,20 @@ Request deduplication includes provider kind. Reusing one request key with a
 different provider is an operation mismatch even when source Workstream and
 revision are unchanged.
 
-Direct CLI creation remains deterministic but is intentionally narrower than
-the onboarding shell. The public `new-workstream` action is available only
-when sourced from one exact existing Workstream; it inherits that source's
-fixed provider and exact registered ProjectLocation. Provider/path overrides
-are rejected, even when they happen to match, so the source-based form remains
-CLI parity for contextual `n`, scripting, and break-glass use. There is no
-source-less public `--provider`/`--path` creation contract: a new provider or
-Location is created only by the brokered provisional shell. Hidden
-prepare/launch helpers are internal implementation boundaries, not public CLI
-commands and not passive adoption paths. CLI commands never select the first
-provider by catalog order or emulate shell adoption.
+There is no public CLI creation command after cutover. Contextual `n` is the
+only same-provider/same-Location new-session path; a new provider or Location
+is created only by the brokered provisional shell. Hidden prepare/launch
+helpers are internal implementation boundaries, not public CLI commands and
+not passive adoption paths. WSNav never selects the first provider by catalog
+order or emulates shell adoption.
 
-The D17 product cutover also removes the current arbitrary-location
+The D17 product cutover removes the arbitrary-location
 `register <checkout> [--provider]` command (and any equivalent public
-`host register-checkout` form). There is no public registration command after
-cutover: the brokered provisional shell is the only new Location/provider
-authority, while the source-based `new-workstream` form remains the exact
-same-provider/same-Location parity path for `n`.
+`host register-checkout` form), as well as the provider-override
+`new-workstream` command. There is no public registration or creation command
+after cutover: the brokered provisional shell is the only new
+Location/provider authority, while contextual `n` is the exact
+same-provider/same-Location path.
 
 ### Provider-scoped readiness
 

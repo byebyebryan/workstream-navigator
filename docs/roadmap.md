@@ -1,37 +1,30 @@
 # Workstream Navigator V1 Roadmap
 
-Date: 2026-08-26
+Date: 2026-08-27
 
 Status: D0-D16 complete; D16 host-local implementation, disposable repository
 gate, and operator-gated live local and SSH-entered-host acceptance complete;
 source-installed operator beta. D17 shell-first managed-session onboarding is
-the approved next checkpoint. Its D17.0 falsification studies, D17.2 test-only
-ownership/private-runtime model, dormant presentation-private marker-backed
-materialization/evidence storage, marker-to-state prepare/consume broker,
-typed helper/pre-exec/post-exec reconciliation fences, dormant account-shell
-bootstrap, account-shell context/system-gate and post-exec-reconciliation
-composition, dormant direct-Codex and OpenCode exec preparation with the
-provider-specific final-effect fences,
-and dormant D17.3 grammar, command-classification,
-onboarding-phase, capability-journal, atomic
-reservation, and ownership-consumption foundations are in progress; no D17
-user-facing behavior or routed provider launch path is
-implemented yet. The explicit schema-13-to-14 migration, stable provisional
-lease, schema-14-only open, lease acquisition, reservation, and
-ownership-consumption seams, plus marker-backed materialization/evidence
-storage, are dormant, and no product path can invoke any of them.
+now routed by the ordinary Navigator: fresh roots initialize directly at schema
+14, idle schema-13 roots migrate transactionally only after a legacy
+presentation is absent, and a post-transaction schema-14 restart resumes the
+same transition and stable provisional-lock installation. The Navigator starts
+the dedicated D17 pane, renders the pinned shell card, and `n` creates a
+selected Workstream's same-provider/same-Location session. The public
+arbitrary-location `register` and provider-override `new-workstream` commands
+are removed. This checkpoint has disposable automated evidence only; D17 live
+Codex/OpenCode promotion acceptance remains explicitly operator-gated and is
+not complete.
 
-### 2026-08-27 D17 presentation-start falsification
+### 2026-08-27 D17 presentation-start falsification resolved
 
-The dormant `Presentation::start_d17` path records the required D17 seed
-context, but its private tmux server still invokes the D16-only `_navigator`
-pane command. That command opens the schema-13 application boundary and thus
-cannot render or operate a schema-14 D17 presentation. This falsifies any
-claim that the current dormant presentation seam is ready for atomic D17 UI
-activation. Do not route the shell card, materializer, or broker through it.
-The next D17 cutover slice must make presentation startup select a dedicated
-schema-14 Navigator controller and prove it with disposable presentation
-acceptance before any user-facing route is enabled.
+The earlier dormant `Presentation::start_d17` seam was not eligible for
+activation because it still selected the D16-only `_navigator` pane. Atomic
+cutover now starts `_navigator_d17` only after the schema-14 state boundary is
+ready. Disposable tests prove fresh schema-14 creation, idle schema-13
+migration, post-transaction restart recovery, and refusal to migrate beneath a
+live D16 presentation. The remaining acceptance work is provider-promotion and
+operator-gated live evidence, not a D16-pane fallback.
 
 The D0-D15 entries below preserve truthful historical implementation and
 acceptance evidence. D3 and later SSH, remote, cross-host, and combined
@@ -179,7 +172,7 @@ detach through ordinary card switching, but no new attachment to that Runtime
 is allowed. Selecting/materializing the fresh derived singleton card attaches
 only its separate provisional server under `provisional.lock` and grants no
 authority over the unproven Runtime. Park/Resume/Fork/contextual
-`n`/`new-workstream`, archive, Rename, recovery/start retry, and cleanup actions
+`n`, archive, Rename, recovery/start retry, and cleanup actions
 for that Runtime refuse or wait with bounded `onboarding-in-progress` guidance.
 Passive snapshot/probe may show `starting`/`onboarding` and reconcile, but must
 not adopt helper/preparation processes, mark the Runtime lost, signal it, or
@@ -255,9 +248,8 @@ host registry. `n` remains the fast path from a selected managed Workstream:
 another independent blank session with the same provider at that exact stored
 root. A different provider or directory begins through the provisional shell;
 `f` remains a conversation Fork. New provider or Location creation is
-broker-only; public `new-workstream` remains source-based parity for contextual
-`n`, inherits the exact source provider/Location, rejects provider/path
-overrides, and cannot accept source-less arbitrary creation.
+broker-only. There is no public `new-workstream` creation command after D17
+cutover; contextual `n` is the only same-provider/same-Location fast path.
 
 Passive process detection, hook-only adoption, pane-text inference, and
 provider launches that bypass the broker remain unmanaged.
@@ -4458,7 +4450,7 @@ marker, onboarding journal, presentation revision, and registry generation while
   or materializing the fresh derived singleton card attaches only its separate
   provisional server under `provisional.lock` and grants no authority over the
   unproven Runtime. Every ordinary Park/Resume/Fork/contextual
-  `n`/`new-workstream`, archive, Rename, recovery/start retry, and cleanup
+  `n`, archive, Rename, recovery/start retry, and cleanup
   action for that Runtime refuses or waits with bounded
   `onboarding-in-progress` guidance. Passive snapshot/probe may
   render `starting`/`onboarding` and reconcile, but must not adopt helper or
@@ -4512,9 +4504,9 @@ marker, onboarding journal, presentation revision, and registry generation while
   permissions, and first input stay native; safe native arguments pass only
   when proven compatible, without an invented live-version flag list. Any
   secret-bearing argument or value is outside the promotable grammar.
-- Public `new-workstream` is source-based parity for contextual `n`: it
-  inherits the exact source provider and ProjectLocation, rejects provider/path
-  overrides, and has no source-less arbitrary creation form.
+- There is no public `new-workstream` command after cutover. Contextual `n`
+  retains the exact source provider and ProjectLocation and has no provider or
+  path override.
 - `n` on a selected managed Workstream starts an independent blank session with
   the same provider at the same exact registered Location. `n` does nothing
   special on the provisional card. A different provider or directory uses the
@@ -4620,7 +4612,7 @@ proof, its originating presentation may retain its existing pane or detach
 through ordinary card switching, but no new attachment to that Runtime is
 allowed. Selecting/materializing the fresh derived singleton card attaches only
 its separate provisional server under `provisional.lock` and grants no authority
-over the unproven Runtime. Park/Resume/Fork, contextual `n`/`new-workstream`,
+over the unproven Runtime. Park/Resume/Fork, contextual `n`,
 archive, Rename, recovery/start retry, and cleanup for that Runtime refuse or
 wait with bounded onboarding guidance. Passive snapshot/probe and restart recovery
 may reconcile but perform no provider effect. A host-local
@@ -4731,7 +4723,7 @@ integration, cancellation/crash recovery, or native provider effects.
   double-source baseline parity. It must race materialization, close/loss,
   prepare and token issuance, helper consume, OpenCode preparation/POST, and
   provider exec under that lock, plus passive snapshot, new attachment,
-  Park/Resume/Fork/contextual `n`/`new-workstream`, archive/Rename,
+  Park/Resume/Fork/contextual `n`, archive/Rename,
   recovery/start retry, helper exit, exact exec error, exec proof, immediate
   provider exit, and restart. It must prove one deterministic winner, no
   helper adoption, managed kill, premature signal/action, stuck operation,
@@ -4796,7 +4788,7 @@ integration, cancellation/crash recovery, or native provider effects.
    symlink/replacement/unlink-recreate refusal, and FD noninheritance) and its
    race across close/loss, prepare/token issuance, helper consume, OpenCode
    preparation/POST, and provider exec. Race passive snapshot, new attachment,
-   Park/Resume/Fork/contextual `n`/`new-workstream`, archive/Rename,
+   Park/Resume/Fork/contextual `n`, archive/Rename,
    recovery/start retry, helper exit, exec error/proof, immediate provider
    exit, and restart across every post-commit phase. Prove the full
    operation/revision, RuntimeId/generation and exact `RuntimePaths` fields

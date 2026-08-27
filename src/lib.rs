@@ -10,6 +10,8 @@ pub mod presentation;
 mod private_tmux;
 pub mod process;
 pub mod provider;
+#[cfg(test)]
+mod provisional;
 pub mod repository;
 pub mod runtime;
 pub mod startup;

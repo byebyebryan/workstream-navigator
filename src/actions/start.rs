@@ -717,7 +717,7 @@ fn wait_for_opencode_provider(
             return Ok(health.version);
         }
         if Instant::now() >= deadline {
-            return Err(ActionError::RuntimeProbeAmbiguous);
+            return Err(ActionError::OpenCodeProviderReadinessTimeout);
         }
         thread::sleep(Duration::from_millis(50));
     }
@@ -842,7 +842,20 @@ fn wait_for_spawned_observer_ready(
                 return Err(ActionError::Io(error));
             }
         };
-        if let Some(_status) = child_status {
+        if let Some(status) = child_status {
+            let reason = registry
+                .opencode_runtime_handle(observer.runtime_id)
+                .ok()
+                .flatten()
+                .map_or(ActionError::OpenCodeObserverExitedBeforeReady, |current| {
+                    classify_spawned_observer_exit(
+                        &current,
+                        observer,
+                        observer_pid,
+                        observer_birth,
+                        status.code(),
+                    )
+                });
             mark_spawned_observer_unknown(
                 registry,
                 observer,
@@ -851,13 +864,13 @@ fn wait_for_spawned_observer_ready(
                 starting.revision,
             );
             terminate_spawned_observer(child);
-            return Err(ActionError::RuntimeProbeAmbiguous);
+            return Err(reason);
         }
         let current = match registry.opencode_runtime_handle(observer.runtime_id) {
             Ok(Some(current)) => current,
             Ok(None) => {
                 terminate_spawned_observer(child);
-                return Err(ActionError::RuntimeProbeAmbiguous);
+                return Err(ActionError::OpenCodeObserverIdentityChanged);
             }
             Err(error) => {
                 terminate_spawned_observer(child);
@@ -882,10 +895,14 @@ fn wait_for_spawned_observer_ready(
                 observer_birth,
             );
             terminate_spawned_observer(child);
-            return Err(ActionError::RuntimeProbeAmbiguous);
+            return Err(ActionError::OpenCodeObserverIdentityChanged);
         }
         if current.observer_status == crate::state::OpenCodeObserverStatus::Ready {
             return Ok(());
+        }
+        if let Some(reason) = observer_startup_failure(current.observer_status) {
+            terminate_spawned_observer(child);
+            return Err(reason);
         }
         if Instant::now() >= deadline {
             let _ = registry.mark_opencode_observer_unknown_exact(
@@ -896,9 +913,42 @@ fn wait_for_spawned_observer_ready(
                 observer_birth,
             );
             terminate_spawned_observer(child);
-            return Err(ActionError::RuntimeProbeAmbiguous);
+            return Err(ActionError::OpenCodeObserverReadinessTimeout);
         }
         thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn observer_startup_failure(status: crate::state::OpenCodeObserverStatus) -> Option<ActionError> {
+    match status {
+        crate::state::OpenCodeObserverStatus::Unknown => {
+            Some(ActionError::OpenCodeObserverStartupFailed)
+        }
+        crate::state::OpenCodeObserverStatus::Stopped => {
+            Some(ActionError::OpenCodeObserverExitedBeforeReady)
+        }
+        crate::state::OpenCodeObserverStatus::Starting
+        | crate::state::OpenCodeObserverStatus::Ready => None,
+    }
+}
+
+fn classify_spawned_observer_exit(
+    current: &crate::state::OpenCodeRuntimeHandle,
+    observer: &OpenCodeObserverLaunch,
+    observer_pid: u32,
+    observer_birth: &str,
+    exit_code: Option<i32>,
+) -> ActionError {
+    if current.runtime_generation != observer.generation
+        || current.observer_pid != Some(observer_pid)
+        || current.observer_birth.as_deref() != Some(observer_birth)
+    {
+        return ActionError::OpenCodeObserverIdentityChanged;
+    }
+    if exit_code.is_some_and(|code| code != 0) {
+        ActionError::OpenCodeObserverStartupFailed
+    } else {
+        ActionError::OpenCodeObserverExitedBeforeReady
     }
 }
 
@@ -1006,5 +1056,89 @@ mod observer_command_tests {
         cleanup.unwrap();
         reaped.unwrap();
         assert_eq!(process_group.as_raw(), child_pid);
+    }
+
+    #[test]
+    fn observer_exit_classification_preserves_bounded_readiness_reason() {
+        let temporary = tempfile::tempdir().unwrap();
+        let observer = OpenCodeObserverLaunch {
+            root: temporary.path().to_path_buf(),
+            runtime_id: RuntimeId::new(),
+            generation: "generation-a".to_owned(),
+            endpoint: OpenCodeEndpoint::loopback(12_345).unwrap(),
+            session: ProviderSessionId::new(ProviderKind::OpenCode, "session-a").unwrap(),
+            pane_pid: 42,
+            cwd: temporary.path().to_path_buf(),
+            process_birth: "provider-birth".to_owned(),
+            handle_revision: Revision::INITIAL,
+        };
+        let handle = |status| crate::state::OpenCodeRuntimeHandle {
+            runtime_id: observer.runtime_id,
+            runtime_generation: observer.generation.clone(),
+            endpoint_host: opencode::LOOPBACK_HOST.to_owned(),
+            endpoint_port: observer.endpoint.port,
+            version: "contract-build-a".to_owned(),
+            native_session_id: observer.session.clone(),
+            observer_pid: Some(77),
+            observer_birth: Some("observer-birth".to_owned()),
+            observer_status: status,
+            revision: Revision::INITIAL,
+        };
+        assert!(matches!(
+            classify_spawned_observer_exit(
+                &handle(crate::state::OpenCodeObserverStatus::Starting),
+                &observer,
+                77,
+                "observer-birth",
+                Some(0),
+            ),
+            ActionError::OpenCodeObserverExitedBeforeReady
+        ));
+        assert!(matches!(
+            classify_spawned_observer_exit(
+                &handle(crate::state::OpenCodeObserverStatus::Unknown),
+                &observer,
+                77,
+                "observer-birth",
+                Some(1),
+            ),
+            ActionError::OpenCodeObserverStartupFailed
+        ));
+        assert!(matches!(
+            classify_spawned_observer_exit(
+                &handle(crate::state::OpenCodeObserverStatus::Starting),
+                &observer,
+                77,
+                "observer-birth",
+                Some(9),
+            ),
+            ActionError::OpenCodeObserverStartupFailed
+        ));
+        let mut changed = handle(crate::state::OpenCodeObserverStatus::Starting);
+        changed.runtime_generation = "generation-b".to_owned();
+        assert!(matches!(
+            classify_spawned_observer_exit(&changed, &observer, 77, "observer-birth", Some(1)),
+            ActionError::OpenCodeObserverIdentityChanged
+        ));
+        assert!(matches!(
+            classify_spawned_observer_exit(
+                &handle(crate::state::OpenCodeObserverStatus::Ready),
+                &observer,
+                77,
+                "observer-birth",
+                None,
+            ),
+            ActionError::OpenCodeObserverExitedBeforeReady
+        ));
+        assert!(matches!(
+            observer_startup_failure(crate::state::OpenCodeObserverStatus::Unknown),
+            Some(ActionError::OpenCodeObserverStartupFailed)
+        ));
+        assert!(matches!(
+            observer_startup_failure(crate::state::OpenCodeObserverStatus::Stopped),
+            Some(ActionError::OpenCodeObserverExitedBeforeReady)
+        ));
+        assert!(observer_startup_failure(crate::state::OpenCodeObserverStatus::Starting).is_none());
+        assert!(observer_startup_failure(crate::state::OpenCodeObserverStatus::Ready).is_none());
     }
 }

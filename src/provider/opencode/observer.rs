@@ -235,10 +235,6 @@ fn run_observer_with_authority<A: ObserverAuthority>(
         .process_birth
         .as_deref()
         .ok_or(OpenCodeObserverError::RuntimeProbeAmbiguous)?;
-    if !endpoint_owned_by_process(&context.endpoint, context.pane_pid, pane_birth) {
-        mark_unknown(authority, context);
-        return Err(OpenCodeObserverError::RuntimeProbeAmbiguous);
-    }
     let Some(handle) = authority.opencode_runtime_handle(context.runtime_id)? else {
         return Ok(());
     };
@@ -253,30 +249,36 @@ fn run_observer_with_authority<A: ObserverAuthority>(
     let client = OpenCodeClient::new(context.endpoint.clone());
     let deadline = Instant::now() + HEALTH_DEADLINE;
     loop {
-        if client
-            .health()
-            .is_ok_and(|health| health.version == handle.version)
-            && matches!(
-                client.session_status_with_root(&context.session, &context.cwd),
-                Ok(OpenCodeSessionStatus::Busy | OpenCodeSessionStatus::Idle)
-            )
-            && endpoint_owned_by_process(&context.endpoint, context.pane_pid, pane_birth)
-        {
+        // Ownership is the first and final gate around provider observation.
+        // When /proc evidence is ambiguous, do not query an endpoint that
+        // could have been rebound; the existing bounded deadline remains the
+        // only retry budget.
+        if let Some(stream) = startup_readiness_step(
+            || endpoint_owned_by_process(&context.endpoint, context.pane_pid, pane_birth),
+            || {
+                client
+                    .health()
+                    .is_ok_and(|health| health.version == handle.version)
+                    && matches!(
+                        client.session_status_with_root(&context.session, &context.cwd),
+                        Ok(OpenCodeSessionStatus::Busy | OpenCodeSessionStatus::Idle)
+                    )
+            },
+            || client.event_stream().ok(),
+        ) {
             // `ready` is an action boundary, not merely process liveness. A
             // caller may submit native input as soon as start returns, so the
             // exact SSE stream must already be established before the handle
             // becomes actionable or the first turn can race past observation.
-            if let Ok(stream) = client.event_stream() {
-                let (observer_pid, observer_birth) = prepare(authority, context)?;
-                let evidence = SupervisionEvidence {
-                    context,
-                    pane_birth,
-                    observer_pid,
-                    observer_birth: &observer_birth,
-                    provider_version: &handle.version,
-                };
-                return supervise(authority, &client, &evidence, Some(stream));
-            }
+            let (observer_pid, observer_birth) = prepare(authority, context)?;
+            let evidence = SupervisionEvidence {
+                context,
+                pane_birth,
+                observer_pid,
+                observer_birth: &observer_birth,
+                provider_version: &handle.version,
+            };
+            return supervise(authority, &client, &evidence, Some(stream));
         }
         if Instant::now() >= deadline {
             mark_unknown(authority, context);
@@ -284,6 +286,25 @@ fn run_observer_with_authority<A: ObserverAuthority>(
         }
         thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Orders one bounded startup readiness attempt. Exact endpoint ownership is
+/// required before any provider HTTP request and rechecked immediately before
+/// opening SSE. An ambiguous first sample therefore permits only a retry.
+fn startup_readiness_step<Endpoint, Provider, Stream, T>(
+    mut endpoint_owned: Endpoint,
+    mut provider_ready: Provider,
+    mut open_stream: Stream,
+) -> Option<T>
+where
+    Endpoint: FnMut() -> bool,
+    Provider: FnMut() -> bool,
+    Stream: FnMut() -> Option<T>,
+{
+    if !endpoint_owned() || !provider_ready() || !endpoint_owned() {
+        return None;
+    }
+    open_stream()
 }
 
 /// A process-local, content-free event buffer used while an observer is in
@@ -1159,6 +1180,116 @@ mod tests {
         let start = Instant::now();
         assert!(!supervision_due(start, start + Duration::from_millis(499)));
         assert!(supervision_due(start, start + SUPERVISION_INTERVAL));
+    }
+
+    #[test]
+    fn startup_readiness_does_not_probe_http_or_sse_when_endpoint_is_unowned() {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let result = startup_readiness_step(
+            || {
+                calls.borrow_mut().push("endpoint");
+                false
+            },
+            || {
+                calls.borrow_mut().push("provider");
+                true
+            },
+            || {
+                calls.borrow_mut().push("stream");
+                Some(())
+            },
+        );
+
+        assert_eq!(result, None);
+        assert_eq!(*calls.borrow(), vec!["endpoint"]);
+    }
+
+    #[test]
+    fn startup_readiness_retries_false_then_true_within_the_existing_loop() {
+        let endpoint_samples = std::cell::Cell::new(0);
+        let provider_calls = std::cell::Cell::new(0);
+        let stream_calls = std::cell::Cell::new(0);
+        let mut result = None;
+        for _ in 0..3 {
+            result = startup_readiness_step(
+                || {
+                    endpoint_samples.set(endpoint_samples.get() + 1);
+                    endpoint_samples.get() >= 2
+                },
+                || {
+                    provider_calls.set(provider_calls.get() + 1);
+                    true
+                },
+                || {
+                    stream_calls.set(stream_calls.get() + 1);
+                    Some("stream")
+                },
+            );
+            if result.is_some() {
+                break;
+            }
+        }
+
+        assert_eq!(result, Some("stream"));
+        assert_eq!(endpoint_samples.get(), 3);
+        assert_eq!(provider_calls.get(), 1);
+        assert_eq!(stream_calls.get(), 1);
+    }
+
+    #[test]
+    fn startup_readiness_persistent_endpoint_ambiguity_stays_bounded_and_passive() {
+        let endpoint_samples = std::cell::Cell::new(0);
+        let provider_calls = std::cell::Cell::new(0);
+        let stream_calls = std::cell::Cell::new(0);
+        for _ in 0..3 {
+            assert_eq!(
+                startup_readiness_step(
+                    || {
+                        endpoint_samples.set(endpoint_samples.get() + 1);
+                        false
+                    },
+                    || {
+                        provider_calls.set(provider_calls.get() + 1);
+                        true
+                    },
+                    || {
+                        stream_calls.set(stream_calls.get() + 1);
+                        Some(())
+                    },
+                ),
+                None
+            );
+        }
+
+        assert_eq!(endpoint_samples.get(), 3);
+        assert_eq!(provider_calls.get(), 0);
+        assert_eq!(stream_calls.get(), 0);
+    }
+
+    #[test]
+    fn startup_readiness_rechecks_ownership_immediately_before_sse() {
+        let endpoint_samples = std::cell::Cell::new(0);
+        let provider_calls = std::cell::Cell::new(0);
+        let stream_calls = std::cell::Cell::new(0);
+        let result = startup_readiness_step(
+            || {
+                endpoint_samples.set(endpoint_samples.get() + 1);
+                endpoint_samples.get() == 1
+            },
+            || {
+                provider_calls.set(provider_calls.get() + 1);
+                true
+            },
+            || {
+                stream_calls.set(stream_calls.get() + 1);
+                Some(())
+            },
+        );
+
+        assert_eq!(result, None);
+        assert_eq!(endpoint_samples.get(), 2);
+        assert_eq!(provider_calls.get(), 1);
+        assert_eq!(stream_calls.get(), 0);
     }
 
     #[test]

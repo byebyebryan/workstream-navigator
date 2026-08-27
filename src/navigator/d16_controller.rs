@@ -23,8 +23,8 @@ use thiserror::Error;
 use crate::{
     app::ObserverActivation,
     application::{
-        ApplicationAction, ApplicationError, ApplicationOutcome, AttachEvidence,
-        HostRegistryApplicationBackend, LocalApplication, LocalApplicationBackend,
+        ActionFailureReason, ApplicationAction, ApplicationError, ApplicationOutcome,
+        AttachEvidence, HostRegistryApplicationBackend, LocalApplication, LocalApplicationBackend,
         ObserverReadiness, WorkstreamSnapshot,
     },
     domain::{RuntimeStatus, WorkstreamId},
@@ -744,24 +744,51 @@ fn poll_attachment(
 }
 
 fn show_application_error(navigator: &mut D16Navigator, error: &ApplicationError) {
-    let message = match error {
-        ApplicationError::StaleRevision { .. } => "action became stale; refresh and retry",
+    navigator
+        .model_mut()
+        .set_message(application_error_message(error));
+}
+
+fn application_error_message(error: &ApplicationError) -> String {
+    match error {
+        ApplicationError::StaleRevision { .. } => "action became stale; refresh and retry".into(),
         ApplicationError::ObserverUnavailable {
             readiness: ObserverReadiness::Foreign,
-        } => "observer ownership is foreign; action refused",
+        } => "observer ownership is foreign; action refused".into(),
         ApplicationError::ObserverUnavailable {
             readiness: ObserverReadiness::Modified,
-        } => "owned observer declaration changed; action refused",
+        } => "owned observer declaration changed; action refused".into(),
         ApplicationError::ObserverUnavailable {
             readiness: ObserverReadiness::Disabled,
-        } => "observer integration is disabled; action refused",
+        } => "observer integration is disabled; action refused".into(),
         ApplicationError::ObserverUnavailable {
             readiness: ObserverReadiness::Ambiguous | ObserverReadiness::Unknown,
-        } => "observer readiness is ambiguous; refresh and retry",
-        ApplicationError::ObserverUnavailable { .. } => "observer readiness requires native review",
-        _ => "local action refused; no provider input was sent",
-    };
-    navigator.model_mut().set_message(message);
+        } => "observer readiness is ambiguous; refresh and retry".into(),
+        ApplicationError::ObserverUnavailable { .. } => {
+            "observer readiness requires native review".into()
+        }
+        ApplicationError::ActionFailed { reason } => match reason {
+            ActionFailureReason::ProviderReadinessTimeout => {
+                "provider startup timed out; retry this workstream".into()
+            }
+            ActionFailureReason::OpenCodeObserverStartupFailed => {
+                "OpenCode observer startup failed; retry this workstream".into()
+            }
+            ActionFailureReason::OpenCodeObserverReadinessTimeout => {
+                "OpenCode observer startup timed out; retry this workstream".into()
+            }
+            ActionFailureReason::OpenCodeObserverIdentityChanged => {
+                "OpenCode observer identity changed; refresh and retry".into()
+            }
+            ActionFailureReason::OpenCodeObserverExitedBeforeReady => {
+                "OpenCode observer exited during startup; retry this workstream".into()
+            }
+            ActionFailureReason::RuntimeEvidenceAmbiguous => {
+                "runtime evidence is ambiguous; refresh and retry".into()
+            }
+        },
+        _ => "local action refused; no provider input was sent".into(),
+    }
 }
 
 struct TerminalSession {
@@ -885,5 +912,45 @@ mod tests {
         assert!(refreshed_attachment_evidence(&rotated, previous).is_none());
         let stopped = workstream_with_runtime(workstream_id, runtime_id, RuntimeStatus::Stopped);
         assert!(refreshed_attachment_evidence(&stopped, previous).is_none());
+    }
+
+    #[test]
+    fn bounded_action_failures_do_not_collapse_to_local_action_refused() {
+        let cases = [
+            (
+                ActionFailureReason::ProviderReadinessTimeout,
+                "provider startup timed out; retry this workstream",
+            ),
+            (
+                ActionFailureReason::OpenCodeObserverStartupFailed,
+                "OpenCode observer startup failed; retry this workstream",
+            ),
+            (
+                ActionFailureReason::OpenCodeObserverReadinessTimeout,
+                "OpenCode observer startup timed out; retry this workstream",
+            ),
+            (
+                ActionFailureReason::OpenCodeObserverIdentityChanged,
+                "OpenCode observer identity changed; refresh and retry",
+            ),
+            (
+                ActionFailureReason::OpenCodeObserverExitedBeforeReady,
+                "OpenCode observer exited during startup; retry this workstream",
+            ),
+            (
+                ActionFailureReason::RuntimeEvidenceAmbiguous,
+                "runtime evidence is ambiguous; refresh and retry",
+            ),
+        ];
+        for (reason, expected) in cases {
+            assert_eq!(
+                application_error_message(&ApplicationError::ActionFailed { reason }),
+                expected
+            );
+            assert_ne!(
+                application_error_message(&ApplicationError::ActionFailed { reason }),
+                "local action refused; no provider input was sent"
+            );
+        }
     }
 }

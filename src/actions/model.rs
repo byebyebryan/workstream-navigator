@@ -148,6 +148,16 @@ pub enum ActionError {
     ObserverNotReady,
     #[error("private runtime probe is ambiguous; refusing to create another provider process")]
     RuntimeProbeAmbiguous,
+    #[error("OpenCode provider did not become ready before the bounded startup deadline")]
+    OpenCodeProviderReadinessTimeout,
+    #[error("OpenCode observer did not become ready before the bounded startup deadline")]
+    OpenCodeObserverReadinessTimeout,
+    #[error("OpenCode observer failed during startup")]
+    OpenCodeObserverStartupFailed,
+    #[error("OpenCode observer identity changed during startup")]
+    OpenCodeObserverIdentityChanged,
+    #[error("OpenCode observer exited before becoming ready")]
+    OpenCodeObserverExitedBeforeReady,
     #[error("private runtime disappeared; select native recovery before continuing")]
     NativeRecoveryRequired,
     #[error("workstream is not awaiting native recovery")]

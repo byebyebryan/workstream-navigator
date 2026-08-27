@@ -2,7 +2,7 @@ use std::fmt::Write as _;
 
 use super::{
     HostRegistry, IntegrationLifecycle, ObserverProfile, Path, StateRoot,
-    cli::{Cli, Commands, is_provider_surface_command},
+    cli::{Cli, Commands, is_observer_command, is_provider_pane_command},
     dispatch,
     model::AppError,
     observer::{finalize_native_trust, prepare_observer_activation_with_manager},
@@ -86,7 +86,7 @@ fn opencode_observer_entrypoint_is_hidden_and_typed() {
 }
 
 #[test]
-fn state_free_opencode_helpers_are_hidden_and_not_provider_surfaces() {
+fn state_free_opencode_helpers_are_hidden_and_not_observer_or_provider_pane_commands() {
     let parsed = Cli::try_parse_from([
         "wsnav",
         "_opencode_serve_guardian",
@@ -99,12 +99,13 @@ fn state_free_opencode_helpers_are_hidden_and_not_provider_surfaces() {
         parsed.command.as_ref(),
         Some(Commands::OpenCodeServeGuardian { port: 4321, .. })
     ));
-    assert!(!is_provider_surface_command(parsed.command.as_ref()));
+    assert!(!is_observer_command(parsed.command.as_ref()));
+    assert!(!is_provider_pane_command(parsed.command.as_ref()));
     assert!(Cli::try_parse_from(["wsnav", "opencode_serve_guardian"]).is_err());
 }
 
 #[test]
-fn provider_surface_helpers_are_local_and_silent() {
+fn provider_pane_helpers_are_local_and_silent() {
     let local = Cli::try_parse_from([
         "wsnav",
         "_provider_attach",
@@ -117,11 +118,13 @@ fn provider_surface_helpers_are_local_and_silent() {
         "00000000-0000-0000-0000-000000000002",
     ])
     .unwrap();
-    assert!(is_provider_surface_command(local.command.as_ref()));
+    assert!(is_provider_pane_command(local.command.as_ref()));
+    assert!(!is_observer_command(local.command.as_ref()));
     assert!(Cli::try_parse_from(["wsnav", "_provider_remote_attach"]).is_err());
 
     let review = Cli::try_parse_from(["wsnav", "_observer_review"]).unwrap();
-    assert!(is_provider_surface_command(review.command.as_ref()));
+    assert!(is_provider_pane_command(review.command.as_ref()));
+    assert!(!is_observer_command(review.command.as_ref()));
     let shell = Cli::try_parse_from([
         "wsnav",
         "_presentation_shell",
@@ -135,8 +138,43 @@ fn provider_surface_helpers_are_local_and_silent() {
         "/tmp/project",
     ])
     .unwrap();
-    assert!(is_provider_surface_command(shell.command.as_ref()));
+    assert!(is_provider_pane_command(shell.command.as_ref()));
+    assert!(!is_observer_command(shell.command.as_ref()));
     assert!(Cli::try_parse_from(["wsnav", "_presentation_ssh_shell"]).is_err());
+}
+
+#[test]
+fn observer_helpers_are_silent_but_return_a_failure_status_on_error() {
+    let active = Cli::try_parse_from([
+        "wsnav",
+        "_opencode_observer_d16",
+        "00000000-0000-0000-0000-000000000001",
+        "generation",
+        "4321",
+        "root-session",
+        "4242",
+        "/project",
+        "birth",
+    ])
+    .unwrap();
+    assert!(is_observer_command(active.command.as_ref()));
+    assert!(!is_provider_pane_command(active.command.as_ref()));
+
+    let standby = Cli::try_parse_from([
+        "wsnav",
+        "_opencode_observer_standby",
+        "00000000-0000-0000-0000-000000000001",
+        "generation",
+        "4321",
+        "contract-build-a",
+        "root-session",
+        "4242",
+        "/project",
+        "birth",
+    ])
+    .unwrap();
+    assert!(is_observer_command(standby.command.as_ref()));
+    assert!(!is_provider_pane_command(standby.command.as_ref()));
 }
 
 #[test]

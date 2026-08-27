@@ -171,7 +171,7 @@ pub(super) enum Commands {
     },
 }
 
-pub(super) const fn is_provider_surface_command(command: Option<&Commands>) -> bool {
+pub(super) const fn is_provider_pane_command(command: Option<&Commands>) -> bool {
     matches!(
         command,
         Some(
@@ -180,8 +180,13 @@ pub(super) const fn is_provider_surface_command(command: Option<&Commands>) -> b
                 | Commands::PresentationShell { .. }
                 | Commands::ObserverReview
                 | Commands::RuntimeLaunch { .. }
-                | Commands::OpenCodeObserverD16 { .. }
-                | Commands::OpenCodeObserverStandby { .. }
         )
+    )
+}
+
+pub(super) const fn is_observer_command(command: Option<&Commands>) -> bool {
+    matches!(
+        command,
+        Some(Commands::OpenCodeObserverD16 { .. } | Commands::OpenCodeObserverStandby { .. })
     )
 }

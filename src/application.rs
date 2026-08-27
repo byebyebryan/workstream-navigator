@@ -190,8 +190,32 @@ pub enum ApplicationError {
     ActionAuthorityFailed,
     #[error("attachment authority failed")]
     AttachmentAuthorityFailed,
+    #[error("local action failed: {reason}")]
+    ActionFailed { reason: ActionFailureReason },
     #[error("observer readiness is unavailable for this action")]
     ObserverUnavailable { readiness: ObserverReadiness },
+}
+
+/// Bounded, content-free classifications for a failed local action.
+///
+/// The application boundary deliberately reduces internal provider, process,
+/// filesystem, and state errors to this finite set before public application
+/// output or presentation, so callers cannot expose provider payloads,
+/// terminal output, credentials, raw paths, or unbounded process diagnostics.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum ActionFailureReason {
+    #[error("provider did not become ready before the startup deadline")]
+    ProviderReadinessTimeout,
+    #[error("OpenCode observer failed during startup")]
+    OpenCodeObserverStartupFailed,
+    #[error("OpenCode observer did not become ready before the startup deadline")]
+    OpenCodeObserverReadinessTimeout,
+    #[error("OpenCode observer identity changed during startup")]
+    OpenCodeObserverIdentityChanged,
+    #[error("OpenCode observer exited before becoming ready")]
+    OpenCodeObserverExitedBeforeReady,
+    #[error("runtime evidence is ambiguous")]
+    RuntimeEvidenceAmbiguous,
 }
 
 /// Identity categories used in typed projection validation errors.
@@ -1966,6 +1990,24 @@ fn map_state_error(error: StateError, authority: Authority) -> ApplicationError 
 
 fn map_action_error(error: actions::ActionError) -> ApplicationError {
     match error {
+        actions::ActionError::OpenCodeProviderReadinessTimeout => ApplicationError::ActionFailed {
+            reason: ActionFailureReason::ProviderReadinessTimeout,
+        },
+        actions::ActionError::OpenCodeObserverReadinessTimeout => ApplicationError::ActionFailed {
+            reason: ActionFailureReason::OpenCodeObserverReadinessTimeout,
+        },
+        actions::ActionError::OpenCodeObserverStartupFailed => ApplicationError::ActionFailed {
+            reason: ActionFailureReason::OpenCodeObserverStartupFailed,
+        },
+        actions::ActionError::OpenCodeObserverIdentityChanged => ApplicationError::ActionFailed {
+            reason: ActionFailureReason::OpenCodeObserverIdentityChanged,
+        },
+        actions::ActionError::OpenCodeObserverExitedBeforeReady => ApplicationError::ActionFailed {
+            reason: ActionFailureReason::OpenCodeObserverExitedBeforeReady,
+        },
+        actions::ActionError::RuntimeProbeAmbiguous => ApplicationError::ActionFailed {
+            reason: ActionFailureReason::RuntimeEvidenceAmbiguous,
+        },
         actions::ActionError::State(StateError::ProviderIdentityMismatch) => {
             ApplicationError::ProviderIdentityMismatch
         }
@@ -2796,6 +2838,56 @@ mod backend_tests {
         assert_eq!(
             map_state_error(StateError::UnsupportedFutureHostSchema(14), authority),
             ApplicationError::UnsupportedFutureHostSchema { schema_version: 14 }
+        );
+    }
+
+    #[test]
+    fn action_failures_preserve_bounded_provider_runtime_and_observer_reasons() {
+        assert_eq!(
+            map_action_error(actions::ActionError::OpenCodeProviderReadinessTimeout),
+            ApplicationError::ActionFailed {
+                reason: ActionFailureReason::ProviderReadinessTimeout,
+            }
+        );
+        assert_eq!(
+            map_action_error(actions::ActionError::OpenCodeObserverStartupFailed),
+            ApplicationError::ActionFailed {
+                reason: ActionFailureReason::OpenCodeObserverStartupFailed,
+            }
+        );
+        assert_eq!(
+            map_action_error(actions::ActionError::OpenCodeObserverReadinessTimeout),
+            ApplicationError::ActionFailed {
+                reason: ActionFailureReason::OpenCodeObserverReadinessTimeout,
+            }
+        );
+        assert_eq!(
+            map_action_error(actions::ActionError::OpenCodeObserverIdentityChanged),
+            ApplicationError::ActionFailed {
+                reason: ActionFailureReason::OpenCodeObserverIdentityChanged,
+            }
+        );
+        assert_eq!(
+            map_action_error(actions::ActionError::OpenCodeObserverExitedBeforeReady),
+            ApplicationError::ActionFailed {
+                reason: ActionFailureReason::OpenCodeObserverExitedBeforeReady,
+            }
+        );
+        assert_eq!(
+            map_action_error(actions::ActionError::RuntimeProbeAmbiguous),
+            ApplicationError::ActionFailed {
+                reason: ActionFailureReason::RuntimeEvidenceAmbiguous,
+            }
+        );
+        assert_eq!(
+            map_action_error(actions::ActionError::NativeRecoveryRequired),
+            ApplicationError::ActionAuthorityFailed
+        );
+        assert_eq!(
+            map_action_error(actions::ActionError::State(
+                StateError::ProviderIdentityMismatch,
+            )),
+            ApplicationError::ProviderIdentityMismatch
         );
     }
 

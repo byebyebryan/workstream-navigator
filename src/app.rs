@@ -45,13 +45,17 @@ pub(crate) use observer::{ObserverActivation, prepare_observer_activation, remov
 #[must_use]
 pub fn run() -> ExitCode {
     let cli = cli::Cli::parse();
-    let provider_surface = cli::is_provider_surface_command(cli.command.as_ref());
+    let observer_command = cli::is_observer_command(cli.command.as_ref());
+    let provider_pane_command = cli::is_provider_pane_command(cli.command.as_ref());
     match dispatch::execute(cli) {
         Ok(()) => ExitCode::SUCCESS,
-        // These helpers execute inside a provider pane. They deliberately do
-        // not expose CLI diagnostics there; normal navigator polling owns the
+        // Observer helpers are disconnected from the provider pane. Keep
+        // their bounded errors silent, but let the owning action observe a
+        // non-success exit status. Other provider-pane helpers deliberately
+        // remain success-suppressed; normal navigator polling owns their
         // bounded state presentation after an attachment ends.
-        Err(_) if provider_surface => ExitCode::SUCCESS,
+        Err(_) if observer_command => ExitCode::FAILURE,
+        Err(_) if provider_pane_command => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
             ExitCode::FAILURE

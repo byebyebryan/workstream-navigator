@@ -9,6 +9,7 @@ pub(crate) mod d17_broker;
 pub(crate) mod d17_clock;
 pub(crate) mod d17_helper;
 pub(crate) mod d17_reconcile;
+pub(crate) mod d17_shell_control;
 pub(crate) mod d17_shell_gate;
 pub mod domain;
 pub mod navigator;

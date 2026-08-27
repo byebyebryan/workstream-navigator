@@ -4,7 +4,7 @@ use super::{
     launch::{
         OpenCodeObserverArguments, OpenCodeObserverStandbyArguments, attach_runtime,
         opencode_observer, opencode_observer_standby, presentation_control, presentation_shell,
-        provider_attach, provider_wait, runtime_launch,
+        provider_attach, provider_attach_d17, provider_wait, runtime_launch,
     },
     local::observe_hook,
     model::{
@@ -202,6 +202,10 @@ fn execute_root_command(root: &StateRoot, command: Commands) -> Result<(), AppEr
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "The typed hidden-helper matrix keeps schema and pane boundaries auditable in one dispatch."
+)]
 fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppError> {
     match command {
         Commands::ProviderAttach {
@@ -212,6 +216,24 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
         } => provider_attach(
             root,
             &workstream_id,
+            presentation_socket,
+            presentation_session,
+            &attempt_id,
+        ),
+        Commands::ProviderAttachD17 {
+            workstream_id,
+            expected_workstream_revision,
+            expected_runtime_id,
+            expected_runtime_revision,
+            presentation_socket,
+            presentation_session,
+            attempt_id,
+        } => provider_attach_d17(
+            root,
+            &workstream_id,
+            expected_workstream_revision,
+            &expected_runtime_id,
+            expected_runtime_revision,
             presentation_socket,
             presentation_session,
             &attempt_id,

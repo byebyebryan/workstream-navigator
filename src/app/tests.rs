@@ -205,6 +205,35 @@ fn provider_pane_helpers_are_local_and_silent() {
     assert!(!is_observer_command(local.command.as_ref()));
     assert!(Cli::try_parse_from(["wsnav", "_provider_remote_attach"]).is_err());
 
+    let d17 = Cli::try_parse_from([
+        "wsnav",
+        "_provider_attach_d17",
+        "00000000-0000-0000-0000-000000000001",
+        "--expected-workstream-revision",
+        "1",
+        "--expected-runtime-id",
+        "00000000-0000-0000-0000-000000000002",
+        "--expected-runtime-revision",
+        "1",
+        "--presentation-socket",
+        "/state/presentation/presentation-0123456789ab/tmux.sock",
+        "--presentation-session",
+        "wsnav-presentation-0123456789ab",
+        "--attempt-id",
+        "00000000-0000-0000-0000-000000000003",
+    ])
+    .unwrap();
+    assert!(matches!(
+        d17.command.as_ref(),
+        Some(Commands::ProviderAttachD17 {
+            expected_workstream_revision: 1,
+            expected_runtime_revision: 1,
+            ..
+        })
+    ));
+    assert!(is_provider_pane_command(d17.command.as_ref()));
+    assert!(!is_observer_command(d17.command.as_ref()));
+
     let review = Cli::try_parse_from(["wsnav", "_observer_review"]).unwrap();
     assert!(is_provider_pane_command(review.command.as_ref()));
     assert!(!is_observer_command(review.command.as_ref()));

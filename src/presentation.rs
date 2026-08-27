@@ -17,7 +17,7 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    domain::{OnboardingPhase, Revision, WorkstreamId},
+    domain::{OnboardingPhase, Revision, RuntimeId, WorkstreamId},
     private_tmux::{TERMINAL_CAPABILITY_CONFIG, copy_mode_scroll_config},
     process::{BoundedProcessError, output_bounded},
     provisional::{PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, read_marker},
@@ -1194,6 +1194,50 @@ impl Presentation {
                 self.invoke(
                     None,
                     self.provider_respawn_arguments(&provider, workstream_id, status.attempt_id),
+                )
+            })();
+            self.finish_attachment_start(status, result)
+        })
+    }
+
+    /// Replaces the outer provider pane with a D17-only attachment helper for
+    /// one already-proven Runtime. The D17 presentation marker must still be
+    /// current, and the helper receives the exact snapshot revisions instead
+    /// of reopening the retired schema-13 application facade.
+    #[allow(
+        dead_code,
+        reason = "the D17 Workstreams controller remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn attach_d17_workstream(
+        &self,
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        runtime_id: RuntimeId,
+        expected_runtime_revision: Revision,
+    ) -> Result<AttachmentStatus, PresentationError> {
+        self.d17_context()?;
+        self.with_attachment_claim(|| {
+            let status = self.prepare_attachment(workstream_id)?;
+            let result = (|| {
+                self.retire_utility_for_attachment(workstream_id)?;
+                let provider = self.provider_target_for_attachment()?;
+                self.set_pane_role(
+                    &provider,
+                    PresentationPaneRole::Provider,
+                    Some(status.workstream_id),
+                )?;
+                self.invoke(
+                    None,
+                    self.provider_respawn_for_command(
+                        &provider,
+                        self.provider_attach_d17_command(
+                            workstream_id,
+                            expected_workstream_revision,
+                            runtime_id,
+                            expected_runtime_revision,
+                            status.attempt_id,
+                        ),
+                    ),
                 )
             })();
             self.finish_attachment_start(status, result)
@@ -2466,6 +2510,35 @@ impl Presentation {
             self.state_root.clone().into_os_string(),
             "_provider_attach".into(),
             workstream_id.to_string().into(),
+            "--presentation-socket".into(),
+            self.paths.socket.clone().into_os_string(),
+            "--presentation-session".into(),
+            self.paths.session_name.clone().into(),
+            "--attempt-id".into(),
+            attempt_id.to_string().into(),
+        ]
+    }
+
+    fn provider_attach_d17_command(
+        &self,
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        runtime_id: RuntimeId,
+        expected_runtime_revision: Revision,
+        attempt_id: uuid::Uuid,
+    ) -> Vec<OsString> {
+        vec![
+            self.executable.clone().into_os_string(),
+            "--state-root".into(),
+            self.state_root.clone().into_os_string(),
+            "_provider_attach_d17".into(),
+            workstream_id.to_string().into(),
+            "--expected-workstream-revision".into(),
+            expected_workstream_revision.value().to_string().into(),
+            "--expected-runtime-id".into(),
+            runtime_id.to_string().into(),
+            "--expected-runtime-revision".into(),
+            expected_runtime_revision.value().to_string().into(),
             "--presentation-socket".into(),
             self.paths.socket.clone().into_os_string(),
             "--presentation-session".into(),
@@ -4939,6 +5012,12 @@ fn classify_provider_command(
         expected_socket,
         session_name,
         same_executable,
+    ) || exact_d17_provider_attach_arguments(
+        process,
+        expected_root,
+        expected_socket,
+        session_name,
+        same_executable,
     ) {
         LegacyPaneCommand::ProviderAttach
     } else {
@@ -4969,6 +5048,44 @@ fn exact_provider_attach_arguments(
         && arguments.get(9).map(String::as_str) == Some("--attempt-id")
         && arguments
             .get(10)
+            .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok())
+}
+
+fn exact_d17_provider_attach_arguments(
+    process: &LegacyProcessProof,
+    expected_root: &str,
+    expected_socket: &str,
+    expected_session: &str,
+    same_executable: bool,
+) -> bool {
+    let arguments = &process.arguments;
+    same_executable
+        && arguments.len() == 17
+        && arguments.get(1).map(String::as_str) == Some("--state-root")
+        && arguments.get(2).map(String::as_str) == Some(expected_root)
+        && arguments.get(3).map(String::as_str) == Some("_provider_attach_d17")
+        && arguments
+            .get(4)
+            .is_some_and(|value| WorkstreamId::from_str(value).is_ok())
+        && arguments.get(5).map(String::as_str) == Some("--expected-workstream-revision")
+        && arguments
+            .get(6)
+            .is_some_and(|value| Revision::try_from(value.parse::<i64>().unwrap_or(0)).is_ok())
+        && arguments.get(7).map(String::as_str) == Some("--expected-runtime-id")
+        && arguments
+            .get(8)
+            .is_some_and(|value| RuntimeId::from_str(value).is_ok())
+        && arguments.get(9).map(String::as_str) == Some("--expected-runtime-revision")
+        && arguments
+            .get(10)
+            .is_some_and(|value| Revision::try_from(value.parse::<i64>().unwrap_or(0)).is_ok())
+        && arguments.get(11).map(String::as_str) == Some("--presentation-socket")
+        && arguments.get(12).map(String::as_str) == Some(expected_socket)
+        && arguments.get(13).map(String::as_str) == Some("--presentation-session")
+        && arguments.get(14).map(String::as_str) == Some(expected_session)
+        && arguments.get(15).map(String::as_str) == Some("--attempt-id")
+        && arguments
+            .get(16)
             .is_some_and(|value| uuid::Uuid::parse_str(value).is_ok())
 }
 
@@ -7288,6 +7405,47 @@ mod tests {
                 .any(|argument| argument == "_provider_attach")
         );
         assert_eq!(command.len(), 11);
+    }
+
+    #[test]
+    fn d17_provider_attachment_carries_exact_snapshot_revisions() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        let presentation = Presentation {
+            paths,
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        let workstream_id = WorkstreamId::from(uuid::Uuid::from_u128(71));
+        let runtime_id = RuntimeId::from(uuid::Uuid::from_u128(72));
+        let command = presentation.provider_attach_d17_command(
+            workstream_id,
+            Revision::INITIAL,
+            runtime_id,
+            Revision::INITIAL,
+            uuid::Uuid::from_u128(73),
+        );
+
+        assert!(
+            command
+                .iter()
+                .all(|argument| argument != "sh" && argument != "/bin/sh")
+        );
+        assert_eq!(command[3], "_provider_attach_d17");
+        assert_eq!(command[4], OsString::from(workstream_id.to_string()));
+        assert_eq!(command[5], "--expected-workstream-revision");
+        assert_eq!(
+            command[6],
+            OsString::from(Revision::INITIAL.value().to_string())
+        );
+        assert_eq!(command[7], "--expected-runtime-id");
+        assert_eq!(command[8], OsString::from(runtime_id.to_string()));
+        assert_eq!(command[9], "--expected-runtime-revision");
+        assert_eq!(
+            command[10],
+            OsString::from(Revision::INITIAL.value().to_string())
+        );
+        assert_eq!(command.len(), 17);
     }
 
     #[test]

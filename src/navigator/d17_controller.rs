@@ -97,9 +97,33 @@ pub(crate) fn run_d17_navigator(
                             .set_guidance("New session shell unavailable; exact state required");
                     }
                 }
-                D17Command::None
-                | D17Command::Attach { .. }
-                | D17Command::NewAtSameLocation { .. } => {}
+                D17Command::Attach {
+                    workstream_id,
+                    expected_workstream_revision,
+                    runtime_id,
+                    expected_runtime_revision,
+                } => {
+                    if presentation
+                        .attach_d17_workstream(
+                            workstream_id,
+                            expected_workstream_revision,
+                            runtime_id,
+                            expected_runtime_revision,
+                        )
+                        .is_ok()
+                    {
+                        if presentation.focus_provider().is_err() {
+                            navigator.set_guidance(
+                                "Managed session opened; provider-pane focus is unavailable",
+                            );
+                        }
+                    } else {
+                        navigator.set_guidance(
+                            "Managed session is unavailable; exact Runtime evidence required",
+                        );
+                    }
+                }
+                D17Command::None | D17Command::NewAtSameLocation { .. } => {}
             }
             redraw = true;
         }

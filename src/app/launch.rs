@@ -1,7 +1,8 @@
-use super::model::{AppError, parse_workstream};
+use super::model::{AppError, parse_revision, parse_workstream};
 use super::{
     AttachmentPhase, Command, FromStr, LinuxProcessProbe, PathBuf, Presentation, PrivateRuntime,
-    ProviderSessionId, RuntimeId, RuntimePaths, StateRoot, Stdio, await_launch_release, env,
+    ProviderSessionId, Revision, RuntimeId, RuntimePaths, StateRoot, Stdio, await_launch_release,
+    env,
 };
 use crate::application::{AttachEvidence, LocalApplication};
 use crate::presentation::{PresentationAction, PresentationError, PresentationPaneRole};
@@ -334,6 +335,52 @@ pub(super) fn provider_attach(
     provider_wait()
 }
 
+/// Runs a proven schema-14 attachment only inside the D17 presentation pane.
+/// It keeps the original D16 application facade out of the schema-14 route and
+/// repeats the workstream/runtime revisions immediately before private tmux
+/// attachment.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the D17 pane helper receives only exact presentation and revision claims"
+)]
+pub(super) fn provider_attach_d17(
+    root: &StateRoot,
+    workstream_id: &str,
+    expected_workstream_revision: i64,
+    expected_runtime_id: &str,
+    expected_runtime_revision: i64,
+    presentation_socket: PathBuf,
+    presentation_session: String,
+    attempt_id: &str,
+) -> Result<(), AppError> {
+    let presentation =
+        Presentation::from_control(root.base(), presentation_socket, presentation_session)?;
+    let attempt_id =
+        uuid::Uuid::parse_str(attempt_id).map_err(AppError::InvalidAttachmentAttempt)?;
+    presentation.report_attachment_phase(attempt_id, AttachmentPhase::Running)?;
+    let outcome = (|| -> Result<(), AppError> {
+        let workstream_id = parse_workstream(workstream_id)?;
+        let expected_workstream_revision = parse_revision(expected_workstream_revision)?;
+        let expected_runtime_id =
+            RuntimeId::from_str(expected_runtime_id).map_err(AppError::InvalidRuntimeId)?;
+        let expected_runtime_revision = parse_revision(expected_runtime_revision)?;
+        attach_runtime_d17(
+            root,
+            workstream_id,
+            expected_workstream_revision,
+            expected_runtime_id,
+            expected_runtime_revision,
+        )
+    })();
+    let phase = if outcome.is_ok() {
+        AttachmentPhase::Completed
+    } else {
+        AttachmentPhase::Failed
+    };
+    presentation.report_attachment_phase(attempt_id, phase)?;
+    provider_wait()
+}
+
 /// Attaches this terminal to a local private provider Runtime after the typed
 /// facade has proved its exact identity and revisions.
 pub(super) fn attach_runtime(
@@ -343,6 +390,64 @@ pub(super) fn attach_runtime(
     let state = crate::state::open_current_only(&StateRoot::select(root.base()))?;
     let mut registry = state.into_host_registry()?;
     let record = crate::actions::preflight_attachment(root, &mut registry, workstream_id)?;
+    let tmux = super::SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(
+        &tmux,
+        &process_probe,
+        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
+    );
+    runtime.prepare_attach()?;
+    let mut command = runtime.attach_command();
+    command.stderr(Stdio::null());
+    let status = command.status().map_err(AppError::Io)?;
+    if status.success()
+        || crate::actions::await_deliberate_park(root, record.runtime_id, record.workstream_id)?
+    {
+        Ok(())
+    } else {
+        Err(AppError::AttachFailed)
+    }
+}
+
+/// Attaches only a D17 Runtime that is neither owned nor fenced by an
+/// unfinished onboarding operation. The D17 Navigator passes the same snapshot
+/// revisions through the outer helper, so stale cards can never authorize an
+/// attachment after a different state transition.
+fn attach_runtime_d17(
+    root: &StateRoot,
+    workstream_id: crate::domain::WorkstreamId,
+    expected_workstream_revision: Revision,
+    expected_runtime_id: RuntimeId,
+    expected_runtime_revision: Revision,
+) -> Result<(), AppError> {
+    let state = crate::state::open_d17_current_only(&StateRoot::select(root.base()))?;
+    if state
+        .d17_onboarding_workstream_projections()?
+        .iter()
+        .any(|onboarding| onboarding.workstream_id == workstream_id)
+    {
+        return Err(AppError::D17AttachmentUnavailable);
+    }
+    let mut registry = state.into_d17_host_registry()?;
+    let overview = registry
+        .workstream_overviews()?
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .ok_or(AppError::D17AttachmentUnavailable)?;
+    let Some(runtime) = overview.runtime else {
+        return Err(AppError::D17AttachmentUnavailable);
+    };
+    if overview.revision != expected_workstream_revision
+        || runtime.runtime_id != expected_runtime_id
+        || runtime.revision != expected_runtime_revision
+    {
+        return Err(AppError::D17AttachmentUnavailable);
+    }
+    let record = crate::actions::preflight_attachment(root, &mut registry, workstream_id)?;
+    if record.runtime_id != expected_runtime_id || record.revision != expected_runtime_revision {
+        return Err(AppError::D17AttachmentUnavailable);
+    }
     let tmux = super::SystemTmux::default();
     let process_probe = LinuxProcessProbe;
     let runtime = PrivateRuntime::new(

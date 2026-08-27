@@ -112,4 +112,6 @@ pub(crate) enum AppError {
     D17ShellGateUnmanaged,
     #[error("the D17 account-shell command is unavailable")]
     D17ShellControlUnavailable,
+    #[error("the D17 runtime attachment is unavailable")]
+    D17AttachmentUnavailable,
 }

@@ -152,6 +152,23 @@ pub(super) enum Commands {
         #[arg(long)]
         attempt_id: String,
     },
+    /// Internal schema-14 provider attachment helper for a proven D17 Runtime.
+    #[command(name = "_provider_attach_d17", hide = true)]
+    ProviderAttachD17 {
+        workstream_id: String,
+        #[arg(long)]
+        expected_workstream_revision: i64,
+        #[arg(long)]
+        expected_runtime_id: String,
+        #[arg(long)]
+        expected_runtime_revision: i64,
+        #[arg(long)]
+        presentation_socket: PathBuf,
+        #[arg(long)]
+        presentation_session: String,
+        #[arg(long)]
+        attempt_id: String,
+    },
     /// Internal passive Codex lifecycle hook entrypoint.
     #[command(name = "_hook", hide = true)]
     Hook,
@@ -217,6 +234,7 @@ pub(super) const fn is_provider_pane_command(command: Option<&Commands>) -> bool
         command,
         Some(
             Commands::ProviderAttach { .. }
+                | Commands::ProviderAttachD17 { .. }
                 | Commands::PresentationControl { .. }
                 | Commands::PresentationShell { .. }
                 | Commands::ObserverReview

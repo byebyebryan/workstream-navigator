@@ -99,6 +99,7 @@ pub(crate) struct D17Model {
     snapshot: D17Snapshot,
     page: D17Page,
     selected: Option<D17RowId>,
+    guidance: Option<&'static str>,
 }
 
 /// Thin D17 Navigator wrapper. It owns only presentation-local selection and
@@ -130,6 +131,12 @@ impl D17Navigator {
         self.model.replace_snapshot(snapshot);
     }
 
+    /// Sets bounded presentation-local guidance after an unavailable D17
+    /// action. This never crosses into provider panes or durable state.
+    pub(crate) fn set_guidance(&mut self, guidance: &'static str) {
+        self.model.set_guidance(guidance);
+    }
+
     #[must_use]
     pub(crate) fn handle_key(&mut self, key: KeyCode) -> D17Command {
         self.model.handle_key(key)
@@ -149,6 +156,7 @@ impl D17Model {
             snapshot,
             page: D17Page::Workstreams,
             selected: Some(D17RowId::ProvisionalShell),
+            guidance: None,
         }
     }
 
@@ -160,6 +168,14 @@ impl D17Model {
     #[must_use]
     pub(crate) const fn selected(&self) -> Option<D17RowId> {
         self.selected
+    }
+
+    pub(crate) const fn guidance(&self) -> Option<&'static str> {
+        self.guidance
+    }
+
+    pub(crate) fn set_guidance(&mut self, guidance: &'static str) {
+        self.guidance = Some(guidance);
     }
 
     #[must_use]
@@ -447,8 +463,8 @@ const fn runtime_status_label(status: crate::domain::RuntimeStatus) -> &'static 
     }
 }
 
-fn controls(model: &D17Model) -> &'static str {
-    match model.page() {
+fn controls(model: &D17Model) -> String {
+    let controls = match model.page() {
         D17Page::Workstreams => match model.selected() {
             Some(D17RowId::Workstream(workstream_id))
                 if model
@@ -465,7 +481,11 @@ fn controls(model: &D17Model) -> &'static str {
             _ => " ↑↓ select  ·  . archived  ·  q quit",
         },
         D17Page::Archived => " ↑↓ select  ·  w workstreams  ·  q quit",
-    }
+    };
+    model.guidance().map_or_else(
+        || controls.to_owned(),
+        |guidance| format!("{controls}  ·  {guidance}"),
+    )
 }
 
 #[cfg(test)]

@@ -959,6 +959,14 @@ impl ProvisionalSlot {
         &self.runtime_paths
     }
 
+    /// Returns the canonical presentation seed bound to this exact
+    /// provisional candidate. It remains marker-private and is exposed only
+    /// for equality checks at D17 authority fences.
+    #[must_use]
+    pub(crate) fn seed_cwd(&self) -> &Path {
+        &self.seed_cwd
+    }
+
     #[must_use]
     pub(crate) const fn slot_generation(&self) -> Uuid {
         self.slot_generation.0

@@ -22,7 +22,7 @@ use crate::{
     process::{BoundedProcessError, output_bounded},
     provisional::{PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, read_marker},
     runtime::RuntimePaths,
-    state::{TransitionLease, d16::D17OnboardingOperationInventory},
+    state::{D16State, ProvisionalLease, TransitionLease, d16::D17OnboardingOperationInventory},
 };
 
 const PRESENTATION_DIRECTORY: &str = "presentation";
@@ -1200,6 +1200,59 @@ impl Presentation {
         })
     }
 
+    /// Replaces only the outer provider pane with the exact private tmux
+    /// client for a materialized D17 account shell. The candidate remains
+    /// unregistered: this does not create a Workstream, Runtime, attachment
+    /// record, or provider effect.
+    ///
+    /// The caller retains the schema-14 provisional lease through this
+    /// transition. The marker, lease, and D17 presentation context are
+    /// revalidated immediately before the outer pane changes, so a stale or
+    /// foreign candidate can never be attached merely because its paths look
+    /// like a Runtime.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the exact D17 marker/lease/context does not
+    /// authorize this shell, or when the owned provider pane cannot be
+    /// replaced.
+    #[allow(
+        dead_code,
+        reason = "the D17 provisional-shell attachment remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn attach_d17_provisional_shell(
+        &self,
+        state: &D16State,
+        provisional_lease: &ProvisionalLease,
+        slot: &ProvisionalSlot,
+    ) -> Result<(), PresentationError> {
+        self.with_attachment_claim(|| {
+            self.validate_d17_provisional_attachment(state, provisional_lease, slot)?;
+            self.retire_utility_for_observer_review()?;
+            let provider = self.provider_target_for_attachment()?;
+            self.set_pane_role(&provider, PresentationPaneRole::Provider, None)?;
+            self.invoke(
+                None,
+                self.provider_respawn_for_command(
+                    &provider,
+                    Self::d17_provisional_attach_command(slot.runtime_paths()),
+                ),
+            )?;
+            // The provider pane has changed, but no D17 state did. Recheck
+            // the held lease before returning so the controller never treats
+            // a changed lock as successful shell authority.
+            provisional_lease
+                .revalidate_for_mutation(state.root())
+                .map_err(|_| {
+                    PresentationError::ControlRefused(
+                        "D17 provisional shell attachment is unavailable",
+                    )
+                })?;
+            self.observer_review_provider_target()?;
+            Ok(())
+        })
+    }
+
     /// Retires the exact utility pane before a different Workstream can
     /// replace the provider attachment. A shell tagged for the requested
     /// Workstream is retained so same-Workstream reconnects preserve its
@@ -1328,6 +1381,25 @@ impl Presentation {
         ];
         arguments.extend(command);
         arguments
+    }
+
+    /// The provisional attach command is deliberately direct argv: no shell,
+    /// provider command, or user-derived string crosses into the outer pane.
+    /// `env -u TMUX` prevents tmux's nested-server warning path from changing
+    /// an attachment to the exact private Runtime socket.
+    fn d17_provisional_attach_command(paths: &RuntimePaths) -> Vec<OsString> {
+        vec![
+            "env".into(),
+            "-u".into(),
+            "TMUX".into(),
+            "tmux".into(),
+            "-u".into(),
+            "-S".into(),
+            paths.socket.clone().into_os_string(),
+            "attach-session".into(),
+            "-t".into(),
+            paths.session_name.clone().into(),
+        ]
     }
 
     /// Gives keyboard focus to the directly interactive provider pane.
@@ -2055,6 +2127,38 @@ impl Presentation {
             .provider()
             .map(|pane| pane.id.clone())
             .ok_or(PresentationError::InvalidTopology)
+    }
+
+    fn validate_d17_provisional_attachment(
+        &self,
+        state: &D16State,
+        provisional_lease: &ProvisionalLease,
+        slot: &ProvisionalSlot,
+    ) -> Result<(), PresentationError> {
+        let unavailable =
+            || PresentationError::ControlRefused("D17 provisional shell attachment is unavailable");
+        provisional_lease
+            .revalidate_for_mutation(state.root())
+            .map_err(|_| unavailable())?;
+        if slot.phase() != ProvisionalPhase::Materialized
+            || slot.lease_generation() != provisional_lease.lease_generation()
+        {
+            return Err(unavailable());
+        }
+        let context = Self::d17_context_from_directory(state.root(), &self.paths.directory)
+            .map_err(|_| unavailable())?;
+        if slot.presentation_id() != context.presentation_id()
+            || slot.presentation_revision() != context.presentation_revision()
+            || slot.seed_cwd() != context.seed_cwd()
+        {
+            return Err(unavailable());
+        }
+        if read_marker(state.root(), &self.paths.directory).map_err(|_| unavailable())? != *slot {
+            return Err(unavailable());
+        }
+        provisional_lease
+            .revalidate_for_mutation(state.root())
+            .map_err(|_| unavailable())
     }
 
     fn install_control_bindings(&self) -> Result<(), PresentationError> {
@@ -7231,6 +7335,33 @@ mod tests {
         assert_eq!(arguments[8], OsString::from(workstream_id.to_string()));
         assert_eq!(arguments[9], "--presentation-socket");
         assert_eq!(arguments[13], "--attempt-id");
+    }
+
+    #[test]
+    fn d17_provisional_attachment_uses_only_the_exact_private_tmux_paths() {
+        let temporary = tempfile::tempdir().unwrap();
+        let runtime = RuntimePaths::for_runtime(
+            temporary.path(),
+            crate::domain::RuntimeId::from(uuid::Uuid::from_u128(87)),
+        );
+
+        let command = Presentation::d17_provisional_attach_command(&runtime);
+
+        assert_eq!(command[0], "env");
+        assert_eq!(command[1], "-u");
+        assert_eq!(command[2], "TMUX");
+        assert_eq!(command[3], "tmux");
+        assert_eq!(command[4], "-u");
+        assert_eq!(command[5], "-S");
+        assert_eq!(command[6], runtime.socket.into_os_string());
+        assert_eq!(command[7], "attach-session");
+        assert_eq!(command[8], "-t");
+        assert_eq!(command[9], OsString::from(runtime.session_name));
+        assert!(
+            command
+                .iter()
+                .all(|argument| argument != "sh" && argument != "/bin/sh")
+        );
     }
 
     #[test]

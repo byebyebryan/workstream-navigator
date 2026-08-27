@@ -28,7 +28,7 @@ use thiserror::Error;
 use crate::{
     d17_account_shell::{AccountShellContext, AccountShellLaunch},
     d17_shell_control::reconcile_provider_exec_from_presentation,
-    d17_snapshot::{D17SnapshotError, read_snapshot},
+    d17_snapshot::{D17Snapshot, D17SnapshotError, read_snapshot},
     domain::RuntimeId,
     presentation::{Presentation, PresentationError},
     provisional::{ProvisionalPhase, ProvisionalSlot, SlotError, SlotGeneration, read_marker},
@@ -52,12 +52,18 @@ pub(crate) enum D17NavigatorError {
     ProvisionalShellUnavailable,
     #[error("D17 provider reconciliation is unavailable")]
     ProviderReconciliationUnavailable,
+    #[error("D17 same-location session creation is unavailable")]
+    SameLocationSessionUnavailable,
 }
 
 /// Runs the hidden schema-14 D17 Navigator pane. It validates the exact D17
 /// presentation context before reading state. The provisional-shell command is
 /// a lease-held marker-first materialization followed by an outer-pane attach;
 /// all other D17 actions remain inert until their complete controllers exist.
+#[allow(
+    clippy::too_many_lines,
+    reason = "The D17 loop keeps shell, promotion, exact attachment, and focus ordering in one auditable owner."
+)]
 pub(crate) fn run_d17_navigator(
     root: &StateRoot,
     socket: PathBuf,
@@ -123,7 +129,43 @@ pub(crate) fn run_d17_navigator(
                         );
                     }
                 }
-                D17Command::None | D17Command::NewAtSameLocation { .. } => {}
+                D17Command::NewAtSameLocation {
+                    source_workstream_id,
+                    expected_workstream_revision,
+                    provider,
+                } => match start_d17_same_location(
+                    root,
+                    source_workstream_id,
+                    expected_workstream_revision,
+                    provider,
+                ) {
+                    Ok((snapshot, attachment)) => {
+                        navigator.replace_snapshot(snapshot);
+                        if presentation
+                            .attach_d17_workstream(
+                                attachment.workstream_id,
+                                attachment.workstream_revision,
+                                attachment.runtime_id,
+                                attachment.runtime_revision,
+                            )
+                            .is_ok()
+                        {
+                            if presentation.focus_provider().is_err() {
+                                navigator.set_guidance(
+                                    "New session started; provider-pane focus is unavailable",
+                                );
+                            }
+                        } else {
+                            navigator.set_guidance(
+                                "New session started; exact Runtime attachment is unavailable",
+                            );
+                        }
+                    }
+                    Err(_) => navigator.set_guidance(
+                        "New session is unavailable; selected provider and Location are required",
+                    ),
+                },
+                D17Command::None => {}
             }
             redraw = true;
         }
@@ -145,6 +187,84 @@ pub(crate) fn run_d17_navigator(
         presentation.stop_session()?;
     }
     Ok(())
+}
+
+/// One exact post-start attachment claim for a session created from a selected
+/// D17 Workstream. No project path, provider option, or shell cwd crosses this
+/// boundary: the retained source Location and provider are the authority.
+struct SameLocationAttachment {
+    workstream_id: crate::domain::WorkstreamId,
+    workstream_revision: crate::domain::Revision,
+    runtime_id: RuntimeId,
+    runtime_revision: crate::domain::Revision,
+}
+
+/// Creates an independent native session using only a selected unfenced source
+/// Workstream's stored provider and Location, then returns the fresh passive
+/// snapshot plus exact attachment revisions. The normal D16 application and
+/// Project-browser paths are intentionally never opened here.
+fn start_d17_same_location(
+    root: &StateRoot,
+    source_workstream_id: crate::domain::WorkstreamId,
+    expected_workstream_revision: crate::domain::Revision,
+    provider: crate::domain::ProviderKind,
+) -> Result<(D17Snapshot, SameLocationAttachment), D17NavigatorError> {
+    let state = open_d17_current_only(root)
+        .map_err(|_| D17NavigatorError::SameLocationSessionUnavailable)?;
+    if state
+        .d17_onboarding_workstream_projections()
+        .map_err(|_| D17NavigatorError::SameLocationSessionUnavailable)?
+        .iter()
+        .any(|onboarding| onboarding.workstream_id == source_workstream_id)
+    {
+        return Err(D17NavigatorError::SameLocationSessionUnavailable);
+    }
+    let mut registry = state
+        .into_d17_host_registry()
+        .map_err(|_| D17NavigatorError::SameLocationSessionUnavailable)?;
+    let source = registry
+        .workstream_overviews()
+        .map_err(|_| D17NavigatorError::SameLocationSessionUnavailable)?
+        .into_iter()
+        .find(|workstream| workstream.workstream_id == source_workstream_id)
+        .ok_or(D17NavigatorError::SameLocationSessionUnavailable)?;
+    if source.revision != expected_workstream_revision
+        || source.provider != provider
+        || source.archived_at_millis.is_some()
+    {
+        return Err(D17NavigatorError::SameLocationSessionUnavailable);
+    }
+    let request_key = uuid::Uuid::new_v4().simple().to_string();
+    let workstream_id = crate::actions::start_independent_workstream(
+        root,
+        &mut registry,
+        source_workstream_id,
+        Some(expected_workstream_revision),
+        &request_key,
+        provider,
+    )
+    .map_err(|_| D17NavigatorError::SameLocationSessionUnavailable)?;
+    drop(registry);
+
+    let snapshot = read_snapshot(root)?;
+    let workstream = snapshot
+        .workstreams
+        .iter()
+        .find(|workstream| workstream.workstream_id == workstream_id)
+        .ok_or(D17NavigatorError::SameLocationSessionUnavailable)?;
+    let runtime = workstream
+        .runtime
+        .ok_or(D17NavigatorError::SameLocationSessionUnavailable)?;
+    if workstream.provider != provider || workstream.onboarding.is_some() {
+        return Err(D17NavigatorError::SameLocationSessionUnavailable);
+    }
+    let attachment = SameLocationAttachment {
+        workstream_id,
+        workstream_revision: workstream.revision,
+        runtime_id: runtime.runtime_id,
+        runtime_revision: runtime.revision,
+    };
+    Ok((snapshot, attachment))
 }
 
 /// Calls the post-exec controller only for the one marker phase in which the
@@ -314,10 +434,10 @@ mod tests {
 
     use super::{
         AccountShellInputs, materialize_provisional_shell_with_inputs,
-        reconcile_provider_exec_if_ready,
+        reconcile_provider_exec_if_ready, start_d17_same_location,
     };
     use crate::{
-        domain::RandomIdGenerator,
+        domain::{ProviderKind, RandomIdGenerator},
         presentation::Presentation,
         process::output_bounded,
         provisional::{ProvisionalPhase, read_marker},
@@ -352,6 +472,10 @@ mod tests {
 
     fn migrate_to_schema14(state_path: &Path) {
         drop(fresh_create(state_path, &RandomIdGenerator).unwrap());
+        migrate_existing_to_schema14(state_path);
+    }
+
+    fn migrate_existing_to_schema14(state_path: &Path) {
         let root = StateRoot::select(state_path);
         let transition_lock = state_path.join(TRANSITION_LOCK_FILE);
         OpenOptions::new()
@@ -453,6 +577,58 @@ mod tests {
         assert!(
             !reconcile_provider_exec_if_ready(&StateRoot::select(&state_path), &presentation)
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn same_location_new_refuses_an_archived_source_before_provider_start() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let checkout = temporary.path().join("checkout");
+        fs::create_dir(&checkout).unwrap();
+        let mut state = fresh_create(&state_path, &RandomIdGenerator).unwrap();
+        let source = state
+            .register_project_location_with_initial_workstream(
+                &checkout,
+                "checkout",
+                None,
+                None,
+                ProviderKind::Codex,
+                &RandomIdGenerator,
+            )
+            .unwrap();
+        drop(state);
+        migrate_existing_to_schema14(&state_path);
+
+        let root = StateRoot::select(&state_path);
+        let state = open_d17_current_only(&root).unwrap();
+        let mut registry = state.into_d17_host_registry().unwrap();
+        let source_overview = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|workstream| workstream.workstream_id == source.workstream.workstream_id)
+            .unwrap();
+        let archived_revision = registry
+            .archive_workstream(source.workstream.workstream_id, source_overview.revision, 1)
+            .unwrap();
+        drop(registry);
+
+        assert!(
+            start_d17_same_location(
+                &root,
+                source.workstream.workstream_id,
+                archived_revision,
+                ProviderKind::Codex,
+            )
+            .is_err()
+        );
+        assert_eq!(
+            crate::d17_snapshot::read_snapshot(&root)
+                .unwrap()
+                .workstreams
+                .len(),
+            1
         );
     }
 }

@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 use crate::{
     domain::{Revision, RuntimeId},
-    runtime::RuntimePaths,
+    runtime::{NativeLaunch, PrivateRuntime, ProcessGroupProbe, RuntimePaths, RuntimeProbe},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -31,6 +31,7 @@ pub(crate) struct SlotGeneration(Uuid);
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ProvisionalPhase {
+    Materializing,
     Materialized,
     HandoffIssued,
     RuntimeOwnedLaunching,
@@ -53,6 +54,7 @@ pub(crate) struct ProvisionalSlot {
     runtime_paths: RuntimePaths,
     seed_cwd: PathBuf,
     slot_generation: SlotGeneration,
+    shell_evidence: Option<ProvisionalShellEvidence>,
     phase: ProvisionalPhase,
     handoff_request: Option<Uuid>,
 }
@@ -69,6 +71,12 @@ pub(crate) enum SlotError {
     InvalidLeaseGeneration,
     #[error("provisional handoff is unavailable")]
     HandoffUnavailable,
+    #[error("provisional shell evidence is unavailable")]
+    ShellEvidenceUnavailable,
+    #[error("provisional shell evidence is invalid")]
+    InvalidShellEvidence,
+    #[error("provisional shell cwd does not match its seed")]
+    ShellCwdMismatch,
     #[error("provisional handoff does not match the slot")]
     HandoffMismatch,
     #[error("provider exec proof is unavailable")]
@@ -97,9 +105,57 @@ pub(crate) enum SlotError {
     MarkerTransitionInvalid,
 }
 
-const PROVISIONAL_MARKER_VERSION: u8 = 1;
+const PROVISIONAL_MARKER_VERSION: u8 = 2;
 const MAX_PROVISIONAL_MARKER_BYTES: usize = 8 * 1024;
+const MAX_SHELL_BIRTH_BYTES: usize = 256;
+const MAX_TMUX_PANE_ID_BYTES: usize = 64;
 pub(crate) const PROVISIONAL_MARKER_FILE: &str = "d17-provisional.json";
+
+/// Exact private-pane/process evidence that binds a materialized provisional
+/// shell to the marker's final tmux path set. The server's socket/config/session
+/// remain in [`RuntimePaths`]; this structure supplies the live pane and shell
+/// lineage required before a broker may issue a handoff.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ProvisionalShellEvidence {
+    pane_id: String,
+    shell_pid: u32,
+    shell_birth: String,
+    shell_process_group: u32,
+    shell_session: u32,
+}
+
+impl ProvisionalShellEvidence {
+    fn new(
+        pane_id: String,
+        shell_pid: u32,
+        shell_birth: String,
+        shell_process_group: u32,
+        shell_session: u32,
+    ) -> Result<Self, SlotError> {
+        let evidence = Self {
+            pane_id,
+            shell_pid,
+            shell_birth,
+            shell_process_group,
+            shell_session,
+        };
+        evidence.validate()?;
+        Ok(evidence)
+    }
+
+    fn validate(&self) -> Result<(), SlotError> {
+        if self.shell_pid == 0
+            || self.shell_process_group == 0
+            || self.shell_session == 0
+            || !is_tmux_pane_id(&self.pane_id)
+            || !is_bounded_process_birth(&self.shell_birth)
+        {
+            return Err(SlotError::InvalidShellEvidence);
+        }
+        Ok(())
+    }
+}
 
 /// Presentation-private evidence for one unregistered materialized candidate.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -116,6 +172,7 @@ struct ProvisionalMarker {
     session_name: String,
     seed_cwd: PathBuf,
     slot_generation: Uuid,
+    shell_evidence: Option<ProvisionalShellEvidence>,
     phase: ProvisionalPhase,
     handoff_request: Option<Uuid>,
 }
@@ -134,6 +191,7 @@ impl ProvisionalMarker {
             session_name: slot.runtime_paths.session_name.clone(),
             seed_cwd: slot.seed_cwd.clone(),
             slot_generation: slot.slot_generation.0,
+            shell_evidence: slot.shell_evidence.clone(),
             phase: slot.phase,
             handoff_request: slot.handoff_request,
         }
@@ -156,7 +214,7 @@ impl ProvisionalMarker {
         if marker.version != PROVISIONAL_MARKER_VERSION {
             return Err(SlotError::MarkerMalformed);
         }
-        let mut slot = ProvisionalSlot::materialized(
+        let mut slot = ProvisionalSlot::materializing(
             state_root,
             marker.presentation_id,
             marker.presentation_revision,
@@ -172,6 +230,7 @@ impl ProvisionalMarker {
         {
             return Err(SlotError::MarkerRuntimePathsMismatch);
         }
+        slot.shell_evidence = marker.shell_evidence;
         slot.phase = marker.phase;
         slot.handoff_request = marker.handoff_request;
         slot.validate_lifecycle()?;
@@ -297,6 +356,67 @@ pub(crate) fn update_marker(
         .map_err(map_marker_io)?;
     validate_marker_file_matches_path(&file, &marker_path)?;
     sync_directory(&presentation_directory)
+}
+
+/// Writes a pre-server marker, creates one exact private shell Runtime, and
+/// records the resulting live pane/process lineage before the slot can be
+/// handed to the broker. Every failure after marker creation deliberately
+/// leaves the materializing marker in place for conservative reconciliation;
+/// this seam never removes, adopts, attaches, or signals an artifact.
+pub(crate) fn materialize_private_shell(
+    state_root: &Path,
+    presentation_directory: &Path,
+    slot: &ProvisionalSlot,
+    runtime: &PrivateRuntime<'_>,
+    launch: &NativeLaunch,
+    process_group_probe: &dyn ProcessGroupProbe,
+) -> Result<ProvisionalSlot, SlotError> {
+    if slot.phase != ProvisionalPhase::Materializing || slot.shell_evidence.is_some() {
+        return Err(SlotError::ShellEvidenceUnavailable);
+    }
+    if runtime.paths() != &slot.runtime_paths {
+        return Err(SlotError::MarkerRuntimePathsMismatch);
+    }
+    let launch_cwd = fs::canonicalize(&launch.cwd).map_err(|_| SlotError::ShellCwdMismatch)?;
+    if launch_cwd != slot.seed_cwd {
+        return Err(SlotError::ShellCwdMismatch);
+    }
+    write_new_marker(state_root, presentation_directory, slot)?;
+    runtime
+        .start(launch)
+        .map_err(|_| SlotError::ShellEvidenceUnavailable)?;
+    let RuntimeProbe::Live {
+        pane_id,
+        pane_pid,
+        cwd,
+        process_birth: Some(shell_birth),
+    } = runtime
+        .probe()
+        .map_err(|_| SlotError::ShellEvidenceUnavailable)?
+    else {
+        return Err(SlotError::ShellEvidenceUnavailable);
+    };
+    let cwd = fs::canonicalize(cwd).map_err(|_| SlotError::ShellEvidenceUnavailable)?;
+    if cwd != slot.seed_cwd {
+        return Err(SlotError::ShellCwdMismatch);
+    }
+    let Some(group) = process_group_probe
+        .process_group_checked(pane_pid)
+        .map_err(|_| SlotError::ShellEvidenceUnavailable)?
+    else {
+        return Err(SlotError::ShellEvidenceUnavailable);
+    };
+    let shell_evidence = ProvisionalShellEvidence::new(
+        pane_id,
+        pane_pid,
+        shell_birth,
+        group.process_group_id,
+        group.session_id,
+    )?;
+    let mut materialized = slot.clone();
+    materialized.record_shell_evidence(shell_evidence)?;
+    update_marker(state_root, presentation_directory, slot, &materialized)?;
+    Ok(materialized)
 }
 
 fn marker_path(
@@ -436,6 +556,23 @@ fn is_private_regular_file(metadata: &fs::Metadata) -> bool {
     }
 }
 
+fn is_tmux_pane_id(value: &str) -> bool {
+    let Some(identifier) = value.strip_prefix('%') else {
+        return false;
+    };
+    !identifier.is_empty()
+        && identifier.len() <= MAX_TMUX_PANE_ID_BYTES
+        && identifier.bytes().all(|byte| byte.is_ascii_digit())
+}
+
+fn is_bounded_process_birth(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_SHELL_BIRTH_BYTES
+        && value
+            .chars()
+            .all(|character| !character.is_control() && !character.is_whitespace())
+}
+
 fn same_file_identity(first: &fs::Metadata, second: &fs::Metadata) -> bool {
     #[cfg(unix)]
     {
@@ -459,7 +596,10 @@ fn map_marker_io(_error: std::io::Error) -> SlotError {
 }
 
 impl ProvisionalSlot {
-    fn materialized(
+    /// Creates the pre-server marker state. The caller must persist this
+    /// exact marker before attempting private tmux creation so a crash leaves
+    /// conservative materialization evidence rather than an adoptable server.
+    fn materializing(
         state_root: &Path,
         presentation_id: Uuid,
         presentation_revision: Revision,
@@ -485,16 +625,17 @@ impl ProvisionalSlot {
             runtime_paths: RuntimePaths::for_runtime(&state_root, candidate_runtime_id),
             seed_cwd,
             slot_generation,
-            phase: ProvisionalPhase::Materialized,
+            shell_evidence: None,
+            phase: ProvisionalPhase::Materializing,
             handoff_request: None,
         })
     }
 
     const fn cleanup_authority(&self) -> CleanupAuthority {
         match self.phase {
-            ProvisionalPhase::Materialized | ProvisionalPhase::HandoffIssued => {
-                CleanupAuthority::ExactProvisional
-            }
+            ProvisionalPhase::Materializing
+            | ProvisionalPhase::Materialized
+            | ProvisionalPhase::HandoffIssued => CleanupAuthority::ExactProvisional,
             ProvisionalPhase::RuntimeOwnedLaunching
             | ProvisionalPhase::ProviderExecProven
             | ProvisionalPhase::Cancelled => CleanupAuthority::None,
@@ -506,15 +647,43 @@ impl ProvisionalSlot {
     }
 
     fn validate_lifecycle(&self) -> Result<(), SlotError> {
-        let request_required = !matches!(self.phase, ProvisionalPhase::Materialized);
-        if request_required != self.handoff_request.is_some() {
+        if let Some(evidence) = &self.shell_evidence {
+            evidence.validate()?;
+        }
+        let expected = match self.phase {
+            ProvisionalPhase::Materializing => (false, false),
+            ProvisionalPhase::Materialized => (true, false),
+            ProvisionalPhase::HandoffIssued
+            | ProvisionalPhase::RuntimeOwnedLaunching
+            | ProvisionalPhase::ProviderExecProven
+            | ProvisionalPhase::Cancelled => (true, true),
+        };
+        if expected.0 != self.shell_evidence.is_some()
+            || expected.1 != self.handoff_request.is_some()
+        {
             return Err(SlotError::MarkerTransitionInvalid);
         }
         Ok(())
     }
 
+    fn record_shell_evidence(
+        &mut self,
+        shell_evidence: ProvisionalShellEvidence,
+    ) -> Result<(), SlotError> {
+        if self.phase != ProvisionalPhase::Materializing || self.shell_evidence.is_some() {
+            return Err(SlotError::ShellEvidenceUnavailable);
+        }
+        shell_evidence.validate()?;
+        self.shell_evidence = Some(shell_evidence);
+        self.phase = ProvisionalPhase::Materialized;
+        Ok(())
+    }
+
     fn issue_handoff(&mut self, request: Uuid) -> Result<(), SlotError> {
-        if self.phase != ProvisionalPhase::Materialized || self.handoff_request.is_some() {
+        if self.phase != ProvisionalPhase::Materialized
+            || self.shell_evidence.is_none()
+            || self.handoff_request.is_some()
+        {
             return Err(SlotError::HandoffUnavailable);
         }
         self.handoff_request = Some(request);
@@ -557,7 +726,8 @@ impl ProvisionalPhase {
     fn transition(self, next: Self) -> Result<(), SlotError> {
         if matches!(
             (self, next),
-            (Self::Materialized, Self::HandoffIssued)
+            (Self::Materializing, Self::Materialized)
+                | (Self::Materialized, Self::HandoffIssued)
                 | (
                     Self::HandoffIssued,
                     Self::RuntimeOwnedLaunching | Self::Cancelled
@@ -582,6 +752,8 @@ fn ensure_same_slot_identity(
         || expected.runtime_paths != next.runtime_paths
         || expected.seed_cwd != next.seed_cwd
         || expected.slot_generation != next.slot_generation
+        || (expected.phase != ProvisionalPhase::Materializing
+            && expected.shell_evidence != next.shell_evidence)
     {
         return Err(SlotError::MarkerTransitionInvalid);
     }
@@ -590,19 +762,28 @@ fn ensure_same_slot_identity(
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::RefCell, collections::BTreeMap, ffi::OsString, fs, str::FromStr};
+    use std::{
+        cell::RefCell,
+        collections::{BTreeMap, VecDeque},
+        ffi::OsString,
+        fs,
+        path::PathBuf,
+        str::FromStr,
+    };
 
     use uuid::Uuid;
 
     use super::{
         CleanupAuthority, PROVISIONAL_MARKER_FILE, ProvisionalMarker, ProvisionalPhase,
-        ProvisionalSlot, SlotError, SlotGeneration, read_marker, update_marker, write_new_marker,
+        ProvisionalShellEvidence, ProvisionalSlot, SlotError, SlotGeneration,
+        materialize_private_shell, read_marker, update_marker, write_new_marker,
     };
     use crate::{
         domain::{Revision, RuntimeId},
         runtime::{
-            NativeLaunch, PrivateRuntime, ProcessProbe, RuntimeError, RuntimePaths, TmuxClient,
-            TmuxInvocation, TmuxResponse,
+            NativeLaunch, PrivateRuntime, ProcessGroupInfo, ProcessGroupProbe, ProcessProbe,
+            ProcessProbeError, RuntimeError, RuntimePaths, TmuxClient, TmuxInvocation,
+            TmuxResponse,
         },
     };
 
@@ -630,6 +811,79 @@ mod tests {
         }
     }
 
+    struct ShellProcessProbe;
+
+    impl ProcessProbe for ShellProcessProbe {
+        fn process_birth(&self, pid: u32) -> Option<String> {
+            (pid == 4242).then(|| "birth-4242".to_owned())
+        }
+    }
+
+    struct ShellGroupProbe;
+
+    impl ProcessGroupProbe for ShellGroupProbe {
+        fn process_group_checked(
+            &self,
+            pid: u32,
+        ) -> Result<Option<ProcessGroupInfo>, ProcessProbeError> {
+            Ok((pid == 4242).then_some(ProcessGroupInfo {
+                process_group_id: 4242,
+                session_id: 31337,
+            }))
+        }
+
+        fn process_group_members_checked(
+            &self,
+            _group: &ProcessGroupInfo,
+        ) -> Result<Vec<u32>, ProcessProbeError> {
+            Ok(vec![4242])
+        }
+
+        fn process_group_members_by_id_checked(
+            &self,
+            _process_group_id: u32,
+        ) -> Result<Vec<u32>, ProcessProbeError> {
+            Ok(vec![4242])
+        }
+    }
+
+    struct MaterializationTmux {
+        calls: RefCell<Vec<TmuxInvocation>>,
+        responses: RefCell<VecDeque<TmuxResponse>>,
+        marker_path: PathBuf,
+    }
+
+    impl MaterializationTmux {
+        fn new(marker_path: PathBuf, responses: impl IntoIterator<Item = TmuxResponse>) -> Self {
+            Self {
+                calls: RefCell::new(Vec::new()),
+                responses: RefCell::new(responses.into_iter().collect()),
+                marker_path,
+            }
+        }
+    }
+
+    impl TmuxClient for MaterializationTmux {
+        fn invoke(&self, invocation: &TmuxInvocation) -> Result<TmuxResponse, RuntimeError> {
+            if self.calls.borrow().is_empty() {
+                assert!(
+                    self.marker_path.is_file(),
+                    "the marker must be durable before the private server starts"
+                );
+            }
+            self.calls.borrow_mut().push(invocation.clone());
+            self.responses
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| RuntimeError::TmuxRejected("unexpected tmux call".to_owned()))
+        }
+    }
+
+    fn shell_evidence() -> ProvisionalShellEvidence {
+        ProvisionalShellEvidence::new("%17".to_owned(), 4242, "birth-4242".to_owned(), 4242, 31337)
+            .unwrap()
+    }
+
     fn fixture() -> (tempfile::TempDir, ProvisionalSlot) {
         let temporary = tempfile::tempdir().unwrap();
         let state_root = temporary.path().join("state");
@@ -638,13 +892,33 @@ mod tests {
         fs::create_dir(&seed).unwrap();
         let candidate_runtime_id =
             RuntimeId::from_str("01234567-0000-0000-0000-000000000001").unwrap();
-        let slot = ProvisionalSlot::materialized(
+        let mut slot = ProvisionalSlot::materializing(
             &state_root,
             Uuid::parse_str("01234567-0000-0000-0000-000000000002").unwrap(),
             Revision::INITIAL,
             1,
             candidate_runtime_id,
             SlotGeneration(Uuid::parse_str("01234567-0000-0000-0000-000000000003").unwrap()),
+            &seed,
+        )
+        .unwrap();
+        slot.record_shell_evidence(shell_evidence()).unwrap();
+        (temporary, slot)
+    }
+
+    fn materializing_fixture() -> (tempfile::TempDir, ProvisionalSlot) {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_root = temporary.path().join("state");
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&state_root).unwrap();
+        fs::create_dir(&seed).unwrap();
+        let slot = ProvisionalSlot::materializing(
+            &state_root,
+            Uuid::parse_str("01234567-0000-0000-0000-000000000012").unwrap(),
+            Revision::INITIAL,
+            1,
+            RuntimeId::from_str("01234567-0000-0000-0000-000000000011").unwrap(),
+            SlotGeneration(Uuid::parse_str("01234567-0000-0000-0000-000000000013").unwrap()),
             &seed,
         )
         .unwrap();
@@ -670,6 +944,7 @@ mod tests {
             temporary.path().join("seed").canonicalize().unwrap()
         );
         assert_eq!(slot.phase, ProvisionalPhase::Materialized);
+        assert_eq!(slot.shell_evidence, Some(shell_evidence()));
         assert_eq!(slot.cleanup_authority(), CleanupAuthority::ExactProvisional);
         assert!(!slot.action_allowed());
     }
@@ -735,10 +1010,147 @@ mod tests {
     }
 
     #[test]
+    fn materializer_persists_pre_server_marker_then_exact_shell_evidence() {
+        let (temporary, slot) = materializing_fixture();
+        let state_root = temporary.path().join("state");
+        let presentation = state_root.join("presentation");
+        fs::create_dir(&presentation).unwrap();
+        let marker_path = presentation.join(PROVISIONAL_MARKER_FILE);
+        let tmux = MaterializationTmux::new(
+            marker_path.clone(),
+            [
+                TmuxResponse {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+                TmuxResponse {
+                    success: true,
+                    stdout: String::new(),
+                    stderr: String::new(),
+                },
+                TmuxResponse {
+                    success: true,
+                    stdout: "%17\n".to_owned(),
+                    stderr: String::new(),
+                },
+                TmuxResponse {
+                    success: true,
+                    stdout: "4242\n".to_owned(),
+                    stderr: String::new(),
+                },
+                TmuxResponse {
+                    success: true,
+                    stdout: format!("{}\n", slot.seed_cwd.display()),
+                    stderr: String::new(),
+                },
+            ],
+        );
+        let process_probe = ShellProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, slot.runtime_paths.clone());
+        let launch = NativeLaunch {
+            cwd: slot.seed_cwd.clone(),
+            program: vec![OsString::from("synthetic-provisional-shell")],
+            environment: BTreeMap::new(),
+        };
+
+        let materialized = materialize_private_shell(
+            &state_root,
+            &presentation,
+            &slot,
+            &runtime,
+            &launch,
+            &ShellGroupProbe,
+        )
+        .unwrap();
+
+        assert_eq!(materialized.phase, ProvisionalPhase::Materialized);
+        assert_eq!(materialized.shell_evidence, Some(shell_evidence()));
+        assert_eq!(
+            read_marker(&state_root, &presentation).unwrap(),
+            materialized
+        );
+        assert_eq!(tmux.calls.borrow().len(), 5);
+    }
+
+    #[test]
+    fn materializer_retains_pre_server_marker_when_private_server_start_fails() {
+        let (temporary, slot) = materializing_fixture();
+        let state_root = temporary.path().join("state");
+        let presentation = state_root.join("presentation");
+        fs::create_dir(&presentation).unwrap();
+        let tmux = MaterializationTmux::new(
+            presentation.join(PROVISIONAL_MARKER_FILE),
+            [TmuxResponse {
+                success: false,
+                stdout: String::new(),
+                stderr: "synthetic refusal".to_owned(),
+            }],
+        );
+        let process_probe = ShellProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, slot.runtime_paths.clone());
+        let launch = NativeLaunch {
+            cwd: slot.seed_cwd.clone(),
+            program: vec![OsString::from("synthetic-provisional-shell")],
+            environment: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            materialize_private_shell(
+                &state_root,
+                &presentation,
+                &slot,
+                &runtime,
+                &launch,
+                &ShellGroupProbe,
+            ),
+            Err(SlotError::ShellEvidenceUnavailable)
+        );
+        assert_eq!(read_marker(&state_root, &presentation).unwrap(), slot);
+        assert_eq!(slot.cleanup_authority(), CleanupAuthority::ExactProvisional);
+    }
+
+    #[test]
+    fn materializer_refuses_a_changed_launch_cwd_before_marker_or_server_creation() {
+        let (temporary, slot) = materializing_fixture();
+        let state_root = temporary.path().join("state");
+        let presentation = state_root.join("presentation");
+        let other_cwd = temporary.path().join("other");
+        fs::create_dir(&presentation).unwrap();
+        fs::create_dir(&other_cwd).unwrap();
+        let tmux = MaterializationTmux::new(
+            presentation.join(PROVISIONAL_MARKER_FILE),
+            std::iter::empty(),
+        );
+        let process_probe = ShellProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, slot.runtime_paths.clone());
+        let launch = NativeLaunch {
+            cwd: other_cwd,
+            program: vec![OsString::from("synthetic-provisional-shell")],
+            environment: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            materialize_private_shell(
+                &state_root,
+                &presentation,
+                &slot,
+                &runtime,
+                &launch,
+                &ShellGroupProbe,
+            ),
+            Err(SlotError::ShellCwdMismatch)
+        );
+        assert!(!presentation.join(PROVISIONAL_MARKER_FILE).exists());
+        assert!(!slot.runtime_paths.directory.exists());
+        assert!(tmux.calls.borrow().is_empty());
+    }
+
+    #[test]
     fn unavailable_state_root_refuses_before_a_candidate_claim_exists() {
         let temporary = tempfile::tempdir().unwrap();
         assert_eq!(
-            ProvisionalSlot::materialized(
+            ProvisionalSlot::materializing(
                 &temporary.path().join("missing-state"),
                 Uuid::new_v4(),
                 Revision::INITIAL,
@@ -767,6 +1179,14 @@ mod tests {
         assert_eq!(
             ProvisionalMarker::decode(temporary.path().join("state").as_path(), &altered),
             Err(SlotError::MarkerRuntimePathsMismatch)
+        );
+
+        let mut altered: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        altered["shell_evidence"]["pane_id"] = serde_json::Value::String("foreign".to_owned());
+        let altered = serde_json::to_vec(&altered).unwrap();
+        assert_eq!(
+            ProvisionalMarker::decode(temporary.path().join("state").as_path(), &altered),
+            Err(SlotError::InvalidShellEvidence)
         );
     }
 

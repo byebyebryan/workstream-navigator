@@ -76,6 +76,13 @@ impl std::fmt::Debug for OpenCodeExternalEffectFence {
     }
 }
 
+impl OpenCodeExternalEffectFence {
+    #[must_use]
+    const fn ownership(&self) -> OnboardingOwnership {
+        *self.ownership
+    }
+}
+
 /// Type-level proof that the session returned after `OpenCode`'s potential
 /// external effect is durably bound to the exact Runtime. Only this proof may
 /// cross the final native-exec fence.
@@ -199,15 +206,14 @@ pub(crate) fn record_opencode_created_session(
     state: &mut D16State,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
-    effect_fence: OpenCodeExternalEffectFence,
+    effect_fence: &OpenCodeExternalEffectFence,
     session: crate::domain::ProviderSessionId,
 ) -> Result<OpenCodeSessionFence, HelperError> {
-    let OpenCodeExternalEffectFence { ownership } = effect_fence;
     let (_, request) = request_from_context(state, provisional_lease, context)?;
     let ownership = state.record_d17_opencode_created_session_current(
         provisional_lease,
         &request,
-        *ownership,
+        effect_fence.ownership(),
         &session,
     )?;
     Ok(OpenCodeSessionFence {
@@ -247,16 +253,77 @@ pub(crate) fn record_opencode_provider_exec_started(
     state: &mut D16State,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
-    session_fence: OpenCodeSessionFence,
+    session_fence: &OpenCodeSessionFence,
 ) -> Result<ProviderExecFence, HelperError> {
-    let OpenCodeSessionFence { ownership, .. } = session_fence;
     let (_, request) = request_from_context(state, provisional_lease, context)?;
-    let ownership =
-        state.record_d17_provider_exec_started_current(provisional_lease, &request, *ownership)?;
+    let ownership = state.record_d17_provider_exec_started_current(
+        provisional_lease,
+        &request,
+        *session_fence.ownership,
+    )?;
     Ok(ProviderExecFence {
         ownership,
         provider: ProviderKind::OpenCode,
     })
+}
+
+/// Marks an `OpenCode` attempt recovery-required after its POST boundary has
+/// been crossed but the returned session could not be durably bound.
+pub(crate) fn record_opencode_effect_recovery_required(
+    state: &mut D16State,
+    provisional_lease: &ProvisionalLease,
+    context: &PrepareContext<'_, '_>,
+    effect_fence: &OpenCodeExternalEffectFence,
+) -> Result<(), HelperError> {
+    let (_, request) = request_from_context(state, provisional_lease, context)?;
+    state.record_d17_recovery_required_current(
+        provisional_lease,
+        &request,
+        effect_fence.ownership(),
+    )?;
+    Ok(())
+}
+
+/// Marks an `OpenCode` attempt recovery-required after a durable native
+/// session binding cannot reach the final exec boundary.
+pub(crate) fn record_opencode_session_recovery_required(
+    state: &mut D16State,
+    provisional_lease: &ProvisionalLease,
+    context: &PrepareContext<'_, '_>,
+    session_fence: &OpenCodeSessionFence,
+) -> Result<(), HelperError> {
+    let (_, request) = request_from_context(state, provisional_lease, context)?;
+    state.record_d17_recovery_required_current(
+        provisional_lease,
+        &request,
+        *session_fence.ownership,
+    )?;
+    Ok(())
+}
+
+/// Marks an `OpenCode` attempt recovery-required after its final native exec
+/// returns an error. Its blank session is already provider-owned, so no
+/// known-absent or retry classification is available.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "moving the opaque exec fence prevents a caller from reusing its final-exec authority"
+)]
+pub(crate) fn record_opencode_exec_recovery_required(
+    state: &mut D16State,
+    provisional_lease: &ProvisionalLease,
+    context: &PrepareContext<'_, '_>,
+    exec_fence: ProviderExecFence,
+) -> Result<(), HelperError> {
+    let ProviderExecFence {
+        ownership,
+        provider,
+    } = exec_fence;
+    if provider != ProviderKind::OpenCode {
+        return Err(HelperError::ExternalEffectProviderMismatch);
+    }
+    let (_, request) = request_from_context(state, provisional_lease, context)?;
+    state.record_d17_recovery_required_current(provisional_lease, &request, ownership)?;
+    Ok(())
 }
 
 /// Advances a revalidated Codex handoff through the exact durable fences

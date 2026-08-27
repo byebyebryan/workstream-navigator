@@ -2743,6 +2743,28 @@ impl D16State {
         Ok(ownership)
     }
 
+    /// Fences one Runtime-owned D17 onboarding attempt for explicit recovery.
+    /// Callers use this after an ambiguous provider effect or a failed final
+    /// exec that cannot be classified as Codex's known absence. It never
+    /// rolls back graph rows, reissues a capability, or contacts a provider.
+    #[allow(
+        dead_code,
+        reason = "the D17 recovery controller remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn record_d17_recovery_required_current(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        request: &OnboardingPrepareRequest,
+        ownership: OnboardingOwnership,
+    ) -> Result<OnboardingOwnership, StateError> {
+        self.advance_d17_onboarding_current(
+            provisional_lease,
+            request,
+            ownership,
+            D17OnboardingAdvance::Normal(OnboardingPhase::RecoveryRequired),
+        )
+    }
+
     /// Records the final durable boundary immediately before the helper would
     /// execute the native provider. It intentionally does not expose an
     /// unproven Runtime to ordinary attachment or action authority.
@@ -9173,6 +9195,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn schema14_opencode_session_binding_requires_the_exact_post_boundary() {
         let temporary = tempfile::tempdir().unwrap();
         let state_path = temporary.path().join("state");
@@ -9265,6 +9288,24 @@ mod tests {
                     &ProviderSessionId::new(ProviderKind::OpenCode, "other-session").unwrap(),
                 )
                 .is_err()
+        );
+        let recovery = state
+            .record_d17_recovery_required_current(&provisional, &request, bound)
+            .unwrap();
+        assert_eq!(
+            recovery.operation_revision.value(),
+            bound.operation_revision.value() + 1
+        );
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT phase FROM compound_operations WHERE operation_id = ?1",
+                    [issued.operation_id().to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "recovery_required"
         );
     }
 

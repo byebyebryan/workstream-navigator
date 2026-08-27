@@ -2006,6 +2006,95 @@ impl D16State {
         Ok(provisional)
     }
 
+    /// Installs or acquires D17's stable provisional lease from a normal
+    /// schema-14 opening. The same pending-to-ready protocol is used as the
+    /// cutover seam, but no schema-13 transition lease can authorize this
+    /// post-migration D17 operation.
+    ///
+    /// The returned descriptor remains `CLOEXEC`, locked, and bound to the
+    /// exact root/inode/generation. No marker, tmux server, Runtime, or
+    /// provider process is created here.
+    pub fn acquire_d17_provisional_lease(&mut self) -> Result<ProvisionalLease, StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        validate_schema14(&self.connection)?;
+        let metadata = load_provisional_lock_metadata(&self.connection)?;
+        let (root, root_identity) = validate_transition_root(&self.root)
+            .map_err(|_| StateError::InvalidProvisionalLease)?;
+        let lock_path = root.join(PROVISIONAL_LOCK_FILE);
+        let expected_contents = provisional_lock_contents(&metadata.host_id, metadata.generation)?;
+        let (file, lock_identity) = match metadata.phase {
+            ProvisionalLockPhase::Pending => {
+                let file = match exact_artifact_metadata(&lock_path)? {
+                    None => {
+                        let mut file = open_private_provisional_file(&lock_path, true)?;
+                        file.write_all(&expected_contents)
+                            .map_err(|error| StateError::io(&lock_path, error))?;
+                        file.sync_all()
+                            .map_err(|error| StateError::io(&lock_path, error))?;
+                        sync_directory(&root)?;
+                        file
+                    }
+                    Some(_) => open_private_provisional_file(&lock_path, false)?,
+                };
+                let identity =
+                    validate_provisional_lock_file(&file, &lock_path, &expected_contents)?;
+                (file, identity)
+            }
+            ProvisionalLockPhase::Ready { expected_identity } => {
+                let file = open_private_provisional_file(&lock_path, false)?;
+                let identity =
+                    validate_provisional_lock_file(&file, &lock_path, &expected_contents)?;
+                if identity != expected_identity {
+                    return Err(StateError::InvalidProvisionalLease);
+                }
+                (file, identity)
+            }
+        };
+        let file = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
+            .map_err(|(_file, _error)| StateError::ProvisionalLeaseBusy)?;
+        let provisional = ProvisionalLease::new(
+            root,
+            root_identity,
+            lock_path,
+            lock_identity,
+            metadata.generation,
+            expected_contents,
+            file,
+        );
+        provisional.revalidate_for_mutation(&self.root)?;
+        if matches!(metadata.phase, ProvisionalLockPhase::Pending) {
+            let transaction = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(StateError::Sqlite)?;
+            let changed = transaction
+                .execute(
+                    "UPDATE host_operational_metadata
+                     SET provisional_lock_phase = 'ready',
+                         provisional_lock_device = ?1,
+                         provisional_lock_inode = ?2
+                     WHERE singleton = 1
+                       AND provisional_lease_generation = ?3
+                       AND provisional_lock_phase = 'pending'",
+                    params![
+                        i64::try_from(lock_identity.device)
+                            .map_err(|_| StateError::InvalidProvisionalLease)?,
+                        i64::try_from(lock_identity.inode)
+                            .map_err(|_| StateError::InvalidProvisionalLease)?,
+                        metadata.generation,
+                    ],
+                )
+                .map_err(StateError::Sqlite)?;
+            if changed != 1 {
+                return Err(StateError::ConcurrentWrite);
+            }
+            validate_schema14(&transaction)?;
+            transaction.commit().map_err(StateError::Sqlite)?;
+            provisional.revalidate_for_mutation(&self.root)?;
+        }
+        Ok(provisional)
+    }
+
     /// Transactionally reserves the D17 Project/Location/Workstream/Runtime
     /// graph for one marker-owned candidate and records a verifier-backed
     /// handoff.  This is intentionally a dormant cutover seam: it requires
@@ -3141,6 +3230,16 @@ fn ensure_cutover_transition_mode(mode: D16OpenMode) -> Result<(), StateError> {
         mode,
         D16OpenMode::CutoverTransition | D16OpenMode::ConfirmedCutover
     ) {
+        Ok(())
+    } else {
+        Err(StateError::StateRecoveryRequired(
+            StateRecoveryReason::UnsupportedLegacySchema,
+        ))
+    }
+}
+
+fn ensure_d17_current_mode(mode: D16OpenMode) -> Result<(), StateError> {
+    if mode == D16OpenMode::D17Current {
         Ok(())
     } else {
         Err(StateError::StateRecoveryRequired(
@@ -7625,9 +7724,21 @@ mod tests {
                 D17_HOST_SCHEMA_VERSION
             ))
         ));
-        let d17 = open_d17_current_only(&root).unwrap();
+        let mut d17 = open_d17_current_only(&root).unwrap();
         assert_eq!(d17.mode(), D16OpenMode::D17Current);
         assert_eq!(d17.schema_version().unwrap(), D17_HOST_SCHEMA_VERSION);
+        let provisional = d17.acquire_d17_provisional_lease().unwrap();
+        assert_eq!(provisional.lease_generation(), 1);
+        provisional.revalidate_for_mutation(&state_path).unwrap();
+        drop(provisional);
+        drop(d17);
+
+        let mut reopened = open_d17_current_only(&root).unwrap();
+        let reacquired = reopened.acquire_d17_provisional_lease().unwrap();
+        assert_eq!(reacquired.lease_generation(), 1);
+        drop(reacquired);
+        drop(reopened);
+        let d17 = open_d17_current_only(&root).unwrap();
         assert!(matches!(
             d17.into_host_registry(),
             Err(StateError::StateRecoveryRequired(

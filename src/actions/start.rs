@@ -735,12 +735,63 @@ struct OpenCodeObserverLaunch {
     handle_revision: Revision,
 }
 
+/// Starts and waits for the exact dormant D17 observer after a separate
+/// reconciler has recorded the native provider PID/birth.  This has no
+/// provider-start authority: it accepts only an already-bound `Starting`
+/// handle and never contacts the provider itself.
+#[allow(
+    dead_code,
+    reason = "the D17 presentation controller remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) fn spawn_d17_opencode_observer(
+    registry: &mut HostRegistry,
+    root: &Path,
+    record: &crate::state::RuntimeRecord,
+    handle: &crate::state::OpenCodeRuntimeHandle,
+) -> Result<(), ActionError> {
+    let (Some(pane_pid), Some(process_birth)) =
+        (record.provider_pid, record.process_birth.as_ref())
+    else {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    };
+    if record.provider != ProviderKind::OpenCode
+        || handle.runtime_id != record.runtime_id
+        || handle.runtime_generation != record.tmux_generation
+        || handle.observer_status != crate::state::OpenCodeObserverStatus::Starting
+        || handle.observer_pid.is_some()
+        || handle.observer_birth.is_some()
+    {
+        return Err(ActionError::OpenCodeObserverIdentityChanged);
+    }
+    let endpoint = OpenCodeEndpoint::loopback(handle.endpoint_port)?;
+    let observer = OpenCodeObserverLaunch {
+        root: root.to_owned(),
+        runtime_id: record.runtime_id,
+        generation: record.tmux_generation.clone(),
+        endpoint,
+        session: handle.native_session_id.clone(),
+        pane_pid,
+        cwd: record.cwd.clone(),
+        process_birth: process_birth.clone(),
+        handle_revision: handle.revision,
+    };
+    spawn_opencode_observer_with_mode(registry, &observer, opencode::OpenCodeObserverMode::D17)
+}
+
 fn spawn_opencode_observer(
     registry: &mut HostRegistry,
     observer: &OpenCodeObserverLaunch,
 ) -> Result<(), ActionError> {
+    spawn_opencode_observer_with_mode(registry, observer, opencode::OpenCodeObserverMode::D16)
+}
+
+fn spawn_opencode_observer_with_mode(
+    registry: &mut HostRegistry,
+    observer: &OpenCodeObserverLaunch,
+    mode: opencode::OpenCodeObserverMode,
+) -> Result<(), ActionError> {
     let executable = env::current_exe().map_err(ActionError::Io)?;
-    let mut command = opencode_observer_command(&executable, observer);
+    let mut command = opencode_observer_command(&executable, observer, mode);
     let mut child = command.spawn().map_err(ActionError::Io)?;
     let observer_pid = child.id();
     let Some(observer_birth) = LinuxProcessProbe.process_birth(observer_pid) else {
@@ -773,12 +824,13 @@ fn spawn_opencode_observer(
 fn opencode_observer_command(
     executable: &Path,
     observer: &OpenCodeObserverLaunch,
+    mode: opencode::OpenCodeObserverMode,
 ) -> std::process::Command {
     let mut command = std::process::Command::new(executable);
     command
         .arg("--state-root")
         .arg(&observer.root)
-        .arg("_opencode_observer_d16")
+        .arg(mode.command_name())
         .arg(observer.runtime_id.to_string())
         .arg(&observer.generation)
         .arg(observer.endpoint.port.to_string())
@@ -1045,7 +1097,8 @@ mod observer_command_tests {
             process_birth: "provider-birth".to_owned(),
             handle_revision: Revision::INITIAL,
         };
-        let mut command = opencode_observer_command(&executable, &observer);
+        let mut command =
+            opencode_observer_command(&executable, &observer, opencode::OpenCodeObserverMode::D16);
         let mut child = command.spawn().unwrap();
         let child_pid = i32::try_from(child.id()).unwrap();
 

@@ -156,7 +156,9 @@ pub(crate) fn prepare_managed_shell_gate(
     prepare(state, provisional_lease, &broker_context).map_err(Into::into)
 }
 
-fn validate_invocation(
+/// Validates the process identity of either the gate child or the exec helper
+/// against freshly observed provisional-shell evidence.
+pub(crate) fn validate_invocation(
     shell: &LiveProvisionalShell,
     invocation: ShellGateInvocation,
 ) -> Result<(), ShellGateError> {

@@ -11,7 +11,7 @@
 )]
 
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
 };
@@ -81,6 +81,16 @@ impl ExpectedProviderExecutable {
             }
         }
         Err(ReconcileError::ExecutableUnavailable)
+    }
+
+    /// Builds the direct native argv from the already canonical executable and
+    /// grammar-normalized fresh-TUI arguments. The original account shell is
+    /// never involved in the final exec.
+    #[must_use]
+    pub(crate) fn native_program(&self, arguments: &[String]) -> Vec<OsString> {
+        std::iter::once(self.canonical_path.clone().into_os_string())
+            .chain(arguments.iter().map(OsString::from))
+            .collect()
     }
 }
 
@@ -238,6 +248,14 @@ mod tests {
 
         assert_eq!(resolved.canonical_path, expected.canonicalize().unwrap());
         assert_eq!(resolved.provider, ProviderKind::Codex);
+        assert_eq!(
+            resolved.native_program(&["--model".to_owned(), "gpt-5.6".to_owned()]),
+            vec![
+                expected.canonicalize().unwrap().into_os_string(),
+                "--model".into(),
+                "gpt-5.6".into(),
+            ]
+        );
     }
 
     #[test]

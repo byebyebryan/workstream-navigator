@@ -4212,8 +4212,8 @@ pub fn open_d17_current_only(root: &StateRoot) -> Result<D16State, StateError> {
     })
 }
 
-/// Opens exactly schema 12 or 13 for the provider observer bridge.  No client
-/// path is inspected and no migration or host identity creation occurs.
+/// Opens exactly schema 12, 13, or 14 for the provider observer bridge. No
+/// client path is inspected and no migration or host identity creation occurs.
 pub fn open_observer_transition(root: &StateRoot) -> Result<D16State, StateError> {
     validate_state_root_directory(root.base())?;
     let path = root.host_database_path();
@@ -4237,8 +4237,9 @@ pub fn open_observer_transition(root: &StateRoot) -> Result<D16State, StateError
     match version {
         D16_SCHEMA_12_VERSION => validate_schema12(&connection)?,
         D16_HOST_SCHEMA_VERSION => validate_schema13(&connection)?,
+        D17_HOST_SCHEMA_VERSION => validate_schema14(&connection)?,
         0..=11 => return Err(StateError::HostStateResetRequired(version)),
-        value if value > D16_HOST_SCHEMA_VERSION => {
+        value if value > D17_HOST_SCHEMA_VERSION => {
             return Err(StateError::UnsupportedFutureHostSchema(value));
         }
         _ => return Err(StateError::MalformedHostSchema),
@@ -12013,7 +12014,7 @@ mod tests {
     }
 
     #[test]
-    fn observer_transition_accepts_schema12_but_not_legacy_versions() {
+    fn observer_transition_accepts_schema12_and_schema14_but_not_legacy_versions() {
         let (temporary, _first, _second) = schema12_root();
         let root = StateRoot::select(temporary.path());
         let state = open_observer_transition(&root).unwrap();
@@ -12035,6 +12036,20 @@ mod tests {
             open_observer_transition(&root),
             Err(StateError::HostStateResetRequired(11))
         ));
+
+        let d17_temporary = private_root();
+        let d17_path = d17_temporary.path().join("state");
+        fresh_create_d17(&d17_path, &SequenceIds::default()).unwrap();
+        let d17_root = StateRoot::select(&d17_path);
+        let d17_observer = open_observer_transition(&d17_root).unwrap();
+        assert_eq!(d17_observer.mode(), D16OpenMode::ObserverTransition);
+        assert_eq!(
+            d17_observer
+                .connection
+                .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
     }
 
     #[test]

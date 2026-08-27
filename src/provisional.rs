@@ -9,6 +9,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -61,6 +62,85 @@ enum SlotError {
     HandoffMismatch,
     #[error("provider exec proof is unavailable")]
     ProviderExecProofUnavailable,
+    #[error("provisional marker could not be encoded")]
+    MarkerEncoding,
+    #[error("provisional marker is oversized")]
+    MarkerOversized,
+    #[error("provisional marker is malformed")]
+    MarkerMalformed,
+    #[error("provisional marker runtime paths do not match the candidate")]
+    MarkerRuntimePathsMismatch,
+}
+
+const PROVISIONAL_MARKER_VERSION: u8 = 1;
+const MAX_PROVISIONAL_MARKER_BYTES: usize = 8 * 1024;
+
+/// Presentation-private evidence for one unregistered materialized candidate.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ProvisionalMarker {
+    version: u8,
+    presentation_id: Uuid,
+    presentation_revision: Revision,
+    candidate_runtime_id: RuntimeId,
+    directory: PathBuf,
+    socket: PathBuf,
+    config: PathBuf,
+    session_name: String,
+    seed_cwd: PathBuf,
+    slot_generation: Uuid,
+}
+
+impl ProvisionalMarker {
+    fn from_slot(slot: &ProvisionalSlot) -> Self {
+        Self {
+            version: PROVISIONAL_MARKER_VERSION,
+            presentation_id: slot.presentation_id,
+            presentation_revision: slot.presentation_revision,
+            candidate_runtime_id: slot.candidate_runtime_id,
+            directory: slot.runtime_paths.directory.clone(),
+            socket: slot.runtime_paths.socket.clone(),
+            config: slot.runtime_paths.config.clone(),
+            session_name: slot.runtime_paths.session_name.clone(),
+            seed_cwd: slot.seed_cwd.clone(),
+            slot_generation: slot.slot_generation.0,
+        }
+    }
+
+    fn encode(&self) -> Result<Vec<u8>, SlotError> {
+        let bytes = serde_json::to_vec(self).map_err(|_| SlotError::MarkerEncoding)?;
+        if bytes.len() > MAX_PROVISIONAL_MARKER_BYTES {
+            return Err(SlotError::MarkerOversized);
+        }
+        Ok(bytes)
+    }
+
+    fn decode(state_root: &Path, bytes: &[u8]) -> Result<ProvisionalSlot, SlotError> {
+        if bytes.len() > MAX_PROVISIONAL_MARKER_BYTES {
+            return Err(SlotError::MarkerOversized);
+        }
+        let marker =
+            serde_json::from_slice::<Self>(bytes).map_err(|_| SlotError::MarkerMalformed)?;
+        if marker.version != PROVISIONAL_MARKER_VERSION {
+            return Err(SlotError::MarkerMalformed);
+        }
+        let slot = ProvisionalSlot::materialized(
+            state_root,
+            marker.presentation_id,
+            marker.presentation_revision,
+            marker.candidate_runtime_id,
+            SlotGeneration(marker.slot_generation),
+            &marker.seed_cwd,
+        )?;
+        if slot.runtime_paths.directory != marker.directory
+            || slot.runtime_paths.socket != marker.socket
+            || slot.runtime_paths.config != marker.config
+            || slot.runtime_paths.session_name != marker.session_name
+        {
+            return Err(SlotError::MarkerRuntimePathsMismatch);
+        }
+        Ok(slot)
+    }
 }
 
 impl ProvisionalSlot {
@@ -151,7 +231,10 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::{CleanupAuthority, ProvisionalPhase, ProvisionalSlot, SlotError, SlotGeneration};
+    use super::{
+        CleanupAuthority, ProvisionalMarker, ProvisionalPhase, ProvisionalSlot, SlotError,
+        SlotGeneration,
+    };
     use crate::{
         domain::{Revision, RuntimeId},
         runtime::{
@@ -300,6 +383,25 @@ mod tests {
                 &temporary.path().join("missing-seed"),
             ),
             Err(SlotError::StateRootUnavailable)
+        );
+    }
+
+    #[test]
+    fn marker_round_trip_binds_every_final_runtime_path_and_rejects_path_tampering() {
+        let (temporary, slot) = fixture();
+        let marker = ProvisionalMarker::from_slot(&slot);
+        let bytes = marker.encode().unwrap();
+        assert_eq!(
+            ProvisionalMarker::decode(temporary.path().join("state").as_path(), &bytes).unwrap(),
+            slot
+        );
+
+        let mut altered: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        altered["socket"] = serde_json::Value::String("elsewhere".to_owned());
+        let altered = serde_json::to_vec(&altered).unwrap();
+        assert_eq!(
+            ProvisionalMarker::decode(temporary.path().join("state").as_path(), &altered),
+            Err(SlotError::MarkerRuntimePathsMismatch)
         );
     }
 }

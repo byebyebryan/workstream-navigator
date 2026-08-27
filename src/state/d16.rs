@@ -3496,6 +3496,50 @@ impl D16State {
         Ok(target)
     }
 
+    /// Loads the exact ready `OpenCode` observer handle for a still-fenced
+    /// provider-exec operation. This is deliberately a D17-only read: the
+    /// caller must still corroborate the returned PID/birth pair against the
+    /// live process table before it can activate ordinary attachment.
+    #[allow(
+        dead_code,
+        reason = "the D17 OpenCode observer controller remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn d17_opencode_observer_ready_current(
+        &self,
+        provisional_lease: &ProvisionalLease,
+        ownership: OnboardingOwnership,
+    ) -> Result<OpenCodeRuntimeHandle, StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        validate_schema14(&self.connection)?;
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        let target = load_d17_exec_proof_target(
+            &transaction,
+            &self.root,
+            ownership.operation_id,
+            OnboardingPhase::ProviderExecStarted,
+        )?;
+        if target.ownership() != ownership || target.provider() != ProviderKind::OpenCode {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+        let handle = load_opencode_handle(&transaction, ownership.runtime_id)?
+            .ok_or(StateError::OnboardingOperationUnavailable)?;
+        if handle.runtime_generation != target.runtime_generation()
+            || handle.observer_status != OpenCodeObserverStatus::Ready
+            || handle.observer_pid.is_none()
+            || handle.observer_birth.is_none()
+        {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+        transaction.commit().map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        Ok(handle)
+    }
+
     /// Loads an already proven provider-exec target so presentation-private
     /// marker reconciliation can complete after a state-before-marker crash.
     /// It performs no provider I/O and exposes no public snapshot data.

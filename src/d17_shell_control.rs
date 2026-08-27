@@ -260,6 +260,7 @@ pub(crate) fn reconcile_opencode_observer_from_presentation(
         account_context.presentation_directory(),
         &runtime,
         &process_probe,
+        &process_probe,
     )?;
     Ok(())
 }

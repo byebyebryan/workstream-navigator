@@ -22,12 +22,14 @@ use thiserror::Error;
 use crate::{
     domain::{OperationId, ProviderKind},
     provisional::{ProvisionalPhase, ProvisionalSlot, SlotError, read_marker, update_marker},
-    runtime::{PrivateRuntime, ProcessGroupProbe},
-    state::d16::{
-        OnboardingProviderExecEvidence, OnboardingProviderExecTarget,
-        OnboardingProviderExecutableIdentity,
+    runtime::{PrivateRuntime, ProcessGroupProbe, ProcessProbe},
+    state::{
+        D16State, OpenCodeObserverStatus, OpenCodeRuntimeHandle, ProvisionalLease, StateError,
+        d16::{
+            OnboardingProviderExecEvidence, OnboardingProviderExecTarget,
+            OnboardingProviderExecutableIdentity,
+        },
     },
-    state::{D16State, ProvisionalLease, StateError},
 };
 
 /// Exact native executable selected before the helper's final `execve`. Its
@@ -158,6 +160,8 @@ pub(crate) enum ReconcileError {
     ProviderCwdMismatch,
     #[error("the provider executable does not match the expected native executable")]
     ProviderExecutableMismatch,
+    #[error("the exact D17 OpenCode observer is unavailable")]
+    OpenCodeObserverUnavailable,
 }
 
 /// Records exact post-exec evidence for one already Runtime-owned provisional
@@ -237,6 +241,7 @@ pub(crate) fn finalize_opencode_observer_ready(
     presentation_directory: &Path,
     runtime: &PrivateRuntime<'_>,
     process_group_probe: &dyn ProcessGroupProbe,
+    observer_process_probe: &dyn ProcessProbe,
 ) -> Result<(), ReconcileError> {
     provisional_lease.revalidate_for_mutation(state.root())?;
     let slot = read_marker(state.root(), presentation_directory)?;
@@ -256,6 +261,9 @@ pub(crate) fn finalize_opencode_observer_ready(
     if live.cwd != target.project_root() {
         return Err(ReconcileError::ProviderCwdMismatch);
     }
+    let observer =
+        state.d17_opencode_observer_ready_current(provisional_lease, target.ownership())?;
+    validate_live_opencode_observer(&observer, observer_process_probe)?;
     let evidence = OnboardingProviderExecEvidence::new(live.shell_pid, live.shell_birth)?;
     state.record_d17_provider_exec_proven_current(
         provisional_lease,
@@ -263,6 +271,27 @@ pub(crate) fn finalize_opencode_observer_ready(
         &evidence,
     )?;
     complete_proven_marker(state, provisional_lease, presentation_directory, &slot)
+}
+
+fn validate_live_opencode_observer(
+    observer: &OpenCodeRuntimeHandle,
+    process_probe: &dyn ProcessProbe,
+) -> Result<(), ReconcileError> {
+    let (Some(pid), Some(expected_birth)) =
+        (observer.observer_pid, observer.observer_birth.as_deref())
+    else {
+        return Err(ReconcileError::OpenCodeObserverUnavailable);
+    };
+    if observer.observer_status != OpenCodeObserverStatus::Ready
+        || pid == 0
+        || expected_birth.is_empty()
+    {
+        return Err(ReconcileError::OpenCodeObserverUnavailable);
+    }
+    match process_probe.process_birth_checked(pid) {
+        Ok(Some(actual)) if actual == expected_birth => Ok(()),
+        Ok(_) | Err(_) => Err(ReconcileError::OpenCodeObserverUnavailable),
+    }
 }
 
 fn validate_slot_target(
@@ -313,8 +342,35 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    use super::{ExpectedProviderExecutable, ReconcileError};
-    use crate::domain::ProviderKind;
+    use super::{ExpectedProviderExecutable, ReconcileError, validate_live_opencode_observer};
+    use crate::{
+        domain::{ProviderKind, ProviderSessionId, Revision, RuntimeId},
+        runtime::ProcessProbe,
+        state::{OpenCodeObserverStatus, OpenCodeRuntimeHandle},
+    };
+
+    struct ObserverProbe(Option<&'static str>);
+
+    impl ProcessProbe for ObserverProbe {
+        fn process_birth(&self, _pid: u32) -> Option<String> {
+            self.0.map(str::to_owned)
+        }
+    }
+
+    fn ready_observer(status: OpenCodeObserverStatus) -> OpenCodeRuntimeHandle {
+        OpenCodeRuntimeHandle {
+            runtime_id: RuntimeId::from(uuid::Uuid::from_u128(31)),
+            runtime_generation: "generation-a".to_owned(),
+            endpoint_host: "127.0.0.1".to_owned(),
+            endpoint_port: 41_001,
+            version: "1.18.23".to_owned(),
+            native_session_id: ProviderSessionId::new(ProviderKind::OpenCode, "session-a").unwrap(),
+            observer_pid: Some(73),
+            observer_birth: Some("birth-73".to_owned()),
+            observer_status: status,
+            revision: Revision::INITIAL,
+        }
+    }
 
     fn write_executable(directory: &Path, name: &str) -> PathBuf {
         let executable = directory.join(name);
@@ -372,6 +428,28 @@ mod tests {
                 &env::join_paths([Path::new(".")]).unwrap(),
             ),
             Err(ReconcileError::ExecutableUnavailable),
+        ));
+    }
+
+    #[test]
+    fn opencode_finalization_requires_the_exact_live_ready_observer() {
+        let ready = ready_observer(OpenCodeObserverStatus::Ready);
+
+        assert!(validate_live_opencode_observer(&ready, &ObserverProbe(Some("birth-73"))).is_ok());
+        assert!(matches!(
+            validate_live_opencode_observer(&ready, &ObserverProbe(Some("reused-birth"))),
+            Err(ReconcileError::OpenCodeObserverUnavailable)
+        ));
+        assert!(matches!(
+            validate_live_opencode_observer(&ready, &ObserverProbe(None)),
+            Err(ReconcileError::OpenCodeObserverUnavailable)
+        ));
+        assert!(matches!(
+            validate_live_opencode_observer(
+                &ready_observer(OpenCodeObserverStatus::Starting),
+                &ObserverProbe(Some("birth-73")),
+            ),
+            Err(ReconcileError::OpenCodeObserverUnavailable)
         ));
     }
 }

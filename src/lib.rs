@@ -6,6 +6,7 @@ pub mod application;
 pub mod cutover;
 pub(crate) mod d17_broker;
 pub(crate) mod d17_helper;
+pub(crate) mod d17_reconcile;
 pub mod domain;
 pub mod navigator;
 pub(crate) mod onboarding;

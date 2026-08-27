@@ -734,6 +734,48 @@ impl OnboardingProviderExecEvidence {
     }
 }
 
+/// The private durable target against which a reconciler proves one native
+/// provider exec. It deliberately remains crate-visible: the repository path
+/// and runtime generation are necessary for local proof but never belong in a
+/// public snapshot or diagnostic.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[allow(
+    dead_code,
+    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
+)]
+pub(crate) struct OnboardingProviderExecTarget {
+    ownership: OnboardingOwnership,
+    provider: ProviderKind,
+    project_root: PathBuf,
+    runtime_generation: String,
+}
+
+#[allow(
+    dead_code,
+    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
+)]
+impl OnboardingProviderExecTarget {
+    #[must_use]
+    pub(crate) const fn ownership(&self) -> OnboardingOwnership {
+        self.ownership
+    }
+
+    #[must_use]
+    pub(crate) const fn provider(&self) -> ProviderKind {
+        self.provider
+    }
+
+    #[must_use]
+    pub(crate) fn project_root(&self) -> &Path {
+        &self.project_root
+    }
+
+    #[must_use]
+    pub(crate) fn runtime_generation(&self) -> &str {
+        &self.runtime_generation
+    }
+}
+
 impl std::fmt::Debug for OnboardingPreparation {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2754,6 +2796,22 @@ impl D16State {
         provisional_lease: &ProvisionalLease,
         operation_id: OperationId,
     ) -> Result<OnboardingOwnership, StateError> {
+        Ok(self
+            .d17_onboarding_exec_proof_target_current(provisional_lease, operation_id)?
+            .ownership())
+    }
+
+    /// Loads the full private D17 target needed for local post-exec proof.
+    /// This remains unavailable to snapshots and ordinary D16 actions.
+    #[allow(
+        dead_code,
+        reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn d17_onboarding_exec_proof_target_current(
+        &self,
+        provisional_lease: &ProvisionalLease,
+        operation_id: OperationId,
+    ) -> Result<OnboardingProviderExecTarget, StateError> {
         ensure_d17_current_mode(self.mode)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
         validate_schema14(&self.connection)?;
@@ -2762,10 +2820,10 @@ impl D16State {
             .unchecked_transaction()
             .map_err(StateError::Sqlite)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
-        let ownership = load_d17_exec_proof_ownership(&transaction, operation_id)?;
+        let target = load_d17_exec_proof_target(&transaction, &self.root, operation_id)?;
         transaction.commit().map_err(StateError::Sqlite)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
-        Ok(ownership)
+        Ok(target)
     }
 
     /// Atomically records the exact process identity of a provider whose
@@ -2819,8 +2877,8 @@ impl D16State {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
-        let current = load_d17_exec_proof_ownership(&transaction, ownership.operation_id)?;
-        if current != ownership {
+        let current = load_d17_exec_proof_target(&transaction, &self.root, ownership.operation_id)?;
+        if current.ownership != ownership {
             return Err(StateError::ConcurrentWrite);
         }
         let next_operation_revision = next_revision(ownership.operation_revision)?;
@@ -4086,10 +4144,11 @@ fn validate_d17_owned_onboarding_transaction(
     dead_code,
     reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
 )]
-fn load_d17_exec_proof_ownership(
+fn load_d17_exec_proof_target(
     transaction: &rusqlite::Transaction<'_>,
+    state_root: &Path,
     operation_id: OperationId,
-) -> Result<OnboardingOwnership, StateError> {
+) -> Result<OnboardingProviderExecTarget, StateError> {
     let persisted: Option<(String, String, String, i64)> = transaction
         .query_row(
             "SELECT kind, phase, expected_revisions_json, revision
@@ -4135,21 +4194,34 @@ fn load_d17_exec_proof_ownership(
     else {
         return Err(StateError::MalformedHostSchema);
     };
+    let provider = provider
+        .parse::<ProviderKind>()
+        .map_err(|_| StateError::MalformedHostSchema)?;
+    let project_root = PathBuf::from(cwd);
+    let state_root =
+        fs::canonicalize(state_root).map_err(|_| StateError::InvalidOnboardingPreparation)?;
+    let expected_runtime_paths =
+        RuntimePaths::for_runtime(&state_root, intent.candidate_runtime_id);
     if workstream_id != intent.workstream_id.to_string()
         || location_id != intent.location_id.to_string()
-        || provider != intent.provider.as_str()
+        || provider != intent.provider
         || runtime_generation != intent.runtime_generation
-        || session.is_empty()
-        || cwd.is_empty()
+        || session != expected_runtime_paths.session_name
+        || !is_normalized_absolute_utf8_path(&project_root)
     {
         return Err(StateError::MalformedHostSchema);
     }
-    Ok(OnboardingOwnership {
-        operation_id,
-        location_id: intent.location_id,
-        workstream_id: intent.workstream_id,
-        runtime_id: intent.candidate_runtime_id,
-        operation_revision: Revision::try_from(revision)?,
+    Ok(OnboardingProviderExecTarget {
+        ownership: OnboardingOwnership {
+            operation_id,
+            location_id: intent.location_id,
+            workstream_id: intent.workstream_id,
+            runtime_id: intent.candidate_runtime_id,
+            operation_revision: Revision::try_from(revision)?,
+        },
+        provider,
+        project_root,
+        runtime_generation,
     })
 }
 
@@ -8918,6 +8990,31 @@ mod tests {
                 .unwrap(),
             exec_started
         );
+        state
+            .connection
+            .execute(
+                "UPDATE runtimes SET tmux_session = 'wsnav-foreign-session'
+                 WHERE runtime_id = ?1",
+                [candidate_runtime_id.to_string()],
+            )
+            .unwrap();
+        assert!(matches!(
+            state.d17_onboarding_exec_proof_ownership_current(
+                &provisional,
+                exec_started.operation_id,
+            ),
+            Err(StateError::MalformedHostSchema),
+        ));
+        state
+            .connection
+            .execute(
+                "UPDATE runtimes SET tmux_session = ?1 WHERE runtime_id = ?2",
+                params![
+                    request.runtime_paths.session_name,
+                    candidate_runtime_id.to_string()
+                ],
+            )
+            .unwrap();
         let provider_evidence =
             OnboardingProviderExecEvidence::new(711, "birth-711".to_owned()).unwrap();
         let exec_proven = state

@@ -8,7 +8,7 @@ source-installed operator beta. D17 shell-first managed-session onboarding is
 the approved next checkpoint. Its D17.0 falsification studies, D17.2 test-only
 ownership/private-runtime model, dormant presentation-private marker-backed
 materialization/evidence storage, marker-to-state prepare/consume broker,
-typed no-provider-effect helper fences, and dormant D17.3 grammar,
+typed no-provider-effect helper and post-exec reconciliation fences, and dormant D17.3 grammar,
 command-classification, onboarding-phase, capability-journal, atomic
 reservation, and ownership-consumption foundations are in progress; no D17
 user-facing behavior or provider launch path is

@@ -236,6 +236,7 @@ fn boot_provenance() -> String {
 #[cfg(test)]
 mod tests {
     use std::{
+        cell::RefCell,
         collections::BTreeMap,
         ffi::OsString,
         fs::{self, OpenOptions},
@@ -249,6 +250,10 @@ mod tests {
     use super::{BrokerError, PrepareContext, WorktreeInspector, consume, prepare};
     use crate::{
         d17_helper::{begin_provider_preparation, record_codex_provider_exec_started},
+        d17_reconcile::{
+            ExpectedProviderExecutable, ProviderExecutableProbe, ReconcileError,
+            prove_provider_exec,
+        },
         domain::{IdGenerator, ProviderKind, Revision, RuntimeId},
         provisional::{
             PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, SlotGeneration,
@@ -311,7 +316,7 @@ mod tests {
     }
 
     struct ShellTmux {
-        cwd: PathBuf,
+        cwd: RefCell<PathBuf>,
     }
 
     impl TmuxClient for ShellTmux {
@@ -327,7 +332,9 @@ mod tests {
                     match invocation.arguments.last().and_then(|value| value.to_str()) {
                         Some("#{pane_id}") => "%17\n".to_owned(),
                         Some("#{pane_pid}") => "4242\n".to_owned(),
-                        Some("#{pane_current_path}") => format!("{}\n", self.cwd.display()),
+                        Some("#{pane_current_path}") => {
+                            format!("{}\n", self.cwd.borrow().display())
+                        }
                         _ => {
                             return Err(RuntimeError::TmuxRejected(
                                 "invalid fixture field".to_owned(),
@@ -352,6 +359,16 @@ mod tests {
 
     struct FixtureWorktreeInspector {
         registration: RepositoryRegistration,
+    }
+
+    struct FixtureExecutableProbe {
+        executable: PathBuf,
+    }
+
+    impl ProviderExecutableProbe for FixtureExecutableProbe {
+        fn executable_for_pid(&self, pid: u32) -> Result<Option<PathBuf>, ReconcileError> {
+            Ok((pid == 4242).then(|| self.executable.clone()))
+        }
     }
 
     impl WorktreeInspector for FixtureWorktreeInspector {
@@ -384,6 +401,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the complete dormant D17 authority handoff is one auditable fixture"
+    )]
     fn broker_reserves_and_consumes_once_after_exact_marker_shell_and_grammar_proof() {
         let temporary = tempfile::tempdir().unwrap();
         let state_path = temporary.path().join("state");
@@ -415,7 +436,7 @@ mod tests {
         )
         .unwrap();
         let tmux = ShellTmux {
-            cwd: shell_cwd.clone(),
+            cwd: RefCell::new(shell_cwd.clone()),
         };
         let process_probe = ShellProbe;
         let runtime = PrivateRuntime::new(&tmux, &process_probe, slot.runtime_paths().clone());
@@ -477,16 +498,77 @@ mod tests {
         .unwrap();
         assert_eq!(exec_fence.operation_id(), handoff.operation_id());
         assert_eq!(exec_fence.runtime_id(), slot.candidate_runtime_id());
-        assert_eq!(
-            read_marker(&state_path, &presentation).unwrap().phase(),
-            ProvisionalPhase::RuntimeOwnedLaunching
-        );
         assert!(matches!(
             consume(&mut state, &provisional_lease, &context, &token, 11),
             Err(BrokerError::Slot(
                 crate::provisional::SlotError::HandoffUnavailable
             ))
         ));
+        let executable = temporary.path().join("synthetic-codex");
+        fs::write(&executable, b"#!/bin/sh\nexit 0\n").unwrap();
+        let unexpected_executable = temporary.path().join("synthetic-unexpected");
+        fs::write(&unexpected_executable, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&unexpected_executable, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let expected_executable =
+            ExpectedProviderExecutable::new(ProviderKind::Codex, &executable).unwrap();
+        assert!(matches!(
+            prove_provider_exec(
+                &mut state,
+                &provisional_lease,
+                &presentation,
+                &runtime,
+                &ShellGroup,
+                &expected_executable,
+                &FixtureExecutableProbe {
+                    executable: unexpected_executable.clone(),
+                },
+            ),
+            Err(ReconcileError::ProviderCwdMismatch),
+        ));
+        assert_eq!(
+            read_marker(&state_path, &presentation).unwrap().phase(),
+            ProvisionalPhase::RuntimeOwnedLaunching,
+            "a cwd mismatch must not advance the durable or marker proof phase"
+        );
+        *tmux.cwd.borrow_mut() = repository_root.canonicalize().unwrap();
+        assert!(matches!(
+            prove_provider_exec(
+                &mut state,
+                &provisional_lease,
+                &presentation,
+                &runtime,
+                &ShellGroup,
+                &expected_executable,
+                &FixtureExecutableProbe {
+                    executable: unexpected_executable,
+                },
+            ),
+            Err(ReconcileError::ProviderExecutableMismatch),
+        ));
+        assert_eq!(
+            read_marker(&state_path, &presentation).unwrap().phase(),
+            ProvisionalPhase::RuntimeOwnedLaunching,
+            "an executable mismatch must not advance the durable or marker proof phase"
+        );
+        prove_provider_exec(
+            &mut state,
+            &provisional_lease,
+            &presentation,
+            &runtime,
+            &ShellGroup,
+            &expected_executable,
+            &FixtureExecutableProbe { executable },
+        )
+        .unwrap();
+        assert_eq!(
+            read_marker(&state_path, &presentation).unwrap().phase(),
+            ProvisionalPhase::ProviderExecProven
+        );
         assert!(presentation.join(PROVISIONAL_MARKER_FILE).is_file());
     }
 }

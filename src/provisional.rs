@@ -708,6 +708,11 @@ impl ProvisionalSlot {
         self.phase
     }
 
+    #[must_use]
+    pub(crate) const fn handoff_request(&self) -> Option<Uuid> {
+        self.handoff_request
+    }
+
     /// Repeats the exact private pane/process comparison required before a
     /// broker or helper may use this marker. Current cwd is deliberately live
     /// evidence rather than a stored cwd history.
@@ -823,7 +828,7 @@ impl ProvisionalSlot {
         Ok(())
     }
 
-    fn prove_provider_exec(&mut self) -> Result<(), SlotError> {
+    pub(crate) fn prove_provider_exec(&mut self) -> Result<(), SlotError> {
         if self.phase != ProvisionalPhase::RuntimeOwnedLaunching {
             return Err(SlotError::ProviderExecProofUnavailable);
         }

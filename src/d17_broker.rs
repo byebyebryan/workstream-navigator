@@ -297,7 +297,7 @@ mod tests {
         domain::{IdGenerator, ProviderKind, Revision, RuntimeId},
         provisional::{
             PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, SlotGeneration,
-            materialize_private_shell, read_marker,
+            materialize_private_shell, read_marker, retire_provider_exec_proven_marker,
         },
         repository::{RepositoryError, RepositoryRegistration},
         runtime::{
@@ -688,5 +688,16 @@ mod tests {
             ProvisionalPhase::ProviderExecProven,
             "a state-before-marker crash is repaired without probing the provider again"
         );
+        let proven = read_marker(&state_path, &presentation).unwrap();
+        retire_provider_exec_proven_marker(&state, &provisional_lease, &presentation, &proven)
+            .unwrap();
+        assert!(matches!(
+            read_marker(&state_path, &presentation),
+            Err(crate::provisional::SlotError::MarkerUnavailable)
+        ));
+        assert!(matches!(
+            runtime.probe().unwrap(),
+            crate::runtime::RuntimeProbe::Live { .. }
+        ));
     }
 }

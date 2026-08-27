@@ -17,7 +17,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph},
+    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
 };
 
 use crate::{
@@ -92,6 +92,15 @@ pub(crate) enum D17Command {
     },
 }
 
+/// The exact bordered list geometry shared by D17 rendering and mouse hit
+/// testing. Footer growth therefore cannot shift the clickable card region
+/// away from what is visible on screen.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct D17ListGeometry {
+    pub(crate) outer: Rect,
+    pub(crate) inner: Rect,
+}
+
 /// The process-local D17 cursor and page state. It intentionally contains no
 /// provider chooser, browser cursor, directory selection, or Project action.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -131,6 +140,12 @@ impl D17Navigator {
         self.model.replace_snapshot(snapshot);
     }
 
+    /// Transfers the presentation-local cursor to the managed card created by
+    /// one exact provisional Runtime promotion.
+    pub(crate) fn select_runtime(&mut self, runtime_id: RuntimeId) -> bool {
+        self.model.select_runtime(runtime_id)
+    }
+
     /// Sets bounded presentation-local guidance after an unavailable D17
     /// action. This never crosses into provider panes or durable state.
     pub(crate) fn set_guidance(&mut self, guidance: &'static str) {
@@ -140,6 +155,29 @@ impl D17Navigator {
     #[must_use]
     pub(crate) fn handle_key(&mut self, key: KeyCode) -> D17Command {
         self.model.handle_key(key)
+    }
+
+    /// Computes the exact list geometry used by the renderer for hit testing.
+    #[must_use]
+    pub(crate) fn list_geometry(&self, area: Rect) -> D17ListGeometry {
+        list_geometry(area, &self.model)
+    }
+
+    /// Resolves one terminal coordinate to an actionable D17 card. Both lines
+    /// of a card resolve to the same identity; project headings and footer
+    /// coordinates deliberately do not resolve.
+    #[must_use]
+    pub(crate) fn row_at(&self, area: Rect, column: u16, row: u16) -> Option<D17RowId> {
+        let geometry = self.list_geometry(area);
+        if column < geometry.inner.x
+            || row < geometry.inner.y
+            || column >= geometry.inner.x.saturating_add(geometry.inner.width)
+            || row >= geometry.inner.y.saturating_add(geometry.inner.height)
+        {
+            return None;
+        }
+        self.model
+            .row_id_at_render_line(usize::from(row.saturating_sub(geometry.inner.y)))
     }
 
     /// Renders the D17-only Workstreams/Archived surface. The renderer has no
@@ -200,6 +238,53 @@ impl D17Model {
 
     pub(crate) fn select_previous(&mut self) {
         self.select_offset(-1);
+    }
+
+    /// Selects one exact visible card and performs its primary action. This is
+    /// the mouse equivalent of selecting the row and pressing Enter.
+    pub(crate) fn activate_row(&mut self, row_id: D17RowId) -> D17Command {
+        if !self.rows().iter().any(|row| row.id() == Some(row_id)) {
+            return D17Command::None;
+        }
+        self.selected = Some(row_id);
+        self.activate_selected()
+    }
+
+    /// Selects the active managed card that owns one exact Runtime. The
+    /// Runtime identity comes from the consumed provisional marker, not from
+    /// card ordering or provider metadata.
+    pub(crate) fn select_runtime(&mut self, runtime_id: RuntimeId) -> bool {
+        let workstream_id = self.snapshot.workstreams.iter().find_map(|workstream| {
+            (!workstream.archived
+                && workstream
+                    .runtime
+                    .is_some_and(|runtime| runtime.runtime_id == runtime_id))
+            .then_some(workstream.workstream_id)
+        });
+        let Some(workstream_id) = workstream_id else {
+            return false;
+        };
+        self.page = D17Page::Workstreams;
+        self.selected = Some(D17RowId::Workstream(workstream_id));
+        true
+    }
+
+    /// Resolves one rendered list line to its exact actionable identity.
+    /// Project headings occupy one line and both card kinds occupy two.
+    #[must_use]
+    pub(crate) fn row_id_at_render_line(&self, line: usize) -> Option<D17RowId> {
+        let mut cursor = 0_usize;
+        for row in self.rows() {
+            let height = match row {
+                D17Row::ProjectHeader { .. } => 1,
+                D17Row::ProvisionalShell | D17Row::Workstream(_) => 2,
+            };
+            if (cursor..cursor.saturating_add(height)).contains(&line) {
+                return row.id();
+            }
+            cursor = cursor.saturating_add(height);
+        }
+        None
     }
 
     /// Handles only D17's direct page/navigation/session commands. Native
@@ -338,9 +423,10 @@ fn rows_for(snapshot: &D17Snapshot, page: D17Page) -> Vec<D17Row> {
 }
 
 fn render_model(frame: &mut Frame<'_>, area: Rect, model: &D17Model) {
+    let footer_height = footer_height(area, model);
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .constraints([Constraint::Min(1), Constraint::Length(footer_height)])
         .split(area);
     let selected = model.selected();
     let rows = model.rows();
@@ -370,10 +456,35 @@ fn render_model(frame: &mut Frame<'_>, area: Rect, model: &D17Model) {
         ),
         layout[0],
     );
-    frame.render_widget(
-        Paragraph::new(controls(model)).style(Style::default().fg(Color::Gray)),
-        layout[1],
-    );
+    if let Some(guidance) = model.guidance() {
+        let controls_height = controls_height(model, layout[1].width).min(layout[1].height);
+        let guidance_height = layout[1].height.saturating_sub(controls_height);
+        let footer = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(guidance_height),
+                Constraint::Length(controls_height),
+            ])
+            .split(layout[1]);
+        frame.render_widget(
+            Paragraph::new(guidance).wrap(Wrap { trim: true }).block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::Yellow))
+                    .title(Span::styled(" Status ", Style::default().fg(Color::Yellow))),
+            ),
+            footer[0],
+        );
+        frame.render_widget(
+            Paragraph::new(controls_lines(model, footer[1].width)),
+            footer[1],
+        );
+    } else {
+        frame.render_widget(
+            Paragraph::new(controls_lines(model, layout[1].width)),
+            layout[1],
+        );
+    }
 }
 
 fn row_lines(row: &D17Row) -> Vec<Line<'static>> {
@@ -463,8 +574,8 @@ const fn runtime_status_label(status: crate::domain::RuntimeStatus) -> &'static 
     }
 }
 
-fn controls(model: &D17Model) -> String {
-    let controls = match model.page() {
+fn control_bindings(model: &D17Model) -> &'static [(&'static str, &'static str)] {
+    match model.page() {
         D17Page::Workstreams => match model.selected() {
             Some(D17RowId::Workstream(workstream_id))
                 if model
@@ -473,26 +584,145 @@ fn controls(model: &D17Model) -> String {
                         !workstream.archived && workstream.onboarding.is_none()
                     }) =>
             {
-                " ↑↓ select  ·  Enter open  ·  n new here  ·  . archived  ·  q quit"
+                &[
+                    ("↑↓", "select"),
+                    ("Enter", "open"),
+                    ("n", "new here"),
+                    (".", "archived"),
+                    ("q", "quit"),
+                ]
             }
-            Some(D17RowId::ProvisionalShell) => {
-                " ↑↓ select  ·  Enter shell  ·  . archived  ·  q quit"
-            }
-            _ => " ↑↓ select  ·  . archived  ·  q quit",
+            Some(D17RowId::ProvisionalShell) => &[
+                ("↑↓", "select"),
+                ("Enter", "shell"),
+                (".", "archived"),
+                ("q", "quit"),
+            ],
+            _ => &[("↑↓", "select"), (".", "archived"), ("q", "quit")],
         },
-        D17Page::Archived => " ↑↓ select  ·  w workstreams  ·  q quit",
-    };
-    model.guidance().map_or_else(
-        || controls.to_owned(),
-        |guidance| format!("{controls}  ·  {guidance}"),
-    )
+        D17Page::Archived => &[("↑↓", "select"), ("w", "workstreams"), ("q", "quit")],
+    }
+}
+
+fn controls_lines(model: &D17Model, width: u16) -> Vec<Line<'static>> {
+    let key = Style::default().fg(Color::Yellow);
+    let label = Style::default().fg(Color::Gray);
+    let width = usize::from(width.max(1));
+    let mut lines = Vec::new();
+    let mut spans = vec![Span::raw(" ")];
+    let mut used = 1_usize;
+    for (shortcut, description) in control_bindings(model) {
+        let binding_width = display_width(shortcut)
+            .saturating_add(1)
+            .saturating_add(display_width(description));
+        let separator_width = usize::from(used > 1) * 2;
+        if used > 1
+            && used
+                .saturating_add(separator_width)
+                .saturating_add(binding_width)
+                > width
+        {
+            lines.push(Line::from(spans));
+            spans = vec![Span::raw(" ")];
+            used = 1;
+        } else if separator_width > 0 {
+            spans.push(Span::raw("  "));
+            used = used.saturating_add(separator_width);
+        }
+        spans.push(Span::styled((*shortcut).to_owned(), key));
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled((*description).to_owned(), label));
+        used = used.saturating_add(binding_width);
+    }
+    lines.push(Line::from(spans));
+    lines
+}
+
+fn controls_height(model: &D17Model, width: u16) -> u16 {
+    u16::try_from(controls_lines(model, width).len())
+        .unwrap_or(u16::MAX)
+        .max(1)
+}
+
+fn footer_height(area: Rect, model: &D17Model) -> u16 {
+    let controls = controls_height(model, area.width);
+    let desired = model.guidance().map_or(controls, |guidance| {
+        status_block_height(area, guidance).saturating_add(controls)
+    });
+    desired.min(area.height.saturating_sub(1))
+}
+
+fn status_block_height(area: Rect, guidance: &str) -> u16 {
+    let content_width = usize::from(area.width.saturating_sub(2).max(1));
+    let content_height = wrapped_display_line_count(guidance, content_width).max(1);
+    u16::try_from(content_height)
+        .unwrap_or(u16::MAX)
+        .saturating_add(2)
+        .min(area.height.saturating_sub(2))
+}
+
+fn wrapped_display_line_count(value: &str, width: usize) -> usize {
+    debug_assert!(width > 0);
+    value
+        .split('\n')
+        .map(|line| wrapped_logical_line_count(line, width))
+        .sum()
+}
+
+fn wrapped_logical_line_count(value: &str, width: usize) -> usize {
+    let mut lines = 1_usize;
+    let mut used = 0_usize;
+    for word in value.split_whitespace() {
+        let word_width = display_width(word);
+        if used > 0 && used.saturating_add(1).saturating_add(word_width) <= width {
+            used = used.saturating_add(1).saturating_add(word_width);
+            continue;
+        }
+        if used > 0 {
+            lines = lines.saturating_add(1);
+        }
+        if word_width > width {
+            lines = lines.saturating_add(word_width.saturating_sub(1) / width);
+            used = word_width % width;
+            if used == 0 {
+                used = width;
+            }
+        } else {
+            used = word_width;
+        }
+    }
+    lines
+}
+
+fn display_width(value: &str) -> usize {
+    Line::raw(value).width()
+}
+
+fn list_geometry(area: Rect, model: &D17Model) -> D17ListGeometry {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(footer_height(area, model)),
+        ])
+        .split(area);
+    let outer = vertical[0];
+    let inner = Rect::new(
+        outer.x.saturating_add(1),
+        outer.y.saturating_add(1),
+        outer.width.saturating_sub(2),
+        outer.height.saturating_sub(2),
+    );
+    D17ListGeometry { outer, inner }
 }
 
 #[cfg(test)]
 mod tests {
     use uuid::Uuid;
 
-    use super::{D17Command, D17Model, D17Page, D17Row, D17RowId};
+    use ratatui::layout::Rect;
+
+    use super::{D17Command, D17Model, D17Navigator, D17Page, D17Row, D17RowId};
     use crate::{
         d17_snapshot::{
             D17LocationSnapshot, D17OnboardingStatus, D17ProjectSnapshot, D17RuntimeSnapshot,
@@ -587,6 +817,126 @@ mod tests {
                 .iter()
                 .flat_map(|line| &line.spans)
                 .all(|span| !span.content.contains("picker"))
+        );
+    }
+
+    #[test]
+    fn both_lines_of_each_card_are_exact_mouse_targets_but_headers_are_not() {
+        let (snapshot, active, _) = snapshot();
+        let navigator = D17Navigator::new(snapshot);
+        let area = Rect::new(0, 0, 32, 24);
+        let geometry = navigator.list_geometry(area);
+        let x = geometry.inner.x;
+
+        assert_eq!(
+            navigator.row_at(area, x, geometry.inner.y),
+            Some(D17RowId::ProvisionalShell)
+        );
+        assert_eq!(
+            navigator.row_at(area, x, geometry.inner.y.saturating_add(1)),
+            Some(D17RowId::ProvisionalShell)
+        );
+        assert_eq!(
+            navigator.row_at(area, x, geometry.inner.y.saturating_add(2)),
+            None
+        );
+        assert_eq!(
+            navigator.row_at(area, x, geometry.inner.y.saturating_add(3)),
+            Some(D17RowId::Workstream(active))
+        );
+        assert_eq!(
+            navigator.row_at(area, x, geometry.inner.y.saturating_add(4)),
+            Some(D17RowId::Workstream(active))
+        );
+        assert_eq!(
+            navigator.row_at(
+                area,
+                x,
+                geometry.outer.y.saturating_add(geometry.outer.height)
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn mouse_activation_selects_the_exact_managed_card_and_requests_attach() {
+        let (mut snapshot, active, _) = snapshot();
+        let runtime_id = RuntimeId::from(Uuid::from_u128(5));
+        snapshot.workstreams[0].runtime = Some(D17RuntimeSnapshot {
+            runtime_id,
+            status: RuntimeStatus::Idle,
+            revision: Revision::INITIAL,
+        });
+        let mut model = D17Model::new(snapshot);
+
+        assert_eq!(
+            model.activate_row(D17RowId::Workstream(active)),
+            D17Command::Attach {
+                workstream_id: active,
+                expected_workstream_revision: Revision::INITIAL,
+                runtime_id,
+                expected_runtime_revision: Revision::INITIAL,
+            }
+        );
+        assert_eq!(model.selected(), Some(D17RowId::Workstream(active)));
+    }
+
+    #[test]
+    fn promotion_transfers_selection_from_shell_to_its_managed_runtime_card() {
+        let (snapshot, active, _) = snapshot();
+        let mut model = D17Model::new(snapshot.clone());
+        let runtime_id = RuntimeId::from(Uuid::from_u128(5));
+        let mut promoted = snapshot;
+        promoted.workstreams[0].runtime = Some(D17RuntimeSnapshot {
+            runtime_id,
+            status: RuntimeStatus::Starting,
+            revision: Revision::INITIAL,
+        });
+
+        model.replace_snapshot(promoted);
+        assert_eq!(model.selected(), Some(D17RowId::ProvisionalShell));
+        assert!(model.select_runtime(runtime_id));
+        assert_eq!(model.selected(), Some(D17RowId::Workstream(active)));
+    }
+
+    #[test]
+    fn narrow_footer_keeps_every_complete_binding_visible() {
+        let (mut snapshot, _, _) = snapshot();
+        snapshot.workstreams[0].runtime = Some(D17RuntimeSnapshot {
+            runtime_id: RuntimeId::from(Uuid::from_u128(5)),
+            status: RuntimeStatus::Idle,
+            revision: Revision::INITIAL,
+        });
+        let mut model = D17Model::new(snapshot);
+        model.select_next();
+
+        let lines = super::controls_lines(&model, 32);
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        for expected in [
+            "↑↓ select",
+            "Enter open",
+            "n new here",
+            ". archived",
+            "q quit",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "missing {expected:?}: {rendered}"
+            );
+        }
+        assert!(lines.iter().all(|line| line.width() <= 32));
+        assert_eq!(
+            super::controls_height(&model, 32),
+            u16::try_from(lines.len()).unwrap()
         );
     }
 

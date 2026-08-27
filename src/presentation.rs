@@ -20,7 +20,10 @@ use crate::{
     domain::{OnboardingPhase, Revision, RuntimeId, WorkstreamId},
     private_tmux::{TERMINAL_CAPABILITY_CONFIG, copy_mode_scroll_config},
     process::{BoundedProcessError, output_bounded},
-    provisional::{PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, read_marker},
+    provisional::{
+        PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, read_marker,
+        retire_provider_exec_proven_marker,
+    },
     runtime::{LinuxProcessProbe, PrivateRuntime, RuntimePaths, SystemTmux},
     state::{
         D16State, ProvisionalLease, StateRoot, TransitionLease,
@@ -423,8 +426,10 @@ pub(crate) fn classify_d17_provisional_inventory(
         }
     }
     if operations.iter().any(|operation| {
-        operation.phase != OnboardingPhase::RolledBack
-            && !matched_operations.contains(&operation.operation_id.as_uuid())
+        !matches!(
+            operation.phase,
+            OnboardingPhase::RolledBack | OnboardingPhase::ProviderExecProven
+        ) && !matched_operations.contains(&operation.operation_id.as_uuid())
     }) {
         return Err(D17ProvisionalInventoryError::Ambiguous);
     }
@@ -2582,6 +2587,25 @@ impl Presentation {
         let slot = read_marker(&self.state_root, &self.paths.directory).map_err(|_| {
             PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
         })?;
+        if slot.phase() == ProvisionalPhase::ProviderExecProven {
+            let root = StateRoot::select(&self.state_root);
+            let mut state = open_d17_current_only(&root).map_err(|_| {
+                PresentationError::ControlRefused("D17 completed onboarding cleanup is unavailable")
+            })?;
+            let provisional_lease = state.acquire_d17_provisional_lease().map_err(|_| {
+                PresentationError::ControlRefused("D17 completed onboarding cleanup is unavailable")
+            })?;
+            retire_provider_exec_proven_marker(
+                &state,
+                &provisional_lease,
+                &self.paths.directory,
+                &slot,
+            )
+            .map_err(|_| {
+                PresentationError::ControlRefused("D17 completed onboarding cleanup is unavailable")
+            })?;
+            return Ok(None);
+        }
         if slot.phase() != ProvisionalPhase::Materialized {
             return Err(PresentationError::ControlRefused(
                 "D17 provisional shell cleanup requires onboarding recovery",
@@ -7324,6 +7348,29 @@ mod tests {
         assert_eq!(
             classify_d17_provisional_inventory(other.path(), &[], &[]),
             Err(D17ProvisionalInventoryError::Ambiguous)
+        );
+
+        let completed = tempfile::tempdir().unwrap();
+        set_mode(completed.path(), 0o700).unwrap();
+        let completed_runtime = crate::domain::RuntimeId::from(uuid::Uuid::from_u128(86));
+        let completed_operation = D17OnboardingOperationInventory {
+            operation_id: crate::domain::OperationId::from(uuid::Uuid::from_u128(87)),
+            workstream_id: WorkstreamId::from(uuid::Uuid::from_u128(88)),
+            runtime_id: completed_runtime,
+            phase: OnboardingPhase::ProviderExecProven,
+        };
+        assert_eq!(
+            classify_d17_provisional_inventory(
+                completed.path(),
+                &[RuntimePaths::for_runtime(
+                    completed.path(),
+                    completed_runtime
+                )],
+                &[completed_operation],
+            )
+            .unwrap(),
+            D17ProvisionalInventory::Vacant,
+            "a terminal onboarding journal without its retired marker leaves the singleton vacant"
         );
     }
 

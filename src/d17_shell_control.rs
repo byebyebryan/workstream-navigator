@@ -47,7 +47,7 @@ use crate::{
     onboarding::{ShellCommandDecision, classify_shell_command},
     presentation::Presentation,
     provider::codex::profile::{OBSERVER_PROFILE_NAME, ObserverProfile, ProfileInspection},
-    provisional::read_marker,
+    provisional::{HostRetirementError, read_marker, retire_provider_exec_proven_marker},
     runtime::{LinuxProcessProbe, PrivateRuntime, ProcessGroupProbe, SystemTmux},
     state::{D16State, IntegrationLifecycle, StateRoot, open_d17_current_only},
 };
@@ -138,6 +138,8 @@ pub(crate) enum ProviderExecReconciliationError {
     State,
     #[error("D17 provider-exec proof is unavailable")]
     Reconcile(#[from] ReconcileError),
+    #[error("D17 completed onboarding retirement is unavailable")]
+    Retirement(#[from] HostRetirementError),
     #[error("D17 OpenCode observer handoff is unavailable")]
     Observer,
 }
@@ -195,6 +197,12 @@ pub(crate) fn reconcile_provider_exec_from_presentation(
     let slot = read_marker(state.root(), account_context.presentation_directory())
         .map_err(ReconcileError::from)?;
     if slot.phase() == crate::provisional::ProvisionalPhase::ProviderExecProven {
+        retire_provider_exec_proven_marker(
+            &state,
+            &provisional_lease,
+            account_context.presentation_directory(),
+            &slot,
+        )?;
         return Ok(());
     }
     if slot.phase() != crate::provisional::ProvisionalPhase::RuntimeOwnedLaunching {
@@ -233,6 +241,14 @@ pub(crate) fn reconcile_provider_exec_from_presentation(
         &runtime,
         &process_probe,
         &process_probe,
+    )?;
+    let slot = read_marker(state.root(), account_context.presentation_directory())
+        .map_err(ReconcileError::from)?;
+    retire_provider_exec_proven_marker(
+        &state,
+        &provisional_lease,
+        account_context.presentation_directory(),
+        &slot,
     )?;
     Ok(())
 }

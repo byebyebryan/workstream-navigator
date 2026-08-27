@@ -21,7 +21,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    domain::{Revision, RuntimeId},
+    domain::{OperationId, Revision, RuntimeId},
     presentation::{
         D17ProvisionalInventory, D17ProvisionalInventoryError, Presentation,
         classify_d17_provisional_inventory,
@@ -133,6 +133,20 @@ pub(crate) enum HostInventoryError {
     Inventory(#[from] D17ProvisionalInventoryError),
 }
 
+/// Bounded refusal from retiring one terminal, Runtime-owned provisional
+/// marker. The retained onboarding journal and registered Runtime remain the
+/// authority; this operation removes only the presentation-private marker and
+/// never attaches, signals, parks, or removes the provider Runtime.
+#[derive(Debug, Error)]
+pub(crate) enum HostRetirementError {
+    #[error("D17 completed onboarding state is unavailable")]
+    State(#[from] StateError),
+    #[error("D17 completed onboarding marker is unavailable")]
+    Slot(#[from] SlotError),
+    #[error("D17 completed onboarding identity is unavailable")]
+    Identity,
+}
+
 /// Bounded refusal from the lease-held D17 shell materialization boundary.
 /// It intentionally retains neither the presentation directory nor candidate
 /// Runtime path, so a caller cannot turn an unavailable or occupied host into
@@ -181,6 +195,44 @@ pub(crate) fn classify_host_inventory(
     provisional_lease.revalidate_for_mutation(state.root())?;
     classify_d17_provisional_inventory(state.root(), &registered_runtime_paths, &operations)
         .map_err(HostInventoryError::from)
+}
+
+/// Retires the exact presentation-private marker after durable onboarding has
+/// reached `provider_exec_proven`. The stable host lease spans journal proof,
+/// marker identity proof, unlink, and directory durability. The adopted
+/// Runtime and terminal operation remain untouched.
+pub(crate) fn retire_provider_exec_proven_marker(
+    state: &D16State,
+    provisional_lease: &ProvisionalLease,
+    presentation_directory: &Path,
+    expected: &ProvisionalSlot,
+) -> Result<(), HostRetirementError> {
+    provisional_lease.revalidate_for_mutation(state.root())?;
+    expected.validate_lifecycle()?;
+    if expected.phase() != ProvisionalPhase::ProviderExecProven
+        || expected.runtime_paths()
+            != &RuntimePaths::for_runtime(state.root(), expected.candidate_runtime_id())
+    {
+        return Err(HostRetirementError::Identity);
+    }
+    let operation_id = expected
+        .handoff_request()
+        .map(OperationId::from)
+        .ok_or(HostRetirementError::Identity)?;
+    let target =
+        state.d17_onboarding_exec_proven_target_current(provisional_lease, operation_id)?;
+    if target.ownership().operation_id != operation_id
+        || target.ownership().runtime_id != expected.candidate_runtime_id()
+    {
+        return Err(HostRetirementError::Identity);
+    }
+    if read_marker(state.root(), presentation_directory)? != *expected {
+        return Err(HostRetirementError::Identity);
+    }
+    provisional_lease.revalidate_for_mutation(state.root())?;
+    remove_exact_marker(state.root(), presentation_directory, expected)?;
+    provisional_lease.revalidate_for_mutation(state.root())?;
+    Ok(())
 }
 
 /// Proves that this exact unregistered candidate may create its first private
@@ -589,6 +641,44 @@ pub(crate) fn update_marker(
         .and_then(|()| file.sync_all())
         .map_err(map_marker_io)?;
     validate_marker_file_matches_path(&file, &marker_path)?;
+    sync_directory(&presentation_directory)
+}
+
+fn remove_exact_marker(
+    state_root: &Path,
+    presentation_directory: &Path,
+    expected: &ProvisionalSlot,
+) -> Result<(), SlotError> {
+    let state_root = canonical_state_root(state_root)?;
+    let presentation_directory =
+        canonical_presentation_directory(&state_root, presentation_directory)?;
+    expected.validate_lifecycle()?;
+    let marker_path = marker_path(&state_root, &presentation_directory, expected)?;
+    let before = fs::symlink_metadata(&marker_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            SlotError::MarkerUnavailable
+        } else {
+            map_marker_io(error)
+        }
+    })?;
+    if !is_private_regular_file(&before) {
+        return Err(SlotError::MarkerOwnershipChanged);
+    }
+    let mut file = open_existing_private_marker(&marker_path)?;
+    let opened = file.metadata().map_err(map_marker_io)?;
+    if !is_private_regular_file(&opened) || !same_file_identity(&before, &opened) {
+        return Err(SlotError::MarkerOwnershipChanged);
+    }
+    if read_marker_from_open_file(&mut file, &state_root)? != *expected {
+        return Err(SlotError::MarkerOwnershipChanged);
+    }
+    validate_marker_file_matches_path(&file, &marker_path)?;
+    fs::remove_file(&marker_path).map_err(map_marker_io)?;
+    match fs::symlink_metadata(&marker_path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(map_marker_io(error)),
+        Ok(_) => return Err(SlotError::MarkerOwnershipChanged),
+    }
     sync_directory(&presentation_directory)
 }
 

@@ -18,11 +18,11 @@ use std::{
 };
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event},
+    event::{self, DisableMouseCapture, EnableMouseCapture, Event, MouseButton, MouseEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use thiserror::Error;
 
 use crate::{
@@ -50,8 +50,6 @@ pub(crate) enum D17NavigatorError {
     Snapshot(#[from] D17SnapshotError),
     #[error("D17 provisional shell is unavailable")]
     ProvisionalShellUnavailable,
-    #[error("D17 provider reconciliation is unavailable")]
-    ProviderReconciliationUnavailable,
     #[error("D17 same-location session creation is unavailable")]
     SameLocationSessionUnavailable,
 }
@@ -78,6 +76,8 @@ pub(crate) fn run_d17_navigator(
     let mut terminal = TerminalSession::enter().map_err(D17NavigatorError::Terminal)?;
     let mut redraw = true;
     let mut last_refresh = Instant::now();
+    let mut mouse_down = None;
+    let mut promoted_runtime = None;
 
     let quit = loop {
         if redraw {
@@ -87,96 +87,114 @@ pub(crate) fn run_d17_navigator(
                 .map_err(D17NavigatorError::Terminal)?;
             redraw = false;
         }
-        if event::poll(Duration::from_millis(100)).map_err(D17NavigatorError::Terminal)?
-            && let Event::Key(key) = event::read().map_err(D17NavigatorError::Terminal)?
-        {
-            match navigator.handle_key(key.code) {
-                D17Command::Quit => break true,
-                D17Command::MaterializeProvisionalShell => {
-                    if materialize_provisional_shell(root, &presentation).is_ok() {
-                        if presentation.focus_provider().is_err() {
-                            navigator
-                                .set_guidance("Shell opened; provider-pane focus is unavailable");
-                        }
-                    } else {
-                        navigator
-                            .set_guidance("New session shell unavailable; exact state required");
+        if event::poll(Duration::from_millis(100)).map_err(D17NavigatorError::Terminal)? {
+            match event::read().map_err(D17NavigatorError::Terminal)? {
+                Event::Key(key) => {
+                    let command = navigator.handle_key(key.code);
+                    if execute_d17_command(
+                        command,
+                        root,
+                        &mut navigator,
+                        &presentation,
+                        FocusAfter::Provider,
+                    ) {
+                        break true;
                     }
+                    redraw = true;
                 }
-                D17Command::Attach {
-                    workstream_id,
-                    expected_workstream_revision,
-                    runtime_id,
-                    expected_runtime_revision,
-                } => {
-                    if presentation
-                        .attach_d17_workstream(
-                            workstream_id,
-                            expected_workstream_revision,
-                            runtime_id,
-                            expected_runtime_revision,
-                        )
-                        .is_ok()
-                    {
-                        if presentation.focus_provider().is_err() {
-                            navigator.set_guidance(
-                                "Managed session opened; provider-pane focus is unavailable",
-                            );
+                Event::Mouse(mouse) => {
+                    let command = match mouse.kind {
+                        MouseEventKind::ScrollUp => {
+                            navigator.model_mut().select_previous();
+                            None
                         }
-                    } else {
+                        MouseEventKind::ScrollDown => {
+                            navigator.model_mut().select_next();
+                            None
+                        }
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            let size = terminal
+                                .terminal
+                                .size()
+                                .map_err(D17NavigatorError::Terminal)?;
+                            mouse_down = navigator.row_at(
+                                Rect::new(0, 0, size.width, size.height),
+                                mouse.column,
+                                mouse.row,
+                            );
+                            None
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            let size = terminal
+                                .terminal
+                                .size()
+                                .map_err(D17NavigatorError::Terminal)?;
+                            let target = navigator.row_at(
+                                Rect::new(0, 0, size.width, size.height),
+                                mouse.column,
+                                mouse.row,
+                            );
+                            let pressed = mouse_down.take();
+                            if pressed.is_some() && pressed == target {
+                                pressed.map(|row| navigator.model_mut().activate_row(row))
+                            } else if target.is_none() {
+                                presentation.focus_navigator().ok();
+                                None
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+                    if let Some(command) = command
+                        && execute_d17_command(
+                            command,
+                            root,
+                            &mut navigator,
+                            &presentation,
+                            FocusAfter::Navigator,
+                        )
+                    {
+                        break true;
+                    }
+                    redraw = true;
+                }
+                Event::Resize(_, _) => {
+                    if presentation.set_default_navigator_width().is_err() {
                         navigator.set_guidance(
-                            "Managed session is unavailable; exact Runtime evidence required",
+                            "Navigator resize is unavailable; exact presentation evidence changed",
+                        );
+                    }
+                    redraw = true;
+                }
+                _ => {}
+            }
+        }
+        if last_refresh.elapsed() >= Duration::from_millis(500) {
+            match refresh_provider_exec(root, &presentation) {
+                ProviderExecRefresh::Idle => {}
+                ProviderExecRefresh::RuntimeOwned {
+                    runtime_id,
+                    reconciled,
+                } => {
+                    promoted_runtime = Some(runtime_id);
+                    if !reconciled {
+                        navigator.set_guidance(
+                            "Managed session reconciliation is unavailable; exact recovery required",
                         );
                     }
                 }
-                D17Command::NewAtSameLocation {
-                    source_workstream_id,
-                    expected_workstream_revision,
-                    provider,
-                } => match start_d17_same_location(
-                    root,
-                    source_workstream_id,
-                    expected_workstream_revision,
-                    provider,
-                ) {
-                    Ok((snapshot, attachment)) => {
-                        navigator.replace_snapshot(snapshot);
-                        if presentation
-                            .attach_d17_workstream(
-                                attachment.workstream_id,
-                                attachment.workstream_revision,
-                                attachment.runtime_id,
-                                attachment.runtime_revision,
-                            )
-                            .is_ok()
-                        {
-                            if presentation.focus_provider().is_err() {
-                                navigator.set_guidance(
-                                    "New session started; provider-pane focus is unavailable",
-                                );
-                            }
-                        } else {
-                            navigator.set_guidance(
-                                "New session started; exact Runtime attachment is unavailable",
-                            );
-                        }
-                    }
-                    Err(_) => navigator.set_guidance(
-                        "New session is unavailable; selected provider and Location are required",
-                    ),
-                },
-                D17Command::None => {}
-            }
-            redraw = true;
-        }
-        if last_refresh.elapsed() >= Duration::from_millis(500) {
-            if reconcile_provider_exec_if_ready(root, &presentation).is_err() {
-                navigator.set_guidance(
+                ProviderExecRefresh::Unavailable => navigator.set_guidance(
                     "Managed session reconciliation is unavailable; exact recovery required",
-                );
+                ),
             }
             if let Ok(snapshot) = read_snapshot(root) {
                 navigator.replace_snapshot(snapshot);
+                if let Some(runtime_id) = promoted_runtime
+                    && navigator.select_runtime(runtime_id)
+                {
+                    promoted_runtime = None;
+                }
             }
             redraw = true;
             last_refresh = Instant::now();
@@ -187,6 +205,110 @@ pub(crate) fn run_d17_navigator(
         presentation.stop_d17_session()?;
     }
     Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FocusAfter {
+    Provider,
+    Navigator,
+}
+
+/// Executes one D17 model command while keeping keyboard- and mouse-originated
+/// focus policy explicit. Mouse activation switches the provider attachment
+/// but leaves keyboard focus in Navigator.
+#[allow(
+    clippy::too_many_lines,
+    reason = "The small D17 command set keeps exact attachment and focus outcomes in one controller seam."
+)]
+fn execute_d17_command(
+    command: D17Command,
+    root: &StateRoot,
+    navigator: &mut D17Navigator,
+    presentation: &Presentation,
+    focus_after: FocusAfter,
+) -> bool {
+    match command {
+        D17Command::Quit => true,
+        D17Command::MaterializeProvisionalShell => {
+            if materialize_provisional_shell(root, presentation).is_ok() {
+                if focus_after == FocusAfter::Provider && presentation.focus_provider().is_err() {
+                    navigator.set_guidance("Shell opened; provider-pane focus is unavailable");
+                }
+            } else {
+                navigator.set_guidance("New session shell unavailable; exact state required");
+            }
+            false
+        }
+        D17Command::Attach {
+            workstream_id,
+            expected_workstream_revision,
+            runtime_id,
+            expected_runtime_revision,
+        } => {
+            if presentation
+                .attach_d17_workstream(
+                    workstream_id,
+                    expected_workstream_revision,
+                    runtime_id,
+                    expected_runtime_revision,
+                )
+                .is_ok()
+            {
+                if focus_after == FocusAfter::Provider && presentation.focus_provider().is_err() {
+                    navigator
+                        .set_guidance("Managed session opened; provider-pane focus is unavailable");
+                }
+            } else {
+                navigator.set_guidance(
+                    "Managed session is unavailable; exact Runtime evidence required",
+                );
+            }
+            false
+        }
+        D17Command::NewAtSameLocation {
+            source_workstream_id,
+            expected_workstream_revision,
+            provider,
+        } => {
+            match start_d17_same_location(
+                root,
+                source_workstream_id,
+                expected_workstream_revision,
+                provider,
+            ) {
+                Ok((snapshot, attachment)) => {
+                    navigator.replace_snapshot(snapshot);
+                    navigator.select_runtime(attachment.runtime_id);
+                    if presentation
+                        .attach_d17_workstream(
+                            attachment.workstream_id,
+                            attachment.workstream_revision,
+                            attachment.runtime_id,
+                            attachment.runtime_revision,
+                        )
+                        .is_ok()
+                    {
+                        if focus_after == FocusAfter::Provider
+                            && presentation.focus_provider().is_err()
+                        {
+                            navigator.set_guidance(
+                                "New session started; provider-pane focus is unavailable",
+                            );
+                        }
+                    } else {
+                        navigator.set_guidance(
+                            "New session started; exact Runtime attachment is unavailable",
+                        );
+                    }
+                }
+                Err(_) => navigator.set_guidance(
+                    "New session is unavailable; selected provider and Location are required",
+                ),
+            }
+            false
+        }
+        D17Command::None => false,
+    }
 }
 
 /// One exact post-start attachment claim for a session created from a selected
@@ -267,30 +389,48 @@ fn start_d17_same_location(
     Ok((snapshot, attachment))
 }
 
-/// Calls the post-exec controller only for the one marker phase in which the
-/// helper already transferred Runtime ownership and committed its final exec
-/// fence. A missing marker is the normal idle-card state; all other valid
-/// provisional phases remain owned by the account shell or completed journal.
+/// Result of observing and reconciling the presentation's provisional marker.
+/// Runtime ownership is reported independently from native-exec reconciliation
+/// so the selected shell can become its exact managed card immediately.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProviderExecRefresh {
+    Idle,
+    RuntimeOwned {
+        runtime_id: RuntimeId,
+        reconciled: bool,
+    },
+    Unavailable,
+}
+
+/// Calls the post-exec controller only after the helper has transferred
+/// Runtime ownership. A missing marker is the normal idle-card state; all
+/// other valid provisional phases remain owned by the account shell or
+/// completed journal.
 ///
 /// The reconciliation adapter never creates a provider process. Its `OpenCode`
 /// branch may start only the already-authorized detached observer after exact
 /// native-exec proof, and it cannot activate attachment until that observer is
 /// both ready and currently live.
-fn reconcile_provider_exec_if_ready(
-    root: &StateRoot,
-    presentation: &Presentation,
-) -> Result<bool, D17NavigatorError> {
+fn refresh_provider_exec(root: &StateRoot, presentation: &Presentation) -> ProviderExecRefresh {
     let slot = match read_marker(root.base(), &presentation.paths().directory) {
         Ok(slot) => slot,
-        Err(SlotError::MarkerUnavailable) => return Ok(false),
-        Err(_) => return Err(D17NavigatorError::ProviderReconciliationUnavailable),
+        Err(SlotError::MarkerUnavailable) => return ProviderExecRefresh::Idle,
+        Err(_) => return ProviderExecRefresh::Unavailable,
     };
-    if slot.phase() != ProvisionalPhase::RuntimeOwnedLaunching {
-        return Ok(false);
+    if !matches!(
+        slot.phase(),
+        ProvisionalPhase::RuntimeOwnedLaunching | ProvisionalPhase::ProviderExecProven
+    ) {
+        return ProviderExecRefresh::Idle;
     }
-    reconcile_provider_exec_from_presentation(root.base(), &presentation.paths().directory)
-        .map_err(|_| D17NavigatorError::ProviderReconciliationUnavailable)?;
-    Ok(true)
+    let runtime_id = slot.candidate_runtime_id();
+    let reconciled =
+        reconcile_provider_exec_from_presentation(root.base(), &presentation.paths().directory)
+            .is_ok();
+    ProviderExecRefresh::RuntimeOwned {
+        runtime_id,
+        reconciled,
+    }
 }
 
 /// Composes the dormant D17 shell card with the marker-first materializer.
@@ -301,11 +441,46 @@ fn materialize_provisional_shell(
     root: &StateRoot,
     presentation: &Presentation,
 ) -> Result<(), D17NavigatorError> {
+    if reattach_materialized_provisional_shell(root, presentation)? {
+        return Ok(());
+    }
     materialize_provisional_shell_with_inputs(
         root,
         presentation,
         &account_shell_inputs_from_environment()?,
     )
+}
+
+/// Reattaches the one exact materialized shell after the provider pane has
+/// switched to a managed Workstream. Marker absence is the only authority to
+/// continue into fresh materialization; every other phase or malformed claim
+/// remains a closed refusal and can never create a duplicate candidate.
+fn reattach_materialized_provisional_shell(
+    root: &StateRoot,
+    presentation: &Presentation,
+) -> Result<bool, D17NavigatorError> {
+    let unavailable = || D17NavigatorError::ProvisionalShellUnavailable;
+    let mut state = open_d17_current_only(root).map_err(|_| unavailable())?;
+    let provisional_lease = state
+        .acquire_d17_provisional_lease()
+        .map_err(|_| unavailable())?;
+    let slot = match read_marker(state.root(), &presentation.paths().directory) {
+        Ok(slot) => slot,
+        Err(SlotError::MarkerUnavailable) => return Ok(false),
+        Err(_) => return Err(unavailable()),
+    };
+    if slot.phase() != ProvisionalPhase::Materialized {
+        return Err(unavailable());
+    }
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, slot.runtime_paths().clone());
+    slot.revalidate_live_shell(&runtime, &process_probe)
+        .map_err(|_| unavailable())?;
+    presentation
+        .attach_d17_provisional_shell(&state, &provisional_lease, &slot)
+        .map_err(|_| unavailable())?;
+    Ok(true)
 }
 
 /// The account-shell values are captured once at materialization. They are
@@ -433,8 +608,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AccountShellInputs, materialize_provisional_shell_with_inputs,
-        reconcile_provider_exec_if_ready, start_d17_same_location,
+        AccountShellInputs, ProviderExecRefresh, materialize_provisional_shell_with_inputs,
+        reattach_materialized_provisional_shell, refresh_provider_exec, start_d17_same_location,
     };
     use crate::{
         domain::{ProviderKind, RandomIdGenerator},
@@ -543,14 +718,17 @@ mod tests {
         let root = StateRoot::select(&state_path);
 
         materialize_provisional_shell_with_inputs(&root, &presentation, &inputs).unwrap();
-        assert!(!reconcile_provider_exec_if_ready(&root, &presentation).unwrap());
+        assert_eq!(
+            refresh_provider_exec(&root, &presentation),
+            ProviderExecRefresh::Idle
+        );
 
         let marker = read_marker(root.base(), &presentation.paths().directory).unwrap();
         assert_eq!(marker.phase(), ProvisionalPhase::Materialized);
         let _runtime_guard = DisposableTmuxServerGuard(marker.runtime_paths().socket.clone());
         wait_for_private_client(&marker.runtime_paths().socket);
 
-        assert!(materialize_provisional_shell_with_inputs(&root, &presentation, &inputs).is_err());
+        assert!(reattach_materialized_provisional_shell(&root, &presentation).unwrap());
         assert_eq!(
             read_marker(root.base(), &presentation.paths().directory).unwrap(),
             marker
@@ -579,9 +757,16 @@ mod tests {
         presentation.start_d17(Uuid::from_u128(92), &seed).unwrap();
         let _presentation_guard = DisposableTmuxServerGuard(presentation.paths().socket.clone());
 
+        assert_eq!(
+            refresh_provider_exec(&StateRoot::select(&state_path), &presentation),
+            ProviderExecRefresh::Idle
+        );
         assert!(
-            !reconcile_provider_exec_if_ready(&StateRoot::select(&state_path), &presentation)
-                .unwrap()
+            !reattach_materialized_provisional_shell(
+                &StateRoot::select(&state_path),
+                &presentation,
+            )
+            .unwrap()
         );
     }
 

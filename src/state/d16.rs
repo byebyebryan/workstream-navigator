@@ -5376,13 +5376,13 @@ fn load_d17_exec_proof_target(
             _ => false,
         },
         OnboardingPhase::ProviderExecProven => {
-            provider_pid
-                .and_then(|pid| u32::try_from(pid).ok())
-                .is_some_and(|pid| pid > 0)
+            runtime_status_from_text(&lifecycle).is_ok()
+                && provider_pid
+                    .and_then(|pid| u32::try_from(pid).ok())
+                    .is_some_and(|pid| pid > 0)
                 && provider_birth
                     .as_deref()
                     .is_some_and(|birth| validate_registry_text("provider birth", birth).is_ok())
-                && lifecycle == "starting"
         }
         _ => return Err(StateError::MalformedHostSchema),
     };
@@ -10714,6 +10714,77 @@ mod tests {
             81
         );
         validate_schema14(&state.connection).unwrap();
+    }
+
+    #[test]
+    fn proven_onboarding_target_survives_runtime_lifecycle_progress() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+        drop(fresh_create(&state_path, &SequenceIds::default()).unwrap());
+
+        let transition = transition_lease(&state_path);
+        let mut migrating = open_cutover_transition(&root, &transition).unwrap();
+        migrating.migrate_schema13_to14(&transition).unwrap();
+        drop(migrating);
+        drop(transition);
+        fs::remove_file(state_path.join(TRANSITION_LOCK_FILE)).unwrap();
+
+        let mut state = open_d17_current_only(&root).unwrap();
+        let provisional = state.acquire_d17_provisional_lease().unwrap();
+        let candidate_runtime_id = RuntimeId::from(Uuid::from_u128(704));
+        let request = onboarding_prepare_request(&state_path, candidate_runtime_id);
+        let ids = SequenceIds::default();
+        let issued = match state
+            .prepare_d17_onboarding_current(&provisional, &request, &ids)
+            .unwrap()
+        {
+            OnboardingPreparation::Issued(reservation) => reservation,
+            OnboardingPreparation::Existing(_) => panic!("first preparation must issue"),
+        };
+        let ownership = state
+            .consume_d17_onboarding_current(
+                &provisional,
+                &request,
+                issued.capability().token(),
+                request.now_monotonic_millis + 1,
+            )
+            .unwrap();
+        let preparation = state
+            .record_d17_provider_preparation_current(
+                &provisional,
+                &request,
+                ownership,
+                onboarding_executable_identity(),
+            )
+            .unwrap();
+        let started = state
+            .record_d17_provider_exec_started_current(&provisional, &request, preparation)
+            .unwrap();
+        let proven = state
+            .record_d17_provider_exec_proven_current(
+                &provisional,
+                started,
+                &OnboardingProviderExecEvidence::new(9124, "birth-codex".to_owned()).unwrap(),
+            )
+            .unwrap();
+        state
+            .connection
+            .execute(
+                "UPDATE runtimes SET lifecycle = 'attention', revision = revision + 1
+                 WHERE runtime_id = ?1",
+                [candidate_runtime_id.to_string()],
+            )
+            .unwrap();
+
+        assert_eq!(
+            state
+                .d17_onboarding_exec_proven_target_current(&provisional, proven.operation_id)
+                .unwrap()
+                .ownership(),
+            proven,
+            "terminal onboarding proof must remain usable after lifecycle hooks advance the Runtime"
+        );
     }
 
     #[test]

@@ -2417,15 +2417,30 @@ conversation between providers.
   through Projects first; ProjectLocation registration runs only when none
   exists. Provider choice then applies to the new Workstream at that exact
   Location.
-- The current host reports which providers are eligible for New by the exact
-  capability predicate above. With no eligible provider, creation stops before
-  a Workstream is recorded. With one, WSNav selects it without another prompt.
-  With more than one, a small navigator-local chooser asks only for provider
-  kind.
+- The current host reports which providers are immediately eligible for New by
+  the exact capability predicate above. The navigator's selectable set also
+  includes Codex when its executable and other prerequisites are present and
+  its exact observer state is `setup_required`, `update_required`, or
+  `trust_review_required`; selecting it enters the bounded contextual guide
+  below before creation. Missing prerequisites and foreign, modified,
+  disabled, ambiguous, or unknown observer states remain non-selectable. With
+  no selectable provider, creation stops before a Workstream is recorded.
+  Registration or a selected Projects Location selects one sole candidate
+  without another prompt. From an existing Workstream, a sole candidate is
+  selected immediately only when it is the source provider; a sole different
+  provider still opens the chooser and requires explicit confirmation. With
+  more than one candidate, a small navigator-local chooser asks only for
+  provider kind.
 - When the chooser was opened from an existing Workstream and that
-  Workstream's provider remains eligible, it is the initial selection. This is
-  contextual UI state, not a remembered per-Project default. If it is not
-  eligible, the user chooses from the remaining host-authoritative set.
+  Workstream's provider remains selectable, it is the initial selection. This
+  is contextual UI state, not a remembered per-Project default. If it is not
+  selectable, the user explicitly confirms one of the remaining
+  host-authoritative candidates even when only one remains.
+- Selecting an onboarding-capable Codex candidate emits the same typed New
+  intent as a ready candidate. The application returns the contextual guide
+  before Project registration, Workstream creation, profile mutation, or
+  provider launch, then continues only after explicit consent, exact readiness,
+  and captured revision revalidation.
 - The navigator sends the selected `ProviderKind` in the creation request. The
   authoritative current host repeats discovery immediately before its creation
   transaction and rejects stale or ineligible selection without recording a
@@ -2464,9 +2479,11 @@ on any provider. Readiness guidance is scoped to the requested provider:
 
 - an unready Codex adapter cannot block Projects, Archived, existing Runtime
   attachment, or an eligible OpenCode action;
-- Codex remains `unavailable/observer_not_ready` until an observer-dependent
-  request invokes the explicit-consent contextual guide and exact native trust
-  review completes;
+- Codex remains `unavailable/observer_not_ready` as an immediate capability
+  until the explicit-consent contextual guide and exact native trust review
+  complete. Exact `setup_required`, `update_required`, and
+  `trust_review_required` states are nevertheless selectable for a New action
+  so that the requested action can invoke that guide;
 - the pending request resumes only after exact readiness and captured revision
   revalidation; and
 - OpenCode adds no installation, credential, trust, or provider-management

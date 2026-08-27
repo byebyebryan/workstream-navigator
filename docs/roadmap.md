@@ -3441,16 +3441,16 @@ Implementation evidence (2026-08-18):
 
 ## D16 - Host-local simplification
 
-Status: Complete on 2026-08-20. The implementation, disposable repository gate,
+Status: Complete on 2026-08-26. The implementation, disposable repository gate,
 and explicitly authorized live local and ordinary-SSH-entered-host acceptance
 passed. D0-D15 remain complete historical checkpoints, and V1 remains a
 source-installed operator beta.
 
-Fresh current-tree evidence includes strict formatting and Clippy, 413 passing
+Fresh current-tree evidence includes strict formatting and Clippy, 426 passing
 tests with one controlled D15 timing study ignored, package verification,
 Cargo Deny policy, shell/Python/fixture checks, the disposable D12 presentation
 harness, D16 retired-source/CLI acceptance, and staged plus unstaged diff
-checks. The five focused D16 integration suites contribute 91 of those passing
+checks. The five focused D16 integration suites contribute 96 of those passing
 tests. This current total includes the post-acceptance source correction that
 removed the redundant page banner, restored the established semantic colors
 and activity ages, then the card refinement that made Project headers
@@ -3476,14 +3476,30 @@ recovery-required, already-absent Runtime to `Workstream=parked` plus
 non-recoverable `recovery_required + stopped` pair while retaining native
 session binding and sticky attention.
 
-The explicitly authorized live gate predates that source correction and passed
+The provider-choice correction keeps onboarding-capable Codex states visible
+for New instead of filtering them out before the contextual guide can run.
+Exact `setup_required`, `update_required`, and `trust_review_required` states
+may be selected, then reuse the existing consent, native review, readiness, and
+revision boundary before any creation or provider launch. Hard-unavailable
+Codex states remain excluded. When `n` starts from one provider and only a
+different provider is selectable, the one-entry chooser now requires explicit
+confirmation instead of silently substituting that provider. This changes no
+schema, provider adapter, Runtime authority, or native interaction contract.
+The corrected binary was then atomically installed and the operator confirmed
+the bounded clean-bootstrap path: provider choice remained visible, Codex
+selection entered contextual setup and native review, and the resulting fresh
+state reported one Codex Workstream and Runtime with observer readiness
+`Ready`. No provider content was inspected. This operational observation is
+not a repeat of the formal live gate because the operator retained the active
+Runtime.
+
+The explicitly authorized live gate predates these source corrections and passed
 on the local machine and an ordinary-SSH-entered host, including confirmed
 schema-12-to-13 cutover, same-Runtime Codex continuity and reattachment across
 SSH disconnect/reconnect, atomic candidate installation, and complete
 acceptance cleanup. The first visual correction was later installed locally
-for operator inspection, but none of the later presentation refinements was
-installed or live-tested in that gate; the current corrected tree is not
-installed. The sanitized, content-free record retains the accepted executable
+for operator inspection, but the later corrected sources were not live-tested
+in that gate. The sanitized, content-free record retains the accepted executable
 hash and its exact 399-test repository evidence in [D16 host-local
 simplification acceptance](evidence/acceptance/d16-host-local.md).
 
@@ -3937,6 +3953,13 @@ D16 closes only when all of the following are true:
   dormant; and an empty active page routes to existing Location selection
   before registration. Project headers never supply ambiguous action authority,
   and Projects owns the typed browser-root and revision-checked metadata actions;
+- provider choice is derived from current host capability evidence. Codex
+  remains selectable when exact observer setup, update, or native trust review
+  can make the requested action ready; hard-unavailable states remain absent.
+  A sole different provider reached from an existing Workstream requires
+  explicit chooser confirmation, while same-provider and Location/registration
+  sole-candidate paths remain immediate. Selection never silently substitutes
+  a provider and onboarding completes before creation or launch;
 - navigator startup detects observer readiness without mutation. An
   observer-dependent Codex request captures its exact intent/revisions and
   offers explicit consent before owned profile creation or update, then opens

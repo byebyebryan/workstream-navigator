@@ -44,6 +44,13 @@ the explicit Projects action; ordinary redraw, attachment, and fast
 Workstream switching do not inspect Git. A selected Location can start a new
 Workstream even when its Project has no active Workstreams.
 
+New Workstream provider choice is explicit. A ready provider is selectable,
+and Codex also remains selectable when its exact observer setup, update, or
+native trust review can be completed by the contextual guide. From an existing
+Workstream, switching to a sole different provider still requires confirmation;
+WSNav never silently substitutes it. New provider conversations are independent
+and never migrate or copy context from the source Workstream.
+
 Observer readiness is contextual rather than a page or manual setup mode.
 Startup detects it read-only. A Codex action that needs readiness opens a guide
 that captures the exact intent, asks explicit consent before one exact owned

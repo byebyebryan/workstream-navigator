@@ -67,6 +67,12 @@ source. When a Project has several Locations, its header is display-only and
 the selectable Locations form a minimal tree. Actions always resolve an exact
 Location or Workstream ID.
 
+New Workstream actions choose a provider from current host capability evidence.
+Codex remains selectable when its contextual observer guide can complete exact
+setup, update, or native trust review. From an existing Workstream, a sole
+different provider still requires explicit confirmation; WSNav never silently
+substitutes providers or transfers conversation context.
+
 Project registration uses a host-private browser rooted at `~` by default.
 The browser shows bounded direct-child names and Git markers, uses a relative
 cursor, and keeps raw paths out of public snapshots and provider panes. The

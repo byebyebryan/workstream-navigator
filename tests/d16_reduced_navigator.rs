@@ -17,7 +17,8 @@ use wsnav::{
         BrowserListing, BrowserPath, LocationSnapshot, ObserverIntent, ObserverReadiness,
         ObserverReadinessEvidence, ObserverReadinessGuide, OperationSnapshot,
         ProjectBrowserSnapshot, ProjectSnapshot, ProjectWorkstreamGroup, ProviderCapability,
-        ProviderCapabilityStatus, RevisedIdentity, RuntimeSnapshot, WorkstreamSnapshot,
+        ProviderCapabilityReason, ProviderCapabilityStatus, RevisedIdentity, RuntimeSnapshot,
+        WorkstreamSnapshot,
     },
     domain::{
         LocationId, OperationKind, OperationPhase, ProjectId, ProviderKind, Revision,
@@ -172,6 +173,40 @@ fn snapshot() -> wsnav::application::ApplicationSnapshot {
             },
         ],
     }
+}
+
+fn snapshot_with_codex_readiness(
+    readiness: ObserverReadiness,
+) -> wsnav::application::ApplicationSnapshot {
+    let mut input = snapshot();
+    input.observer_readiness = ObserverReadinessEvidence {
+        readiness,
+        integration_revision: match readiness {
+            ObserverReadiness::SetupRequired
+            | ObserverReadiness::Foreign
+            | ObserverReadiness::Ambiguous
+            | ObserverReadiness::Unknown => None,
+            ObserverReadiness::Ready
+            | ObserverReadiness::TrustReviewRequired
+            | ObserverReadiness::UpdateRequired
+            | ObserverReadiness::Modified
+            | ObserverReadiness::Disabled => Some(revision(15)),
+        },
+    };
+    let codex = input
+        .provider_capabilities
+        .iter_mut()
+        .find(|capability| capability.provider == ProviderKind::Codex)
+        .expect("Codex capability");
+    codex.status = ProviderCapabilityStatus::Unavailable;
+    codex.reason = Some(ProviderCapabilityReason::ObserverNotReady);
+    codex.fresh_launch = false;
+    codex.exact_resume = false;
+    codex.observe = false;
+    codex.metadata_read = false;
+    codex.navigator_rename = false;
+    codex.fork = false;
+    input
 }
 
 fn render_buffer(navigator: &D16Navigator, now_millis: Option<i64>) -> Buffer {
@@ -601,6 +636,188 @@ fn registration_uses_the_same_process_local_provider_chooser() {
             expected_browser_revision,
             provider: ProviderKind::Codex,
         }) if relative_path.as_str() == "repo" && expected_browser_revision == revision(14)
+    ));
+}
+
+#[test]
+fn registration_keeps_codex_selectable_while_observer_setup_is_required() {
+    let mut model = D16Model::new(snapshot_with_codex_readiness(
+        ObserverReadiness::SetupRequired,
+    ));
+    model.select_page(D16Page::Projects);
+    model.handle_key(KeyCode::Char('a'));
+    model.accept_outcome(ApplicationOutcome::BrowserListed(BrowserListing {
+        root_label: "workspace".to_owned(),
+        relative_path: BrowserPath::root(),
+        include_hidden: false,
+        entries: vec![BrowserEntry {
+            name: "repo".to_owned(),
+            is_git_repository: true,
+        }],
+        revision: revision(14),
+    }));
+
+    assert!(model.handle_key(KeyCode::Enter).is_none());
+    assert_eq!(
+        model
+            .provider_chooser()
+            .map(|chooser| chooser.providers.clone()),
+        Some(vec![ProviderKind::Codex, ProviderKind::OpenCode])
+    );
+    let action = model.handle_key(KeyCode::Enter);
+    assert!(matches!(
+        action,
+        D16Command::Apply(ApplicationAction::RegisterLocation {
+            relative_path,
+            expected_browser_revision,
+            provider: ProviderKind::Codex,
+        }) if relative_path.as_str() == "repo"
+            && expected_browser_revision == revision(14)
+    ));
+
+    let guide = ObserverReadinessGuide {
+        evidence: ObserverReadinessEvidence {
+            readiness: ObserverReadiness::SetupRequired,
+            integration_revision: None,
+        },
+        intent: ObserverIntent::RegisterLocation {
+            expected_browser_revision: revision(14),
+            provider: ProviderKind::Codex,
+        },
+        explicit_interactive_consent_required: true,
+        native_trust_review_required: true,
+    };
+    model.accept_outcome(ApplicationOutcome::ObserverReadinessRequired(guide));
+    assert_eq!(model.observer_guide(), Some(guide));
+    assert!(model.pending_action().is_some());
+}
+
+#[test]
+fn new_from_open_code_workstream_keeps_source_preferred_and_allows_codex() {
+    let mut input = snapshot_with_codex_readiness(ObserverReadiness::TrustReviewRequired);
+    input.active_project_groups[0].workstreams[0].provider = ProviderKind::OpenCode;
+    let mut model = D16Model::new(input);
+
+    assert!(model.handle_key(KeyCode::Char('n')).is_none());
+    assert_eq!(
+        model
+            .provider_chooser()
+            .map(|chooser| chooser.providers.clone()),
+        Some(vec![ProviderKind::Codex, ProviderKind::OpenCode])
+    );
+    assert_eq!(
+        model.provider_chooser().map(|chooser| chooser.selected),
+        Some(1)
+    );
+
+    assert!(model.handle_key(KeyCode::Up).is_none());
+    let action = model.handle_key(KeyCode::Enter);
+    assert!(matches!(
+        action,
+        D16Command::Apply(ApplicationAction::NewAtSameLocation {
+            source_workstream_id,
+            expected_workstream_revision,
+            provider: ProviderKind::Codex,
+        }) if source_workstream_id == id(0xA11)
+            && expected_workstream_revision == revision(3)
+    ));
+}
+
+#[test]
+fn sole_codex_onboarding_selection_emits_the_typed_action_for_the_guide() {
+    let mut input = snapshot_with_codex_readiness(ObserverReadiness::UpdateRequired);
+    let opencode = input
+        .provider_capabilities
+        .iter_mut()
+        .find(|capability| capability.provider == ProviderKind::OpenCode)
+        .expect("OpenCode capability");
+    opencode.status = ProviderCapabilityStatus::Unavailable;
+    opencode.reason = Some(ProviderCapabilityReason::NotInstalled);
+    opencode.fresh_launch = false;
+    opencode.exact_resume = false;
+    opencode.observe = false;
+    opencode.metadata_read = false;
+    opencode.navigator_rename = false;
+    opencode.fork = false;
+
+    let mut model = D16Model::new(input);
+    let action = model.handle_key(KeyCode::Char('n'));
+    assert!(model.provider_chooser().is_none());
+    assert!(matches!(
+        action,
+        D16Command::Apply(ApplicationAction::NewAtSameLocation {
+            source_workstream_id,
+            expected_workstream_revision,
+            provider: ProviderKind::Codex,
+        }) if source_workstream_id == id(0xA11)
+            && expected_workstream_revision == revision(3)
+    ));
+}
+
+#[test]
+fn hard_codex_readiness_requires_confirmation_before_switching_from_codex() {
+    for readiness in [
+        ObserverReadiness::Foreign,
+        ObserverReadiness::Modified,
+        ObserverReadiness::Disabled,
+        ObserverReadiness::Ambiguous,
+        ObserverReadiness::Unknown,
+    ] {
+        let mut input = snapshot_with_codex_readiness(readiness);
+        let codex = input
+            .provider_capabilities
+            .iter_mut()
+            .find(|capability| capability.provider == ProviderKind::Codex)
+            .expect("Codex capability");
+        codex.status = ProviderCapabilityStatus::Available;
+        codex.reason = None;
+        codex.fresh_launch = true;
+        codex.exact_resume = true;
+        codex.observe = true;
+        codex.metadata_read = true;
+        codex.navigator_rename = true;
+        codex.fork = true;
+        let mut model = D16Model::new(input);
+        assert!(
+            model.handle_key(KeyCode::Char('n')).is_none(),
+            "{readiness:?}"
+        );
+        assert_eq!(
+            model
+                .provider_chooser()
+                .map(|chooser| chooser.providers.clone()),
+            Some(vec![ProviderKind::OpenCode]),
+            "{readiness:?}"
+        );
+        let action = model.handle_key(KeyCode::Enter);
+        assert!(
+            matches!(
+                action,
+                D16Command::Apply(ApplicationAction::NewAtSameLocation {
+                    provider: ProviderKind::OpenCode,
+                    ..
+                })
+            ),
+            "{readiness:?}: expected OpenCode after confirmation"
+        );
+    }
+}
+
+#[test]
+fn hard_codex_readiness_does_not_block_open_code_source_new() {
+    let mut input = snapshot_with_codex_readiness(ObserverReadiness::Foreign);
+    input.active_project_groups[0].workstreams[0].provider = ProviderKind::OpenCode;
+    let mut model = D16Model::new(input);
+
+    let action = model.handle_key(KeyCode::Char('n'));
+    assert!(model.provider_chooser().is_none());
+    assert!(matches!(
+        action,
+        D16Command::Apply(ApplicationAction::NewAtSameLocation {
+            source_workstream_id,
+            provider: ProviderKind::OpenCode,
+            ..
+        }) if source_workstream_id == id(0xA11)
     ));
 }
 

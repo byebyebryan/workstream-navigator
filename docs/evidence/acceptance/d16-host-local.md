@@ -102,6 +102,26 @@ locally for operator inspection as executable SHA-256
 `bcf48bc69d392f0bdea36845eb480038451bb5e4fb7837d09f08ddbad2438c47`; it was
 not live-accepted as part of the evidence above.
 
+A 2026-08-26 provider-choice correction keeps Codex selectable
+when exact observer setup, update, or native trust review can make the requested
+New action ready. Selecting Codex then enters the existing contextual guide
+before Project registration, Workstream creation, or provider launch. Hard
+observer failures remain excluded. When `n` starts from one provider and the
+only candidate is a different provider, a one-entry chooser now requires
+explicit confirmation instead of silently substituting it. The resulting
+current-tree `scripts/check` gate passed 426 tests with the same controlled D15
+study ignored; the five focused D16 suites contribute 96 passing tests. The
+correction was atomically installed as executable SHA-256
+`0986f9eacc8e8945b736be1333e6cd2701c1bdfb121c46830bd62a843efd70d1`.
+After a recoverable state reset exposed a deliberately retained prior observer
+profile as foreign, exact owned-profile cleanup left a genuine empty bootstrap
+boundary. The operator's next interactive launch offered provider choice,
+selected Codex, completed contextual observer setup and native review, and
+produced one fresh Codex Workstream and Runtime with observer readiness
+`Ready`. No provider content was inspected. This changes no schema, provider
+adapter, Runtime authority, or native interaction contract and is a bounded
+operational observation, not a repeat of the formal live acceptance below.
+
 ## SSH-entered-host acceptance
 
 The first confirmed schema-12-to-13 cutover completed its durable transition

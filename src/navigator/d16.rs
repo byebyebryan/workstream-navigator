@@ -29,7 +29,8 @@ use crate::{
     application::{
         ApplicationAction, ApplicationError, ApplicationOutcome, ApplicationSnapshot,
         AttachEvidence, AttentionKind, BrowserListing, BrowserPath, BrowserRootPath,
-        ObserverReadinessGuide, OperationSnapshot, ProjectRefreshRequest, ProjectSnapshot,
+        ObserverReadiness, ObserverReadinessGuide, OperationSnapshot, ProjectRefreshRequest,
+        ProjectSnapshot, ProviderCapability, ProviderCapabilityReason, ProviderCapabilityStatus,
         RevisedIdentity, WorkstreamSnapshot,
     },
     domain::{
@@ -1227,16 +1228,34 @@ impl D16Model {
         self.refresh_project(project_id).unwrap_or(D16Command::None)
     }
 
-    fn eligible_new_providers(&self) -> Vec<ProviderKind> {
+    fn selectable_new_providers(&self) -> Vec<ProviderKind> {
         let mut providers = self
             .snapshot
             .provider_capabilities
             .iter()
-            .filter(|capability| capability.eligible_for_new())
+            .filter(|capability| self.provider_selectable_for_new(capability))
             .map(|capability| capability.provider)
             .collect::<Vec<_>>();
         providers.sort_unstable();
         providers
+    }
+
+    /// Codex observer setup is deliberately represented as unavailable in the
+    /// passive capability snapshot.  The contextual guide is nevertheless a
+    /// bounded, explicit path to readiness for the three onboarding states, so
+    /// those exact records remain selectable for New.  All other unavailable
+    /// or unknown evidence stays fail-closed and cannot displace `OpenCode`.
+    fn provider_selectable_for_new(&self, capability: &ProviderCapability) -> bool {
+        if capability.provider != ProviderKind::Codex {
+            return capability.eligible_for_new();
+        }
+        if self.snapshot.observer_readiness.needs_guide() {
+            return capability.eligible_for_new()
+                || (capability.status == ProviderCapabilityStatus::Unavailable
+                    && capability.reason == Some(ProviderCapabilityReason::ObserverNotReady));
+        }
+        self.snapshot.observer_readiness.readiness == ObserverReadiness::Ready
+            && capability.eligible_for_new()
     }
 
     fn request_provider(
@@ -1244,25 +1263,28 @@ impl D16Model {
         request: D16ProviderRequest,
         preferred: Option<ProviderKind>,
     ) -> D16Command {
-        let providers = self.eligible_new_providers();
-        match providers.as_slice() {
-            [] => {
-                self.message = Some("no local provider is ready for a new Workstream".to_owned());
-                D16Command::None
-            }
-            [provider] => self.record_action(request.action(*provider)),
-            _ => {
-                let selected = preferred
-                    .and_then(|provider| providers.iter().position(|item| *item == provider))
-                    .unwrap_or(0);
-                self.provider_chooser = Some(D16ProviderChooser {
-                    providers,
-                    selected,
-                    request,
-                });
-                D16Command::None
-            }
+        let providers = self.selectable_new_providers();
+        if providers.is_empty() {
+            self.message = Some("no local provider is ready for a new Workstream".to_owned());
+            return D16Command::None;
         }
+        // A lone alternative to an existing source provider is an explicit
+        // provider switch. Registration and same-provider New retain their
+        // sole-provider fast paths.
+        let sole_provider_matches_preference =
+            providers.len() == 1 && preferred.is_none_or(|provider| providers[0] == provider);
+        if sole_provider_matches_preference {
+            return self.record_action(request.action(providers[0]));
+        }
+        let selected = preferred
+            .and_then(|provider| providers.iter().position(|item| *item == provider))
+            .unwrap_or(0);
+        self.provider_chooser = Some(D16ProviderChooser {
+            providers,
+            selected,
+            request,
+        });
+        D16Command::None
     }
 
     fn record_action(&mut self, action: ApplicationAction) -> D16Command {

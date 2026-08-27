@@ -21,7 +21,10 @@ use thiserror::Error;
 
 use crate::{
     d17_account_shell::{AccountShellContext, AccountShellError},
-    d17_broker::{PrepareContext, PreparedHandoff, SystemWorktreeInspector, WorktreeInspector},
+    d17_broker::{
+        PrepareContext, PreparedHandoff, PresentationBinding, SystemWorktreeInspector,
+        WorktreeInspector,
+    },
     d17_clock::{D17Clock, SystemD17Clock},
     d17_helper::{
         advance_codex_to_provider_exec_fence, begin_provider_preparation,
@@ -40,6 +43,7 @@ use crate::{
     },
     domain::{ProviderKind, RandomIdGenerator},
     onboarding::{ShellCommandDecision, classify_shell_command},
+    presentation::Presentation,
     provisional::read_marker,
     runtime::{LinuxProcessProbe, PrivateRuntime, ProcessGroupProbe, SystemTmux},
     state::{StateRoot, open_d17_current_only},
@@ -131,6 +135,22 @@ pub(crate) enum ProviderExecReconciliationError {
     Reconcile(#[from] ReconcileError),
 }
 
+/// Reopens the private D17 presentation marker before any account-shell path
+/// may be used to open state. The marker's opaque identity is carried through
+/// all later broker/helper fences; the inherited environment remains only
+/// discovery input.
+fn presentation_binding_from_account_context(
+    account_context: &AccountShellContext,
+) -> Result<PresentationBinding, AccountShellError> {
+    let context = Presentation::d17_context_from_directory(
+        account_context.state_root(),
+        account_context.presentation_directory(),
+    )
+    .map_err(|_| AccountShellError::ContextUnavailable)?;
+    PresentationBinding::new(context.presentation_id(), context.presentation_revision())
+        .map_err(|_| AccountShellError::ContextUnavailable)
+}
+
 /// Reopens one presentation-private D17 marker and reconciles only its
 /// already-owned provider exec. The future D17 Navigator may call this from
 /// its passive snapshot/preflight loop; there is intentionally no CLI route
@@ -140,6 +160,8 @@ pub(crate) fn reconcile_provider_exec_from_presentation(
     presentation_directory: &std::path::Path,
 ) -> Result<(), ProviderExecReconciliationError> {
     let account_context = AccountShellContext::new(state_root, presentation_directory)?;
+    let presentation_binding = presentation_binding_from_account_context(&account_context)
+        .map_err(ProviderExecReconciliationError::Context)?;
     let root = StateRoot::select(account_context.state_root());
     let mut state =
         open_d17_current_only(&root).map_err(|_| ProviderExecReconciliationError::State)?;
@@ -148,6 +170,9 @@ pub(crate) fn reconcile_provider_exec_from_presentation(
         .map_err(|_| ProviderExecReconciliationError::State)?;
     let slot = read_marker(state.root(), account_context.presentation_directory())
         .map_err(ReconcileError::from)?;
+    presentation_binding.validate_slot(&slot).map_err(|_| {
+        ProviderExecReconciliationError::Context(AccountShellError::ContextUnavailable)
+    })?;
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
     let runtime = PrivateRuntime::new(&tmux, &process_probe, slot.runtime_paths().clone());
@@ -175,6 +200,7 @@ pub(crate) fn gate_from_account_shell(
         return Ok(AccountShellGateOutcome::ExplicitlyUnmanaged);
     };
     let account_context = AccountShellContext::from_environment()?;
+    let presentation_binding = presentation_binding_from_account_context(&account_context)?;
     let root = StateRoot::select(account_context.state_root());
     let mut state = open_d17_current_only(&root).map_err(|_| AccountShellGateError::State)?;
     let provisional_lease = state
@@ -190,6 +216,7 @@ pub(crate) fn gate_from_account_shell(
     let ids = RandomIdGenerator;
     let context = ShellGateContext {
         presentation_directory: account_context.presentation_directory(),
+        presentation_binding,
         invocation: ShellGateInvocation {
             shell_leader_pid,
             caller_group,
@@ -227,6 +254,7 @@ pub(crate) fn exec_codex_from_account_shell(
     let executable = ExpectedProviderExecutable::resolve_from_path(ProviderKind::Codex, &path)
         .map_err(|_| AccountShellCodexLaunchError::Executable)?;
     let account_context = AccountShellContext::from_environment()?;
+    let presentation_binding = presentation_binding_from_account_context(&account_context)?;
     let root = StateRoot::select(account_context.state_root());
     let mut state =
         open_d17_current_only(&root).map_err(|_| AccountShellCodexLaunchError::State)?;
@@ -263,6 +291,7 @@ pub(crate) fn exec_codex_from_account_shell(
     let ids = RandomIdGenerator;
     let context = PrepareContext {
         presentation_directory: account_context.presentation_directory(),
+        presentation_binding,
         runtime: &runtime,
         process_group_probe: &process_probe,
         provider: ProviderKind::Codex,
@@ -322,6 +351,7 @@ pub(crate) fn exec_opencode_from_account_shell(
         .next()
         .expect("the exact native program contains its executable");
     let account_context = AccountShellContext::from_environment()?;
+    let presentation_binding = presentation_binding_from_account_context(&account_context)?;
     let root = StateRoot::select(account_context.state_root());
     let mut state =
         open_d17_current_only(&root).map_err(|_| AccountShellOpenCodeLaunchError::State)?;
@@ -362,6 +392,7 @@ pub(crate) fn exec_opencode_from_account_shell(
     let ids = RandomIdGenerator;
     let context = PrepareContext {
         presentation_directory: account_context.presentation_directory(),
+        presentation_binding,
         runtime: &runtime,
         process_group_probe: &process_probe,
         provider: ProviderKind::OpenCode,

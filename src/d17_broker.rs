@@ -15,7 +15,7 @@ use std::{ffi::OsString, path::Path};
 use thiserror::Error;
 
 use crate::{
-    domain::{IdGenerator, OperationId, ProviderKind},
+    domain::{IdGenerator, OperationId, ProviderKind, Revision},
     onboarding::{LaunchCapability, ShellCommandDecision, classify_shell_command},
     provisional::{ProvisionalPhase, ProvisionalSlot, SlotError, read_marker, update_marker},
     repository::{RepositoryError, RepositoryRegistration, inspect_containing_worktree},
@@ -32,6 +32,46 @@ pub(crate) trait WorktreeInspector {
         &self,
         cwd: &Path,
     ) -> Result<RepositoryRegistration, RepositoryError>;
+}
+
+/// Exact presentation identity carried from the private ownership marker into
+/// every shell-gate and helper fence. A presentation path is discovery only:
+/// the broker accepts a provisional slot only when this opaque identity still
+/// matches its marker.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct PresentationBinding {
+    presentation_id: uuid::Uuid,
+    presentation_revision: Revision,
+}
+
+impl PresentationBinding {
+    /// Builds a bounded binding recovered from a D17 presentation marker.
+    /// Callers cannot construct a nil or pre-initial presentation identity.
+    pub(crate) fn new(
+        presentation_id: uuid::Uuid,
+        presentation_revision: Revision,
+    ) -> Result<Self, BrokerError> {
+        if presentation_id.is_nil() || presentation_revision.value() < Revision::INITIAL.value() {
+            return Err(BrokerError::PresentationBindingInvalid);
+        }
+        Ok(Self {
+            presentation_id,
+            presentation_revision,
+        })
+    }
+
+    fn matches(self, slot: &ProvisionalSlot) -> bool {
+        self.presentation_id == slot.presentation_id()
+            && self.presentation_revision == slot.presentation_revision()
+    }
+
+    /// Refuses a slot that was not materialized by this exact presentation
+    /// context before any state mutation or provider effect may occur.
+    pub(crate) fn validate_slot(self, slot: &ProvisionalSlot) -> Result<(), BrokerError> {
+        self.matches(slot)
+            .then_some(())
+            .ok_or(BrokerError::PresentationBindingMismatch)
+    }
 }
 
 /// The production read-only worktree inspector.
@@ -51,6 +91,7 @@ impl WorktreeInspector for SystemWorktreeInspector {
 /// through [`PreparedHandoff`]'s crate-private channel.
 pub(crate) struct PrepareContext<'a, 'runtime> {
     pub(crate) presentation_directory: &'a Path,
+    pub(crate) presentation_binding: PresentationBinding,
     pub(crate) runtime: &'a PrivateRuntime<'runtime>,
     pub(crate) process_group_probe: &'a dyn ProcessGroupProbe,
     pub(crate) provider: ProviderKind,
@@ -105,6 +146,10 @@ pub(crate) enum BrokerError {
     State(#[from] StateError),
     #[error("provisional lease generation does not match the marker")]
     LeaseGenerationMismatch,
+    #[error("D17 presentation binding is invalid")]
+    PresentationBindingInvalid,
+    #[error("D17 provisional slot does not match this presentation")]
+    PresentationBindingMismatch,
     #[error("an unresolved onboarding operation already owns this provisional slot")]
     ExistingOperation,
 }
@@ -185,6 +230,7 @@ pub(crate) fn request_from_context(
 ) -> Result<(ProvisionalSlot, OnboardingPrepareRequest), BrokerError> {
     provisional_lease.revalidate_for_mutation(state.root())?;
     let slot = read_marker(state.root(), context.presentation_directory)?;
+    context.presentation_binding.validate_slot(&slot)?;
     if slot.lease_generation() != provisional_lease.lease_generation() {
         return Err(BrokerError::LeaseGenerationMismatch);
     }
@@ -242,7 +288,9 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::{BrokerError, PrepareContext, WorktreeInspector, consume, prepare};
+    use super::{
+        BrokerError, PrepareContext, PresentationBinding, WorktreeInspector, consume, prepare,
+    };
     use crate::{
         d17_helper::{advance_codex_to_provider_exec_fence, begin_provider_preparation},
         d17_reconcile::{ProviderExecutableProbe, ReconcileError, prove_provider_exec},
@@ -477,6 +525,11 @@ mod tests {
             OnboardingProviderExecutableIdentity::new(23, 29).unwrap();
         let context = PrepareContext {
             presentation_directory: &presentation,
+            presentation_binding: PresentationBinding::new(
+                slot.presentation_id(),
+                slot.presentation_revision(),
+            )
+            .unwrap(),
             runtime: &runtime,
             process_group_probe: &ShellGroup,
             provider: ProviderKind::Codex,
@@ -487,6 +540,24 @@ mod tests {
             id_generator: &ids,
             worktree_inspector: &inspector,
         };
+        let mismatched_presentation = PrepareContext {
+            presentation_directory: &presentation,
+            presentation_binding: PresentationBinding::new(Uuid::from_u128(999), Revision::INITIAL)
+                .unwrap(),
+            runtime: &runtime,
+            process_group_probe: &ShellGroup,
+            provider: ProviderKind::Codex,
+            arguments: &[OsString::from("--model"), OsString::from("gpt-5.6")],
+            now_monotonic_millis: 10,
+            expiry_monotonic_millis: 1_010,
+            boot_provenance: "d17-boot-v1:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            id_generator: &ids,
+            worktree_inspector: &inspector,
+        };
+        assert!(matches!(
+            prepare(&mut state, &provisional_lease, &mismatched_presentation),
+            Err(BrokerError::PresentationBindingMismatch)
+        ));
 
         let handoff = prepare(&mut state, &provisional_lease, &context).unwrap();
         let token = handoff.capability().token().to_owned();
@@ -498,6 +569,11 @@ mod tests {
         ));
         let after_reboot_context = PrepareContext {
             presentation_directory: &presentation,
+            presentation_binding: PresentationBinding::new(
+                slot.presentation_id(),
+                slot.presentation_revision(),
+            )
+            .unwrap(),
             runtime: &runtime,
             process_group_probe: &ShellGroup,
             provider: ProviderKind::Codex,

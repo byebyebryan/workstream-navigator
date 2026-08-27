@@ -755,7 +755,59 @@ impl Presentation {
         reason = "the D17 presentation context remains unreachable until the atomic Navigator cutover"
     )]
     pub(crate) fn d17_context(&self) -> Result<D17PresentationContext, PresentationError> {
-        let ownership = read_presentation_ownership(&self.paths)?
+        let ownership = read_d17_presentation_ownership(&self.paths)?
+            .ok_or(PresentationError::D17ContextUnavailable)?;
+        let marker = ownership
+            .marker
+            .d17
+            .as_ref()
+            .ok_or(PresentationError::D17ContextUnavailable)?;
+        d17_context_from_marker(marker)
+    }
+
+    /// Reopens the D17 context only from an exact owned presentation directory
+    /// beneath this state root. The inherited shell path is discovery input,
+    /// not authority: this repeats the private ownership-marker proof before
+    /// a shell gate may open schema-14 state.
+    #[allow(
+        dead_code,
+        reason = "the D17 presentation context remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn d17_context_from_directory(
+        state_root: &Path,
+        presentation_directory: &Path,
+    ) -> Result<D17PresentationContext, PresentationError> {
+        let state_metadata = fs::symlink_metadata(state_root)
+            .map_err(|_| PresentationError::D17ContextUnavailable)?;
+        if state_metadata.file_type().is_symlink() || !state_metadata.is_dir() {
+            return Err(PresentationError::D17ContextUnavailable);
+        }
+        let state_root =
+            fs::canonicalize(state_root).map_err(|_| PresentationError::D17ContextUnavailable)?;
+        if !state_root.is_dir() {
+            return Err(PresentationError::D17ContextUnavailable);
+        }
+        let original = fs::symlink_metadata(presentation_directory)
+            .map_err(|_| PresentationError::D17ContextUnavailable)?;
+        if original.file_type().is_symlink() || !original.is_dir() {
+            return Err(PresentationError::D17ContextUnavailable);
+        }
+        let presentation_directory = fs::canonicalize(presentation_directory)
+            .map_err(|_| PresentationError::D17ContextUnavailable)?;
+        let presentation_root = state_root.join(PRESENTATION_DIRECTORY);
+        if presentation_directory.parent() != Some(presentation_root.as_path()) {
+            return Err(PresentationError::D17ContextUnavailable);
+        }
+        let session_name = presentation_session_name(&presentation_directory)
+            .ok_or(PresentationError::D17ContextUnavailable)?;
+        let paths = PresentationPaths {
+            socket: presentation_directory.join("tmux.sock"),
+            config: presentation_directory.join("tmux.conf"),
+            attachment_status: presentation_directory.join(ATTACHMENT_STATUS_FILE),
+            session_name,
+            directory: presentation_directory,
+        };
+        let ownership = read_d17_presentation_ownership(&paths)?
             .ok_or(PresentationError::D17ContextUnavailable)?;
         let marker = ownership
             .marker
@@ -5282,6 +5334,28 @@ fn write_presentation_ownership_marker(
 fn read_presentation_ownership(
     paths: &PresentationPaths,
 ) -> Result<Option<PresentationOwnershipProof>, PresentationError> {
+    read_presentation_ownership_with_artifacts(paths, PresentationArtifactSet::D16)
+}
+
+/// Reads an owned D17 presentation after a provisional marker may exist. The
+/// ordinary D16 ownership reader deliberately continues to reject that marker
+/// so legacy close/cleanup cannot adopt a partially materialized D17 shell.
+fn read_d17_presentation_ownership(
+    paths: &PresentationPaths,
+) -> Result<Option<PresentationOwnershipProof>, PresentationError> {
+    read_presentation_ownership_with_artifacts(paths, PresentationArtifactSet::D17)
+}
+
+#[derive(Clone, Copy)]
+enum PresentationArtifactSet {
+    D16,
+    D17,
+}
+
+fn read_presentation_ownership_with_artifacts(
+    paths: &PresentationPaths,
+    artifacts: PresentationArtifactSet,
+) -> Result<Option<PresentationOwnershipProof>, PresentationError> {
     let directory_metadata = match fs::symlink_metadata(&paths.directory) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -5295,7 +5369,7 @@ fn read_presentation_ownership(
             "presentation ownership directory is foreign or malformed",
         ));
     }
-    validate_presentation_artifact_entries(&paths.directory)?;
+    validate_presentation_artifact_entries(&paths.directory, artifacts)?;
     let marker_path = presentation_ownership_marker_path(paths);
     let marker_metadata = match fs::symlink_metadata(&marker_path) {
         Ok(metadata) => metadata,
@@ -5396,7 +5470,10 @@ fn map_presentation_ownership_probe(failure: LegacyProbeFailure) -> Presentation
     }
 }
 
-fn validate_presentation_artifact_entries(directory: &Path) -> Result<(), PresentationError> {
+fn validate_presentation_artifact_entries(
+    directory: &Path,
+    artifacts: PresentationArtifactSet,
+) -> Result<(), PresentationError> {
     let entries = fs::read_dir(directory).map_err(PresentationError::Io)?;
     for (count, entry) in entries
         .take(MAX_LEGACY_PRESENTATION_ENTRIES + 1)
@@ -5419,6 +5496,8 @@ fn validate_presentation_artifact_entries(directory: &Path) -> Result<(), Presen
             && name != ATTACHMENT_STATUS_FILE
             && name != "tmux.conf"
             && name != "tmux.sock"
+            && !(matches!(artifacts, PresentationArtifactSet::D17)
+                && name == crate::provisional::PROVISIONAL_MARKER_FILE)
         {
             return Err(PresentationError::ControlRefused(
                 "presentation directory contains an unknown artifact",
@@ -5444,7 +5523,7 @@ fn remove_owned_presentation(
     // Recheck the bounded allowlist before each unlink. This never recursively
     // removes the directory, and an unknown/sentinel entry therefore remains
     // untouched even if it appears during cleanup.
-    validate_presentation_artifact_entries(&paths.directory)?;
+    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D16)?;
     let attachment = inspect_regular_file(
         &paths.attachment_status,
         false,
@@ -5460,7 +5539,7 @@ fn remove_owned_presentation(
         )?;
     }
 
-    validate_presentation_artifact_entries(&paths.directory)?;
+    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D16)?;
     remove_exact_regular_artifact(
         &paths.config,
         Some(&expected.marker.config_identity),
@@ -5468,7 +5547,7 @@ fn remove_owned_presentation(
         &mut |_| Ok(()),
     )?;
 
-    validate_presentation_artifact_entries(&paths.directory)?;
+    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D16)?;
     let socket = inspect_private_socket(&paths.socket).map_err(map_presentation_ownership_probe)?;
     if socket.is_some()
         && !optional_socket_identity_compatible(expected.socket_identity.as_ref(), socket.as_ref())
@@ -5481,7 +5560,7 @@ fn remove_owned_presentation(
         remove_exact_socket_artifact(&paths.socket, Some(identity), &mut |_| Ok(()))?;
     }
 
-    validate_presentation_artifact_entries(&paths.directory)?;
+    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D16)?;
     remove_exact_regular_artifact(
         &presentation_ownership_marker_path(paths),
         Some(&expected.marker_identity),
@@ -6159,6 +6238,44 @@ mod tests {
 
         let marker = fs::read(paths.directory.join(PRESENTATION_OWNERSHIP_MARKER_FILE)).unwrap();
         assert!(String::from_utf8(marker).unwrap().contains("\"d17\":{"));
+    }
+
+    #[test]
+    fn d17_context_reopens_only_the_exact_owned_directory_after_slot_materialization() {
+        let temporary = tempfile::tempdir().unwrap();
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        create_paths(&paths).unwrap();
+        let presentation = Presentation {
+            paths: paths.clone(),
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        let presentation_id = uuid::Uuid::from_u128(74);
+        let context = presentation
+            .initialize_d17_context(presentation_id, &seed)
+            .unwrap();
+        let slot = crate::provisional::ProvisionalSlot::materializing(
+            temporary.path(),
+            presentation_id,
+            context.presentation_revision(),
+            1,
+            crate::domain::RuntimeId::new(),
+            crate::provisional::SlotGeneration::new(uuid::Uuid::from_u128(75)),
+            &seed,
+        )
+        .unwrap();
+        crate::provisional::write_new_marker(temporary.path(), &paths.directory, &slot).unwrap();
+
+        assert_eq!(
+            Presentation::d17_context_from_directory(temporary.path(), &paths.directory).unwrap(),
+            context
+        );
+        assert!(matches!(
+            Presentation::d17_context_from_directory(temporary.path(), &seed),
+            Err(PresentationError::D17ContextUnavailable)
+        ));
     }
 
     #[test]

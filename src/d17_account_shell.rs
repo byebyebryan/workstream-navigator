@@ -186,11 +186,8 @@ impl AccountShellContext {
         state_root: &Path,
         presentation_directory: &Path,
     ) -> Result<Self, AccountShellError> {
-        let state_root = canonical_directory(state_root, AccountShellError::ContextUnavailable)?;
-        let presentation_directory = canonical_directory(
-            presentation_directory,
-            AccountShellError::ContextUnavailable,
-        )?;
+        let state_root = canonical_context_directory(state_root)?;
+        let presentation_directory = canonical_context_directory(presentation_directory)?;
         if presentation_directory == state_root || !presentation_directory.starts_with(&state_root)
         {
             return Err(AccountShellError::ContextUnavailable);
@@ -407,6 +404,18 @@ fn canonical_directory(
     } else {
         Err(error)
     }
+}
+
+/// Context paths originate outside the process through the private shell
+/// environment. Refuse symlinks before canonicalization so a later D17
+/// presentation proof can compare the exact on-disk location rather than an
+/// attacker-selected alias.
+fn canonical_context_directory(path: &Path) -> Result<PathBuf, AccountShellError> {
+    let metadata = fs::symlink_metadata(path).map_err(|_| AccountShellError::ContextUnavailable)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(AccountShellError::ContextUnavailable);
+    }
+    canonical_directory(path, AccountShellError::ContextUnavailable)
 }
 
 fn canonical_executable(
@@ -936,6 +945,23 @@ mod tests {
 
         assert_eq!(
             AccountShellContext::new(&state_root, &foreign_presentation).unwrap_err(),
+            AccountShellError::ContextUnavailable
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn account_context_refuses_a_symlinked_presentation_discovery_path() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_root = temporary.path().join("state");
+        let presentation = state_root.join("presentation");
+        let alias = state_root.join("presentation-alias");
+        make_directory(&state_root);
+        make_directory(&presentation);
+        std::os::unix::fs::symlink(&presentation, &alias).unwrap();
+
+        assert_eq!(
+            AccountShellContext::new(&state_root, &alias).unwrap_err(),
             AccountShellError::ContextUnavailable
         );
     }

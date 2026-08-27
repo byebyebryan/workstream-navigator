@@ -17,7 +17,10 @@ use std::{ffi::OsString, path::Path};
 use thiserror::Error;
 
 use crate::{
-    d17_broker::{BrokerError, PrepareContext, PreparedHandoff, WorktreeInspector, prepare},
+    d17_broker::{
+        BrokerError, PrepareContext, PreparedHandoff, PresentationBinding, WorktreeInspector,
+        prepare,
+    },
     d17_clock::{ClockError, D17Clock},
     domain::{IdGenerator, ProviderKind},
     onboarding::{ShellCommandDecision, classify_shell_command},
@@ -85,6 +88,7 @@ pub(crate) struct ShellGateInvocation {
 /// and live runtime proof below decide ownership.
 pub(crate) struct ShellGateContext<'a> {
     pub(crate) presentation_directory: &'a Path,
+    pub(crate) presentation_binding: PresentationBinding,
     pub(crate) invocation: ShellGateInvocation,
     pub(crate) tmux: &'a dyn TmuxClient,
     pub(crate) process_probe: &'a dyn ProcessProbe,
@@ -143,6 +147,7 @@ pub(crate) fn prepare_managed_shell_gate(
     let boot_provenance = context.clock.boot_provenance()?;
     let broker_context = PrepareContext {
         presentation_directory: context.presentation_directory,
+        presentation_binding: context.presentation_binding,
         runtime: &runtime,
         process_group_probe: context.process_group_probe,
         provider: command.provider(),

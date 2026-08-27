@@ -30,7 +30,10 @@ use crate::{
         record_opencode_external_effect_started, record_opencode_provider_exec_started,
         record_opencode_session_recovery_required, record_provider_preparation_recovery_required,
     },
-    d17_reconcile::ExpectedProviderExecutable,
+    d17_reconcile::{
+        ExpectedProviderExecutable, LinuxProviderExecutableProbe, ReconcileError,
+        prove_provider_exec,
+    },
     d17_shell_gate::{
         ShellGateContext, ShellGateDecision, ShellGateError, ShellGateInvocation,
         classify_shell_gate, prepare_managed_shell_gate, validate_invocation,
@@ -113,6 +116,50 @@ pub(crate) enum AccountShellOpenCodeLaunchError {
     Helper,
     #[error("D17 native OpenCode exec failed")]
     Exec,
+}
+
+/// Bounded result of a dormant presentation-owned post-exec reconciliation.
+/// This path performs no provider I/O or process control: it can only record
+/// exact native-exec proof already visible in the adopted private pane.
+#[derive(Debug, Error)]
+pub(crate) enum ProviderExecReconciliationError {
+    #[error("D17 presentation context is unavailable")]
+    Context(#[from] AccountShellError),
+    #[error("D17 provider-exec state is unavailable")]
+    State,
+    #[error("D17 provider-exec proof is unavailable")]
+    Reconcile(#[from] ReconcileError),
+}
+
+/// Reopens one presentation-private D17 marker and reconciles only its
+/// already-owned provider exec. The future D17 Navigator may call this from
+/// its passive snapshot/preflight loop; there is intentionally no CLI route
+/// or provider launch path in this dormant slice.
+pub(crate) fn reconcile_provider_exec_from_presentation(
+    state_root: &std::path::Path,
+    presentation_directory: &std::path::Path,
+) -> Result<(), ProviderExecReconciliationError> {
+    let account_context = AccountShellContext::new(state_root, presentation_directory)?;
+    let root = StateRoot::select(account_context.state_root());
+    let mut state =
+        open_d17_current_only(&root).map_err(|_| ProviderExecReconciliationError::State)?;
+    let provisional_lease = state
+        .acquire_d17_provisional_lease()
+        .map_err(|_| ProviderExecReconciliationError::State)?;
+    let slot = read_marker(state.root(), account_context.presentation_directory())
+        .map_err(ReconcileError::from)?;
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, slot.runtime_paths().clone());
+    prove_provider_exec(
+        &mut state,
+        &provisional_lease,
+        account_context.presentation_directory(),
+        &runtime,
+        &process_probe,
+        &LinuxProviderExecutableProbe,
+    )?;
+    Ok(())
 }
 
 /// Runs the complete real-host gate after a shell wrapper has supplied its own
@@ -461,13 +508,14 @@ fn exec_program(_program: &[OsString]) -> std::io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
+    use std::{ffi::OsString, fs};
 
     use super::{
-        AccountShellGateOutcome, AccountShellOpenCodeLaunchError, exec_opencode_from_account_shell,
-        gate_from_account_shell,
+        AccountShellGateOutcome, AccountShellOpenCodeLaunchError, ProviderExecReconciliationError,
+        exec_opencode_from_account_shell, gate_from_account_shell,
+        reconcile_provider_exec_from_presentation,
     };
-    use crate::domain::ProviderKind;
+    use crate::{d17_account_shell::AccountShellError, domain::ProviderKind};
 
     #[test]
     fn unmanaged_commands_return_before_the_real_host_context_is_required() {
@@ -485,6 +533,21 @@ mod tests {
         assert!(matches!(
             exec_opencode_from_account_shell("unreachable", &[OsString::from("--version")]),
             Err(AccountShellOpenCodeLaunchError::Command)
+        ));
+    }
+
+    #[test]
+    fn post_exec_reconciliation_refuses_an_outside_presentation_before_state_open() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_root = temporary.path().join("state");
+        let outside = temporary.path().join("outside");
+        fs::create_dir(&state_root).unwrap();
+        fs::create_dir(&outside).unwrap();
+        assert!(matches!(
+            reconcile_provider_exec_from_presentation(&state_root, &outside),
+            Err(ProviderExecReconciliationError::Context(
+                AccountShellError::ContextUnavailable
+            ))
         ));
     }
 }

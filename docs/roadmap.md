@@ -9,8 +9,9 @@ the approved next checkpoint. Its D17.0 falsification studies, D17.2 test-only
 ownership/private-runtime model, dormant presentation-private marker-backed
 materialization/evidence storage, marker-to-state prepare/consume broker,
 typed helper/pre-exec/post-exec reconciliation fences, dormant account-shell
-bootstrap, account-shell context/system-gate composition, dormant direct-Codex
-and OpenCode exec preparation with the provider-specific final-effect fences,
+bootstrap, account-shell context/system-gate and post-exec-reconciliation
+composition, dormant direct-Codex and OpenCode exec preparation with the
+provider-specific final-effect fences,
 and dormant D17.3 grammar, command-classification,
 onboarding-phase, capability-journal, atomic
 reservation, and ownership-consumption foundations are in progress; no D17
@@ -261,9 +262,11 @@ immediately before its temporary private server can `POST /session`, binds only
 the exact returned blank session, then records `provider_exec_started`. Any
 failure after ownership consumption that is not Codex's direct-exec known
 absence becomes `recovery_required`; OpenCode never retries or invents a
-replacement session. These adapters remain dormant and have exercised only
-disposable unit seams, not a user shell, provider installation, or live
-Runtime.
+replacement session. A dormant presentation-owned reconciliation adapter can
+then compare the adopted pane's `/proc/<pid>/exe` identity against that durable
+record without provider I/O or process control. These adapters remain dormant
+and have exercised only disposable unit seams, not a user shell, provider
+installation, or live Runtime.
 
 [Spike 0019](evidence/spikes/0019-brokered-onboarding-shell.md) validates a
 single-phase controlled-function-plus-`exec` candidate in a synthetic

@@ -34,7 +34,10 @@ use crate::onboarding::{
     CapabilityError, LaunchCapability, LaunchCapabilityClaims, LaunchCapabilityMetadata,
     verify_launch_capability,
 };
-use crate::provider::lifecycle::{LifecycleEvent, LifecycleHint, LifecycleObservation};
+use crate::provider::{
+    codex::profile::OBSERVER_PROFILE_NAME,
+    lifecycle::{LifecycleEvent, LifecycleHint, LifecycleObservation},
+};
 use crate::repository::RepositoryRegistration;
 use crate::runtime::RuntimePaths;
 
@@ -1251,6 +1254,31 @@ impl D16State {
                     .map_err(|_| StateError::MalformedHostSchema)
             })
             .collect()
+    }
+
+    /// Reads the retained owned Codex observer integration through the
+    /// schema-14-only D17 boundary. It is launch-readiness evidence only: the
+    /// D17 shell helper must still inspect the exact profile before it selects
+    /// `--profile wsnav-observer` for a native Codex exec.
+    #[allow(
+        dead_code,
+        reason = "the D17 account-shell exec boundary remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn d17_codex_integration(
+        &self,
+    ) -> Result<Option<super::models::CodexIntegration>, StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        validate_schema14(&self.connection)?;
+        self.connection
+            .query_row(
+                "SELECT canonical_profile_path, owner_id, profile_schema_version,
+                    hook_executable_path, generated_content_hash, lifecycle, revision
+                 FROM codex_integrations WHERE profile_name = ?1",
+                [OBSERVER_PROFILE_NAME],
+                super::host::row_to_integration,
+            )
+            .optional()
+            .map_err(StateError::Sqlite)
     }
 
     /// Reads all schema-13 Projects in deterministic opaque-ID order and
@@ -8495,10 +8523,11 @@ mod tests {
     use super::*;
     use crate::domain::{HostId, IdGenerator, LocationId, Revision};
     use crate::onboarding::{ShellCommandDecision, classify_shell_command};
+    use crate::provider::codex::profile::ProfileOwnership;
     use crate::repository::RepositoryRegistration;
     use crate::runtime::RuntimePaths;
-    use crate::state::OpenCodeLifecycleObservation;
     use crate::state::utils::{set_private_directory_permissions, set_private_file_permissions};
+    use crate::state::{IntegrationLifecycle, OpenCodeLifecycleObservation};
 
     #[derive(Default)]
     struct SequenceIds(AtomicU64);
@@ -9292,6 +9321,36 @@ mod tests {
         let d17 = open_d17_current_only(&root).unwrap();
         let registry = d17.into_d17_host_registry().unwrap();
         assert_eq!(registry.schema_version().unwrap(), D17_HOST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn schema14_d17_exec_reads_the_retained_codex_observer_integration() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let root = StateRoot::select(&state_path);
+        let state = fresh_create(&state_path, &SequenceIds::default()).unwrap();
+        let mut registry = state.into_host_registry().unwrap();
+        let ownership = ProfileOwnership {
+            canonical_path: PathBuf::from("/private/codex/wsnav-observer.config.toml"),
+            owner_id: "owner".to_owned(),
+            profile_schema_version: 2,
+            hook_executable: PathBuf::from("/private/wsnav"),
+            content_hash: "hash".to_owned(),
+        };
+        let expected = registry
+            .record_codex_integration(ownership, IntegrationLifecycle::Ready)
+            .unwrap();
+        drop(registry);
+
+        let lease = transition_lease(&state_path);
+        let mut migrating = open_cutover_transition(&root, &lease).unwrap();
+        migrating.migrate_schema13_to14(&lease).unwrap();
+        drop(migrating);
+        drop(lease);
+        fs::remove_file(state_path.join(TRANSITION_LOCK_FILE)).unwrap();
+
+        let d17 = open_d17_current_only(&root).unwrap();
+        assert_eq!(d17.d17_codex_integration().unwrap(), Some(expected));
     }
 
     #[test]

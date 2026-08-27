@@ -14,6 +14,7 @@
 
 use std::{
     ffi::OsString,
+    path::PathBuf,
     process::{self, Command},
 };
 
@@ -44,9 +45,10 @@ use crate::{
     domain::{ProviderKind, RandomIdGenerator},
     onboarding::{ShellCommandDecision, classify_shell_command},
     presentation::Presentation,
+    provider::codex::profile::{OBSERVER_PROFILE_NAME, ObserverProfile, ProfileInspection},
     provisional::read_marker,
     runtime::{LinuxProcessProbe, PrivateRuntime, ProcessGroupProbe, SystemTmux},
-    state::{StateRoot, open_d17_current_only},
+    state::{D16State, IntegrationLifecycle, StateRoot, open_d17_current_only},
 };
 
 /// The only two outcomes a shell wrapper needs from the gate. An unmanaged
@@ -93,6 +95,8 @@ pub(crate) enum AccountShellCodexLaunchError {
     Command,
     #[error("D17 native Codex executable is unavailable")]
     Executable,
+    #[error("D17 native Codex observer profile is unavailable")]
+    Observer,
     #[error("D17 provider launch state is unavailable")]
     Helper,
     #[error("D17 native Codex exec failed")]
@@ -258,6 +262,7 @@ pub(crate) fn exec_codex_from_account_shell(
     let root = StateRoot::select(account_context.state_root());
     let mut state =
         open_d17_current_only(&root).map_err(|_| AccountShellCodexLaunchError::State)?;
+    let codex_home = d17_codex_observer_home(&state)?;
     let provisional_lease = state
         .acquire_d17_provisional_lease()
         .map_err(|_| AccountShellCodexLaunchError::State)?;
@@ -313,11 +318,77 @@ pub(crate) fn exec_codex_from_account_shell(
         executable.identity(),
     )
     .map_err(|_| AccountShellCodexLaunchError::Helper)?;
-    let error = exec_program(&executable.native_program(launch.arguments()));
+    let error = exec_codex_program(
+        &codex_observer_program(&executable, launch.arguments()),
+        &codex_home,
+    );
     record_codex_exec_failed_known_absent(&mut state, &provisional_lease, &context, exec_fence)
         .map_err(|_| AccountShellCodexLaunchError::Helper)?;
     let _ = error;
     Err(AccountShellCodexLaunchError::Exec)
+}
+
+/// Requires the exact current-binary observer declaration and native trust
+/// before a dormant D17 helper can consume a Codex launch capability. The
+/// record's profile parent, rather than inherited shell state, becomes the
+/// explicit `CODEX_HOME` for the final native exec.
+fn d17_codex_observer_home(state: &D16State) -> Result<PathBuf, AccountShellCodexLaunchError> {
+    let integration = state
+        .d17_codex_integration()
+        .map_err(|_| AccountShellCodexLaunchError::State)?
+        .ok_or(AccountShellCodexLaunchError::Observer)?;
+    if integration.lifecycle != IntegrationLifecycle::Ready {
+        return Err(AccountShellCodexLaunchError::Observer);
+    }
+    let codex_home = integration
+        .ownership
+        .canonical_path
+        .parent()
+        .filter(|path| path.is_absolute())
+        .map(PathBuf::from)
+        .ok_or(AccountShellCodexLaunchError::Observer)?;
+    let executable = std::env::current_exe().map_err(|_| AccountShellCodexLaunchError::Observer)?;
+    let profile = ObserverProfile::new(codex_home.clone(), executable, state.root());
+    if profile.inspect(Some(&integration.ownership)).ok() != Some(ProfileInspection::Ready) {
+        return Err(AccountShellCodexLaunchError::Observer);
+    }
+    Ok(codex_home)
+}
+
+/// Builds the only D17-managed Codex native command. The closed grammar has
+/// already rejected caller-provided profile flags, so this exact profile is
+/// the single selected Codex configuration layer.
+fn codex_observer_program(
+    executable: &ExpectedProviderExecutable,
+    arguments: &[String],
+) -> Vec<OsString> {
+    let mut program = executable.native_program(&[]);
+    program.extend([
+        OsString::from("--profile"),
+        OsString::from(OBSERVER_PROFILE_NAME),
+    ]);
+    program.extend(arguments.iter().map(OsString::from));
+    program
+}
+
+#[cfg(unix)]
+fn exec_codex_program(program: &[OsString], codex_home: &std::path::Path) -> std::io::Error {
+    use std::os::unix::process::CommandExt;
+
+    let (executable, arguments) = program
+        .split_first()
+        .expect("the D17 native Codex program is constructed from an exact executable");
+    let mut command = Command::new(executable);
+    command.args(arguments).env("CODEX_HOME", codex_home);
+    command.exec()
+}
+
+#[cfg(not(unix))]
+fn exec_codex_program(_program: &[OsString], _codex_home: &std::path::Path) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::Unsupported,
+        "native Codex exec is unavailable",
+    )
 }
 
 /// Replaces the exact provisional shell with a native `OpenCode` command after
@@ -539,14 +610,18 @@ fn exec_program(_program: &[OsString]) -> std::io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, fs};
+    use std::ffi::OsString;
+    use std::fs;
 
     use super::{
         AccountShellGateOutcome, AccountShellOpenCodeLaunchError, ProviderExecReconciliationError,
-        exec_opencode_from_account_shell, gate_from_account_shell,
+        codex_observer_program, exec_opencode_from_account_shell, gate_from_account_shell,
         reconcile_provider_exec_from_presentation,
     };
-    use crate::{d17_account_shell::AccountShellError, domain::ProviderKind};
+    use crate::{
+        d17_account_shell::AccountShellError, d17_reconcile::ExpectedProviderExecutable,
+        domain::ProviderKind,
+    };
 
     #[test]
     fn unmanaged_commands_return_before_the_real_host_context_is_required() {
@@ -565,6 +640,30 @@ mod tests {
             exec_opencode_from_account_shell("unreachable", &[OsString::from("--version")]),
             Err(AccountShellOpenCodeLaunchError::Command)
         ));
+    }
+
+    #[test]
+    fn managed_codex_exec_forces_the_exact_observer_profile() {
+        let temporary = tempfile::tempdir().unwrap();
+        let executable = temporary.path().join("codex");
+        fs::write(&executable, b"#!/bin/sh\nexit 0\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let executable = ExpectedProviderExecutable::new(ProviderKind::Codex, &executable).unwrap();
+
+        assert_eq!(
+            codex_observer_program(&executable, &["--model".to_owned(), "gpt-5.6".to_owned()],),
+            vec![
+                executable.native_program(&[])[0].clone(),
+                "--profile".into(),
+                "wsnav-observer".into(),
+                "--model".into(),
+                "gpt-5.6".into(),
+            ]
+        );
     }
 
     #[test]

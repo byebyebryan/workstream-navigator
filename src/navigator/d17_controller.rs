@@ -27,10 +27,11 @@ use thiserror::Error;
 
 use crate::{
     d17_account_shell::{AccountShellContext, AccountShellLaunch},
+    d17_shell_control::reconcile_provider_exec_from_presentation,
     d17_snapshot::{D17SnapshotError, read_snapshot},
     domain::RuntimeId,
     presentation::{Presentation, PresentationError},
-    provisional::{ProvisionalSlot, SlotGeneration},
+    provisional::{ProvisionalPhase, ProvisionalSlot, SlotError, SlotGeneration, read_marker},
     runtime::{LinuxProcessProbe, PrivateRuntime, SystemTmux},
     state::{StateRoot, open_d17_current_only},
 };
@@ -49,6 +50,8 @@ pub(crate) enum D17NavigatorError {
     Snapshot(#[from] D17SnapshotError),
     #[error("D17 provisional shell is unavailable")]
     ProvisionalShellUnavailable,
+    #[error("D17 provider reconciliation is unavailable")]
+    ProviderReconciliationUnavailable,
 }
 
 /// Runs the hidden schema-14 D17 Navigator pane. It validates the exact D17
@@ -101,6 +104,11 @@ pub(crate) fn run_d17_navigator(
             redraw = true;
         }
         if last_refresh.elapsed() >= Duration::from_millis(500) {
+            if reconcile_provider_exec_if_ready(root, &presentation).is_err() {
+                navigator.set_guidance(
+                    "Managed session reconciliation is unavailable; exact recovery required",
+                );
+            }
             if let Ok(snapshot) = read_snapshot(root) {
                 navigator.replace_snapshot(snapshot);
             }
@@ -113,6 +121,32 @@ pub(crate) fn run_d17_navigator(
         presentation.stop_session()?;
     }
     Ok(())
+}
+
+/// Calls the post-exec controller only for the one marker phase in which the
+/// helper already transferred Runtime ownership and committed its final exec
+/// fence. A missing marker is the normal idle-card state; all other valid
+/// provisional phases remain owned by the account shell or completed journal.
+///
+/// The reconciliation adapter never creates a provider process. Its `OpenCode`
+/// branch may start only the already-authorized detached observer after exact
+/// native-exec proof, and it cannot activate attachment until that observer is
+/// both ready and currently live.
+fn reconcile_provider_exec_if_ready(
+    root: &StateRoot,
+    presentation: &Presentation,
+) -> Result<bool, D17NavigatorError> {
+    let slot = match read_marker(root.base(), &presentation.paths().directory) {
+        Ok(slot) => slot,
+        Err(SlotError::MarkerUnavailable) => return Ok(false),
+        Err(_) => return Err(D17NavigatorError::ProviderReconciliationUnavailable),
+    };
+    if slot.phase() != ProvisionalPhase::RuntimeOwnedLaunching {
+        return Ok(false);
+    }
+    reconcile_provider_exec_from_presentation(root.base(), &presentation.paths().directory)
+        .map_err(|_| D17NavigatorError::ProviderReconciliationUnavailable)?;
+    Ok(true)
 }
 
 /// Composes the dormant D17 shell card with the marker-first materializer.
@@ -254,7 +288,10 @@ mod tests {
 
     use uuid::Uuid;
 
-    use super::{AccountShellInputs, materialize_provisional_shell_with_inputs};
+    use super::{
+        AccountShellInputs, materialize_provisional_shell_with_inputs,
+        reconcile_provider_exec_if_ready,
+    };
     use crate::{
         domain::RandomIdGenerator,
         presentation::Presentation,
@@ -358,6 +395,7 @@ mod tests {
         let root = StateRoot::select(&state_path);
 
         materialize_provisional_shell_with_inputs(&root, &presentation, &inputs).unwrap();
+        assert!(!reconcile_provider_exec_if_ready(&root, &presentation).unwrap());
 
         let marker = read_marker(root.base(), &presentation.paths().directory).unwrap();
         assert_eq!(marker.phase(), ProvisionalPhase::Materialized);
@@ -372,5 +410,25 @@ mod tests {
 
         let state = open_d17_current_only(&root).unwrap();
         assert!(state.d17_registered_runtime_paths().unwrap().is_empty());
+    }
+
+    #[test]
+    fn idle_d17_presentation_does_not_open_a_provider_reconciler() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        migrate_to_schema14(&state_path);
+
+        let navigator = temporary.path().join("navigator-fixture");
+        make_executable(&navigator, "#!/bin/sh\nexec sleep 60\n");
+        let presentation = Presentation::fresh_with_executable(&state_path, navigator);
+        presentation.start_d17(Uuid::from_u128(92), &seed).unwrap();
+        let _presentation_guard = DisposableTmuxServerGuard(presentation.paths().socket.clone());
+
+        assert!(
+            !reconcile_provider_exec_if_ready(&StateRoot::select(&state_path), &presentation)
+                .unwrap()
+        );
     }
 }

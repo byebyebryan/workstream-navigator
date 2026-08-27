@@ -159,9 +159,10 @@ fn presentation_binding_from_account_context(
 }
 
 /// Reopens one presentation-private D17 marker and reconciles only its
-/// already-owned provider exec. The future D17 Navigator may call this from
-/// its passive snapshot/preflight loop; there is intentionally no CLI route
-/// or provider launch path in this dormant slice.
+/// already-owned provider exec. Codex can complete direct proof immediately.
+/// `OpenCode` remains action-fenced until this controller establishes its exact
+/// detached observer and proves it remains live. Neither path constructs or
+/// launches a native provider command.
 pub(crate) fn reconcile_provider_exec_from_presentation(
     state_root: &std::path::Path,
     presentation_directory: &std::path::Path,
@@ -191,47 +192,18 @@ pub(crate) fn reconcile_provider_exec_from_presentation(
         &process_probe,
         &LinuxProviderExecutableProbe,
     )?;
-    Ok(())
-}
-
-/// Performs the dormant D17 `OpenCode` post-exec handoff. It first records
-/// only exact native process evidence, then starts one detached observer from
-/// the controller, and finally commits provider-exec proof only if that
-/// observer became `Ready`. It never starts, replaces, signals, or otherwise
-/// controls the native provider.
-pub(crate) fn reconcile_opencode_observer_from_presentation(
-    state_root: &std::path::Path,
-    presentation_directory: &std::path::Path,
-) -> Result<(), ProviderExecReconciliationError> {
-    let account_context = AccountShellContext::new(state_root, presentation_directory)?;
-    let presentation_binding = presentation_binding_from_account_context(&account_context)
-        .map_err(ProviderExecReconciliationError::Context)?;
-    let root = StateRoot::select(account_context.state_root());
-    let mut state =
-        open_d17_current_only(&root).map_err(|_| ProviderExecReconciliationError::State)?;
-    let provisional_lease = state
-        .acquire_d17_provisional_lease()
-        .map_err(|_| ProviderExecReconciliationError::State)?;
     let slot = read_marker(state.root(), account_context.presentation_directory())
         .map_err(ReconcileError::from)?;
-    presentation_binding.validate_slot(&slot).map_err(|_| {
-        ProviderExecReconciliationError::Context(AccountShellError::ContextUnavailable)
-    })?;
+    if slot.phase() == crate::provisional::ProvisionalPhase::ProviderExecProven {
+        return Ok(());
+    }
+    if slot.phase() != crate::provisional::ProvisionalPhase::RuntimeOwnedLaunching {
+        return Err(ReconcileError::SlotNotReady.into());
+    }
     let operation_id = slot
         .handoff_request()
         .map(crate::domain::OperationId::from)
         .ok_or(ReconcileError::HandoffIdentityUnavailable)?;
-    let tmux = SystemTmux::default();
-    let process_probe = LinuxProcessProbe;
-    let runtime = PrivateRuntime::new(&tmux, &process_probe, slot.runtime_paths().clone());
-    prove_provider_exec(
-        &mut state,
-        &provisional_lease,
-        account_context.presentation_directory(),
-        &runtime,
-        &process_probe,
-        &LinuxProviderExecutableProbe,
-    )?;
     let target = state
         .d17_onboarding_exec_proof_target_current(&provisional_lease, operation_id)
         .map_err(ReconcileError::from)?;

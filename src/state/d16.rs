@@ -51,9 +51,9 @@ use super::{
     runtime::{load_binding, load_current_binding, load_opencode_handle, row_to_runtime},
     schema::HOST_SCHEMA_SQL,
     utils::{
-        operation_phase_from_text, resolve_project_browser_root, runtime_status_from_text,
-        validate_project_display_name, validate_provider_metadata, validate_registry_text,
-        validate_remote_identity_display, validate_repository_fingerprint,
+        operation_phase_from_text, operation_phase_text, resolve_project_browser_root,
+        runtime_status_from_text, validate_project_display_name, validate_provider_metadata,
+        validate_registry_text, validate_remote_identity_display, validate_repository_fingerprint,
         workstream_lifecycle_from_text,
     },
     workstream::{next_activity_sequence, touch_workstream},
@@ -2555,6 +2555,190 @@ impl D16State {
             workstream_id: existing.workstream_id,
             runtime_id: existing.runtime_id,
             operation_revision: next_revision,
+        })
+    }
+
+    /// Records the helper's durable provider-preparation fence after exact
+    /// Runtime ownership has committed. This changes only the bounded D17
+    /// journal; it neither invokes nor proves a provider.
+    #[allow(
+        dead_code,
+        reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn record_d17_provider_preparation_current(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        ownership: OnboardingOwnership,
+    ) -> Result<OnboardingOwnership, StateError> {
+        self.advance_d17_onboarding_current(
+            provisional_lease,
+            ownership,
+            OnboardingPhase::ProviderPreparation,
+        )
+    }
+
+    /// Records the point at which provider-specific preparation may have an
+    /// external effect. The caller must record this before making that effect;
+    /// this state seam itself does not contact a provider.
+    #[allow(
+        dead_code,
+        reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn record_d17_provider_external_effect_started_current(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        ownership: OnboardingOwnership,
+    ) -> Result<OnboardingOwnership, StateError> {
+        self.advance_d17_onboarding_current(
+            provisional_lease,
+            ownership,
+            OnboardingPhase::ProviderExternalEffectStarted,
+        )
+    }
+
+    /// Records the final durable boundary immediately before the helper would
+    /// execute the native provider. It intentionally does not expose an
+    /// unproven Runtime to ordinary attachment or action authority.
+    #[allow(
+        dead_code,
+        reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
+    )]
+    pub(crate) fn record_d17_provider_exec_started_current(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        ownership: OnboardingOwnership,
+    ) -> Result<OnboardingOwnership, StateError> {
+        self.advance_d17_onboarding_current(
+            provisional_lease,
+            ownership,
+            OnboardingPhase::ProviderExecStarted,
+        )
+    }
+
+    /// Advances one exact Runtime-owned D17 journal through a pre-exec fence.
+    /// Provider-exec proof, known absence, rollback, and recovery each need
+    /// their own evidence-bearing reconciler APIs and cannot use this generic
+    /// mutation seam.
+    fn advance_d17_onboarding_current(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        ownership: OnboardingOwnership,
+        next: OnboardingPhase,
+    ) -> Result<OnboardingOwnership, StateError> {
+        let previous_busy_timeout = self
+            .connection
+            .query_row("PRAGMA busy_timeout", [], |row| row.get::<_, i64>(0))
+            .map_err(StateError::Sqlite)?;
+        self.connection
+            .busy_timeout(Duration::ZERO)
+            .map_err(StateError::Sqlite)?;
+        let advanced =
+            self.advance_d17_onboarding_with_zero_timeout(provisional_lease, ownership, next);
+        let restore = self.connection.busy_timeout(Duration::from_millis(
+            u64::try_from(previous_busy_timeout.max(0)).unwrap_or(0),
+        ));
+        match (advanced, restore) {
+            (Err(error), _) => Err(error),
+            (Ok(_), Err(error)) => Err(StateError::Sqlite(error)),
+            (Ok(ownership), Ok(())) => Ok(ownership),
+        }
+    }
+
+    fn advance_d17_onboarding_with_zero_timeout(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        ownership: OnboardingOwnership,
+        next: OnboardingPhase,
+    ) -> Result<OnboardingOwnership, StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        validate_schema14(&self.connection)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        ensure_d17_current_mode(self.mode)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        let persisted: Option<(String, String, String, i64)> = transaction
+            .query_row(
+                "SELECT kind, phase, expected_revisions_json, revision
+                 FROM compound_operations WHERE operation_id = ?1",
+                [ownership.operation_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?;
+        let Some((kind, phase, encoded_intent, revision)) = persisted else {
+            return Err(StateError::UnknownOperation(ownership.operation_id));
+        };
+        if kind != "onboard" {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+        let intent: PersistedOnboardingIntent =
+            serde_json::from_str(&encoded_intent).map_err(|_| StateError::MalformedHostSchema)?;
+        if intent.version != 1
+            || intent.location_id != ownership.location_id
+            || intent.workstream_id != ownership.workstream_id
+            || intent.candidate_runtime_id != ownership.runtime_id
+        {
+            return Err(StateError::MalformedHostSchema);
+        }
+        let persisted_revision = Revision::try_from(revision)?;
+        if persisted_revision != ownership.operation_revision {
+            return Err(StateError::ConcurrentWrite);
+        }
+        let runtime: Option<(String, String, String)> = transaction
+            .query_row(
+                "SELECT runtimes.workstream_id, workstreams.location_id, runtimes.tmux_generation
+                 FROM runtimes
+                 JOIN workstreams ON workstreams.workstream_id = runtimes.workstream_id
+                 WHERE runtimes.runtime_id = ?1",
+                [ownership.runtime_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?;
+        let Some((workstream_id, location_id, runtime_generation)) = runtime else {
+            return Err(StateError::MalformedHostSchema);
+        };
+        if workstream_id != ownership.workstream_id.to_string()
+            || location_id != ownership.location_id.to_string()
+            || runtime_generation != intent.runtime_generation
+        {
+            return Err(StateError::MalformedHostSchema);
+        }
+        let current = OnboardingPhase::from_operation_phase(
+            operation_phase_from_text(&phase).map_err(|_| StateError::MalformedHostSchema)?,
+        )
+        .ok_or(StateError::MalformedHostSchema)?;
+        current.transition(next)?;
+        let next_revision = next_revision(persisted_revision)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        let updated = transaction
+            .execute(
+                "UPDATE compound_operations
+                 SET phase = ?1, revision = ?2
+                 WHERE operation_id = ?3 AND kind = 'onboard'
+                   AND phase = ?4 AND revision = ?5",
+                params![
+                    operation_phase_text(next.operation_phase()),
+                    next_revision.value(),
+                    ownership.operation_id.to_string(),
+                    phase,
+                    persisted_revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if updated != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        validate_schema14(&transaction)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        Ok(OnboardingOwnership {
+            operation_revision: next_revision,
+            ..ownership
         })
     }
 
@@ -8324,6 +8508,54 @@ mod tests {
             ),
             Err(StateError::OnboardingOperationUnavailable)
         ));
+        assert!(matches!(
+            state.record_d17_provider_exec_started_current(&provisional, ownership),
+            Err(StateError::Domain(
+                crate::domain::DomainError::InvalidOnboardingTransition { .. }
+            ))
+        ));
+        let preparation = state
+            .record_d17_provider_preparation_current(&provisional, ownership)
+            .unwrap();
+        assert_eq!(preparation.operation_revision.value(), 4);
+        assert!(matches!(
+            state.record_d17_provider_preparation_current(&provisional, ownership),
+            Err(StateError::ConcurrentWrite),
+        ));
+        let effect_started = state
+            .record_d17_provider_external_effect_started_current(&provisional, preparation)
+            .unwrap();
+        assert_eq!(effect_started.operation_revision.value(), 5);
+        let exec_started = state
+            .record_d17_provider_exec_started_current(&provisional, effect_started)
+            .unwrap();
+        assert_eq!(exec_started.operation_revision.value(), 6);
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT phase, revision FROM compound_operations WHERE operation_id = ?1",
+                    [issued.operation_id().to_string()],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+                )
+                .unwrap(),
+            ("provider_exec_started".to_owned(), 6)
+        );
+        assert!(matches!(
+            state.record_d17_provider_preparation_current(&provisional, exec_started),
+            Err(StateError::Domain(
+                crate::domain::DomainError::InvalidOnboardingTransition { .. }
+            ))
+        ));
+        assert_eq!(
+            state
+                .connection
+                .query_row("SELECT COUNT(*) FROM provider_bindings", [], |row| row
+                    .get::<_, i64>(0),)
+                .unwrap(),
+            0,
+            "journal fences never manufacture a provider binding"
+        );
         assert_eq!(
             state
                 .connection

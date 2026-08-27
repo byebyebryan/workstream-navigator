@@ -294,6 +294,12 @@ The separate observer-ancestry revalidation passed on Codex `0.150.0`, while a
 real brokered Codex launch remains a D17 gate. D17.0 remains the first
 implementation gate for the complete handshake, grammar, wrapper, ownership,
 and recovery contract.
+OpenCode activation requires the D17-specific staged observer proof in
+design.md: it may not become attachable merely because the pane executable was
+proven. The retained blank-session endpoint/session handle is bound before the
+final exec, then a post-exec controller must record the unchanged native
+PID/birth, establish the exact detached observer, and commit final activation
+only after the observer is Ready. That work is not yet user-facing.
 [Spike 0020](evidence/spikes/0020-opencode-1.18.23-revalidation.md) revalidates
 the OpenCode fresh-session/provider lifecycle assumptions on `1.18.23`; it does
 not replace the required D17 broker implementation and Bash/Zsh acceptance.

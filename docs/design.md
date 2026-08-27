@@ -696,6 +696,26 @@ enters the exact recovery/resume state if final TUI exec fails; it is never
 rolled back and never issues a second POST. A possible POST effect remains
 `recovery-required`.
 
+For OpenCode, executable proof alone is not the final D17 activation proof.
+Before the final native exec, the helper persists the exact loopback
+endpoint/version/session handle that the already-fenced blank-session creation
+returned; that handle is not observer authority while the pane still contains
+the account shell. After the passive reconciler proves the final native
+executable and records the unchanged pane PID/birth, it retains
+`provider_exec_started` and starts one detached, presentation-independent
+observer for that exact Runtime generation. The observer may perform its first
+health, root-session, and SSE reads only after those durable PID/birth, handle,
+and generation checks all agree. It records `Ready` under the same exact
+identity, and only then does the reconciler commit `provider_exec_proven` and
+make the Runtime attachable/actionable. An observer that is missing, changed,
+unknown, exits before Ready, or cannot establish the exact endpoint/session
+leaves the Workstream action-fenced for explicit recovery; it never permits a
+blind attach, a second session POST, or an inferred observer replacement. The
+helper does not try to start this long-lived observer after `execve` from the
+provider pane: the D17 presentation/controller owns the staged post-exec
+handoff and must clean an observer-start failure without signalling the native
+provider.
+
 ### Account-shell bootstrap and broker handshake
 
 D17 supports Bash and Zsh interactive non-login shells only. The launcher

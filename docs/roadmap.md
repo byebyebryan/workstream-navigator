@@ -99,7 +99,7 @@ only after exact prior absence or conclusive cleanup and receives a fresh
 `slot_generation` and candidate RuntimeId.
 
 Every participant revalidates the marker, onboarding journal, and
-presentation/registry revisions while holding `provisional.lock`. The broker
+presentation revision and registry generation while holding `provisional.lock`. The broker
 validates the shell's current cwd, detects the exact non-bare Git worktree root,
 and transactionally generates/reserves the durable Runtime generation and graph
 for the exact candidate ID and unchanged full-UUID `RuntimePaths` fields
@@ -4354,7 +4354,7 @@ private Runtime, recovery, privacy, and completed-output guarantees.
   never crosses provider exec, and busy/timeout never creates a second lock or
   proceeds unlocked. Marker, capability, and journal bind both
   `lease_generation` and `slot_generation`; each participant revalidates the
-  marker, onboarding journal, and presentation/registry revisions while
+marker, onboarding journal, presentation revision, and registry generation while
   holding it.
   The broker transactionally generates/reserves the durable Runtime generation
   and graph for the exact candidate ID and unchanged full-UUID `RuntimePaths`

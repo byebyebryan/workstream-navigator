@@ -102,7 +102,7 @@ pub(crate) struct LaunchCapabilityClaims {
     worktree_root: PathBuf,
     location_id: LocationId,
     runtime_generation: String,
-    registry_revision: Revision,
+    registry_generation: String,
     shell_pid: u32,
     shell_birth: String,
     shell_process_group: u32,
@@ -147,7 +147,7 @@ impl LaunchCapabilityClaims {
         worktree_root: PathBuf,
         location_id: LocationId,
         runtime_generation: String,
-        registry_revision: Revision,
+        registry_generation: String,
         shell_pid: u32,
         shell_birth: String,
         shell_process_group: u32,
@@ -166,6 +166,7 @@ impl LaunchCapabilityClaims {
             || !is_normalized_absolute_path(&worktree_root)
             || !is_bounded_text(&runtime_paths.session_name)
             || !is_bounded_text(&runtime_generation)
+            || !is_bounded_text(&registry_generation)
             || !is_bounded_text(&shell_birth)
             || !is_versioned_sha256(&argv_digest, ARGUMENT_DIGEST_VERSION)
             || !is_versioned_sha256(&boot_provenance, BOOT_PROVENANCE_VERSION)
@@ -185,7 +186,7 @@ impl LaunchCapabilityClaims {
             worktree_root,
             location_id,
             runtime_generation,
-            registry_revision,
+            registry_generation,
             shell_pid,
             shell_birth,
             shell_process_group,
@@ -245,8 +246,8 @@ impl LaunchCapabilityClaims {
         update_claim(&mut digest, "runtime_generation", &self.runtime_generation);
         update_claim(
             &mut digest,
-            "registry_revision",
-            &self.registry_revision.value().to_string(),
+            "registry_generation",
+            &self.registry_generation,
         );
         update_claim(&mut digest, "shell_pid", &self.shell_pid.to_string());
         update_claim(&mut digest, "shell_birth", &self.shell_birth);
@@ -601,7 +602,7 @@ mod tests {
             PathBuf::from("/tmp/wsnav-d17-state/worktree"),
             LocationId::from(Uuid::from_u128(15)),
             "runtime-generation-16".to_owned(),
-            Revision::try_from(2).unwrap(),
+            "registry-generation-17".to_owned(),
             101,
             shell_birth.to_owned(),
             101,
@@ -791,7 +792,7 @@ mod tests {
         changed.runtime_generation = "runtime-generation-other".to_owned();
         assert_ne!(changed.digest(), digest);
         changed = claims.clone();
-        changed.registry_revision = Revision::try_from(3).unwrap();
+        changed.registry_generation = "registry-generation-other".to_owned();
         assert_ne!(changed.digest(), digest);
         changed = claims.clone();
         changed.shell_pid = 102;

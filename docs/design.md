@@ -326,7 +326,8 @@ records only the candidate RuntimeId, exact final-form `RuntimePaths` fields
 (directory, socket, configuration, and session), seed cwd, presentation/slot
 identity, fresh `slot_generation`, and bounded shell/server/process ownership
 evidence. It is
-revalidated with the onboarding journal and registry revisions under the shared
+revalidated with the onboarding journal, presentation revision, and registry
+generation under the shared
 stable host-private `provisional.lock` lease. The marker is the provisional
 cleanup authority until the helper successfully revalidates every bound claim,
 atomically consumes the capability, and commits durable `Runtime-owned`
@@ -475,8 +476,9 @@ with bounded guidance; it never falls back or becomes Project authority.
 The provisional slot has one serialized ownership handoff shared by lazy
 materialization, confirmed close/loss cleanup, the prepare broker, and the
 launch helper. Each participant acquires the stable host-private
-`provisional.lock` lease, revalidates the marker and its presentation/registry
-revisions, and releases the lease only after its state transition is complete.
+`provisional.lock` lease, revalidates the marker, presentation revision, and
+registry generation, and releases the lease only after its state transition is
+complete.
 The marker, capability, and onboarding journal bind both the lock's
 `lease_generation` and the presentation/slot `slot_generation`.
 Materialization owns only the marker-backed provisional artifacts. The prepare
@@ -731,7 +733,7 @@ token. Its claims bind the request/operation key, presentation identity,
 provisional-slot identity, candidate `RuntimeId`, exact final-form `RuntimePaths`
 fields (directory, socket, configuration, and session), fixed provider, shell
 cwd, detected worktree root and ProjectLocation, reserved Runtime generation,
-captured registry and presentation revisions, shell leader PID/birth/process-
+captured presentation revision and registry generation, shell leader PID/birth/process-
 group identity, a digest of the already grammar-approved bounded argv, and a
 short monotonic expiry. Expiry uses one host monotonic-clock provenance; after
 a restart or clock-provenance ambiguity the capability is expired rather than
@@ -1831,7 +1833,7 @@ ownership evidence. That marker is the only authority for the provisional
 process and never becomes a `Runtime` or `Workstream` row by itself. Before
 provider execution, the prepare broker acquires the stable host-private
 `provisional.lock`, revalidates the marker, its `lease_generation` and
-`slot_generation`, and the captured presentation/registry revisions, creates or
+`slot_generation`, captured presentation revision, and registry generation, creates or
 reuses one exact request-keyed `CompoundOperation`, and transactionally
 generates/reserves the durable Runtime generation while adopting that exact
 candidate ID and unchanged `RuntimePaths` fields (directory, socket,
@@ -2134,7 +2136,7 @@ user selects New session · shell and presses Enter
 -> for a promotable fresh-TUI shape, it invokes the bounded prepare broker as a
    child over presentation-private non-terminal control I/O
 -> broker acquires `provisional.lock` and revalidates the
-   marker, shell identity, seed/current cwd, and registry revisions
+   marker, shell identity, seed/current cwd, presentation revision, and registry generation
 -> host detects and validates that current cwd's exact non-bare Git worktree root
 -> host revalidates provider readiness and rejects broker-owned or conflicting
    cwd/profile/session/endpoint arguments

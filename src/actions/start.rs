@@ -735,14 +735,10 @@ struct OpenCodeObserverLaunch {
     handle_revision: Revision,
 }
 
-/// Starts and waits for the exact dormant D17 observer after a separate
+/// Starts and waits for the exact D17 observer after a separate
 /// reconciler has recorded the native provider PID/birth.  This has no
 /// provider-start authority: it accepts only an already-bound `Starting`
 /// handle and never contacts the provider itself.
-#[allow(
-    dead_code,
-    reason = "the D17 presentation controller remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) fn spawn_d17_opencode_observer(
     registry: &mut HostRegistry,
     root: &Path,
@@ -811,14 +807,38 @@ fn spawn_opencode_observer_with_mode(
             return Err(ActionError::State(error));
         }
     };
-    wait_for_spawned_observer_ready(
+    match wait_for_spawned_observer_ready(
         registry,
         observer,
         &mut child,
         observer_pid,
         &observer_birth,
         &starting,
-    )
+    ) {
+        Ok(()) => match reap_spawned_observer(child) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // A ready observer must retain an owner that waits on its
+                // child. If the detached reaper cannot be created, stop the
+                // exact helper and leave durable recovery evidence rather
+                // than silently creating an unreaped process.
+                let _ = crate::runtime::terminate_owned_observer_process(
+                    observer_pid,
+                    &observer_birth,
+                    PARK_CONFIRM_TIMEOUT,
+                );
+                mark_spawned_observer_unknown(
+                    registry,
+                    observer,
+                    observer_pid,
+                    &observer_birth,
+                    starting.revision,
+                );
+                Err(ActionError::Io(error))
+            }
+        },
+        Err(error) => Err(error),
+    }
 }
 
 fn opencode_observer_command(
@@ -1054,6 +1074,21 @@ fn terminate_spawned_observer(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// Keeps a direct child waiter alive for the long-lived `OpenCode` observer.
+/// The observer command is intentionally detached from the startup action,
+/// but its `Child` handle must still be owned somewhere so a normal exit is
+/// reaped instead of remaining as a zombie under the Navigator process.
+fn reap_spawned_observer(mut child: std::process::Child) -> Result<(), std::io::Error> {
+    match thread::Builder::new()
+        .name("wsnav-opencode-observer-reaper".to_owned())
+        .spawn(move || {
+            let _ = child.wait();
+        }) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 pub(super) fn runtime_launch_program(
     state_root: &Path,
     runtime_id: RuntimeId,
@@ -1109,6 +1144,25 @@ mod observer_command_tests {
         cleanup.unwrap();
         reaped.unwrap();
         assert_eq!(process_group.as_raw(), child_pid);
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn detached_observer_reaper_reaps_a_ready_child() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exit 0"]);
+        let child = command.spawn().unwrap();
+        let child_pid = child.id();
+        reap_spawned_observer(child).unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while Instant::now() < deadline {
+            if LinuxProcessProbe.process_birth(child_pid).is_none() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+        panic!("detached observer reaper did not reap child {child_pid}");
     }
 
     #[test]

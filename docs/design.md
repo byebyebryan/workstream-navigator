@@ -1,15 +1,23 @@
 # Workstream Navigator V1 Design
 
-Date: 2026-08-27
+Date: 2026-08-28
 
-Status: D16 host-local simplification is complete, including operator-gated
-live local and SSH-entered-host acceptance. The current binary routes ordinary
-Navigator startup through D17 shell-first managed-session onboarding: fresh
-state is schema 14, idle schema-13 state migrates without a wipe only after a
-legacy presentation is absent, and interrupted schema-13/schema-14 transition
-recovery is explicit. D17 disposable automated acceptance is complete; no D17
-live-provider acceptance has been performed in this checkpoint. V1 remains a source-installed
-operator beta with no compatibility contract.
+Status: D16 host-local simplification and D17 shell-first managed-session
+onboarding are complete. The current binary creates fresh state at schema 14,
+migrates idle schema-13 state without a wipe only after a legacy presentation
+is absent, and recovers interrupted schema-13/schema-14 transitions explicitly.
+Exact pre-provider shell/handoff recovery, schema-14 public-command routing,
+retired D16 application/UI/route removal, and fresh-state Codex observer
+readiness before broker reservation are implemented. The repository gate and
+sanitized, operator-gated live Codex/OpenCode acceptance pass with complete
+disposable cleanup. V1 remains a source-installed operator beta with no
+compatibility contract.
+
+The final review-directory ownership correction is repository-gated after the
+recorded live run. It changes only exact ownership and non-recursive recovery
+of the empty native-review cwd; the acceptance record distinguishes the live
+artifact from the post-review source candidate and does not claim binary
+parity between them.
 
 The design is the current product and architecture contract. Dated acceptance,
 spike, and study records preserve the evidence and limitations of the candidate
@@ -770,14 +778,17 @@ binding may roll back the graph. An exact `execve` error alone proves only
 absence of the final provider TUI exec; any possible post-effect result remains
 a visible recovery-required operation and cannot become a blind clean retry.
 
-This two-phase prepare-token-helper variant is an explicit D17 candidate.
+This two-phase prepare-token-helper variant was the approved D17 candidate and
+is now routed by the current binary.
 [Spike 0021](evidence/spikes/0021-d17-two-phase-handshake.md) validates its
 narrow synthetic mechanical boundary across Bash/Zsh and both provider routes:
 direct prepare child, one-shot verifier-backed capability, exact claim
-comparison, shell identity preservation, and lease-FD noninheritance. D17.0
-still must validate the cross-actor wrapper/lock integration, races and
-recovery, and real provider effects before production implementation relies on
-the complete contract. [Spike
+comparison, shell identity preservation, and lease-FD noninheritance. Those
+spikes remain historical model evidence rather than proof of the production
+composition. The routed implementation and disposable tests now cover
+conclusive pre-provider shell/handoff recovery and the required cross-actor
+race matrix. Formal live provider acceptance is recorded in the D17 evidence.
+[Spike
 0022](evidence/spikes/0022-d17-account-shell-wrapper.md) validates the
 non-login account wrapper and Bash login preflight, while [Spike
 0023](evidence/spikes/0023-d17-provisional-lock.md) validates the isolated
@@ -1245,11 +1256,21 @@ later. This does not affect ordinary Codex use of any profile.
 
 Opening `wsnav` performs only read-only observer readiness detection. It does
 not install, update, remove, or force review of a profile, and an unready Codex
-adapter does not block Projects, Archived, or attachment to an existing live
-Runtime. When the user requests a Codex Start, Resume, Fork, or other operation
-that requires an unready observer, the navigator captures that exact intent
-and its expected Workstream, Location, integration, and registry revisions,
-then offers a contextual readiness guide.
+adapter does not block Workstreams, Archived, the provisional shell, or
+attachment to an existing live Runtime. Before a provisional shell reserves a
+Codex launch, the shell gate performs the same read-only check. If setup is
+required, the wrapper retains the original bounded argv only in process memory,
+asks for explicit consent in that shell, opens the native review in place, and
+retries the exact argv only after readiness succeeds. No broker reservation,
+capability, Runtime, Workstream, or ProjectLocation exists before that success.
+
+When the user requests a Codex Start, Resume, Fork, or other managed operation
+that requires an unready observer, the Navigator instead captures that exact
+intent and its expected Workstream, Location, integration, and registry
+revisions in a typed process-local pending action, then offers contextual review
+in the right pane. A stopped or deliberately parked attachment may surrender
+only its disposable outer helper after exact proof that its private Runtime is
+absent; a live, ambiguous, changed, or foreign attachment is never replaced.
 
 A non-interactive public CLI action never installs, updates, or opens native
 review. It returns a typed `observer readiness required` result with bounded
@@ -1257,8 +1278,9 @@ guidance to use interactive `wsnav`; hidden internal preparation entrypoints
 remain inaccessible as normal public workflow.
 
 For an absent profile or an exact owned declaration requiring update, the
-guide explains the bounded mutation and asks for explicit consent before any
-write. Declining cancels the pending action without mutation. A missing
+review path explains the bounded mutation and asks for explicit consent before
+any write. Declining cancels the pending action or shell retry without
+mutation. A missing
 ownership record, foreign or modified file, disabled configuration, ambiguous
 path, or other ownership mismatch is never adopted or overwritten; the guide
 reports the exact refusal and leaves the requested action available for an
@@ -1275,20 +1297,29 @@ absolute WSNav hook executable path, and exact generated-declaration hash.
 The hook definition is reviewed and trusted through Codex's native `/hooks`
 UI. WSNav never writes Codex's trust database and never passes
 `--dangerously-bypass-hook-trust`. Once the exact owned declaration is
-`trust_pending`, the contextual guide may replace only the presentation's
-right pane with a temporary native, profile-selected Codex review process in
-an empty disposable cwd. The navigator remains visible; the operator uses the
-normal `/hooks` UI, trusts the exact generated command if desired, and exits
-without submitting a prompt. That temporary process is not a managed Runtime
-or Workstream and deliberately has no observer authority: an invoked hook
-drains and does nothing.
+`trust_pending`, the shell or Navigator review path may replace only the
+presentation's right pane with a temporary native, profile-selected Codex
+review process in an empty disposable cwd beneath the exact owned presentation.
+The navigator remains visible; the
+operator uses the normal `/hooks` UI, trusts the exact generated command if
+desired, and exits without submitting a prompt. That temporary process is not
+a managed Runtime or Workstream and deliberately has no observer authority: an
+invoked hook drains and does nothing. A bounded sibling marker binds the cwd to
+the presentation ID/revision, owner PID/birth, and presentation/directory
+device/inode. The process-local owner quarantines and revalidates the exact
+empty directory and marker before non-recursive removal. An interrupted owner
+is never adopted by a later review; after the presentation lifecycle has
+stopped its pane and any provisional Runtime, it completes the same exact
+cleanup. Missing, replaced, non-empty, foreign, malformed, or ambiguous
+evidence is preserved and fails closed.
 
 On review exit, WSNav silently re-detects the complete native trust record and
-revalidates every captured revision. It continues the pending action only when
-the profile is exactly ready and the original intent is still current. An
-incomplete or declined native review leaves the owned profile accurately
-`trust_pending` and cancels the pending action with retry guidance; changed
-revisions likewise cancel rather than retargeting the operation. The guide
+revalidates every captured revision. It continues the pending action or exact
+shell retry only when the profile is exactly ready and the original intent is
+still current. An incomplete or declined native review leaves the owned
+profile accurately `trust_pending` and cancels the pending action or shell
+retry with guidance; changed revisions likewise cancel rather than retargeting
+the operation. The review path
 neither inspects the current cwd nor creates a ProjectLocation or Workstream.
 A blank Codex landing screen emits no `SessionStart`, so no stronger passive
 activation signal is fabricated. The first managed `SessionStart` must instead
@@ -2505,7 +2536,7 @@ while using the same host/runtime contracts.
 | D16 is installed while a schema-12 Codex Runtime remains live | New hooks use only the observer-transition handle so accepted lifecycle and attention evidence continues before confirmation; keep every action and Navigator open behind cutover-required |
 | A pre-D16 OpenCode observer remains live at cutover | Before reset, journal exact identities, establish a mutation-inert D16 standby stream, freeze the proven old helper, compare-and-swap the observer handle, activate the standby, and terminate only the frozen old sidecar |
 | OpenCode observer handover is interrupted | Under a newly confirmed cutover and the transition lease, replay only a valid exact journal phase; restore the old observer before the swap or complete new authority and old-helper cleanup after it, otherwise signal nothing and require transition recovery |
-| `wsnav-observer` is absent or awaiting trust | Preserve existing Runtime attachment; on an observer-dependent request offer the explicit-consent contextual guide, then continue only after exact readiness and revision revalidation |
+| `wsnav-observer` is absent or awaiting trust | Preserve existing Runtime attachment. Before a provisional Codex broker reservation, ask consent in the shell and complete native review; for a managed action capture the exact pending intent. Continue either path only after exact readiness and revision revalidation |
 | `wsnav-observer` is foreign, modified, disabled, or ambiguous | Preserve it and existing Runtime attachment; refuse the observer-dependent request with exact contextual diagnosis and retry guidance |
 | Profile update or exceptional removal is requested while a managed Runtime is live | Refuse the integration change until all WSNav-managed Codex Runtimes on that host are parked or stopped; do not block attachment |
 
@@ -3220,13 +3251,14 @@ on any provider. Readiness guidance is scoped to the requested provider:
 
 - an unready Codex adapter cannot block the provisional shell, Archived,
   existing Runtime attachment, or an eligible OpenCode action;
-- Codex remains `unavailable/observer_not_ready` as an immediate capability
-  until the explicit-consent contextual guide and exact native trust review
-  complete. Exact `setup_required`, `update_required`, and
-  `trust_review_required` states are nevertheless accepted as a typed Codex
-  onboarding request so that the requested action can invoke that guide;
-- the pending request resumes only after exact readiness and captured revision
-  revalidation; and
+- Codex remains `unavailable/observer_not_ready` as an immediate broker/action
+  capability until explicit consent and exact native trust review complete.
+  Exact `setup_required`, `update_required`, and `trust_review_required` states
+  are accepted as typed readiness requests: the provisional shell performs
+  review before reservation, while a managed action records process-local
+  pending intent;
+- the shell retries its exact in-memory argv, or the managed request resumes,
+  only after exact readiness and captured revision revalidation; and
 - OpenCode adds no installation, credential, trust, or provider-management
   flow.
 

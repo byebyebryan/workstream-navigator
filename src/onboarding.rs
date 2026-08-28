@@ -1,13 +1,9 @@
 //! Pure D17 onboarding preparation boundaries.
-#![allow(
-    dead_code,
-    reason = "the hidden D17 broker consumes this pure boundary only at the atomic cutover; keeping it dormant preserves D16 behavior"
-)]
 //!
 //! This module does not create state, a shell, or a provider process. It
-//! reduces the bounded argv observed by the future account-shell function to
+//! reduces the bounded argv observed by the account-shell function to
 //! either an explicitly unmanaged provider command or a normalized fresh-TUI
-//! launch artifact. The broker will persist only the artifact's digest.
+//! launch artifact. The broker persists only the artifact's digest.
 
 use std::{
     ffi::OsString,
@@ -70,6 +66,7 @@ impl FreshProviderLaunch {
 
     /// Reconstructs a direct native invocation without a shell command
     /// string. This stays private to the future helper boundary.
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn native_program(&self) -> Vec<OsString> {
         std::iter::once(OsString::from(self.provider.as_str()))

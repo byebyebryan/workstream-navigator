@@ -4,10 +4,13 @@
 
 D16 host-local implementation and its separately authorized live acceptance
 remain complete historical evidence. D17 shell-first managed-session
-onboarding is the active source-installed product: its schema-14 cutover,
-Navigator, brokered Codex/OpenCode promotion, and managed attachment paths are
-implemented, and the repository gate passes. Final explicitly operator-gated
-live Codex/OpenCode acceptance remains open.
+onboarding is complete and is the active source-installed product: its
+schema-14 cutover, Navigator, brokered Codex/OpenCode promotion, managed
+attachment paths, interrupted-shell and unconsumed-capability recovery,
+schema-14 public-command routing, retired-D16 removal, and fresh-state Codex
+observer readiness are implemented. The repository gate and explicitly
+operator-gated live Codex/OpenCode acceptance pass with complete disposable
+cleanup.
 
 - [Product and architecture design](design.md) is the V1 contract.
 - [Delivery roadmap](roadmap.md) owns delivery order, checkpoint status, and
@@ -36,6 +39,13 @@ views. Workstreams keeps `Enter`, `n`, `f`, `p`, `x`, `a`, and `?`; Archived
 uses `u` to restore without starting or attaching a provider. The installed
 `wsnav --help` output is the CLI reference for that exact binary.
 
+Retained public management commands use the same schema-14 snapshot and
+revision-fenced action boundaries as the Navigator. Passive status and
+operation queries do not launch a provider or inspect tmux. Direct scripting
+commands never install observer state or open native review; a Codex action
+that needs setup returns a typed readiness-required refusal and points to the
+interactive `wsnav` flow.
+
 Workstreams starts with one pinned `Shell` card outside Project groups. A fresh
 presentation starts with that card selected and its account shell visible on
 the right; reconnect preserves the detached presentation's current surface.
@@ -50,13 +60,21 @@ Shell card. There is no Projects page, provider picker, path picker, or
 below-provider split shell.
 
 Observer readiness is contextual rather than a page or manual setup mode.
-Startup detects it read-only. A Codex action that needs readiness opens a guide
-that captures the exact intent, asks explicit consent before one exact owned
-profile is created or updated, opens native trust review without granting
-trust, and continues only after readiness and revisions are revalidated.
-Decline, foreign/modified/disabled/ambiguous state, or live-Runtime conflicts
-leave state unchanged. Exact removal is an exceptional cleanup path; normal
-CLI use returns guidance rather than installing or reviewing a profile.
+Startup detects it read-only. A provisional shell checks readiness before any
+Codex broker reservation; when setup is needed, its wrapper retains the
+bounded argv only in process memory, asks explicit consent, opens native trust
+review, and retries only after exact readiness. A managed Codex action instead
+captures its exact intent and revisions in the Navigator before using the same
+review surface. Decline, foreign/modified/disabled/ambiguous state, or
+live Codex Runtime conflicts leave state unchanged. Exact removal is an exceptional
+cleanup path; direct CLI use returns typed guidance rather than installing or
+reviewing a profile.
+
+The native review cwd is an empty, presentation-owned directory with bounded
+owner/process and filesystem-identity evidence. Normal exit removes it
+non-recursively through its process-local owner; presentation teardown finishes
+an interrupted exact cleanup only after stopping the possible native users.
+Changed, non-empty, foreign, or ambiguous paths are preserved.
 
 D16 removes the client catalog in a clean break. The exact
 `client.sqlite`, `client.sqlite-wal`, and `client.sqlite-shm` paths are
@@ -211,8 +229,8 @@ Runtime attachment/pane or detach through ordinary card switching, but no new
 attachment to that Runtime is allowed. Selecting/materializing the fresh derived
 singleton card attaches only its separate provisional server under
 `provisional.lock` and grants no authority over the unproven Runtime. Park,
-Resume, Fork, contextual `n`/`new-workstream`, archive, Rename, recovery/start
-retry, and cleanup actions for that Runtime refuse or wait with bounded
+Resume, Fork, contextual `n`, archive, Rename, recovery/start retry, and
+cleanup actions for that Runtime refuse or wait with bounded
 `onboarding-in-progress` guidance. Passive snapshot/probe may show
 `starting`/`onboarding` and reconcile, but never adopts the helper/preparation
 process as provider identity, marks the Runtime lost, or signals it. Once
@@ -295,18 +313,18 @@ pre-effect absence. After that exact helper commit, presentation cleanup never
 signals that server. Ambiguous ownership leaves evidence untouched and blocks
 duplicate creation. Shell exit and conclusive pre-effect launch failure are
 resolved by onboarding recovery; ambiguity after a provider effect remains visible as a
-recovery-required managed Workstream. Public `new-workstream` remains
-source-based parity for contextual `n`: it inherits the exact source provider
-and Location and rejects provider/path overrides. Source-less arbitrary
-provider/path creation is broker-only.
+recovery-required managed Workstream. The public `new-workstream` command is
+removed. Contextual `n` inherits the selected Workstream's exact provider and
+Location and has no provider/path override; every new provider/Location pair is
+broker-only through the provisional shell.
 
 Disposable automated evidence covers the schema/lease boundaries, Bash/Zsh
 wrappers, marker-backed Runtime handoff, provider grammar, crash/recovery
 fences, exact attachment, card promotion/selection, live cwd display, and
 retired split-shell bindings. The [D17 roadmap
-checkpoint](roadmap.md#d17---shell-first-managed-session-onboarding) retains the
-complete exit gates. Final sanitized live Codex/OpenCode acceptance still
-requires explicit operator intent.
+checkpoint](roadmap.md#d17---shell-first-managed-session-onboarding) records the
+completed exit gates. Sanitized live Codex/OpenCode acceptance passed with
+explicit operator intent and complete disposable cleanup.
 
 ## Build and command references
 

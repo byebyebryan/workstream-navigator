@@ -1,13 +1,8 @@
-//! Dormant D17 controlled account-shell bootstrap.
+//! D17 controlled account-shell bootstrap.
 //!
 //! This module constructs only fixed private startup files and direct shell
-//! argv for a provisional Runtime. It does not render a card, create state,
-//! invoke a provider, or expose a CLI path before the atomic D17 cutover.
-
-#![allow(
-    dead_code,
-    reason = "the D17 account shell remains unreachable until the atomic Navigator cutover"
-)]
+//! argv for a provisional Runtime. It does not render a card, create durable
+//! state, or invoke a provider itself.
 
 use std::{
     collections::BTreeMap,
@@ -51,9 +46,10 @@ fi
 unalias codex opencode 2>/dev/null || true
 unset -f codex opencode 2>/dev/null || true
 codex() {
-    local wsnav_capability
+    local wsnav_capability wsnav_status wsnav_consent wsnav_setup_status
+    while :; do
     wsnav_capability="$("${WSNAV_D17_EXECUTABLE:?}" _d17_shell_gate --provider codex --shell-leader-pid "$$" -- "$@")"
-    local wsnav_status=$?
+    wsnav_status=$?
     if [[ "$wsnav_status" -eq 0 && -n "$wsnav_capability" && ${#wsnav_capability} -le 512 && "$wsnav_capability" != *$'\n'* && "$wsnav_capability" != *$'\r'* ]]; then
         exec "${WSNAV_D17_EXECUTABLE}" _d17_launch_helper --capability "$wsnav_capability" --provider codex -- "$@"
         printf '%s\n' 'WSNav D17 onboarding command is unavailable' >&2
@@ -63,8 +59,22 @@ codex() {
         command codex "$@"
         return
     fi
+    if [[ "$wsnav_status" -eq 11 ]]; then
+        printf '%s' 'WSNav Codex observer setup is required. Allow exact profile setup and native /hooks review? [y/N] ' >&2
+        IFS= read -r wsnav_consent || wsnav_consent=''
+        if [[ "$wsnav_consent" == [yY] || "$wsnav_consent" == [yY][eE][sS] ]]; then
+            "${WSNAV_D17_EXECUTABLE}" _d17_observer_setup --shell-leader-pid "$$" --consent
+            wsnav_setup_status=$?
+            if [[ "$wsnav_setup_status" -eq 0 ]]; then
+                continue
+            fi
+        else
+            printf '%s\n' 'WSNav D17 Codex observer setup was declined' >&2
+        fi
+    fi
     printf '%s\n' 'WSNav D17 onboarding command is unavailable' >&2
     return 64
+    done
 }
 opencode() {
     local wsnav_capability
@@ -98,9 +108,10 @@ if (( $+aliases[opencode] )); then unalias opencode || return 64; fi
 if (( $+functions[codex] )); then unfunction codex || return 64; fi
 if (( $+functions[opencode] )); then unfunction opencode || return 64; fi
 codex() {
-    local wsnav_capability
+    local wsnav_capability wsnav_status wsnav_consent wsnav_setup_status
+    while :; do
     wsnav_capability="$("${WSNAV_D17_EXECUTABLE:?}" _d17_shell_gate --provider codex --shell-leader-pid "$$" -- "$@")"
-    local wsnav_status=$?
+    wsnav_status=$?
     if [[ "$wsnav_status" -eq 0 && -n "$wsnav_capability" && ${#wsnav_capability} -le 512 && "$wsnav_capability" != *$'\n'* && "$wsnav_capability" != *$'\r'* ]]; then
         exec "${WSNAV_D17_EXECUTABLE}" _d17_launch_helper --capability "$wsnav_capability" --provider codex -- "$@"
         print -r -- 'WSNav D17 onboarding command is unavailable' >&2
@@ -110,8 +121,22 @@ codex() {
         command codex "$@"
         return
     fi
+    if [[ "$wsnav_status" -eq 11 ]]; then
+        print -n -- 'WSNav Codex observer setup is required. Allow exact profile setup and native /hooks review? [y/N] ' >&2
+        read -r wsnav_consent || wsnav_consent=''
+        if [[ "$wsnav_consent" == [yY] || "$wsnav_consent" == [yY][eE][sS] ]]; then
+            "${WSNAV_D17_EXECUTABLE}" _d17_observer_setup --shell-leader-pid "$$" --consent
+            wsnav_setup_status=$?
+            if [[ "$wsnav_setup_status" -eq 0 ]]; then
+                continue
+            fi
+        else
+            print -r -- 'WSNav D17 Codex observer setup was declined' >&2
+        fi
+    fi
     print -r -- 'WSNav D17 onboarding command is unavailable' >&2
     return 64
+    done
 }
 opencode() {
     local wsnav_capability

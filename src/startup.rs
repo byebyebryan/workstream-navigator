@@ -1,4 +1,4 @@
-//! D16 launcher-owned state classification and confirmation.
+//! Transition-owned state classification and confirmation before D17 startup.
 //!
 //! This boundary runs before presentation reuse.  Classification performs no
 //! creation, migration, cleanup, provider action, or process signal.  Only an
@@ -68,7 +68,7 @@ pub fn assess_startup<P: PresentationProofSource>(
     // pre-12, or future host database beside a legacy artifact is recovery
     // state, not authority to prompt, acquire a lease, or retire anything.
     // A normal schema-13 presentation is current reconnect state and is owned
-    // by `Presentation::open_or_create`, never by the legacy cutover parser.
+    // by the D17 presentation opener, never by the legacy cutover parser.
     let has_client = has_legacy_client_artifact(root.base())?;
     let schema = host_schema_version(root)?;
     match schema {

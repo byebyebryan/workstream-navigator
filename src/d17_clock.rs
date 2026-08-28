@@ -5,11 +5,6 @@
 //! it before consumption.  This prevents a stale monotonic expiry from being
 //! interpreted after a restart.
 
-#![allow(
-    dead_code,
-    reason = "the D17 clock remains behind the dormant shell-helper cutover"
-)]
-
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 

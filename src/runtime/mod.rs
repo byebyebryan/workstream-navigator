@@ -98,7 +98,7 @@ impl RuntimePaths {
         }
     }
 
-    fn launch_barrier(&self) -> PathBuf {
+    pub(crate) fn launch_barrier(&self) -> PathBuf {
         self.directory.join(LAUNCH_BARRIER_FILE)
     }
 }
@@ -158,6 +158,26 @@ pub enum RuntimeProbe {
     Unknown {
         diagnostic: String,
     },
+}
+
+/// The process state needed by helper cleanup in addition to its birth token.
+/// A zombie cannot execute or receive useful provider work, but its `/proc`
+/// record can remain visible until its parent reaps it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProcessState {
+    Running,
+    Zombie,
+}
+
+/// One atomically-read process identity and liveness observation.
+///
+/// The birth token remains the ownership fence; the state is only used to
+/// classify an exact zombie helper as conclusively stopped. Native provider
+/// process-group cleanup continues to use its existing group proof.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessObservation {
+    pub birth: String,
+    pub state: ProcessState,
 }
 
 /// An owned tmux invocation, represented without a shell command string.
@@ -253,6 +273,27 @@ pub trait ProcessProbe {
     /// enough certainty to authorize an external signal.
     fn process_birth_checked(&self, pid: u32) -> Result<Option<String>, ProcessProbeError> {
         Ok(self.process_birth(pid))
+    }
+
+    /// Returns the exact process birth token together with its parsed state.
+    /// Existing probes that expose only a birth token remain conservative and
+    /// classify an observed process as running; Linux overrides this with one
+    /// `/proc` read so a zombie cannot be mistaken for a live helper.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when process metadata cannot be read or parsed with
+    /// enough certainty to classify the process.
+    fn process_observation_checked(
+        &self,
+        pid: u32,
+    ) -> Result<Option<ProcessObservation>, ProcessProbeError> {
+        self.process_birth_checked(pid).map(|birth| {
+            birth.map(|birth| ProcessObservation {
+                birth,
+                state: ProcessState::Running,
+            })
+        })
     }
 }
 
@@ -691,50 +732,15 @@ pub fn terminate_owned_process(
     timeout: Duration,
     poll_interval: Duration,
 ) -> Result<OwnedProcessTermination, RuntimeError> {
-    if provider_pid == 0 || expected_birth.is_empty() {
-        return Err(RuntimeError::InvalidProcessIdentity);
-    }
-    if !exact_process_identity(process_probe, provider_pid, expected_birth)? {
-        return Ok(OwnedProcessTermination::AlreadyGone);
-    }
-
-    match process_signaler.signal(provider_pid, expected_birth, OwnedProcessSignal::Term) {
-        Ok(()) => {}
-        Err(ProcessSignalError::AlreadyGone) => {
-            return Ok(OwnedProcessTermination::AlreadyGone);
-        }
-        Err(error) => return Err(RuntimeError::ProcessSignal(error)),
-    }
-    if wait_for_process_exit(
+    terminate_owned_process_with_options(
         provider_pid,
         expected_birth,
         process_probe,
+        process_signaler,
         timeout,
         poll_interval,
-    )? {
-        return Ok(OwnedProcessTermination::TerminatedByTerm);
-    }
-
-    // Re-check the exact identity at the escalation boundary. If the PID was
-    // reused, treating it as gone is the only safe action; never send KILL.
-    if !exact_process_identity(process_probe, provider_pid, expected_birth)? {
-        return Ok(OwnedProcessTermination::AlreadyGone);
-    }
-    match process_signaler.signal(provider_pid, expected_birth, OwnedProcessSignal::Kill) {
-        Ok(()) | Err(ProcessSignalError::AlreadyGone) => {}
-        Err(error) => return Err(RuntimeError::ProcessSignal(error)),
-    }
-    if wait_for_process_exit(
-        provider_pid,
-        expected_birth,
-        process_probe,
-        timeout,
-        poll_interval,
-    )? {
-        Ok(OwnedProcessTermination::TerminatedByKill)
-    } else {
-        Err(RuntimeError::ProcessShutdownTimedOut)
-    }
+        false,
+    )
 }
 
 /// Proves that the exact live provider process is the leader of its own
@@ -1056,7 +1062,7 @@ pub fn terminate_owned_observer_process(
     expected_birth: &str,
     timeout: Duration,
 ) -> Result<OwnedProcessTermination, RuntimeError> {
-    terminate_owned_process(
+    terminate_owned_observer_process_with(
         observer_pid,
         expected_birth,
         &LinuxProcessProbe,
@@ -1064,6 +1070,114 @@ pub fn terminate_owned_observer_process(
         timeout,
         PROVIDER_SHUTDOWN_POLL_INTERVAL,
     )
+}
+
+/// Terminates one exact helper process while distinguishing a dead zombie
+/// from a still-running process that happens to retain the same birth token.
+/// The injected boundary keeps the zombie classification deterministic in
+/// tests; native provider process groups continue through
+/// [`terminate_owned_process_group`] and retain their existing authority.
+fn terminate_owned_observer_process_with(
+    observer_pid: u32,
+    expected_birth: &str,
+    process_probe: &dyn ProcessProbe,
+    process_signaler: &dyn ProcessSignaler,
+    timeout: Duration,
+    poll_interval: Duration,
+) -> Result<OwnedProcessTermination, RuntimeError> {
+    terminate_owned_process_with_options(
+        observer_pid,
+        expected_birth,
+        process_probe,
+        process_signaler,
+        timeout,
+        poll_interval,
+        true,
+    )
+}
+
+fn terminate_owned_process_with_options(
+    provider_pid: u32,
+    expected_birth: &str,
+    process_probe: &dyn ProcessProbe,
+    process_signaler: &dyn ProcessSignaler,
+    timeout: Duration,
+    poll_interval: Duration,
+    accept_exact_zombie: bool,
+) -> Result<OwnedProcessTermination, RuntimeError> {
+    if provider_pid == 0 || expected_birth.is_empty() {
+        return Err(RuntimeError::InvalidProcessIdentity);
+    }
+    if accept_exact_zombie && exact_zombie_identity(process_probe, provider_pid, expected_birth)? {
+        return Ok(OwnedProcessTermination::AlreadyGone);
+    }
+    terminate_owned_process_inner(
+        provider_pid,
+        expected_birth,
+        process_probe,
+        process_signaler,
+        timeout,
+        poll_interval,
+        accept_exact_zombie,
+    )
+}
+
+fn terminate_owned_process_inner(
+    provider_pid: u32,
+    expected_birth: &str,
+    process_probe: &dyn ProcessProbe,
+    process_signaler: &dyn ProcessSignaler,
+    timeout: Duration,
+    poll_interval: Duration,
+    accept_exact_zombie: bool,
+) -> Result<OwnedProcessTermination, RuntimeError> {
+    if !exact_process_identity(process_probe, provider_pid, expected_birth)? {
+        return Ok(OwnedProcessTermination::AlreadyGone);
+    }
+
+    match process_signaler.signal(provider_pid, expected_birth, OwnedProcessSignal::Term) {
+        Ok(()) => {}
+        Err(ProcessSignalError::AlreadyGone) => {
+            return Ok(OwnedProcessTermination::AlreadyGone);
+        }
+        Err(error) => return Err(RuntimeError::ProcessSignal(error)),
+    }
+    if wait_for_process_exit(
+        provider_pid,
+        expected_birth,
+        process_probe,
+        timeout,
+        poll_interval,
+        accept_exact_zombie,
+    )? {
+        return Ok(OwnedProcessTermination::TerminatedByTerm);
+    }
+
+    if accept_exact_zombie && exact_zombie_identity(process_probe, provider_pid, expected_birth)? {
+        return Ok(OwnedProcessTermination::TerminatedByTerm);
+    }
+
+    // Re-check the exact identity at the escalation boundary. If the PID was
+    // reused, treating it as gone is the only safe action; never send KILL.
+    if !exact_process_identity(process_probe, provider_pid, expected_birth)? {
+        return Ok(OwnedProcessTermination::AlreadyGone);
+    }
+    match process_signaler.signal(provider_pid, expected_birth, OwnedProcessSignal::Kill) {
+        Ok(()) | Err(ProcessSignalError::AlreadyGone) => {}
+        Err(error) => return Err(RuntimeError::ProcessSignal(error)),
+    }
+    if wait_for_process_exit(
+        provider_pid,
+        expected_birth,
+        process_probe,
+        timeout,
+        poll_interval,
+        accept_exact_zombie,
+    )? {
+        Ok(OwnedProcessTermination::TerminatedByKill)
+    } else {
+        Err(RuntimeError::ProcessShutdownTimedOut)
+    }
 }
 
 fn exact_process_identity(
@@ -1077,15 +1191,32 @@ fn exact_process_identity(
         .map_err(RuntimeError::ProcessProbe)
 }
 
+fn exact_zombie_identity(
+    probe: &dyn ProcessProbe,
+    pid: u32,
+    expected_birth: &str,
+) -> Result<bool, RuntimeError> {
+    Ok(probe
+        .process_observation_checked(pid)
+        .map_err(RuntimeError::ProcessProbe)?
+        .is_some_and(|observation| {
+            observation.birth == expected_birth && observation.state == ProcessState::Zombie
+        }))
+}
+
 fn wait_for_process_exit(
     pid: u32,
     expected_birth: &str,
     process_probe: &dyn ProcessProbe,
     timeout: Duration,
     poll_interval: Duration,
+    accept_exact_zombie: bool,
 ) -> Result<bool, RuntimeError> {
     let deadline = Instant::now() + timeout;
     loop {
+        if accept_exact_zombie && exact_zombie_identity(process_probe, pid, expected_birth)? {
+            return Ok(true);
+        }
         if !exact_process_identity(process_probe, pid, expected_birth)? {
             return Ok(true);
         }
@@ -1107,6 +1238,22 @@ impl ProcessProbe for LinuxProcessProbe {
 
     fn process_birth_checked(&self, pid: u32) -> Result<Option<String>, ProcessProbeError> {
         Ok(read_linux_process_stat(pid)?.map(|stat| stat.birth))
+    }
+
+    fn process_observation_checked(
+        &self,
+        pid: u32,
+    ) -> Result<Option<ProcessObservation>, ProcessProbeError> {
+        Ok(
+            read_linux_process_stat(pid)?.map(|stat| ProcessObservation {
+                birth: stat.birth,
+                state: if stat.state == 'Z' {
+                    ProcessState::Zombie
+                } else {
+                    ProcessState::Running
+                },
+            }),
+        )
     }
 }
 
@@ -1610,18 +1757,27 @@ impl<'a> PrivateRuntime<'a> {
     /// Returns an error when tmux cannot be invoked or refuses the private
     /// server shutdown.
     pub fn park(&self) -> Result<(), RuntimeError> {
+        self.stop_server()?;
+        if self.paths.directory.exists() {
+            fs::remove_dir_all(&self.paths.directory).map_err(|source| RuntimeError::Io {
+                path: self.paths.directory.clone(),
+                source,
+            })?;
+        }
+        Ok(())
+    }
+
+    /// Stops only the server at this Runtime's private socket, retaining its
+    /// directory for a caller that has a narrower artifact cleanup proof.
+    /// This is used for presentation-private provisional shells so the
+    /// generic `park` recursive removal cannot outrun exact ownership checks.
+    pub(crate) fn stop_server(&self) -> Result<(), RuntimeError> {
         let response = self.tmux.invoke(&TmuxInvocation {
             socket: self.paths.socket.clone(),
             config: None,
             arguments: vec![OsString::from("kill-server")],
         })?;
         if response.success || is_missing_server(&response.stderr) {
-            if self.paths.directory.exists() {
-                fs::remove_dir_all(&self.paths.directory).map_err(|source| RuntimeError::Io {
-                    path: self.paths.directory.clone(),
-                    source,
-                })?;
-            }
             return Ok(());
         }
         Err(RuntimeError::TmuxRejected(trim_diagnostic(
@@ -1900,6 +2056,24 @@ mod tests {
     impl ProcessProbe for FakeProcessProbe {
         fn process_birth(&self, pid: u32) -> Option<String> {
             Some(format!("birth-{pid}"))
+        }
+    }
+
+    struct ZombieProcessProbe;
+
+    impl ProcessProbe for ZombieProcessProbe {
+        fn process_birth(&self, _pid: u32) -> Option<String> {
+            Some("birth-zombie".to_owned())
+        }
+
+        fn process_observation_checked(
+            &self,
+            _pid: u32,
+        ) -> Result<Option<ProcessObservation>, ProcessProbeError> {
+            Ok(Some(ProcessObservation {
+                birth: "birth-zombie".to_owned(),
+                state: ProcessState::Zombie,
+            }))
         }
     }
 
@@ -2214,6 +2388,90 @@ mod tests {
             ),
             Err(RuntimeError::ProcessProbe(ProcessProbeError::Inaccessible))
         ));
+        assert!(signaler.signals.borrow().is_empty());
+    }
+
+    #[test]
+    fn exact_zombie_observer_is_conclusively_gone_without_signalling() {
+        let probe = ZombieProcessProbe;
+        let signaler = RecordingSignaler::default();
+
+        assert_eq!(
+            terminate_owned_observer_process_with(
+                77,
+                "birth-zombie",
+                &probe,
+                &signaler,
+                Duration::ZERO,
+                Duration::ZERO,
+            )
+            .unwrap(),
+            OwnedProcessTermination::AlreadyGone
+        );
+        assert!(signaler.signals.borrow().is_empty());
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn production_observer_termination_accepts_an_exact_linux_zombie() {
+        let mut child = Command::new("sleep");
+        child.arg("0.05");
+        let mut child = child.spawn().unwrap();
+        let child_pid = child.id();
+        let probe = LinuxProcessProbe;
+        let birth_deadline = Instant::now() + Duration::from_secs(1);
+        let birth = loop {
+            if let Some(birth) = probe.process_birth(child_pid) {
+                break birth;
+            }
+            assert!(
+                Instant::now() < birth_deadline,
+                "child birth was unavailable"
+            );
+            thread::sleep(Duration::from_millis(1));
+        };
+        let zombie_deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if matches!(
+                probe.process_observation_checked(child_pid),
+                Ok(Some(ProcessObservation {
+                    birth: ref observed_birth,
+                    state: ProcessState::Zombie,
+                })) if observed_birth == &birth
+            ) {
+                break;
+            }
+            assert!(
+                Instant::now() < zombie_deadline,
+                "child did not become an exact zombie"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        assert_eq!(
+            terminate_owned_observer_process(child_pid, &birth, Duration::ZERO).unwrap(),
+            OwnedProcessTermination::AlreadyGone
+        );
+        child.wait().unwrap();
+    }
+
+    #[test]
+    fn zombie_observer_with_changed_birth_is_not_owned() {
+        let probe = ZombieProcessProbe;
+        let signaler = RecordingSignaler::default();
+
+        assert_eq!(
+            terminate_owned_observer_process_with(
+                77,
+                "birth-reused",
+                &probe,
+                &signaler,
+                Duration::ZERO,
+                Duration::ZERO,
+            )
+            .unwrap(),
+            OwnedProcessTermination::AlreadyGone
+        );
         assert!(signaler.signals.borrow().is_empty());
     }
 

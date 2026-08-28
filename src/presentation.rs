@@ -21,10 +21,11 @@ use crate::{
     private_tmux::{TERMINAL_CAPABILITY_CONFIG, copy_mode_scroll_config},
     process::{BoundedProcessError, output_bounded},
     provisional::{
-        PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, read_marker,
-        retire_provider_exec_proven_marker,
+        PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, cancel_pre_handoff_under_lease,
+        read_marker, remove_exact_provisional_runtime_artifacts,
+        retire_provider_exec_proven_marker, validate_exact_provisional_runtime_artifacts,
     },
-    runtime::{LinuxProcessProbe, PrivateRuntime, RuntimePaths, SystemTmux},
+    runtime::{LinuxProcessProbe, PrivateRuntime, RuntimePaths, RuntimeProbe, SystemTmux},
     state::{
         D16State, ProvisionalLease, StateRoot, TransitionLease,
         d16::D17OnboardingOperationInventory, open_d17_current_only,
@@ -59,9 +60,9 @@ const MAX_D17_PROVISIONAL_INVENTORY_ENTRIES: usize = 128;
 const LEGACY_RETIREMENT_MARKER_FILE: &str = "d16-retirement.json";
 const ROLE_OPTION: &str = "@wsnav_role";
 const WORKSTREAM_OPTION: &str = "@wsnav_workstream_id";
-const SHELL_CLAIM_OPTION: &str = "@wsnav_shell_claim";
-const SHELL_CLAIM_ATTEMPTS: usize = 20;
-const SHELL_CLAIM_RETRY: Duration = Duration::from_millis(5);
+const PRESENTATION_CLAIM_OPTION: &str = "@wsnav_presentation_claim";
+const LEGACY_SHELL_CLAIM_OPTION: &str = "@wsnav_shell_claim";
+const PRESENTATION_CLAIM_RETRY: Duration = Duration::from_millis(5);
 const NAVIGATOR_STOP_ATTEMPTS: usize = 20;
 const NAVIGATOR_STOP_RETRY: Duration = Duration::from_millis(5);
 const TOPOLOGY_FORMAT: &str = "#{pane_id}\t#{@wsnav_role}\t#{@wsnav_workstream_id}\t#{pane_dead}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{window_width}\t#{window_height}";
@@ -135,9 +136,6 @@ pub fn legacy_presentation_config_for_test() -> String {
 /// fixed internal ABI values; no arbitrary tmux command can enter this path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PresentationAction {
-    CreateOrFocusShell,
-    SuppressSplit,
-    CloseShell,
     FocusNext,
     FocusUp,
     FocusDown,
@@ -150,9 +148,6 @@ impl PresentationAction {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::CreateOrFocusShell => "create-or-focus-shell",
-            Self::SuppressSplit => "suppress-split",
-            Self::CloseShell => "close-shell",
             Self::FocusNext => "focus-next",
             Self::FocusUp => "focus-up",
             Self::FocusDown => "focus-down",
@@ -168,9 +163,6 @@ impl FromStr for PresentationAction {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "create-or-focus-shell" => Ok(Self::CreateOrFocusShell),
-            "suppress-split" => Ok(Self::SuppressSplit),
-            "close-shell" => Ok(Self::CloseShell),
             "focus-next" => Ok(Self::FocusNext),
             "focus-up" => Ok(Self::FocusUp),
             "focus-down" => Ok(Self::FocusDown),
@@ -199,13 +191,9 @@ pub struct AttachmentStatus {
 }
 
 /// Immutable, presentation-private D17 shell-onboarding context. The seed is
-/// intentionally available only to the future D17 materializer; it never
+/// intentionally available only to the D17 materializer; it never
 /// enters a navigator snapshot, provider command, or durable host registry.
 #[derive(Clone, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "the D17 presentation context remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) struct D17PresentationContext {
     presentation_id: uuid::Uuid,
     presentation_revision: Revision,
@@ -223,10 +211,6 @@ impl std::fmt::Debug for D17PresentationContext {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "the D17 presentation context remains unreachable until the atomic Navigator cutover"
-)]
 impl D17PresentationContext {
     #[must_use]
     pub(crate) const fn presentation_id(&self) -> uuid::Uuid {
@@ -249,10 +233,6 @@ impl D17PresentationContext {
 /// classifier itself never creates, adopts, removes, attaches, or signals a
 /// presentation or Runtime artifact.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) enum D17ProvisionalInventory {
     Vacant,
     Occupied,
@@ -262,10 +242,6 @@ pub(crate) enum D17ProvisionalInventory {
 /// No path, marker body, operation identifier, shell evidence, or provider
 /// content crosses this boundary.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) enum D17ProvisionalInventoryError {
     #[error("D17 provisional inventory is unavailable")]
     Unavailable,
@@ -387,7 +363,10 @@ pub(crate) fn classify_d17_provisional_inventory(
                             &slot,
                             &operations_by_id,
                             &mut matched_operations,
-                            &[OnboardingPhase::CapabilityIssued],
+                            &[
+                                OnboardingPhase::CapabilityIssued,
+                                OnboardingPhase::RolledBack,
+                            ],
                         )?;
                         occupied = true;
                         allowed_runtime_directories.insert(slot.runtime_paths().directory.clone());
@@ -620,7 +599,7 @@ impl LegacyPresentationProof {
 
     /// Returns the legacy controller executable identity established by the
     /// exact navigator process.  This is intentionally independent from the
-    /// executable currently running the D16 launcher.
+    /// executable currently running the transition launcher.
     #[must_use]
     pub fn legacy_executable_identity(&self) -> Option<LegacyFileIdentity> {
         self.legacy_executable
@@ -882,25 +861,7 @@ impl Presentation {
         }
     }
 
-    /// Reuses the one live owned presentation, or creates a fresh owner when
-    /// no presentation is live. A detached presentation is intentionally kept
-    /// so a later `wsnav` invocation can reconnect without disturbing any
-    /// provider Runtime.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when an owned presentation is ambiguous, malformed, or
-    /// cannot be queried through its exact private tmux socket.
-    pub fn open_or_create(state_root: &Path) -> Result<(Self, bool), PresentationError> {
-        let live = Self::discover_live(state_root)?;
-        match live.as_slice() {
-            [] => Ok((Self::fresh(state_root)?, true)),
-            [presentation] => Ok((presentation.clone(), false)),
-            _ => Err(PresentationError::AmbiguousPresentations),
-        }
-    }
-
-    /// D17-only equivalent of [`Self::open_or_create`]. Its discovery and
+    /// D17 presentation discovery and opener. Its discovery and
     /// cleanup path admits the presentation-private provisional marker, but
     /// never lets the legacy D16 ownership reader adopt it.
     pub(crate) fn open_or_create_d17(state_root: &Path) -> Result<(Self, bool), PresentationError> {
@@ -941,12 +902,7 @@ impl Presentation {
     /// materialization can bind its provisional slot without deriving identity
     /// from a directory name or a provider process.
     ///
-    /// This dormant seam neither creates a provisional server nor opens host
-    /// state. The atomic D17 cutover is its only future caller.
-    #[allow(
-        dead_code,
-        reason = "the D17 presentation context remains unreachable until the atomic Navigator cutover"
-    )]
+    /// This boundary neither creates a provisional server nor opens host state.
     pub(crate) fn initialize_d17_context(
         &self,
         presentation_id: uuid::Uuid,
@@ -979,10 +935,6 @@ impl Presentation {
 
     /// Reopens the bounded D17 context from the exact current presentation
     /// marker. It exposes no terminal data, provider input, or registry path.
-    #[allow(
-        dead_code,
-        reason = "the D17 presentation context remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn d17_context(&self) -> Result<D17PresentationContext, PresentationError> {
         let ownership = read_d17_presentation_ownership(&self.paths)?
             .ok_or(PresentationError::D17ContextUnavailable)?;
@@ -998,10 +950,6 @@ impl Presentation {
     /// beneath this state root. The inherited shell path is discovery input,
     /// not authority: this repeats the private ownership-marker proof before
     /// a shell gate may open schema-14 state.
-    #[allow(
-        dead_code,
-        reason = "the D17 presentation context remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn d17_context_from_directory(
         state_root: &Path,
         presentation_directory: &Path,
@@ -1046,48 +994,29 @@ impl Presentation {
         d17_context_from_marker(marker)
     }
 
-    /// Creates exactly one private tmux server with a navigator pane and a
-    /// blank provider-attachment pane. Neither command invokes a shell.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the owned paths cannot be created or tmux rejects
-    /// the private presentation setup.
-    pub fn start(&self) -> Result<(), PresentationError> {
-        let _ = self.start_with_d17_context(None)?;
-        Ok(())
-    }
-
     /// Starts a fresh private presentation with its D17 seed context written
     /// before the navigator pane can run. This ordering prevents the pane from
     /// deriving a seed or identity after its process has already started.
-    #[allow(
-        dead_code,
-        reason = "the D17 presentation context remains unreachable until the atomic Navigator cutover"
-    )]
-    pub(crate) fn start_d17(
+    #[doc(hidden)]
+    pub fn start_d17(
+        &self,
+        presentation_id: uuid::Uuid,
+        seed_cwd: &Path,
+    ) -> Result<(), PresentationError> {
+        self.start_d17_with_context(presentation_id, seed_cwd)
+            .map(|_| ())
+    }
+
+    pub(crate) fn start_d17_with_context(
         &self,
         presentation_id: uuid::Uuid,
         seed_cwd: &Path,
     ) -> Result<D17PresentationContext, PresentationError> {
-        self.start_with_d17_context(Some((presentation_id, seed_cwd)))?
-            .ok_or(PresentationError::D17ContextUnavailable)
-    }
-
-    fn start_with_d17_context(
-        &self,
-        d17: Option<(uuid::Uuid, &Path)>,
-    ) -> Result<Option<D17PresentationContext>, PresentationError> {
         create_paths(&self.paths)?;
-        let is_d17 = d17.is_some();
-        let context = d17
-            .map(|(presentation_id, seed_cwd)| {
-                self.complete_start_stage(
-                    "D17 presentation context capture",
-                    self.initialize_d17_context(presentation_id, seed_cwd),
-                )
-            })
-            .transpose()?;
+        let context = self.complete_start_stage(
+            "D17 presentation context capture",
+            self.initialize_d17_context(presentation_id, seed_cwd),
+        )?;
         let mut arguments = vec![
             "new-session".into(),
             "-d".into(),
@@ -1096,12 +1025,7 @@ impl Presentation {
             "-n".into(),
             NAVIGATOR_WINDOW.into(),
         ];
-        let navigator_command = if is_d17 {
-            self.d17_navigator_command()
-        } else {
-            self.navigator_command()
-        };
-        arguments.extend(navigator_command);
+        arguments.extend(self.d17_navigator_command());
         let result = self.invoke(Some(&self.paths.config), arguments);
         self.complete_start_stage("server creation", result)?;
         let result = self.capture_ownership_socket_identity();
@@ -1146,7 +1070,19 @@ impl Presentation {
         result: Result<T, PresentationError>,
     ) -> Result<T, PresentationError> {
         result.map_err(|source| {
-            let _ = self.close();
+            // D17 writes its marker before starting tmux. Once that marker is
+            // present, cleanup must stay on the D17 owner: it may need to
+            // reconcile an interrupted provisional shell and must never fall
+            // back to the retired D16 close path.
+            let d17_marker_exists = fs::symlink_metadata(
+                self.paths
+                    .directory
+                    .join(PRESENTATION_OWNERSHIP_MARKER_FILE),
+            )
+            .is_ok();
+            if d17_marker_exists {
+                let _ = self.close_d17();
+            }
             PresentationError::StartupFailed {
                 stage,
                 source: Box::new(source),
@@ -1154,12 +1090,14 @@ impl Presentation {
         })
     }
 
-    /// Directly attaches the caller's terminal to this private presentation.
+    /// Directly attaches the caller's terminal to an already-existing legacy
+    /// presentation during the schema-13 drain-only cutover. This is
+    /// transition evidence, not a dispatchable D17 presentation route.
     ///
     /// # Errors
     ///
     /// Returns an error when tmux cannot attach to this exact private server.
-    pub fn attach(&self) -> Result<(), PresentationError> {
+    pub(crate) fn attach_legacy_drain(&self) -> Result<(), PresentationError> {
         self.prepare_attach()?;
         let status = private_tmux_command()
             .arg("-S")
@@ -1168,13 +1106,13 @@ impl Presentation {
             .status()
             .map_err(PresentationError::Io)?;
         if stopped_owned_presentation(self.is_live()?) {
-            self.close()?;
+            self.close_legacy_drain()?;
             return Ok(());
         }
         if status.success() {
             for _ in 0..NAVIGATOR_STOP_ATTEMPTS {
                 if self.navigator_pane_is_dead()? {
-                    self.close()?;
+                    self.close_legacy_drain()?;
                     return Ok(());
                 }
                 thread::sleep(NAVIGATOR_STOP_RETRY);
@@ -1182,7 +1120,7 @@ impl Presentation {
             return Ok(());
         }
         if self.navigator_pane_is_dead()? {
-            self.close()?;
+            self.close_legacy_drain()?;
             return Ok(());
         }
         Err(PresentationError::TmuxRejected(
@@ -1191,8 +1129,8 @@ impl Presentation {
     }
 
     /// Directly attaches the caller's terminal to an owned D17 presentation.
-    /// Unlike [`Self::attach`], every terminal-loss cleanup branch stays on
-    /// the D17 marker-aware lifecycle path.
+    /// Unlike the transition-only legacy attach, every terminal-loss cleanup
+    /// branch stays on the D17 marker-aware lifecycle path.
     pub(crate) fn attach_d17(&self) -> Result<(), PresentationError> {
         self.prepare_attach()?;
         let status = private_tmux_command()
@@ -1239,41 +1177,10 @@ impl Presentation {
 
     /// Replaces only the outer provider attachment helper. The managed Codex
     /// runtime remains in its own private tmux server.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when tmux rejects replacement of the exact owned pane.
-    pub fn attach_workstream(
-        &self,
-        workstream_id: WorkstreamId,
-    ) -> Result<AttachmentStatus, PresentationError> {
-        self.with_attachment_claim(|| {
-            let status = self.prepare_attachment(workstream_id)?;
-            let result = (|| {
-                self.retire_utility_for_attachment(workstream_id)?;
-                let provider = self.provider_target_for_attachment()?;
-                self.set_pane_role(
-                    &provider,
-                    PresentationPaneRole::Provider,
-                    Some(status.workstream_id),
-                )?;
-                self.invoke(
-                    None,
-                    self.provider_respawn_arguments(&provider, workstream_id, status.attempt_id),
-                )
-            })();
-            self.finish_attachment_start(status, result)
-        })
-    }
-
     /// Replaces the outer provider pane with a D17-only attachment helper for
     /// one already-proven Runtime. The D17 presentation marker must still be
     /// current, and the helper receives the exact snapshot revisions instead
     /// of reopening the retired schema-13 application facade.
-    #[allow(
-        dead_code,
-        reason = "the D17 Workstreams controller remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn attach_d17_workstream(
         &self,
         workstream_id: WorkstreamId,
@@ -1285,7 +1192,6 @@ impl Presentation {
         self.with_attachment_claim(|| {
             let status = self.prepare_attachment(workstream_id)?;
             let result = (|| {
-                self.retire_utility_for_attachment(workstream_id)?;
                 let provider = self.provider_target_for_attachment()?;
                 self.set_pane_role(
                     &provider,
@@ -1326,10 +1232,6 @@ impl Presentation {
     /// Returns an error when the exact D17 marker/lease/context does not
     /// authorize this shell, or when the owned provider pane cannot be
     /// replaced.
-    #[allow(
-        dead_code,
-        reason = "the D17 provisional-shell attachment remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn attach_d17_provisional_shell(
         &self,
         state: &D16State,
@@ -1338,7 +1240,6 @@ impl Presentation {
     ) -> Result<(), PresentationError> {
         self.with_attachment_claim(|| {
             self.validate_d17_provisional_attachment(state, provisional_lease, slot)?;
-            self.retire_utility_for_observer_review()?;
             let provider = self.provider_target_for_attachment()?;
             self.set_pane_role(&provider, PresentationPaneRole::Provider, None)?;
             self.invoke(
@@ -1358,124 +1259,303 @@ impl Presentation {
                         "D17 provisional shell attachment is unavailable",
                     )
                 })?;
-            self.observer_review_provider_target()?;
+            self.provider_target_for_attachment()?;
             Ok(())
         })
     }
 
-    /// Retires the exact utility pane before a different Workstream can
-    /// replace the provider attachment. A shell tagged for the requested
-    /// Workstream is retained so same-Workstream reconnects preserve its
-    /// launch context.
-    ///
-    /// This deliberately performs no provider mutation. The topology is
-    /// validated before the exact utility pane is killed and again after the
-    /// kill, so an ambiguous or unconfirmed cleanup refuses the attachment
-    /// before its provider pane is retagged or respawned.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the owned presentation topology is ambiguous, an
-    /// exact utility cleanup is rejected, or the resulting two-pane geometry
-    /// cannot be proven.
-    fn retire_utility_for_attachment(
+    /// Replaces an unattached D17 provider pane with a native Codex process
+    /// for the contextual observer `/hooks` review. The process receives only
+    /// the exact owned profile home and a disposable review directory; no
+    /// `WSNav` command, management traffic, or provider payload is sent into
+    /// the pane. A live or ambiguous managed attachment is a hard refusal
+    /// because its native output must remain visible and untouched; only an
+    /// exact deliberately parked attachment may surrender its outer helper
+    /// pane.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "The exact parked-attachment handoff keeps topology, state, status, and native review fences together."
+    )]
+    pub(crate) fn start_d17_observer_review(
         &self,
-        workstream_id: WorkstreamId,
+        executable: &Path,
+        codex_home: &Path,
+        review_directory: &Path,
+        detached_workstream_id: Option<WorkstreamId>,
     ) -> Result<(), PresentationError> {
-        self.validate_single_presentation_window()?;
+        if !executable.is_absolute() || !codex_home.is_absolute() || !review_directory.is_absolute()
+        {
+            return Err(PresentationError::ControlRefused(
+                "D17 observer review paths are not exact",
+            ));
+        }
+        let executable_metadata = fs::symlink_metadata(executable).map_err(|_| {
+            PresentationError::ControlRefused("D17 observer executable is unavailable")
+        })?;
+        let review_metadata = fs::symlink_metadata(review_directory)
+            .map_err(|_| PresentationError::ControlRefused("D17 observer review is unavailable"))?;
+        if executable_metadata.file_type().is_symlink()
+            || !executable_metadata.is_file()
+            || review_metadata.file_type().is_symlink()
+            || !review_metadata.is_dir()
+        {
+            return Err(PresentationError::ControlRefused(
+                "D17 observer review evidence is unavailable",
+            ));
+        }
+        self.d17_context()?;
+        self.with_attachment_claim(|| {
+            let topology = self.attachment_topology()?;
+            let provider = topology
+                .provider()
+                .ok_or(PresentationError::InvalidTopology)?;
+            let attached_workstream = self.d17_observer_attachment_context()?;
+            if attached_workstream != detached_workstream_id {
+                return Err(PresentationError::ControlRefused(
+                    "D17 observer review attachment context changed",
+                ));
+            }
+            if let Some(workstream_id) = attached_workstream {
+                // A parked/stopped Runtime is the only managed attachment
+                // that may surrender the outer helper pane.  The private
+                // Runtime remains the durable reopen path; a live or
+                // ambiguous probe keeps its provider output untouched.
+                self.prove_d17_stopped_attachment(workstream_id)?;
+            }
+            let previous_status = self.read_attachment_status()?;
+            let role_result =
+                self.set_pane_role(&provider.id, PresentationPaneRole::Provider, None);
+            if let Err(error) = role_result {
+                let _ = self.set_pane_role(
+                    &provider.id,
+                    PresentationPaneRole::Provider,
+                    attached_workstream,
+                );
+                return Err(error);
+            }
+            if let Err(error) = self.clear_d17_observer_attachment_status(attached_workstream) {
+                let _ = self.set_pane_role(
+                    &provider.id,
+                    PresentationPaneRole::Provider,
+                    attached_workstream,
+                );
+                if let Some(status) = previous_status.as_ref()
+                    && matches!(self.read_attachment_status(), Ok(None))
+                {
+                    let _ = self.write_attachment_status(status);
+                }
+                return Err(error);
+            }
+            if let Err(error) = self.set_pane_remain_on_exit(&provider.id, true) {
+                let _ = self.set_pane_role(
+                    &provider.id,
+                    PresentationPaneRole::Provider,
+                    attached_workstream,
+                );
+                if let Some(status) = previous_status.as_ref()
+                    && matches!(self.read_attachment_status(), Ok(None))
+                {
+                    let _ = self.write_attachment_status(status);
+                }
+                return Err(error);
+            }
+            let command = vec![
+                "env".into(),
+                "-u".into(),
+                "TMUX".into(),
+                format!("{}={}", "CODEX_HOME", codex_home.display()).into(),
+                executable.as_os_str().to_owned(),
+                "--profile".into(),
+                crate::provider::codex::profile::OBSERVER_PROFILE_NAME.into(),
+                "-C".into(),
+                review_directory.as_os_str().to_owned(),
+            ];
+            let result = self.invoke(
+                None,
+                self.provider_respawn_for_command(&provider.id, command),
+            );
+            if let Err(error) = result {
+                // Restore the exact outer attachment metadata when tmux
+                // refuses the review respawn.  A changed status file is
+                // deliberately not overwritten.
+                let _ = self.set_pane_role(
+                    &provider.id,
+                    PresentationPaneRole::Provider,
+                    attached_workstream,
+                );
+                if let Some(status) = previous_status.as_ref()
+                    && matches!(self.read_attachment_status(), Ok(None))
+                {
+                    let _ = self.write_attachment_status(status);
+                }
+                return Err(error);
+            }
+            Ok(())
+        })
+    }
+
+    /// Returns the exact current outer attachment context that can be
+    /// detached for a native observer review.  A managed context is accepted
+    /// only with its matching terminal attachment attempt; a running or
+    /// mismatched helper is an explicit refusal.
+    pub(crate) fn d17_observer_attachment_context(
+        &self,
+    ) -> Result<Option<WorkstreamId>, PresentationError> {
         let topology = self.attachment_topology()?;
-        let Some(utility) = topology.utility() else {
-            return Ok(());
-        };
         let provider = topology
             .provider()
             .ok_or(PresentationError::InvalidTopology)?;
-        let provider_matches =
-            provider.workstream_id.is_none() || provider.workstream_id == Some(workstream_id);
-        let utility_matches = utility.workstream_id == Some(workstream_id);
-        if !utility.dead && provider_matches && utility_matches {
-            return Ok(());
+        let status = self.attachment_status()?;
+        match (provider.workstream_id, status) {
+            (None, None) => Ok(None),
+            (Some(workstream_id), Some(status))
+                if status.workstream_id == workstream_id
+                    && matches!(
+                        status.phase,
+                        AttachmentPhase::Completed | AttachmentPhase::Failed
+                    ) =>
+            {
+                Ok(Some(workstream_id))
+            }
+            _ => Err(PresentationError::ControlRefused(
+                "D17 observer review attachment evidence is unavailable",
+            )),
         }
+    }
 
-        let utility_id = utility.id.clone();
-        self.kill_exact_pane(&utility_id)?;
-        self.validate_single_presentation_window()?;
-        let topology = self.attachment_topology()?;
-        if topology.utility().is_some() {
+    /// Proves that the managed Runtime whose outer helper is being replaced
+    /// is deliberately parked and absent from its private tmux server.  The
+    /// outer pane alone is not mutation authority: a stopped-looking helper
+    /// can still belong to a live or changed Runtime.
+    fn prove_d17_stopped_attachment(
+        &self,
+        workstream_id: WorkstreamId,
+    ) -> Result<(), PresentationError> {
+        let root = StateRoot::select(&self.state_root);
+        let state = open_d17_current_only(&root).map_err(|_| {
+            PresentationError::ControlRefused(
+                "D17 observer review managed attachment state is unavailable",
+            )
+        })?;
+        let registry = state.into_d17_host_registry().map_err(|_| {
+            PresentationError::ControlRefused(
+                "D17 observer review managed attachment state is unavailable",
+            )
+        })?;
+        let runtime = registry
+            .runtime_for_workstream(workstream_id)
+            .map_err(|_| {
+                PresentationError::ControlRefused(
+                    "D17 observer review managed attachment state is unavailable",
+                )
+            })?
+            .ok_or(PresentationError::ControlRefused(
+                "D17 observer review managed attachment is unavailable",
+            ))?;
+        let deliberately_parked = registry
+            .runtime_is_deliberately_parked(runtime.runtime_id, workstream_id)
+            .map_err(|_| {
+                PresentationError::ControlRefused(
+                    "D17 observer review managed attachment state is unavailable",
+                )
+            })?;
+        if !deliberately_parked {
             return Err(PresentationError::ControlRefused(
-                "utility shell cleanup could not be proven",
+                "D17 observer review cannot replace a live or unparked attachment",
+            ));
+        }
+        let paths =
+            RuntimePaths::for_record(root.base(), runtime.runtime_id, &runtime.tmux_session)
+                .map_err(|_| {
+                    PresentationError::ControlRefused(
+                        "D17 observer review managed attachment paths are unavailable",
+                    )
+                })?;
+        let tmux = SystemTmux::default();
+        let process_probe = LinuxProcessProbe;
+        let private_runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+        match private_runtime.probe().map_err(|_| {
+            PresentationError::ControlRefused(
+                "D17 observer review managed attachment probe is unavailable",
+            )
+        })? {
+            RuntimeProbe::Missing => Ok(()),
+            RuntimeProbe::Live { .. } | RuntimeProbe::Unknown { .. } => {
+                Err(PresentationError::ControlRefused(
+                    "D17 observer review cannot replace a live or ambiguous attachment",
+                ))
+            }
+        }
+    }
+
+    /// Removes only the exact host-local attachment attempt that accompanied
+    /// a stopped managed context.  A mismatched, running, malformed, or
+    /// foreign status file remains untouched and blocks review.
+    fn clear_d17_observer_attachment_status(
+        &self,
+        workstream_id: Option<WorkstreamId>,
+    ) -> Result<(), PresentationError> {
+        let Some(workstream_id) = workstream_id else {
+            if self.read_attachment_status()?.is_some() {
+                return Err(PresentationError::ControlRefused(
+                    "D17 observer review attachment status is unexpected",
+                ));
+            }
+            return Ok(());
+        };
+        let status = self
+            .read_attachment_status()?
+            .ok_or(PresentationError::ControlRefused(
+                "D17 observer review attachment status is missing",
+            ))?;
+        if status.workstream_id != workstream_id
+            || !matches!(
+                status.phase,
+                AttachmentPhase::Completed | AttachmentPhase::Failed
+            )
+        {
+            return Err(PresentationError::ControlRefused(
+                "D17 observer review attachment status changed",
+            ));
+        }
+        let identity = inspect_regular_file(
+            &self.paths.attachment_status,
+            true,
+            MAX_ATTACHMENT_STATUS_BYTES_USIZE,
+        )
+        .map_err(map_presentation_ownership_probe)?
+        .ok_or(PresentationError::ControlRefused(
+            "D17 observer review attachment status disappeared",
+        ))?;
+        remove_exact_regular_artifact(
+            &self.paths.attachment_status,
+            Some(&identity),
+            MAX_ATTACHMENT_STATUS_BYTES_USIZE,
+            &mut |_| Ok(()),
+        )?;
+        if self.read_attachment_status()?.is_some() {
+            return Err(PresentationError::ControlRefused(
+                "D17 observer review attachment status changed",
             ));
         }
         Ok(())
     }
 
-    /// Retires every exact utility pane before the provider is replaced by
-    /// observer review. Unlike Workstream attachment, observer review has no
-    /// Workstream context that could authorize retaining an existing shell.
-    /// The same presentation-wide claim is held by the caller through this
-    /// check, kill, and post-respawn topology validation.
-    fn retire_utility_for_observer_review(&self) -> Result<(), PresentationError> {
-        self.validate_single_presentation_window()?;
-        let topology = self.read_topology()?;
-        topology
+    /// Reports whether the exact provider pane used for a contextual observer
+    /// review has exited. The pane is retained by tmux, so this is evidence
+    /// only; native trust is still verified from the exact profile before any
+    /// pending managed action can resume.
+    pub(crate) fn d17_observer_review_finished(&self) -> Result<bool, PresentationError> {
+        let topology = self.read_topology_allow_dead()?;
+        let provider = topology
             .provider()
             .ok_or(PresentationError::InvalidTopology)?;
-        let Some(utility) = topology.utility() else {
-            return Ok(());
-        };
-        let utility_id = utility.id.clone();
-        self.kill_exact_pane(&utility_id)?;
-        self.validate_single_presentation_window()?;
-        let topology = self.read_topology()?;
-        if topology.utility().is_some() {
+        if provider.workstream_id.is_some() {
             return Err(PresentationError::ControlRefused(
-                "utility shell cleanup could not be proven before observer review",
+                "D17 observer review provider context changed",
             ));
         }
-        validate_observer_review_topology(&topology).map(|_| ())
-    }
-
-    fn observer_review_provider_target(&self) -> Result<String, PresentationError> {
-        self.validate_single_presentation_window()?;
-        let topology = self.read_topology()?;
-        validate_observer_review_topology(&topology)
-    }
-
-    /// Replaces the blank provider pane with the local temporary native Codex
-    /// observer-review surface. This is not a Workstream attachment and never
-    /// records provider output in presentation state. The presentation-wide
-    /// claim is held while any utility pane is retired and through the final
-    /// two-pane topology check.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the exact owned presentation pane cannot be
-    /// replaced.
-    pub fn start_observer_review(&self) -> Result<(), PresentationError> {
-        self.with_attachment_claim(|| {
-            self.retire_utility_for_observer_review()?;
-            let provider = self.observer_review_provider_target()?;
-            self.clear_pane_context(&provider)?;
-            self.invoke(
-                None,
-                self.provider_respawn_for_command(&provider, self.observer_review_command()),
-            )?;
-            // The presentation-wide claim prevents WSNav's own shell action
-            // from splitting concurrently. Re-read the exact topology after
-            // respawn as a final guard against an external/stale split.
-            self.observer_review_provider_target()?;
-            Ok(())
-        })
-    }
-
-    fn provider_respawn_arguments(
-        &self,
-        provider: &str,
-        workstream_id: WorkstreamId,
-        attempt_id: uuid::Uuid,
-    ) -> Vec<OsString> {
-        let command = self.provider_attach_command(workstream_id, attempt_id);
-        self.provider_respawn_for_command(provider, command)
+        Ok(provider.dead)
     }
 
     fn provider_respawn_for_command(
@@ -1573,212 +1653,6 @@ impl Presentation {
         Ok(())
     }
 
-    /// Focuses the exact utility pane if one is already present. This check
-    /// intentionally precedes attachment preflight so a shell keeps its
-    /// original launch context when the provider selection later changes.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the source or topology is ambiguous, or when an
-    /// existing utility pane cannot be focused.
-    pub fn focus_existing_utility_if_present(
-        &self,
-        source_pane: &str,
-    ) -> Result<bool, PresentationError> {
-        let topology = match self.read_topology() {
-            Ok(topology) => topology,
-            Err(PresentationError::InvalidTopology) if self.shell_claim_present()? => {
-                // A competing helper may have the one bounded claim while its
-                // new pane is between split and role tagging. Let the caller
-                // perform authoritative preflight and enter the same bounded
-                // create/focus retry loop instead of treating that transient
-                // evidence as a foreign topology.
-                return Ok(false);
-            }
-            Err(error) => return Err(error),
-        };
-        topology
-            .pane(source_pane)
-            .ok_or(PresentationError::InvalidTopology)?;
-        let Some(utility) = topology.utility() else {
-            return Ok(false);
-        };
-        self.select_owned_pane(&utility.id)?;
-        Ok(true)
-    }
-
-    /// Arms one exact newly-created utility pane before its shell barrier
-    /// replaces itself. The pane must already belong to this private
-    /// presentation window; no positional pane target is accepted.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the pane identity is malformed, belongs to a
-    /// different session/window, or cannot be switched to non-retaining mode.
-    pub fn prepare_utility_pane(&self, pane: &str) -> Result<(), PresentationError> {
-        let pane = parse_pane_id(pane).ok_or(PresentationError::InvalidTopology)?;
-        let evidence = self.invoke_capture(
-            None,
-            vec![
-                "display-message".into(),
-                "-p".into(),
-                "-t".into(),
-                pane.clone().into(),
-                "#{session_name}\t#{window_name}\t#{pane_id}".into(),
-            ],
-        )?;
-        let expected = format!("{}\t{}\t{pane}", self.paths.session_name, NAVIGATOR_WINDOW);
-        if evidence.trim() != expected {
-            return Err(PresentationError::InvalidTopology);
-        }
-        self.set_pane_remain_on_exit(&pane, false)
-    }
-
-    /// Creates one local shell below the exact provider, or focuses the
-    /// existing utility shell. The caller must complete authoritative state
-    /// preflight before invoking this method.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the shell path, project root, role topology, or
-    /// bounded tmux mutation is not exact. A shell that exits before tagging
-    /// is treated as normal cleanup.
-    pub fn create_or_focus_shell(
-        &self,
-        source_pane: &str,
-        workstream_id: WorkstreamId,
-        cwd: &Path,
-        shell: &Path,
-    ) -> Result<(), PresentationError> {
-        validate_shell_path(shell)?;
-        if !cwd.is_dir() {
-            return Err(PresentationError::ControlRefused(
-                "registered project root is unavailable",
-            ));
-        }
-
-        let shell_command = vec![
-            self.executable.clone().into_os_string(),
-            "--state-root".into(),
-            self.state_root.clone().into_os_string(),
-            "_presentation_shell".into(),
-            "--presentation-socket".into(),
-            self.paths.socket.clone().into_os_string(),
-            "--presentation-session".into(),
-            self.paths.session_name.clone().into(),
-            "--shell".into(),
-            shell.to_path_buf().into_os_string(),
-            "--cwd".into(),
-            cwd.to_path_buf().into_os_string(),
-        ];
-        self.create_or_focus_shell_command(source_pane, workstream_id, &shell_command)
-    }
-
-    fn create_or_focus_shell_command(
-        &self,
-        source_pane: &str,
-        workstream_id: WorkstreamId,
-        shell_command: &[OsString],
-    ) -> Result<(), PresentationError> {
-        for _ in 0..SHELL_CLAIM_ATTEMPTS {
-            let topology = match self.read_topology() {
-                Ok(topology) => topology,
-                Err(PresentationError::InvalidTopology) if self.shell_claim_present()? => {
-                    thread::sleep(SHELL_CLAIM_RETRY);
-                    continue;
-                }
-                Err(error) => return Err(error),
-            };
-            topology
-                .pane(source_pane)
-                .ok_or(PresentationError::InvalidTopology)?;
-            if let Some(utility) = topology.utility() {
-                self.select_owned_pane(&utility.id)?;
-                return Ok(());
-            }
-            let provider = topology
-                .provider()
-                .ok_or(PresentationError::InvalidTopology)?;
-            if provider.workstream_id != Some(workstream_id) {
-                return Err(PresentationError::InvalidTopology);
-            }
-
-            let token = format!("{}-{}", std::process::id(), uuid::Uuid::new_v4().simple());
-            if !self.try_shell_claim(&token)? {
-                thread::sleep(SHELL_CLAIM_RETRY);
-                continue;
-            }
-            let result = self.create_shell_after_claim(
-                &topology,
-                workstream_id,
-                provider.id.as_str(),
-                shell_command,
-            );
-            self.release_shell_claim(&token);
-            return result;
-        }
-        Err(PresentationError::ControlRefused(
-            "another shell action is in progress",
-        ))
-    }
-
-    fn create_shell_after_claim(
-        &self,
-        topology: &PresentationTopology,
-        workstream_id: WorkstreamId,
-        provider: &str,
-        shell_command: &[OsString],
-    ) -> Result<(), PresentationError> {
-        let mut split_arguments = vec![
-            "split-window".into(),
-            "-v".into(),
-            "-P".into(),
-            "-F".into(),
-            "#{pane_id}".into(),
-            "-t".into(),
-            provider.into(),
-        ];
-        split_arguments.extend(shell_command.iter().cloned());
-        let output = self.invoke_capture(None, split_arguments)?;
-        let Some(utility_id) = parse_pane_id(output.trim()) else {
-            return Err(PresentationError::InvalidTopology);
-        };
-        if topology.pane(&utility_id).is_some() {
-            return Err(PresentationError::InvalidTopology);
-        }
-        let setup = (|| {
-            self.set_pane_remain_on_exit(&utility_id, false)?;
-            self.set_pane_role(
-                &utility_id,
-                PresentationPaneRole::Utility,
-                Some(workstream_id),
-            )?;
-            self.select_owned_pane(&utility_id)?;
-            if self.pane_is_dead(&utility_id)? {
-                self.kill_exact_pane(&utility_id)?;
-            }
-            Ok(())
-        })();
-        match setup {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                let cleanup = self.kill_exact_pane(&utility_id);
-                let restored = cleanup.is_ok()
-                    && self.read_topology().is_ok_and(|current| {
-                        base_topology_preserved(topology, &current, &utility_id)
-                    });
-                if restored
-                    && (pane_disappeared(&error)
-                        || matches!(error, PresentationError::InvalidTopology))
-                {
-                    Ok(())
-                } else {
-                    Err(error)
-                }
-            }
-        }
-    }
-
     /// Runs a bounded presentation-only action. Provider literal input is
     /// deliberately excluded: the app layer must first preflight the exact
     /// Runtime and use its private tmux socket.
@@ -1795,11 +1669,9 @@ impl Presentation {
         self.control_with_client(action, source_pane, None)
     }
 
-    /// Runs one presentation action with the exact invoking tmux client when
-    /// the action needs a client-scoped prompt.  The client identity is
-    /// intentionally optional for callers that cannot originate a tmux key
-    /// binding (for example, deterministic unit fixtures); utility close
-    /// refuses that path instead of guessing a client.
+    /// Runs one presentation action with the exact invoking tmux client.
+    /// Hidden key helpers must provide the client identity so a stale or
+    /// foreign client cannot mutate this private presentation.
     ///
     /// # Errors
     ///
@@ -1812,12 +1684,10 @@ impl Presentation {
         source_pane: &str,
         client_name: Option<&str>,
     ) -> Result<(), PresentationError> {
+        if let Some(client_name) = client_name {
+            self.validate_presentation_client(client_name)?;
+        }
         match action {
-            PresentationAction::SuppressSplit => {
-                self.focused_pane_role(source_pane)?;
-                self.show_guidance("Use Ctrl+b \" for the utility shell")
-            }
-            PresentationAction::CloseShell => self.close_shell(source_pane, client_name),
             PresentationAction::FocusUp
             | PresentationAction::FocusDown
             | PresentationAction::FocusLeft
@@ -1832,9 +1702,6 @@ impl Presentation {
                 }
                 self.send_outer_literal_c_b(source_pane)
             }
-            PresentationAction::CreateOrFocusShell => Err(PresentationError::ControlRefused(
-                "local shell requires attachment preflight",
-            )),
         }
     }
 
@@ -1864,26 +1731,10 @@ impl Presentation {
         )
     }
 
-    fn close_shell(
+    pub(crate) fn validate_presentation_client(
         &self,
-        source_pane: &str,
-        client_name: Option<&str>,
+        client_name: &str,
     ) -> Result<(), PresentationError> {
-        let topology = self.read_topology()?;
-        let source = topology
-            .pane(source_pane)
-            .ok_or(PresentationError::InvalidTopology)?;
-        if source.role != PresentationPaneRole::Utility {
-            return self.show_guidance("Ctrl+b x closes only the utility shell");
-        }
-        let client_name = client_name.ok_or(PresentationError::ControlRefused(
-            "invoking presentation client is unavailable",
-        ))?;
-        self.validate_presentation_client(client_name)?;
-        self.invoke(None, close_shell_arguments(client_name, &source.id))
-    }
-
-    fn validate_presentation_client(&self, client_name: &str) -> Result<(), PresentationError> {
         if client_name.is_empty()
             || client_name.len() > 256
             || client_name
@@ -1932,27 +1783,18 @@ impl Presentation {
             PresentationAction::FocusDown => topology.directional(source, Direction::Down),
             PresentationAction::FocusLeft => topology.directional(source, Direction::Left),
             PresentationAction::FocusRight => topology.directional(source, Direction::Right),
-            _ => None,
+            PresentationAction::LiteralCtrlB => None,
         };
         let Some(target) = target else {
-            return self.show_guidance("No other owned pane in that direction");
+            return Err(PresentationError::ControlRefused(
+                "no other owned pane in that direction",
+            ));
         };
         self.select_owned_pane(&target.id)
     }
 
     fn select_owned_pane(&self, pane: &str) -> Result<(), PresentationError> {
         self.invoke(None, vec!["select-pane".into(), "-t".into(), pane.into()])
-    }
-
-    fn kill_exact_pane(&self, pane: &str) -> Result<(), PresentationError> {
-        if parse_pane_id(pane).is_none() {
-            return Err(PresentationError::InvalidTopology);
-        }
-        match self.invoke(None, vec!["kill-pane".into(), "-t".into(), pane.into()]) {
-            Ok(()) => Ok(()),
-            Err(error) if pane_disappeared(&error) => Ok(()),
-            Err(error) => Err(error),
-        }
     }
 
     /// Displays one bounded guidance message in the Navigator pane.
@@ -1990,32 +1832,6 @@ impl Presentation {
         parse_topology(&output)
     }
 
-    fn validate_single_presentation_window(&self) -> Result<(), PresentationError> {
-        let output = self.invoke_capture(
-            None,
-            vec![
-                "list-windows".into(),
-                "-t".into(),
-                self.paths.session_name.clone().into(),
-                "-F".into(),
-                "#{window_name}\t#{window_id}".into(),
-            ],
-        )?;
-        let mut windows = output.lines();
-        let Some(window) = windows.next() else {
-            return Err(PresentationError::InvalidTopology);
-        };
-        let mut fields = window.split('\t');
-        if fields.next() != Some(NAVIGATOR_WINDOW)
-            || !fields.next().is_some_and(parse_window_id)
-            || fields.next().is_some()
-            || windows.next().is_some()
-        {
-            return Err(PresentationError::InvalidTopology);
-        }
-        Ok(())
-    }
-
     fn read_topology_allow_dead(&self) -> Result<PresentationTopology, PresentationError> {
         let output = self.invoke_capture(
             None,
@@ -2044,32 +1860,14 @@ impl Presentation {
         )
     }
 
-    fn pane_is_dead(&self, pane: &str) -> Result<bool, PresentationError> {
-        let value = self.invoke_capture(
-            None,
-            vec![
-                "display-message".into(),
-                "-p".into(),
-                "-t".into(),
-                self.pane_target(pane).into(),
-                "#{pane_dead}".into(),
-            ],
-        )?;
-        match value.trim() {
-            "0" => Ok(false),
-            "1" => Ok(true),
-            _ => Err(PresentationError::InvalidTopology),
-        }
-    }
-
-    fn try_shell_claim(&self, token: &str) -> Result<bool, PresentationError> {
+    fn try_presentation_claim(&self, token: &str) -> Result<bool, PresentationError> {
         match self.invoke(
             None,
             vec![
                 "set-option".into(),
                 "-g".into(),
                 "-o".into(),
-                SHELL_CLAIM_OPTION.into(),
+                PRESENTATION_CLAIM_OPTION.into(),
                 token.into(),
             ],
         ) {
@@ -2081,25 +1879,13 @@ impl Presentation {
         }
     }
 
-    fn shell_claim_present(&self) -> Result<bool, PresentationError> {
-        let value = self.invoke_capture(
-            None,
-            vec![
-                "show-options".into(),
-                "-gqv".into(),
-                SHELL_CLAIM_OPTION.into(),
-            ],
-        )?;
-        Ok(!value.trim().is_empty())
-    }
-
-    fn release_shell_claim(&self, token: &str) {
+    fn release_presentation_claim(&self, token: &str) {
         let current = self.invoke_capture(
             None,
             vec![
                 "show-options".into(),
                 "-gqv".into(),
-                SHELL_CLAIM_OPTION.into(),
+                PRESENTATION_CLAIM_OPTION.into(),
             ],
         );
         if current
@@ -2113,7 +1899,7 @@ impl Presentation {
                     "set-option".into(),
                     "-g".into(),
                     "-u".into(),
-                    SHELL_CLAIM_OPTION.into(),
+                    PRESENTATION_CLAIM_OPTION.into(),
                 ],
             );
         }
@@ -2123,21 +1909,20 @@ impl Presentation {
         &self,
         operation: impl FnOnce() -> Result<T, PresentationError>,
     ) -> Result<T, PresentationError> {
-        // The shell claim is presentation-global, so holding it through the
-        // provider retag/respawn closes the race where a new utility split
-        // could appear after retirement but before attachment replacement.
+        // The presentation claim is held through provider retag/respawn so a
+        // concurrent action cannot mutate the exact two-pane topology.
         let token = format!(
             "attachment-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4().simple()
         );
-        if !self.try_shell_claim(&token)? {
+        if !self.try_presentation_claim(&token)? {
             return Err(PresentationError::ControlRefused(
-                "another presentation shell or attachment action is in progress",
+                "another presentation action is in progress",
             ));
         }
         let result = operation();
-        self.release_shell_claim(&token);
+        self.release_presentation_claim(&token);
         result
     }
 
@@ -2229,6 +2014,11 @@ impl Presentation {
         if topology.navigator().is_none_or(|pane| pane.dead) || topology.provider().is_none() {
             return Err(PresentationError::InvalidTopology);
         }
+        if topology.utility().is_some() {
+            return Err(PresentationError::ControlRefused(
+                "D17 presentation must remain a two-pane topology",
+            ));
+        }
         Ok(topology)
     }
 
@@ -2282,7 +2072,7 @@ impl Presentation {
         ];
         for (key, action) in bindings {
             // Deliberately omit `-b`: tmux waits for this fixed helper before
-            // accepting another key action, which makes create/focus requests
+            // accepting another key action, which makes focus requests
             // serialize without a lock that could outlive a failed helper.
             self.invoke(
                 None,
@@ -2365,50 +2155,9 @@ impl Presentation {
         Ok(Some(status))
     }
 
-    /// Detaches clients from this exact presentation so the navigator can
-    /// exit without trying to kill its own controlling tmux server. The outer
-    /// launcher observes the dead navigator after `attach-session` returns and
-    /// removes the already-proven private server and files. Provider Runtimes
-    /// live on separate servers and are never targeted.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when stable private ownership cannot be proven or tmux
-    /// rejects detaching clients from the exact presentation session.
-    pub fn stop_session(&self) -> Result<(), PresentationError> {
-        let ownership = read_presentation_ownership(&self.paths)?.ok_or(
-            PresentationError::ControlRefused("presentation ownership marker is missing"),
-        )?;
-        let current =
-            read_presentation_ownership(&self.paths)?.ok_or(PresentationError::ControlRefused(
-                "presentation ownership disappeared before session stop",
-            ))?;
-        if current.marker != ownership.marker
-            || current.marker_identity != ownership.marker_identity
-            || current.socket_identity.is_none()
-            || !optional_socket_identity_compatible(
-                ownership.socket_identity.as_ref(),
-                current.socket_identity.as_ref(),
-            )
-        {
-            return Err(PresentationError::ControlRefused(
-                "presentation ownership changed before session stop",
-            ));
-        }
-        self.invoke(
-            None,
-            vec![
-                "detach-client".into(),
-                "-s".into(),
-                self.paths.session_name.clone().into(),
-            ],
-        )
-    }
-
-    /// D17-only session stop. This is intentionally separate from
-    /// [`Self::stop_session`]: a materialized provisional shell is an allowed
-    /// D17 presentation artifact, but remains a hard refusal for the legacy
-    /// D16 lifecycle.
+    /// Stops the owned D17 presentation after the Navigator pane has exited.
+    /// A materialized provisional shell is an allowed D17 presentation
+    /// artifact, but remains a hard refusal for the legacy D16 lifecycle.
     pub(crate) fn stop_d17_session(&self) -> Result<(), PresentationError> {
         self.d17_context()?;
         let ownership = read_d17_presentation_ownership(&self.paths)?.ok_or(
@@ -2473,14 +2222,14 @@ impl Presentation {
         self.write_attachment_status(&status)
     }
 
-    /// Stops only this private presentation server and removes its exact
-    /// private directory. It never targets a provider runtime or default tmux.
+    /// Stops only the exact legacy presentation server during drain-only
+    /// cutover and removes its owned directory. D17 never dispatches here.
     ///
     /// # Errors
     ///
     /// Returns an error when a live private presentation cannot be stopped or
     /// its owned directory cannot be removed.
-    pub fn close(&self) -> Result<(), PresentationError> {
+    fn close_legacy_drain(&self) -> Result<(), PresentationError> {
         let Some(ownership) = read_presentation_ownership(&self.paths)? else {
             // A fresh owner that was never started has no artifacts to clean.
             // Any existing path without our marker is foreign or malformed;
@@ -2523,7 +2272,8 @@ impl Presentation {
     /// binding, and exact live shell all agree. Any handoff or runtime-owned
     /// phase is deliberately left for onboarding recovery rather than being
     /// mistaken for presentation cleanup authority.
-    pub(crate) fn close_d17(&self) -> Result<(), PresentationError> {
+    #[doc(hidden)]
+    pub fn close_d17(&self) -> Result<(), PresentationError> {
         let Some(ownership) = read_d17_presentation_ownership(&self.paths)? else {
             match fs::symlink_metadata(&self.paths.directory) {
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -2551,7 +2301,7 @@ impl Presentation {
                 "presentation ownership changed before close",
             ));
         }
-        self.d17_context()?;
+        let d17_context = self.d17_context()?;
 
         let provisional = self.d17_provisional_cleanup_proof()?;
         let provisional_lease = provisional
@@ -2575,6 +2325,14 @@ impl Presentation {
                     )
                 })?;
         }
+        crate::d17_review::recover_after_presentation_stop(
+            &self.paths.directory,
+            d17_context.presentation_id(),
+            d17_context.presentation_revision(),
+        )
+        .map_err(|_| {
+            PresentationError::ControlRefused("D17 observer review cleanup is unavailable")
+        })?;
         remove_owned_d17_presentation(
             &self.state_root,
             &self.paths,
@@ -2615,7 +2373,12 @@ impl Presentation {
             })?;
             return Ok(None);
         }
-        if slot.phase() != ProvisionalPhase::Materialized {
+        if !matches!(
+            slot.phase(),
+            ProvisionalPhase::Materializing
+                | ProvisionalPhase::Materialized
+                | ProvisionalPhase::HandoffIssued
+        ) {
             return Err(PresentationError::ControlRefused(
                 "D17 provisional shell cleanup requires onboarding recovery",
             ));
@@ -2637,18 +2400,45 @@ impl Presentation {
         }))
     }
 
+    #[allow(clippy::too_many_lines)]
     fn cleanup_d17_materialized_shell(
         &self,
         provisional: &D17ProvisionalCleanupProof,
     ) -> Result<ProvisionalLease, PresentationError> {
         let root = StateRoot::select(&self.state_root);
         let mut state = open_d17_current_only(&root).map_err(|_| {
-            PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+            PresentationError::ControlRefused(
+                "D17 provisional shell cleanup requires onboarding recovery",
+            )
         })?;
         let provisional_lease = state.acquire_d17_provisional_lease().map_err(|_| {
             PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
         })?;
-        self.validate_d17_provisional_attachment(&state, &provisional_lease, &provisional.slot)?;
+        provisional_lease
+            .revalidate_for_mutation(state.root())
+            .map_err(|_| {
+                PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+            })?;
+        if read_marker(state.root(), &self.paths.directory).map_err(|_| {
+            PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+        })? != provisional.slot
+        {
+            return Err(PresentationError::ControlRefused(
+                "D17 provisional shell cleanup is unavailable",
+            ));
+        }
+        let context = self.d17_context().map_err(|_| {
+            PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+        })?;
+        if provisional.slot.presentation_id() != context.presentation_id()
+            || provisional.slot.presentation_revision() != context.presentation_revision()
+            || provisional.slot.seed_cwd() != context.seed_cwd()
+            || provisional.slot.lease_generation() != provisional_lease.lease_generation()
+        {
+            return Err(PresentationError::ControlRefused(
+                "D17 provisional shell cleanup is unavailable",
+            ));
+        }
         let tmux = SystemTmux::default();
         let process_probe = LinuxProcessProbe;
         let runtime = PrivateRuntime::new(
@@ -2656,20 +2446,59 @@ impl Presentation {
             &process_probe,
             provisional.slot.runtime_paths().clone(),
         );
-        provisional
-            .slot
-            .revalidate_live_shell(&runtime, &process_probe)
-            .map_err(|_| {
-                PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
-            })?;
+        let probe = runtime.probe().map_err(|_| {
+            PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+        })?;
+        if matches!(
+            provisional.slot.phase(),
+            ProvisionalPhase::Materialized | ProvisionalPhase::HandoffIssued
+        ) && matches!(probe, RuntimeProbe::Live { .. })
+        {
+            provisional
+                .slot
+                .revalidate_live_shell(&runtime, &process_probe)
+                .map_err(|_| {
+                    PresentationError::ControlRefused(
+                        "D17 provisional shell cleanup is unavailable",
+                    )
+                })?;
+        } else if matches!(probe, RuntimeProbe::Unknown { .. })
+            || (provisional.slot.phase() == ProvisionalPhase::Materializing
+                && matches!(probe, RuntimeProbe::Live { .. }))
+        {
+            return Err(PresentationError::ControlRefused(
+                "D17 provisional shell cleanup is unavailable",
+            ));
+        }
+        cancel_pre_handoff_under_lease(
+            &mut state,
+            &provisional_lease,
+            &self.paths.directory,
+            &provisional.slot,
+        )
+        .map_err(|_| {
+            PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+        })?;
         provisional_lease
             .revalidate_for_mutation(state.root())
             .map_err(|_| {
                 PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
             })?;
-        runtime.park().map_err(|_| {
-            PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
-        })?;
+        if matches!(probe, RuntimeProbe::Live { .. }) {
+            validate_exact_provisional_runtime_artifacts(state.root(), &provisional.slot).map_err(
+                |_| {
+                    PresentationError::ControlRefused(
+                        "D17 provisional shell cleanup is unavailable",
+                    )
+                },
+            )?;
+            runtime.stop_server().map_err(|_| {
+                PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable")
+            })?;
+        }
+        remove_exact_provisional_runtime_artifacts(state.root(), &provisional.slot).map_err(
+            |_| PresentationError::ControlRefused("D17 provisional shell cleanup is unavailable"),
+        )?;
         provisional_lease
             .revalidate_for_mutation(state.root())
             .map_err(|_| {
@@ -2690,34 +2519,6 @@ impl Presentation {
         parse_client_rows(&clients, &self.paths.session_name)
             .map(|clients| clients.len())
             .map_err(map_presentation_ownership_probe)
-    }
-
-    fn discover_live(state_root: &Path) -> Result<Vec<Self>, PresentationError> {
-        let presentation_root = state_root.join(PRESENTATION_DIRECTORY);
-        if !presentation_root.exists() {
-            return Ok(Vec::new());
-        }
-        let entries = fs::read_dir(&presentation_root).map_err(PresentationError::Io)?;
-        let mut live = Vec::new();
-        for entry in entries {
-            let entry = entry.map_err(PresentationError::Io)?;
-            if !entry.file_type().map_err(PresentationError::Io)?.is_dir() {
-                return Err(PresentationError::InvalidControlPath(entry.path()));
-            }
-            let directory = entry.path();
-            let session_name = presentation_session_name(&directory)
-                .ok_or_else(|| PresentationError::InvalidControlPath(directory.clone()))?;
-            let presentation =
-                Self::from_control(state_root, directory.join("tmux.sock"), session_name)?;
-            let session_live = presentation.is_live()?;
-            let navigator_pane_dead = session_live && presentation.navigator_pane_is_dead()?;
-            if should_reuse_presentation(session_live, navigator_pane_dead) {
-                live.push(presentation);
-            } else {
-                presentation.close()?;
-            }
-        }
-        Ok(live)
     }
 
     fn discover_live_d17(state_root: &Path) -> Result<Vec<Self>, PresentationError> {
@@ -2777,10 +2578,6 @@ impl Presentation {
         )))
     }
 
-    fn navigator_command(&self) -> Vec<OsString> {
-        self.navigator_command_for("_navigator")
-    }
-
     fn d17_navigator_command(&self) -> Vec<OsString> {
         self.navigator_command_for("_navigator_d17")
     }
@@ -2804,35 +2601,6 @@ impl Presentation {
             "--state-root".into(),
             self.state_root.clone().into_os_string(),
             "_provider_wait".into(),
-        ]
-    }
-
-    fn observer_review_command(&self) -> Vec<OsString> {
-        vec![
-            self.executable.clone().into_os_string(),
-            "--state-root".into(),
-            self.state_root.clone().into_os_string(),
-            "_observer_review".into(),
-        ]
-    }
-
-    fn provider_attach_command(
-        &self,
-        workstream_id: WorkstreamId,
-        attempt_id: uuid::Uuid,
-    ) -> Vec<OsString> {
-        vec![
-            self.executable.clone().into_os_string(),
-            "--state-root".into(),
-            self.state_root.clone().into_os_string(),
-            "_provider_attach".into(),
-            workstream_id.to_string().into(),
-            "--presentation-socket".into(),
-            self.paths.socket.clone().into_os_string(),
-            "--presentation-session".into(),
-            self.paths.session_name.clone().into(),
-            "--attempt-id".into(),
-            attempt_id.to_string().into(),
         ]
     }
 
@@ -3074,9 +2842,9 @@ impl Presentation {
 
 /// Classifies legacy presentation ownership without opening host state or
 /// invoking any mutating presentation helper.  This is intentionally separate
-/// from [`Presentation::open_or_create`]: a cutover launcher must be
-/// able to inspect and prove the old presentation before it is allowed to
-/// acquire a transition lease or present confirmation.
+/// from the D17 presentation opener: a cutover launcher must be able to
+/// inspect and prove the old presentation before it is allowed to acquire a
+/// transition lease or present confirmation.
 ///
 /// The only live process inspected here is the navigator pane itself.  No
 /// signal, provider Runtime socket, tmux kill, or directory removal is ever
@@ -3435,7 +3203,7 @@ where
     for _ in 0..MAX_LEGACY_RETIREMENT_ATTEMPTS {
         let after = fresh()?;
         if server_live(expected)? {
-            thread::sleep(SHELL_CLAIM_RETRY);
+            thread::sleep(PRESENTATION_CLAIM_RETRY);
             continue;
         }
         match after.state() {
@@ -3451,7 +3219,7 @@ where
                 }
                 return Err(PresentationError::LegacyNotRetired);
             }
-            _ => thread::sleep(SHELL_CLAIM_RETRY),
+            _ => thread::sleep(PRESENTATION_CLAIM_RETRY),
         }
     }
     Err(PresentationError::LegacyNotRetired)
@@ -4571,8 +4339,10 @@ fn inspect_legacy_presentation(
         return Err(LegacyProbeFailure::Malformed);
     }
 
-    let claim = match legacy_tmux_query(&socket_path, ["show-options", "-gqv", SHELL_CLAIM_OPTION])
-    {
+    let claim = match legacy_tmux_query(
+        &socket_path,
+        ["show-options", "-gqv", LEGACY_SHELL_CLAIM_OPTION],
+    ) {
         Ok(Some(claim)) => claim,
         Ok(None) => String::new(),
         Err(_) if attached => return Ok(evidence),
@@ -5806,21 +5576,6 @@ fn validate_topology_shape(topology: &PresentationTopology) -> Result<(), Presen
     Ok(())
 }
 
-fn validate_observer_review_topology(
-    topology: &PresentationTopology,
-) -> Result<String, PresentationError> {
-    validate_topology_shape(topology)?;
-    if topology.utility().is_some() {
-        return Err(PresentationError::ControlRefused(
-            "observer review requires an exact two-pane presentation",
-        ));
-    }
-    topology
-        .provider()
-        .map(|pane| pane.id.clone())
-        .ok_or(PresentationError::InvalidTopology)
-}
-
 fn parse_pane_id(value: &str) -> Option<String> {
     value
         .strip_prefix('%')
@@ -5834,23 +5589,6 @@ fn parse_window_id(value: &str) -> bool {
     value.strip_prefix('@').is_some_and(|digits| {
         !digits.is_empty() && digits.chars().all(|character| character.is_ascii_digit())
     })
-}
-
-fn validate_shell_path(path: &Path) -> Result<(), PresentationError> {
-    let value = path
-        .to_str()
-        .ok_or_else(|| PresentationError::InvalidControlPath(path.to_path_buf()))?;
-    if !path.is_absolute()
-        || value.is_empty()
-        || value
-            .chars()
-            .any(|character| character.is_control() || character.is_whitespace())
-    {
-        return Err(PresentationError::ControlRefused(
-            "ordinary shell path is invalid",
-        ));
-    }
-    Ok(())
 }
 
 fn shell_quote(value: &std::ffi::OsStr) -> Result<String, PresentationError> {
@@ -5869,17 +5607,6 @@ fn shell_quote(value: &std::ffi::OsStr) -> Result<String, PresentationError> {
     // expansion.
     let value = value.replace('#', "##");
     Ok(format!("'{}'", value.replace('\'', "'\\''")))
-}
-
-fn close_shell_arguments(client_name: &str, utility_pane: &str) -> Vec<OsString> {
-    vec![
-        "confirm-before".into(),
-        "-t".into(),
-        client_name.into(),
-        "-p".into(),
-        "Close utility shell? (y/n)".into(),
-        format!("kill-pane -t {utility_pane}").into(),
-    ]
 }
 
 fn presentation_session_name(directory: &Path) -> Option<String> {
@@ -5903,45 +5630,6 @@ fn sanitize_diagnostic(diagnostic: &str) -> String {
         .filter(|character| !character.is_control() || *character == ' ')
         .take(256)
         .collect()
-}
-
-fn pane_disappeared(error: &PresentationError) -> bool {
-    matches!(
-        error,
-        PresentationError::TmuxRejected(message)
-            if message.contains("no such pane")
-                || message.contains("pane not found")
-                || message.contains("can't find pane")
-    )
-}
-
-fn base_topology_preserved(
-    before: &PresentationTopology,
-    after: &PresentationTopology,
-    removed_utility: &str,
-) -> bool {
-    if after.panes.len() != 2 || after.utility().is_some() || after.pane(removed_utility).is_some()
-    {
-        return false;
-    }
-    let (
-        Some(before_navigator),
-        Some(before_provider),
-        Some(after_navigator),
-        Some(after_provider),
-    ) = (
-        before.navigator(),
-        before.provider(),
-        after.navigator(),
-        after.provider(),
-    )
-    else {
-        return false;
-    };
-    before_navigator.id == after_navigator.id
-        && before_navigator.workstream_id == after_navigator.workstream_id
-        && before_provider.id == after_provider.id
-        && before_provider.workstream_id == after_provider.workstream_id
 }
 
 fn validate_legacy_host_alias(host_alias: &str) -> Result<(), PresentationError> {
@@ -5986,7 +5674,12 @@ fn match_materialized_slot_operation(
         .collect::<Vec<_>>();
     match matches.as_slice() {
         [] => Ok(()),
-        [operation] if operation.phase == OnboardingPhase::CapabilityIssued => {
+        [operation]
+            if matches!(
+                operation.phase,
+                OnboardingPhase::CapabilityIssued | OnboardingPhase::RolledBack
+            ) =>
+        {
             matched_operations.insert(operation.operation_id.as_uuid());
             Ok(())
         }
@@ -6118,6 +5811,11 @@ fn create_paths(paths: &PresentationPaths) -> Result<(), PresentationError> {
     write_presentation_ownership_marker(paths, &marker, None)
 }
 
+#[cfg(test)]
+pub(crate) fn create_paths_for_test(paths: &PresentationPaths) -> Result<(), PresentationError> {
+    create_paths(paths)
+}
+
 fn presentation_ownership_marker_path(paths: &PresentationPaths) -> PathBuf {
     paths.directory.join(PRESENTATION_OWNERSHIP_MARKER_FILE)
 }
@@ -6198,7 +5896,7 @@ fn read_presentation_ownership(
 }
 
 /// Reads an owned D17 presentation after a provisional marker may exist. The
-/// ordinary D16 ownership reader deliberately continues to reject that marker
+/// legacy ownership reader deliberately continues to reject that marker
 /// so legacy close/cleanup cannot adopt a partially materialized D17 shell.
 fn read_d17_presentation_ownership(
     paths: &PresentationPaths,
@@ -6229,7 +5927,6 @@ fn read_presentation_ownership_with_artifacts(
             "presentation ownership directory is foreign or malformed",
         ));
     }
-    validate_presentation_artifact_entries(&paths.directory, artifacts)?;
     let marker_path = presentation_ownership_marker_path(paths);
     let marker_metadata = match fs::symlink_metadata(&marker_path) {
         Ok(metadata) => metadata,
@@ -6280,6 +5977,7 @@ fn read_presentation_ownership_with_artifacts(
             "presentation ownership marker does not prove this directory",
         ));
     }
+    validate_presentation_artifact_entries(&paths.directory, artifacts, marker.d17.as_ref())?;
     let config = inspect_regular_file(&paths.config, true, MAX_LEGACY_CONFIG_BYTES)
         .map_err(map_presentation_ownership_probe)?
         .ok_or(PresentationError::ControlRefused(
@@ -6333,6 +6031,7 @@ fn map_presentation_ownership_probe(failure: LegacyProbeFailure) -> Presentation
 fn validate_presentation_artifact_entries(
     directory: &Path,
     artifacts: PresentationArtifactSet,
+    d17_marker: Option<&D17PresentationMarker>,
 ) -> Result<(), PresentationError> {
     let entries = fs::read_dir(directory).map_err(PresentationError::Io)?;
     for (count, entry) in entries
@@ -6358,10 +6057,28 @@ fn validate_presentation_artifact_entries(
             && name != "tmux.sock"
             && !(matches!(artifacts, PresentationArtifactSet::D17)
                 && name == crate::provisional::PROVISIONAL_MARKER_FILE)
+            && !(matches!(artifacts, PresentationArtifactSet::D17)
+                && crate::d17_review::is_review_artifact_name(&name))
         {
             return Err(PresentationError::ControlRefused(
                 "presentation directory contains an unknown artifact",
             ));
+        }
+    }
+    match artifacts {
+        PresentationArtifactSet::D16 => {}
+        PresentationArtifactSet::D17 => {
+            let d17 = d17_marker.ok_or(PresentationError::ControlRefused(
+                "D17 presentation context is unavailable",
+            ))?;
+            crate::d17_review::validate_artifacts(
+                directory,
+                d17.presentation_id,
+                d17.presentation_revision,
+            )
+            .map_err(|_| {
+                PresentationError::ControlRefused("D17 observer review ownership is unavailable")
+            })?;
         }
     }
     Ok(())
@@ -6383,7 +6100,7 @@ fn remove_owned_presentation(
     // Recheck the bounded allowlist before each unlink. This never recursively
     // removes the directory, and an unknown/sentinel entry therefore remains
     // untouched even if it appears during cleanup.
-    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D16)?;
+    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D16, None)?;
     let attachment = inspect_regular_file(
         &paths.attachment_status,
         false,
@@ -6399,7 +6116,7 @@ fn remove_owned_presentation(
         )?;
     }
 
-    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D16)?;
+    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D16, None)?;
     remove_exact_regular_artifact(
         &paths.config,
         Some(&expected.marker.config_identity),
@@ -6407,7 +6124,7 @@ fn remove_owned_presentation(
         &mut |_| Ok(()),
     )?;
 
-    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D16)?;
+    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D16, None)?;
     let socket = inspect_private_socket(&paths.socket).map_err(map_presentation_ownership_probe)?;
     if socket.is_some()
         && !optional_socket_identity_compatible(expected.socket_identity.as_ref(), socket.as_ref())
@@ -6420,7 +6137,7 @@ fn remove_owned_presentation(
         remove_exact_socket_artifact(&paths.socket, Some(identity), &mut |_| Ok(()))?;
     }
 
-    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D16)?;
+    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D16, None)?;
     remove_exact_regular_artifact(
         &presentation_ownership_marker_path(paths),
         Some(&expected.marker_identity),
@@ -6463,7 +6180,7 @@ fn remove_owned_d17_presentation(
                 "D17 provisional shell cleanup is unavailable",
             ));
         }
-        validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D17)?;
+        validate_expected_d17_artifacts(paths, expected)?;
         remove_exact_regular_artifact(
             &paths.directory.join(PROVISIONAL_MARKER_FILE),
             Some(&provisional.marker_identity),
@@ -6482,7 +6199,7 @@ fn remove_owned_d17_presentation(
         }
     }
 
-    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D17)?;
+    validate_expected_d17_artifacts(paths, expected)?;
     let attachment = inspect_regular_file(
         &paths.attachment_status,
         false,
@@ -6498,7 +6215,7 @@ fn remove_owned_d17_presentation(
         )?;
     }
 
-    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D17)?;
+    validate_expected_d17_artifacts(paths, expected)?;
     remove_exact_regular_artifact(
         &paths.config,
         Some(&expected.marker.config_identity),
@@ -6506,7 +6223,7 @@ fn remove_owned_d17_presentation(
         &mut |_| Ok(()),
     )?;
 
-    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D17)?;
+    validate_expected_d17_artifacts(paths, expected)?;
     let socket = inspect_private_socket(&paths.socket).map_err(map_presentation_ownership_probe)?;
     if socket.is_some()
         && !optional_socket_identity_compatible(expected.socket_identity.as_ref(), socket.as_ref())
@@ -6519,7 +6236,7 @@ fn remove_owned_d17_presentation(
         remove_exact_socket_artifact(&paths.socket, Some(identity), &mut |_| Ok(()))?;
     }
 
-    validate_presentation_artifact_entries(&paths.directory, PresentationArtifactSet::D17)?;
+    validate_expected_d17_artifacts(paths, expected)?;
     remove_exact_regular_artifact(
         &presentation_ownership_marker_path(paths),
         Some(&expected.marker_identity),
@@ -6536,6 +6253,17 @@ fn remove_owned_d17_presentation(
         }
         Err(error) => Err(PresentationError::Io(error)),
     }
+}
+
+fn validate_expected_d17_artifacts(
+    paths: &PresentationPaths,
+    expected: &PresentationOwnershipProof,
+) -> Result<(), PresentationError> {
+    validate_presentation_artifact_entries(
+        &paths.directory,
+        PresentationArtifactSet::D17,
+        expected.marker.d17.as_ref(),
+    )
 }
 
 #[cfg(unix)]
@@ -6947,7 +6675,9 @@ mod tests {
         };
 
         let presentation = Presentation::fresh_with_executable(temporary.path(), fixture);
-        presentation.start().unwrap();
+        presentation
+            .start_d17_with_context(uuid::Uuid::from_u128(0x1706), temporary.path())
+            .unwrap();
         let _presentation_guard = DisposableTmuxServerGuard::new(
             presentation.paths().socket.clone(),
             Some(presentation.paths().directory.clone()),
@@ -7133,43 +6863,6 @@ mod tests {
     }
 
     #[test]
-    fn close_refuses_a_path_shaped_directory_without_our_marker() {
-        let temporary = tempfile::tempdir().unwrap();
-        let paths = PresentationPaths::fresh(temporary.path());
-        fs::create_dir_all(&paths.directory).unwrap();
-        set_mode(&paths.directory, 0o700).unwrap();
-        let sentinel = paths.directory.join("foreign-sentinel");
-        fs::write(&sentinel, b"leave me alone").unwrap();
-        let presentation = Presentation {
-            paths: paths.clone(),
-            executable: PathBuf::from("/workspace/wsnav"),
-            state_root: temporary.path().to_path_buf(),
-        };
-        let result = presentation.close();
-        assert!(matches!(
-            result,
-            Err(PresentationError::ControlRefused(message))
-                if message.contains("ownership marker") || message.contains("unknown artifact")
-        ));
-        assert!(paths.directory.exists());
-        assert!(sentinel.exists());
-    }
-
-    #[test]
-    fn close_removes_only_a_directory_with_our_ownership_proof() {
-        let temporary = tempfile::tempdir().unwrap();
-        let paths = PresentationPaths::fresh(temporary.path());
-        create_paths(&paths).unwrap();
-        let presentation = Presentation {
-            paths: paths.clone(),
-            executable: PathBuf::from("/workspace/wsnav"),
-            state_root: temporary.path().to_path_buf(),
-        };
-        presentation.close().unwrap();
-        assert!(!paths.directory.exists());
-    }
-
-    #[test]
     fn d17_context_is_marker_bound_and_uses_only_the_canonical_seed() {
         let temporary = tempfile::tempdir().unwrap();
         let seed = temporary.path().join("seed");
@@ -7259,7 +6952,7 @@ mod tests {
     }
 
     #[test]
-    fn close_d17_leaves_a_non_materialized_provisional_marker_for_recovery() {
+    fn close_d17_recovers_an_interrupted_exact_observer_review() {
         let temporary = tempfile::tempdir().unwrap();
         let seed = temporary.path().join("seed");
         fs::create_dir(&seed).unwrap();
@@ -7270,29 +6963,185 @@ mod tests {
             executable: PathBuf::from("/workspace/wsnav"),
             state_root: temporary.path().to_path_buf(),
         };
+        let context = presentation
+            .initialize_d17_context(uuid::Uuid::from_u128(7_501), &seed)
+            .unwrap();
+        let review = std::mem::ManuallyDrop::new(
+            crate::d17_review::D17ReviewDirectory::create(
+                &paths.directory,
+                context.presentation_id(),
+                context.presentation_revision(),
+            )
+            .unwrap(),
+        );
+        assert!(review.path().exists());
+
+        presentation.close_d17().unwrap();
+
+        assert!(!paths.directory.exists());
+    }
+
+    #[test]
+    fn close_d17_preserves_a_replaced_observer_review_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        let paths = PresentationPaths::fresh(temporary.path());
+        create_paths(&paths).unwrap();
+        let presentation = Presentation {
+            paths: paths.clone(),
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+        let context = presentation
+            .initialize_d17_context(uuid::Uuid::from_u128(7_502), &seed)
+            .unwrap();
+        let review = std::mem::ManuallyDrop::new(
+            crate::d17_review::D17ReviewDirectory::create(
+                &paths.directory,
+                context.presentation_id(),
+                context.presentation_revision(),
+            )
+            .unwrap(),
+        );
+        let review_path = review.path();
+        fs::remove_dir(&review_path).unwrap();
+        fs::create_dir(&review_path).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&review_path, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        fs::write(review_path.join("foreign"), b"preserve").unwrap();
+
+        assert!(presentation.close_d17().is_err());
+        assert_eq!(fs::read(review_path.join("foreign")).unwrap(), b"preserve");
+        assert!(paths.directory.exists());
+    }
+
+    #[test]
+    fn close_d17_reconciles_schema14_marker_and_preserves_ambiguous_evidence() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        let mut state =
+            crate::state::fresh_create_d17(&state_path, &crate::domain::RandomIdGenerator).unwrap();
+        let provisional_lease = state.acquire_d17_provisional_lease().unwrap();
+        let presentation =
+            Presentation::fresh_with_executable(&state_path, PathBuf::from("/workspace/wsnav"));
+        let paths = presentation.paths().clone();
+        create_paths(&paths).unwrap();
         let presentation_id = uuid::Uuid::from_u128(76);
         let context = presentation
             .initialize_d17_context(presentation_id, &seed)
             .unwrap();
         let slot = crate::provisional::ProvisionalSlot::materializing(
-            temporary.path(),
+            &state_path,
             presentation_id,
             context.presentation_revision(),
-            1,
-            crate::domain::RuntimeId::new(),
+            provisional_lease.lease_generation(),
+            crate::domain::RuntimeId::from(uuid::Uuid::from_u128(7_600)),
             crate::provisional::SlotGeneration::new(uuid::Uuid::from_u128(77)),
             &seed,
         )
         .unwrap();
-        crate::provisional::write_new_marker(temporary.path(), &paths.directory, &slot).unwrap();
+        crate::provisional::write_new_marker(&state_path, &paths.directory, &slot).unwrap();
+        drop(state);
+        drop(provisional_lease);
+
+        presentation.close_d17().unwrap();
+        assert!(!paths.directory.exists());
+
+        let ambiguous = tempfile::tempdir().unwrap();
+        let state_path = ambiguous.path().join("state");
+        let seed = ambiguous.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        let mut state =
+            crate::state::fresh_create_d17(&state_path, &crate::domain::RandomIdGenerator).unwrap();
+        let provisional_lease = state.acquire_d17_provisional_lease().unwrap();
+        let presentation =
+            Presentation::fresh_with_executable(&state_path, PathBuf::from("/workspace/wsnav"));
+        let paths = presentation.paths().clone();
+        create_paths(&paths).unwrap();
+        let context = presentation
+            .initialize_d17_context(uuid::Uuid::from_u128(78), &seed)
+            .unwrap();
+        let slot = crate::provisional::ProvisionalSlot::materializing(
+            &state_path,
+            context.presentation_id(),
+            context.presentation_revision(),
+            provisional_lease.lease_generation(),
+            crate::domain::RuntimeId::from(uuid::Uuid::from_u128(7_601)),
+            crate::provisional::SlotGeneration::new(uuid::Uuid::from_u128(79)),
+            &seed,
+        )
+        .unwrap();
+        crate::provisional::write_new_marker(&state_path, &paths.directory, &slot).unwrap();
+        fs::create_dir_all(&slot.runtime_paths().directory).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                &slot.runtime_paths().directory,
+                fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+        let foreign = slot.runtime_paths().directory.join("foreign-artifact");
+        fs::write(&foreign, b"foreign").unwrap();
+        drop(state);
+        drop(provisional_lease);
 
         assert!(matches!(
             presentation.close_d17(),
             Err(PresentationError::ControlRefused(message))
-                if message.contains("requires onboarding recovery")
+                if message.contains("provisional shell cleanup is unavailable")
         ));
         assert!(paths.directory.exists());
         assert!(paths.directory.join(PROVISIONAL_MARKER_FILE).exists());
+        assert!(foreign.exists());
+    }
+
+    #[test]
+    fn d17_startup_failure_uses_marker_aware_cleanup_owner() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        let mut state =
+            crate::state::fresh_create_d17(&state_path, &crate::domain::RandomIdGenerator).unwrap();
+        let provisional_lease = state.acquire_d17_provisional_lease().unwrap();
+        let presentation =
+            Presentation::fresh_with_executable(&state_path, PathBuf::from("/workspace/wsnav"));
+        let paths = presentation.paths().clone();
+        create_paths(&paths).unwrap();
+        let context = presentation
+            .initialize_d17_context(uuid::Uuid::from_u128(8_000), &seed)
+            .unwrap();
+        let slot = crate::provisional::ProvisionalSlot::materializing(
+            &state_path,
+            context.presentation_id(),
+            context.presentation_revision(),
+            provisional_lease.lease_generation(),
+            crate::domain::RuntimeId::from(uuid::Uuid::from_u128(8_001)),
+            crate::provisional::SlotGeneration::new(uuid::Uuid::from_u128(8_002)),
+            &seed,
+        )
+        .unwrap();
+        crate::provisional::write_new_marker(&state_path, &paths.directory, &slot).unwrap();
+        drop(state);
+        drop(provisional_lease);
+
+        let failure = presentation.complete_start_stage(
+            "synthetic D17 stage",
+            Err::<(), _>(PresentationError::ControlRefused("synthetic failure")),
+        );
+        assert!(matches!(
+            failure,
+            Err(PresentationError::StartupFailed { .. })
+        ));
+        assert!(!paths.directory.exists());
     }
 
     #[test]
@@ -7474,7 +7323,7 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_presentation_marker_omits_the_dormant_d17_shape() {
+    fn fresh_presentation_marker_omits_d17_until_context_initialization() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = PresentationPaths::fresh(temporary.path());
         create_paths(&paths).unwrap();
@@ -7504,29 +7353,6 @@ mod tests {
             presentation.d17_context(),
             Err(PresentationError::D17SeedUnavailable)
         ));
-    }
-
-    #[test]
-    fn close_leaves_unknown_artifacts_when_owned_directory_is_tampered() {
-        let temporary = tempfile::tempdir().unwrap();
-        let paths = PresentationPaths::fresh(temporary.path());
-        create_paths(&paths).unwrap();
-        let sentinel = paths.directory.join("foreign-sentinel");
-        fs::write(&sentinel, b"leave me alone").unwrap();
-        let presentation = Presentation {
-            paths: paths.clone(),
-            executable: PathBuf::from("/workspace/wsnav"),
-            state_root: temporary.path().to_path_buf(),
-        };
-        let result = presentation.close();
-        assert!(matches!(
-            result,
-            Err(PresentationError::ControlRefused(message))
-                if message.contains("unknown artifact")
-        ));
-        assert!(paths.directory.exists());
-        assert!(sentinel.exists());
-        assert!(paths.config.exists());
     }
 
     #[test]
@@ -7651,34 +7477,6 @@ mod tests {
     }
 
     #[test]
-    fn observer_review_topology_retires_utility_and_rejects_external_splits() {
-        let two_pane = concat!(
-            "%0\tnavigator\t\t0\t0\t0\t32\t24\t128\t24\n",
-            "%1\tprovider\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t0\t95\t24\t128\t24\n",
-        );
-        let topology = parse_topology(two_pane).unwrap();
-        assert_eq!(validate_observer_review_topology(&topology).unwrap(), "%1");
-
-        let utility = concat!(
-            "%0\tnavigator\t\t0\t0\t0\t32\t24\t128\t24\n",
-            "%1\tprovider\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t0\t95\t11\t128\t24\n",
-            "%2\tutility\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t12\t95\t12\t128\t24\n",
-        );
-        let topology = parse_topology(utility).unwrap();
-        assert!(matches!(
-            validate_observer_review_topology(&topology),
-            Err(PresentationError::ControlRefused(message))
-                if message.contains("two-pane")
-        ));
-
-        let external = utility.replace("utility", "external");
-        assert!(matches!(
-            parse_topology(&external),
-            Err(PresentationError::InvalidTopology)
-        ));
-    }
-
-    #[test]
     fn control_binding_uses_fixed_quoting_and_tmux_format_source() {
         let temporary = tempfile::tempdir().unwrap();
         let state_root = temporary.path().join("state's root/#{danger}/#(marker)");
@@ -7703,27 +7501,6 @@ mod tests {
         assert!(command.contains("--client-name #{q:client_name}"));
         assert!(!command.contains("; tmux"));
         assert!(!command.contains("split-window"));
-    }
-
-    #[test]
-    fn close_shell_targets_the_invoking_client_and_exact_utility_pane() {
-        let arguments = close_shell_arguments("/dev/pts/9", "%7");
-        let values = arguments
-            .iter()
-            .map(|argument| argument.to_string_lossy().into_owned())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            values,
-            vec![
-                "confirm-before",
-                "-t",
-                "/dev/pts/9",
-                "-p",
-                "Close utility shell? (y/n)",
-                "kill-pane -t %7",
-            ]
-        );
-        assert_ne!(values[2], values[5]);
     }
 
     #[test]
@@ -7881,30 +7658,6 @@ mod tests {
     }
 
     #[test]
-    fn provider_attachment_uses_direct_arguments_not_a_shell() {
-        let temporary = tempfile::tempdir().unwrap();
-        let paths = PresentationPaths::fresh(temporary.path());
-        let presentation = Presentation {
-            paths,
-            executable: PathBuf::from("/workspace/wsnav"),
-            state_root: temporary.path().to_path_buf(),
-        };
-        let command =
-            presentation.provider_attach_command(WorkstreamId::new(), uuid::Uuid::new_v4());
-        assert!(
-            command
-                .iter()
-                .all(|argument| argument != "sh" && argument != "/bin/sh")
-        );
-        assert!(
-            command
-                .iter()
-                .any(|argument| argument == "_provider_attach")
-        );
-        assert_eq!(command.len(), 11);
-    }
-
-    #[test]
     fn d17_provider_attachment_carries_exact_snapshot_revisions() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = PresentationPaths::fresh(temporary.path());
@@ -7943,53 +7696,6 @@ mod tests {
             OsString::from(Revision::INITIAL.value().to_string())
         );
         assert_eq!(command.len(), 17);
-    }
-
-    #[test]
-    fn observer_review_uses_only_the_owned_provider_pane_and_direct_arguments() {
-        let temporary = tempfile::tempdir().unwrap();
-        let paths = PresentationPaths::fresh(temporary.path());
-        let presentation = Presentation {
-            paths,
-            executable: PathBuf::from("/workspace/wsnav"),
-            state_root: temporary.path().to_path_buf(),
-        };
-
-        let command = presentation.observer_review_command();
-
-        assert_eq!(command[0], "/workspace/wsnav");
-        assert_eq!(command[1], "--state-root");
-        assert_eq!(command[3], "_observer_review");
-        assert!(
-            command
-                .iter()
-                .all(|argument| argument != "sh" && argument != "/bin/sh")
-        );
-    }
-
-    #[test]
-    fn provider_respawn_forwards_the_complete_direct_attachment_command() {
-        let temporary = tempfile::tempdir().unwrap();
-        let paths = PresentationPaths::fresh(temporary.path());
-        let presentation = Presentation {
-            paths,
-            executable: PathBuf::from("/workspace/wsnav"),
-            state_root: temporary.path().to_path_buf(),
-        };
-        let workstream_id = WorkstreamId::new();
-        let arguments = presentation.provider_respawn_arguments(
-            PROVIDER_PANE,
-            workstream_id,
-            uuid::Uuid::new_v4(),
-        );
-
-        assert_eq!(arguments.len(), 15);
-        assert_eq!(arguments[0], "respawn-pane");
-        assert_eq!(arguments[4], "/workspace/wsnav");
-        assert_eq!(arguments[7], "_provider_attach");
-        assert_eq!(arguments[8], OsString::from(workstream_id.to_string()));
-        assert_eq!(arguments[9], "--presentation-socket");
-        assert_eq!(arguments[13], "--attempt-id");
     }
 
     #[test]

@@ -2,24 +2,21 @@ use std::{
     collections::BTreeSet,
     ffi::OsString,
     fs,
-    io::Write,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
-    sync::{Arc, Barrier},
     thread,
     time::{Duration, Instant},
 };
 
 use wsnav::{
-    domain::{RandomIdGenerator, WorkstreamId},
-    presentation::{AttachmentPhase, Presentation, PresentationAction, PresentationPaths},
-    runtime::{LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, SystemTmux},
+    domain::{RandomIdGenerator, RuntimeId},
+    presentation::{Presentation, PresentationAction, PresentationPaths},
+    runtime::{NativeLaunch, PrivateRuntime, RuntimePaths, SystemTmux},
     state,
 };
 
 const NAVIGATOR_PANE: &str = "0.0";
 const PROVIDER_PANE: &str = "0.1";
-const FALSE_PROGRAM: &str = "/usr/bin/false";
 const SLEEP_PROGRAM: &str = "/usr/bin/sleep";
 const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 const READINESS_POLL: Duration = Duration::from_millis(10);
@@ -34,7 +31,10 @@ fn current_state_root() -> tempfile::TempDir {
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
             .expect("private state root");
     }
-    drop(state::fresh_create(root.path(), &RandomIdGenerator).expect("fresh schema-13 state root"));
+    drop(
+        state::fresh_create_d17(root.path(), &RandomIdGenerator)
+            .expect("fresh schema-14 state root"),
+    );
     root
 }
 
@@ -45,97 +45,9 @@ struct PrivateTmuxGuard {
 
 impl Drop for PrivateTmuxGuard {
     fn drop(&mut self) {
-        let mut command = tmux_command(&self.socket);
-        let _ = command.args(["kill-server"]).output();
+        let _ = tmux_command(&self.socket).args(["kill-server"]).output();
         let _ = fs::remove_dir_all(&self.directory);
     }
-}
-
-#[test]
-fn open_or_create_refuses_an_unmarked_path_shaped_presentation() {
-    if !tmux_available() {
-        eprintln!("skipped: tmux is unavailable");
-        return;
-    }
-    assert!(Path::new(FALSE_PROGRAM).is_file());
-    assert!(Path::new(SLEEP_PROGRAM).is_file());
-
-    let state_root = current_state_root();
-    let paths = PresentationPaths::fresh(state_root.path());
-    let presentation_root = paths.directory.parent().unwrap();
-    fs::create_dir_all(presentation_root).unwrap();
-    fs::create_dir(&paths.directory).unwrap();
-    fs::write(
-        &paths.config,
-        "set -g remain-on-exit on\nset -g status off\n",
-    )
-    .unwrap();
-    let _guard = PrivateTmuxGuard {
-        directory: paths.directory.clone(),
-        socket: paths.socket.clone(),
-    };
-
-    let mut new_session = tmux_command(&paths.socket);
-    let status = new_session
-        .arg("-f")
-        .arg(&paths.config)
-        .args([
-            "new-session",
-            "-d",
-            "-s",
-            &paths.session_name,
-            "-n",
-            "navigator",
-            FALSE_PROGRAM,
-        ])
-        .status()
-        .unwrap();
-    assert!(status.success());
-
-    let mut split = tmux_command(&paths.socket);
-    let status = split
-        .args([
-            "split-window",
-            "-h",
-            "-d",
-            "-t",
-            &format!("{}:{NAVIGATOR_PANE}", paths.session_name),
-            SLEEP_PROGRAM,
-            "60",
-        ])
-        .status()
-        .unwrap();
-    assert!(status.success());
-    for (pane, role) in [(NAVIGATOR_PANE, "navigator"), (PROVIDER_PANE, "provider")] {
-        let status = tmux_command(&paths.socket)
-            .args(["set-option", "-p", "-t"])
-            .arg(format!("{}:{pane}", paths.session_name))
-            .args(["@wsnav_role", role])
-            .status()
-            .unwrap();
-        assert!(status.success());
-    }
-
-    wait_for_fixture(&paths);
-    assert_eq!(
-        pane_dead(&paths.socket, &paths.session_name, NAVIGATOR_PANE),
-        Some(true)
-    );
-    assert_eq!(
-        pane_dead(&paths.socket, &paths.session_name, PROVIDER_PANE),
-        Some(false)
-    );
-
-    let failed_directory = paths.directory.clone();
-    let result = Presentation::open_or_create(state_root.path());
-
-    assert!(matches!(
-        result,
-        Err(wsnav::presentation::PresentationError::ControlRefused(message))
-            if message.contains("ownership") || message.contains("foreign")
-    ));
-    assert!(failed_directory.exists());
-    assert!(session_exists(&paths.socket, &paths.session_name));
 }
 
 #[test]
@@ -155,7 +67,9 @@ fn navigator_stop_leaves_cleanup_to_the_outer_owner() {
         directory: paths.directory.clone(),
         socket: paths.socket.clone(),
     };
-    presentation.start().unwrap();
+    presentation
+        .start_d17(uuid::Uuid::from_u128(0x1701), state_root.path())
+        .unwrap();
 
     let mut client = attach_tmux_client(&paths);
     assert!(
@@ -190,7 +104,7 @@ fn navigator_stop_leaves_cleanup_to_the_outer_owner() {
     assert!(session_exists(&paths.socket, &paths.session_name));
     assert!(paths.directory.exists());
 
-    presentation.close().unwrap();
+    presentation.close_d17().unwrap();
     assert!(!paths.directory.exists());
 }
 
@@ -228,12 +142,13 @@ fn private_presentation_restores_navigator_width_when_the_window_resizes() {
         .unwrap();
     assert!(status.success());
     let ordinary_before = tmux_output(&ordinary_socket, ["list-keys", "-T", "root"]);
-    presentation.start().unwrap();
+    presentation
+        .start_d17(uuid::Uuid::from_u128(0x1702), state_root.path())
+        .unwrap();
     let ordinary_after = tmux_output(&ordinary_socket, ["list-keys", "-T", "root"]);
     assert_eq!(ordinary_before, ordinary_after);
 
-    let mut resize = tmux_command(&paths.socket);
-    let status = resize
+    let status = tmux_command(&paths.socket)
         .args(["resize-window", "-t"])
         .arg(format!("{}:0", paths.session_name))
         .args(["-x", "150", "-y", "40"])
@@ -267,7 +182,9 @@ fn private_presentation_has_only_owned_roles_and_bounded_key_tables() {
         directory: paths.directory.clone(),
         socket: paths.socket.clone(),
     };
-    presentation.start().unwrap();
+    presentation
+        .start_d17(uuid::Uuid::from_u128(0x1703), state_root.path())
+        .unwrap();
 
     let panes = tmux_output(
         &paths.socket,
@@ -303,13 +220,6 @@ fn private_presentation_has_only_owned_roles_and_bounded_key_tables() {
         binding_keys(&prefix),
         BTreeSet::from(["?", "d", "o", "Up", "Down", "Left", "Right", "C-b",])
     );
-    let started = Instant::now();
-    let status = tmux_command(&paths.socket)
-        .args(["run-shell", "sleep 0.05"])
-        .status()
-        .unwrap();
-    assert!(status.success());
-    assert!(started.elapsed() >= Duration::from_millis(30));
     let root = tmux_output(&paths.socket, ["list-keys", "-T", "root"]);
     assert_eq!(
         binding_keys(&root),
@@ -321,21 +231,6 @@ fn private_presentation_has_only_owned_roles_and_bounded_key_tables() {
             "WheelDownPane",
         ])
     );
-    let normalized_root = root
-        .lines()
-        .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        normalized_root
-            .contains("MouseDrag1Pane if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\"")
-    );
-    assert!(normalized_root.contains(
-        "WheelUpPane if-shell -F \"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}\""
-    ));
-    assert!(normalized_root.contains(
-        "WheelDownPane if-shell -F \"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}\""
-    ));
 }
 
 #[test]
@@ -354,7 +249,9 @@ fn mutated_private_geometry_fails_closed_without_rearranging_panes() {
         directory: paths.directory.clone(),
         socket: paths.socket.clone(),
     };
-    presentation.start().unwrap();
+    presentation
+        .start_d17(uuid::Uuid::from_u128(0x1704), state_root.path())
+        .unwrap();
     let output = tmux_command(&paths.socket)
         .args(["split-window", "-v", "-d", "-P", "-F", "#{pane_id}", "-t"])
         .arg("%0")
@@ -362,17 +259,12 @@ fn mutated_private_geometry_fails_closed_without_rearranging_panes() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    let utility = String::from_utf8(output.stdout).unwrap().trim().to_owned();
-    for (option, value) in [
-        ("@wsnav_role", "utility".to_owned()),
-        ("@wsnav_workstream_id", WorkstreamId::new().to_string()),
-    ] {
-        let status = tmux_command(&paths.socket)
-            .args(["set-option", "-p", "-t", &utility, option, &value])
-            .status()
-            .unwrap();
-        assert!(status.success());
-    }
+    let extra = String::from_utf8(output.stdout).unwrap().trim().to_owned();
+    let status = tmux_command(&paths.socket)
+        .args(["set-option", "-p", "-t", &extra, "@wsnav_role", "external"])
+        .status()
+        .unwrap();
+    assert!(status.success());
     let before = pane_snapshot(&paths);
     assert_eq!(before.len(), 3);
     assert!(presentation.focus_navigator().is_err());
@@ -380,531 +272,84 @@ fn mutated_private_geometry_fails_closed_without_rearranging_panes() {
 }
 
 #[test]
-fn local_shell_create_is_idempotent_and_failed_launch_restores_two_panes() {
-    if !tmux_available() {
-        eprintln!("skipped: tmux is unavailable");
-        return;
-    }
-    let state_root = current_state_root();
-    let project_root = tempfile::tempdir().unwrap();
-    let presentation = Presentation::fresh_with_executable(
-        state_root.path(),
-        PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
-    );
-    let paths = presentation.paths().clone();
-    let _guard = PrivateTmuxGuard {
-        directory: paths.directory.clone(),
-        socket: paths.socket.clone(),
-    };
-    presentation.start().unwrap();
-    let workstream_id = WorkstreamId::new();
-    exercise_local_shell(&presentation, &paths, workstream_id, project_root.path());
-    presentation.close().unwrap();
-
-    let failed_root = current_state_root();
-    let failed = Presentation::fresh_with_executable(
-        failed_root.path(),
-        PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
-    );
-    let failed_paths = failed.paths().clone();
-    let _failed_guard = PrivateTmuxGuard {
-        directory: failed_paths.directory.clone(),
-        socket: failed_paths.socket.clone(),
-    };
-    failed.start().unwrap();
-    exercise_failed_shell(&failed, &failed_paths, workstream_id, project_root.path());
-}
-
-#[test]
-fn guarded_close_targets_the_attached_client_and_only_utility_pane() {
-    if !tmux_available() {
-        eprintln!("skipped: tmux is unavailable");
-        return;
-    }
-    let state_root = current_state_root();
-    let project_root = tempfile::tempdir().unwrap();
-    let presentation = Presentation::fresh_with_executable(
-        state_root.path(),
-        PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
-    );
-    let paths = presentation.paths().clone();
-    let _guard = PrivateTmuxGuard {
-        directory: paths.directory.clone(),
-        socket: paths.socket.clone(),
-    };
-    presentation.start().unwrap();
-    let workstream_id = WorkstreamId::new();
-    respawn_fixture_panes(&paths);
-    set_provider_context(&paths, workstream_id);
-    presentation
-        .create_or_focus_shell(
-            "%0",
-            workstream_id,
-            project_root.path(),
-            Path::new("/bin/sh"),
-        )
-        .unwrap();
-    let utility = pane_value(&paths, "utility", "#{pane_id}");
-
-    let mut client = attach_tmux_client(&paths);
-    let client_name = attached_client_name(&paths).expect("attached presentation client");
-    let navigator = pane_value(&paths, "navigator", "#{pane_id}");
-    presentation
-        .control_with_client(
-            PresentationAction::CloseShell,
-            &navigator,
-            Some(&client_name),
-        )
-        .unwrap();
-    assert_eq!(pane_snapshot(&paths).len(), 3);
-
-    let close_presentation = presentation.clone();
-    let close_client = client_name.clone();
-    let close_utility = utility.clone();
-    let closer = thread::spawn(move || {
-        close_presentation.control_with_client(
-            PresentationAction::CloseShell,
-            &close_utility,
-            Some(&close_client),
-        )
-    });
-    thread::sleep(Duration::from_millis(100));
-    client
-        .stdin
-        .as_mut()
-        .expect("tmux attach stdin")
-        .write_all(b"y\n")
-        .unwrap();
-    closer.join().unwrap().unwrap();
-    wait_for_pane_count(&paths, 2);
-    assert_eq!(pane_value(&paths, "navigator", "#{pane_id}"), navigator);
-    assert!(pane_value_if_present(&paths, "utility", "#{pane_id}").is_none());
-    assert!(pane_value_if_present(&paths, "provider", "#{pane_id}").is_some());
-    let _ = client.kill();
-    let _ = client.wait();
-}
-
-#[test]
-fn tmux_control_binding_expands_only_intentional_formats() {
+fn tmux_control_bindings_are_parseable_active_helpers_only() {
     if !tmux_available() {
         eprintln!("skipped: tmux is unavailable");
         return;
     }
     let fixture_root = tempfile::tempdir().unwrap();
-    let marker = fixture_root.path().join("m");
-    let recorder = fixture_root.path().join("argv-record");
-    let malicious_root = fixture_root
-        .path()
-        .join(format!("s'/#{{danger}}/#(touch {})", marker.display()));
-    fs::create_dir_all(&malicious_root).unwrap();
-    let executable = malicious_root.join(format!("x'/#{{danger}}/#(touch {})", marker.display()));
-    fs::create_dir_all(executable.parent().unwrap()).unwrap();
-    let recorder_path = shell_quote_for_test(&recorder);
-    let script = format!(
-        "#!/bin/sh\nif [ \"$3\" = \"_navigator\" ] || [ \"$3\" = \"_provider_wait\" ]; then exec sleep 60; fi\n: > {recorder_path}\nfor arg in \"$@\"; do printf '%s\\0' \"$arg\" >> {recorder_path}; done\n",
-    );
+    let executable = fixture_root.path().join("wsnav-fixture");
+    let script = "#!/bin/sh\nif [ \"$3\" = \"_navigator_d17\" ] || [ \"$3\" = \"_provider_wait\" ]; then exec sleep 60; fi\n";
     fs::write(&executable, script).unwrap();
     make_executable(&executable);
-    let presentation = Presentation::fresh_with_executable(&malicious_root, executable.clone());
+    let state_root = current_state_root();
+    let presentation = Presentation::fresh_with_executable(state_root.path(), executable);
     let paths = presentation.paths().clone();
     let _guard = PrivateTmuxGuard {
         directory: paths.directory.clone(),
         socket: paths.socket.clone(),
     };
-    presentation.start().unwrap();
-    let mut client = attach_tmux_client(&paths);
-    let client_name = attached_client_name(&paths).expect("attached presentation client");
-    let binding = tmux_output(&paths.socket, ["list-keys", "-T", "prefix"]);
-    let command = binding
-        .lines()
-        .find(|line| line.contains("--action focus-next"))
-        .and_then(extract_run_shell_command)
-        .expect("fixed focus-next binding");
-    let output = tmux_command(&paths.socket)
-        .args(["run-shell", "-t", NAVIGATOR_PANE])
-        .arg(&command)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "tmux failed: {:?} stdout={:?} command={command}",
-        output.stderr,
-        output.stdout
-    );
-    let bytes = fs::read(&recorder).unwrap();
-    let arguments = bytes
-        .split(|byte| *byte == 0)
-        .filter(|argument| !argument.is_empty())
-        .map(|argument| String::from_utf8(argument.to_vec()).unwrap())
-        .collect::<Vec<_>>();
-    assert_eq!(arguments[0], "--state-root");
-    assert_eq!(arguments[1], malicious_root.display().to_string());
-    assert_eq!(arguments[2], "_presentation_control");
-    assert_eq!(arguments[3], "--presentation-socket");
-    assert_eq!(arguments[4], paths.socket.display().to_string());
-    assert_eq!(arguments[5], "--presentation-session");
-    assert_eq!(arguments[6], paths.session_name);
-    assert_eq!(
-        &arguments[7..11],
-        &[
-            "--action".to_owned(),
-            "focus-next".to_owned(),
-            "--source-pane".to_owned(),
-            "%0".to_owned(),
-        ]
-    );
-    assert_eq!(
-        &arguments[11..],
-        &["--client-name".to_owned(), client_name.clone()]
-    );
-    assert!(!marker.exists());
-    let _ = fs::remove_file(&marker);
-    let _ = client.kill();
-    let _ = client.wait();
-}
-
-fn exercise_local_shell(
-    presentation: &Presentation,
-    paths: &PresentationPaths,
-    workstream_id: WorkstreamId,
-    project_root: &Path,
-) {
-    respawn_fixture_panes(paths);
-    set_provider_context(paths, workstream_id);
-    let concurrent = Arc::new(presentation.clone());
-    let gate = Arc::new(Barrier::new(8));
-    let handles: Vec<_> = (0..8)
-        .map(|_| {
-            let presentation = Arc::clone(&concurrent);
-            let gate = Arc::clone(&gate);
-            let cwd = project_root.to_path_buf();
-            thread::spawn(move || {
-                gate.wait();
-                presentation.create_or_focus_shell("%0", workstream_id, &cwd, Path::new("/bin/sh"))
-            })
-        })
-        .collect();
-    for handle in handles {
-        handle.join().unwrap().unwrap();
-    }
-    wait_for_pane_count(paths, 3);
-    let first = pane_snapshot(paths);
-    assert_eq!(first.len(), 3);
-    assert!(first.iter().any(|line| line.contains("\tutility\t")));
-    let utility_top = pane_field(paths, "utility", "#{pane_top}");
-    let provider_top = pane_field(paths, "provider", "#{pane_top}");
-    assert!(utility_top > provider_top);
-    wait_for_pane_value(
-        paths,
-        "utility",
-        "#{pane_current_path}",
-        &project_root.display().to_string(),
-    );
-    assert_eq!(pane_option(paths, "utility", "remain-on-exit"), "off");
-
-    let owned_panes: Vec<String> = ["navigator", "provider", "utility"]
-        .into_iter()
-        .map(|role| pane_value(paths, role, "#{pane_id}"))
-        .collect();
-    for source in &owned_panes {
-        presentation
-            .control(PresentationAction::FocusNext, source)
-            .unwrap();
-        assert!(owned_panes.contains(&active_pane(paths)));
-    }
     presentation
-        .create_or_focus_shell("%1", workstream_id, project_root, Path::new("/bin/sh"))
+        .start_d17(uuid::Uuid::from_u128(0x1705), state_root.path())
         .unwrap();
-    assert_eq!(pane_snapshot(paths).len(), 3);
-    for source in ["navigator", "provider"] {
-        presentation
-            .control(
-                PresentationAction::CloseShell,
-                &pane_value(paths, source, "#{pane_id}"),
-            )
-            .unwrap();
-    }
-    assert_eq!(pane_snapshot(paths).len(), 3);
-    let utility = pane_value(paths, "utility", "#{pane_id}");
-    let status = tmux_command(&paths.socket)
-        .args(["send-keys", "-t", &utility, "C-d"])
-        .status()
-        .unwrap();
-    assert!(status.success());
-    wait_for_pane_count(paths, 2);
-    assert_eq!(pane_option(paths, "navigator", "remain-on-exit"), "on");
-    assert_eq!(pane_option(paths, "provider", "remain-on-exit"), "on");
-}
 
-fn exercise_failed_shell(
-    presentation: &Presentation,
-    paths: &PresentationPaths,
-    workstream_id: WorkstreamId,
-    project_root: &Path,
-) {
-    respawn_fixture_panes(paths);
-    set_provider_context(paths, workstream_id);
-    assert!(
-        presentation
-            .create_or_focus_shell("%999", workstream_id, project_root, Path::new("/bin/sh"),)
-            .is_err()
-    );
-    assert_eq!(pane_snapshot(paths).len(), 2);
-    assert!(
-        presentation
-            .create_or_focus_shell(
-                "%0",
-                workstream_id,
-                project_root,
-                Path::new("/bin/sh invalid"),
-            )
-            .is_err()
-    );
-    assert_eq!(pane_snapshot(paths).len(), 2);
-    presentation
-        .create_or_focus_shell("%0", workstream_id, project_root, Path::new(FALSE_PROGRAM))
-        .unwrap();
-    wait_for_pane_count(paths, 2);
-    assert_eq!(pane_snapshot(paths).len(), 2);
+    let prefix = tmux_output(&paths.socket, ["list-keys", "-T", "prefix"]);
+    for action in [
+        "focus-next",
+        "focus-up",
+        "focus-down",
+        "focus-left",
+        "focus-right",
+        "literal-c-b",
+    ] {
+        assert!(prefix.contains(&format!("--action {action}")));
+    }
+    for retired in ["create-or-focus-shell", "suppress-split", "close-shell"] {
+        assert!(!prefix.contains(retired));
+    }
 }
 
 #[test]
-fn local_attachment_switch_closes_only_a_different_workstream_shell() {
+fn outer_presentation_protects_nested_provider_literal_prefix() {
     if !tmux_available() {
         eprintln!("skipped: tmux is unavailable");
         return;
     }
-    let state_root = tempfile::tempdir().unwrap();
-    let project_root = tempfile::tempdir().unwrap();
-    let fake = state_root.path().join("provider-helper");
-    fs::write(&fake, "#!/bin/sh\nexec /usr/bin/sleep 60\n").unwrap();
-    make_executable(&fake);
-    let presentation = Presentation::fresh_with_executable(state_root.path(), fake);
+    let state_root = current_state_root();
+    let presentation = Presentation::fresh_with_executable(
+        state_root.path(),
+        PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
+    );
     let paths = presentation.paths().clone();
     let _guard = PrivateTmuxGuard {
         directory: paths.directory.clone(),
         socket: paths.socket.clone(),
     };
-    presentation.start().unwrap();
-
-    let first_workstream = WorkstreamId::new();
-    presentation.attach_workstream(first_workstream).unwrap();
     presentation
-        .create_or_focus_shell(
-            "%1",
-            first_workstream,
-            project_root.path(),
-            Path::new("/bin/sh"),
-        )
+        .start_d17(uuid::Uuid::from_u128(0x1707), state_root.path())
         .unwrap();
-    wait_for_pane_count(&paths, 3);
-    let utility = pane_value(&paths, "utility", "#{pane_id}");
-    let utility_pid = pane_value(&paths, "utility", "#{pane_pid}");
-
-    // Reconnecting the same exact attachment leaves its utility pane and
-    // process untouched.
-    presentation.attach_workstream(first_workstream).unwrap();
-    assert_eq!(pane_value(&paths, "utility", "#{pane_id}"), utility);
-    assert_eq!(pane_value(&paths, "utility", "#{pane_pid}"), utility_pid);
-    assert_eq!(pane_snapshot(&paths).len(), 3);
-
-    let second_workstream = WorkstreamId::new();
-    presentation.attach_workstream(second_workstream).unwrap();
-    wait_for_pane_count(&paths, 2);
-    wait_for_pid_exit(&utility_pid);
-    assert!(pane_value_if_present(&paths, "utility", "#{pane_id}").is_none());
-    assert_eq!(
-        pane_value(&paths, "provider", "#{@wsnav_workstream_id}"),
-        second_workstream.to_string()
-    );
-    assert_eq!(pane_field(&paths, "navigator", "#{pane_top}"), 0);
-    assert_eq!(pane_field(&paths, "provider", "#{pane_top}"), 0);
-}
-
-#[test]
-fn completed_attachment_pane_can_be_replaced_by_another_workstream() {
-    if !tmux_available() {
-        eprintln!("skipped: tmux is unavailable");
-        return;
-    }
-    let state_root = tempfile::tempdir().unwrap();
-    let fake = state_root.path().join("provider-helper");
-    fs::write(&fake, "#!/bin/sh\nexec /usr/bin/sleep 60\n").unwrap();
-    make_executable(&fake);
-    let presentation = Presentation::fresh_with_executable(state_root.path(), fake);
-    let paths = presentation.paths().clone();
-    let _guard = PrivateTmuxGuard {
-        directory: paths.directory.clone(),
-        socket: paths.socket.clone(),
-    };
-    presentation.start().unwrap();
-
-    let first_workstream = WorkstreamId::new();
-    presentation.attach_workstream(first_workstream).unwrap();
-    let provider = pane_value(&paths, "provider", "#{pane_id}");
-    let status = tmux_command(&paths.socket)
-        .args(["respawn-pane", "-k", "-t", &provider, FALSE_PROGRAM])
-        .status()
-        .unwrap();
-    assert!(status.success());
-    wait_for_pane_state(&paths, PROVIDER_PANE, true);
-    assert_eq!(
-        presentation.attachment_status().unwrap().unwrap().phase,
-        AttachmentPhase::Failed
-    );
-
-    let second_workstream = WorkstreamId::new();
-    presentation.attach_workstream(second_workstream).unwrap();
-    wait_for_pane_state(&paths, PROVIDER_PANE, false);
-    assert_eq!(pane_value(&paths, "provider", "#{pane_id}"), provider);
-    assert_eq!(
-        pane_value(&paths, "provider", "#{@wsnav_workstream_id}"),
-        second_workstream.to_string()
-    );
-}
-
-#[test]
-fn ambiguous_attachment_topology_refuses_switch_before_provider_mutation() {
-    if !tmux_available() {
-        eprintln!("skipped: tmux is unavailable");
-        return;
-    }
-    let state_root = tempfile::tempdir().unwrap();
-    let project_root = tempfile::tempdir().unwrap();
-    let fake = state_root.path().join("provider-helper");
-    fs::write(&fake, "#!/bin/sh\nexec /usr/bin/sleep 60\n").unwrap();
-    make_executable(&fake);
-    let presentation = Presentation::fresh_with_executable(state_root.path(), fake);
-    let paths = presentation.paths().clone();
-    let _guard = PrivateTmuxGuard {
-        directory: paths.directory.clone(),
-        socket: paths.socket.clone(),
-    };
-    presentation.start().unwrap();
-
-    let first_workstream = WorkstreamId::new();
-    presentation.attach_workstream(first_workstream).unwrap();
-    presentation
-        .create_or_focus_shell(
-            "%1",
-            first_workstream,
-            project_root.path(),
-            Path::new("/bin/sh"),
-        )
-        .unwrap();
-    wait_for_pane_count(&paths, 3);
-    let provider = pane_value(&paths, "provider", "#{pane_id}");
-    let utility = pane_value(&paths, "utility", "#{pane_id}");
-    let before = pane_snapshot(&paths);
-
-    // An untagged extra pane makes the owned topology ambiguous. The target
-    // provider must retain its exact context and the utility must remain.
-    let output = tmux_command(&paths.socket)
-        .args([
-            "split-window",
-            "-v",
-            "-d",
+    let provider = tmux_output(
+        &paths.socket,
+        [
+            "list-panes",
             "-t",
-            &provider,
-            SLEEP_PROGRAM,
-            "60",
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success());
-    let second_workstream = WorkstreamId::new();
-    assert!(presentation.attach_workstream(second_workstream).is_err());
-    assert_eq!(
-        presentation.attachment_status().unwrap().unwrap().phase,
-        AttachmentPhase::Failed
-    );
-    assert_eq!(pane_value(&paths, "provider", "#{pane_id}"), provider);
-    assert_eq!(
-        pane_value(&paths, "provider", "#{@wsnav_workstream_id}"),
-        first_workstream.to_string()
-    );
-    assert_eq!(pane_value(&paths, "utility", "#{pane_id}"), utility);
-    assert_ne!(pane_snapshot(&paths), before);
-}
+            &format!("{}:navigator", paths.session_name),
+            "-F",
+            "#{pane_id}\t#{@wsnav_role}",
+        ],
+    )
+    .lines()
+    .find_map(|line| {
+        let (pane, role) = line.split_once('\t')?;
+        (role == "provider").then_some(pane.to_owned())
+    })
+    .expect("D17 provider pane");
 
-#[test]
-fn extra_presentation_window_refuses_cross_workstream_attachment_without_mutation() {
-    if !tmux_available() {
-        eprintln!("skipped: tmux is unavailable");
-        return;
-    }
-    let state_root = tempfile::tempdir().unwrap();
-    let project_root = tempfile::tempdir().unwrap();
-    let fake = state_root.path().join("provider-helper");
-    fs::write(&fake, "#!/bin/sh\nexec /usr/bin/sleep 60\n").unwrap();
-    make_executable(&fake);
-    let presentation = Presentation::fresh_with_executable(state_root.path(), fake);
-    let paths = presentation.paths().clone();
-    let _guard = PrivateTmuxGuard {
-        directory: paths.directory.clone(),
-        socket: paths.socket.clone(),
-    };
-    presentation.start().unwrap();
-
-    let first_workstream = WorkstreamId::new();
-    presentation.attach_workstream(first_workstream).unwrap();
-    presentation
-        .create_or_focus_shell(
-            "%1",
-            first_workstream,
-            project_root.path(),
-            Path::new("/bin/sh"),
-        )
-        .unwrap();
-    wait_for_pane_count(&paths, 3);
-    let provider = pane_value(&paths, "provider", "#{pane_id}");
-    let utility = pane_value(&paths, "utility", "#{pane_id}");
-    let utility_pid = pane_value(&paths, "utility", "#{pane_pid}");
-
-    let output = tmux_command(&paths.socket)
-        .args([
-            "new-window",
-            "-d",
-            "-n",
-            "hidden",
-            "-t",
-            &paths.session_name,
-            SLEEP_PROGRAM,
-            "60",
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "tmux failed: {:?}", output.stderr);
-    assert_eq!(
-        tmux_output(
-            &paths.socket,
-            [
-                "list-windows",
-                "-t",
-                &paths.session_name,
-                "-F",
-                "#{window_name}"
-            ]
-        )
-        .lines()
-        .count(),
-        2
-    );
-
-    let second_workstream = WorkstreamId::new();
-    assert!(presentation.attach_workstream(second_workstream).is_err());
-    assert_eq!(
-        presentation.attachment_status().unwrap().unwrap().phase,
-        AttachmentPhase::Failed
-    );
-    assert_eq!(pane_value(&paths, "provider", "#{pane_id}"), provider);
-    assert_eq!(
-        pane_value(&paths, "provider", "#{@wsnav_workstream_id}"),
-        first_workstream.to_string()
-    );
-    assert_eq!(pane_value(&paths, "utility", "#{pane_id}"), utility);
-    assert_eq!(pane_value(&paths, "utility", "#{pane_pid}"), utility_pid);
-    assert_eq!(pane_snapshot(&paths).len(), 3);
+    assert!(matches!(
+        presentation.control(PresentationAction::LiteralCtrlB, &provider),
+        Err(wsnav::presentation::PresentationError::ControlRefused(message))
+            if message.contains("Runtime preflight")
+    ));
 }
 
 #[test]
@@ -923,11 +368,11 @@ fn nested_runtime_literal_ctrl_b_reaches_the_provider_as_one_byte() {
         shell_quote_for_test(&capture),
     );
     let tmux = SystemTmux::default();
-    let process_probe = LinuxProcessProbe;
+    let process_probe = wsnav::runtime::LinuxProcessProbe;
     let runtime = PrivateRuntime::new(
         &tmux,
         &process_probe,
-        RuntimePaths::for_runtime(state_root.path(), wsnav::domain::RuntimeId::new()),
+        RuntimePaths::for_runtime(state_root.path(), RuntimeId::new()),
     );
     runtime
         .start(&NativeLaunch {
@@ -1066,43 +511,20 @@ fn attach_tmux_session_client(socket: &Path, session: &str) -> Child {
     panic!("private presentation client did not attach");
 }
 
-fn attached_client_name(paths: &PresentationPaths) -> Option<String> {
-    attached_client_name_for(&paths.socket, &paths.session_name, Some("navigator"))
-}
-
-fn attached_client_name_for(
-    socket: &Path,
-    expected_session: &str,
-    expected_window: Option<&str>,
-) -> Option<String> {
+fn tmux_has_client(socket: &Path, session: &str) -> bool {
     let output = tmux_command(socket)
         .args([
             "list-clients",
             "-F",
             "#{client_name}\t#{session_name}\t#{window_name}",
         ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout)
-        .ok()?
-        .lines()
-        .find_map(|line| {
-            let mut fields = line.split('\t');
-            let client = fields.next()?;
-            let session = fields.next()?;
-            let window = fields.next()?;
-            (session == expected_session
-                && expected_window.is_none_or(|expected| window == expected)
-                && fields.next().is_none())
-            .then(|| client.to_owned())
-        })
-}
-
-fn tmux_has_client(socket: &Path, session: &str) -> bool {
-    attached_client_name_for(socket, session, None).is_some()
+        .output();
+    output.is_ok_and(|output| {
+        output.status.success()
+            && String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .any(|line| line.split('\t').nth(1) == Some(session))
+    })
 }
 
 fn wait_for_runtime_client(socket: &Path) -> (String, String, String) {
@@ -1141,12 +563,6 @@ fn runtime_client_status(socket: &Path) -> Option<(String, String, String)> {
     })
 }
 
-fn extract_run_shell_command(line: &str) -> Option<String> {
-    let command = line.split_once(" run-shell ")?.1.trim();
-    let command = command.strip_prefix('"')?.strip_suffix('"')?;
-    Some(command.replace("\\\\", "\\").replace("\\\"", "\""))
-}
-
 fn binding_keys(output: &str) -> BTreeSet<&str> {
     output
         .lines()
@@ -1159,53 +575,8 @@ fn binding_keys(output: &str) -> BTreeSet<&str> {
         .collect()
 }
 
-fn wait_for_fixture(paths: &PresentationPaths) {
-    let deadline = Instant::now() + READINESS_TIMEOUT;
-    loop {
-        if pane_dead(&paths.socket, &paths.session_name, NAVIGATOR_PANE) == Some(true)
-            && pane_dead(&paths.socket, &paths.session_name, PROVIDER_PANE) == Some(false)
-        {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "private tmux fixture did not become ready"
-        );
-        thread::sleep(READINESS_POLL);
-    }
-}
-
-fn wait_for_pane_value(paths: &PresentationPaths, role: &str, format: &str, expected: &str) {
-    let deadline = Instant::now() + READINESS_TIMEOUT;
-    loop {
-        if pane_value(paths, role, format) == expected {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "private tmux pane value did not become ready"
-        );
-        thread::sleep(READINESS_POLL);
-    }
-}
-
-fn wait_for_pane_state(paths: &PresentationPaths, pane: &str, expected_dead: bool) {
-    let deadline = Instant::now() + READINESS_TIMEOUT;
-    loop {
-        if pane_dead(&paths.socket, &paths.session_name, pane) == Some(expected_dead) {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "private tmux pane {pane} did not reach dead={expected_dead}"
-        );
-        thread::sleep(READINESS_POLL);
-    }
-}
-
 fn pane_dead(socket: &Path, session: &str, target: &str) -> Option<bool> {
-    let mut command = tmux_command(socket);
-    let output = command
+    let output = tmux_command(socket)
         .args(["display-message", "-p", "-t"])
         .arg(format!("{session}:{target}"))
         .arg("#{pane_dead}")
@@ -1215,8 +586,7 @@ fn pane_dead(socket: &Path, session: &str, target: &str) -> Option<bool> {
 }
 
 fn pane_width(socket: &Path, session: &str, target: &str) -> Option<u16> {
-    let mut command = tmux_command(socket);
-    let output = command
+    let output = tmux_command(socket)
         .args(["display-message", "-p", "-t"])
         .arg(format!("{session}:{target}"))
         .arg("#{pane_width}")
@@ -1244,8 +614,7 @@ fn parse_pane_dead(output: &Output) -> Option<bool> {
 }
 
 fn session_exists(socket: &Path, session: &str) -> bool {
-    let mut command = tmux_command(socket);
-    command
+    tmux_command(socket)
         .args(["has-session", "-t"])
         .arg(session)
         .output()
@@ -1256,35 +625,6 @@ fn tmux_output<const N: usize>(socket: &Path, arguments: [&str; N]) -> String {
     let output = tmux_command(socket).args(arguments).output().unwrap();
     assert!(output.status.success(), "tmux failed: {:?}", output.stderr);
     String::from_utf8(output.stdout).unwrap()
-}
-
-fn set_provider_context(paths: &PresentationPaths, workstream_id: WorkstreamId) {
-    let target = format!("{}:{PROVIDER_PANE}", paths.session_name);
-    let value = workstream_id.to_string();
-    let status = tmux_command(&paths.socket)
-        .args([
-            "set-option",
-            "-p",
-            "-t",
-            &target,
-            "@wsnav_workstream_id",
-            &value,
-        ])
-        .status()
-        .unwrap();
-    assert!(status.success());
-}
-
-fn respawn_fixture_panes(paths: &PresentationPaths) {
-    for target in [NAVIGATOR_PANE, PROVIDER_PANE] {
-        let status = tmux_command(&paths.socket)
-            .args(["respawn-pane", "-k", "-t"])
-            .arg(format!("{}:{target}", paths.session_name))
-            .args([SLEEP_PROGRAM, "60"])
-            .status()
-            .unwrap();
-        assert!(status.success());
-    }
 }
 
 fn pane_snapshot(paths: &PresentationPaths) -> Vec<String> {
@@ -1301,111 +641,4 @@ fn pane_snapshot(paths: &PresentationPaths) -> Vec<String> {
     .lines()
     .map(str::to_owned)
     .collect()
-}
-
-fn pane_field(paths: &PresentationPaths, role: &str, format: &str) -> u16 {
-    let output = tmux_output(
-        &paths.socket,
-        [
-            "list-panes",
-            "-t",
-            &format!("{}:navigator", paths.session_name),
-            "-F",
-            &format!("#{{@wsnav_role}}\t{format}"),
-        ],
-    );
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix(&format!("{role}\t")))
-        .unwrap()
-        .parse()
-        .unwrap()
-}
-
-fn pane_value(paths: &PresentationPaths, role: &str, format: &str) -> String {
-    let output = tmux_output(
-        &paths.socket,
-        [
-            "list-panes",
-            "-t",
-            &format!("{}:navigator", paths.session_name),
-            "-F",
-            &format!("#{{@wsnav_role}}\t{format}"),
-        ],
-    );
-    output
-        .lines()
-        .find_map(|line| line.strip_prefix(&format!("{role}\t")))
-        .unwrap()
-        .to_owned()
-}
-
-fn pane_value_if_present(paths: &PresentationPaths, role: &str, format: &str) -> Option<String> {
-    let output = tmux_command(&paths.socket)
-        .args([
-            "list-panes",
-            "-t",
-            &format!("{}:navigator", paths.session_name),
-            "-F",
-            &format!("#{{@wsnav_role}}\t{format}"),
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    String::from_utf8(output.stdout)
-        .ok()?
-        .lines()
-        .find_map(|line| line.strip_prefix(&format!("{role}\t")).map(str::to_owned))
-}
-
-fn active_pane(paths: &PresentationPaths) -> String {
-    let output = tmux_command(&paths.socket)
-        .args(["display-message", "-p", "-t"])
-        .arg(format!("{}:navigator", paths.session_name))
-        .arg("#{pane_id}")
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "tmux failed: {:?}", output.stderr);
-    String::from_utf8(output.stdout).unwrap().trim().to_owned()
-}
-
-fn pane_option(paths: &PresentationPaths, role: &str, option: &str) -> String {
-    let pane = pane_value(paths, role, "#{pane_id}");
-    tmux_output(
-        &paths.socket,
-        ["show-options", "-p", "-v", "-t", &pane, option],
-    )
-    .trim()
-    .to_owned()
-}
-
-fn wait_for_pane_count(paths: &PresentationPaths, expected: usize) {
-    let deadline = Instant::now() + READINESS_TIMEOUT;
-    while Instant::now() < deadline {
-        if pane_snapshot(paths).len() == expected {
-            return;
-        }
-        thread::sleep(READINESS_POLL);
-    }
-    panic!(
-        "expected {expected} private presentation panes, got {:?}",
-        pane_snapshot(paths)
-    );
-}
-
-fn wait_for_pid_exit(pid: &str) {
-    let deadline = Instant::now() + READINESS_TIMEOUT;
-    while Instant::now() < deadline {
-        let exited = Command::new("kill")
-            .args(["-0", pid])
-            .status()
-            .is_ok_and(|status| !status.success());
-        if exited {
-            return;
-        }
-        thread::sleep(READINESS_POLL);
-    }
-    panic!("utility process {pid} did not exit");
 }

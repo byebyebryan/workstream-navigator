@@ -1,15 +1,10 @@
-//! Dormant D17 post-exec reconciliation boundary.
+//! D17 post-exec reconciliation boundary.
 //!
 //! The reconciler can only record exact native exec evidence. Codex may then
 //! finish its provider-exec proof directly, while `OpenCode` remains action
 //! fenced until the presentation controller has established its exact
 //! detached observer; it never launches, signals, attaches, or otherwise
 //! controls a provider.
-
-#![allow(
-    dead_code,
-    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
-)]
 
 use std::{
     ffi::{OsStr, OsString},
@@ -105,6 +100,13 @@ impl ExpectedProviderExecutable {
     #[must_use]
     pub(crate) const fn identity(&self) -> OnboardingProviderExecutableIdentity {
         self.identity
+    }
+
+    /// Returns the canonical executable selected by the exact provider probe.
+    /// Callers use it only to build a direct native argv in an owned pane.
+    #[must_use]
+    pub(crate) fn canonical_path(&self) -> &Path {
+        &self.canonical_path
     }
 }
 

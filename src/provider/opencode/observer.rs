@@ -51,7 +51,7 @@ const STANDBY_ACTIVATION_ACK_LINE_MAX_BYTES: usize = 512;
 pub enum OpenCodeObserverMode {
     D16,
     /// D17's observer can open only the explicit schema-14 current boundary.
-    /// It is still started solely by the dormant presentation controller.
+    /// It is started only by the D17 presentation controller.
     D17,
     D16Standby,
 }

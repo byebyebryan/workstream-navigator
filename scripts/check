@@ -52,7 +52,7 @@ for fixture_file in "${fixture_files[@]}"; do
 done
 
 scripts/d12-presentation-harness-acceptance.sh
-bash scripts/d16-source-acceptance.sh
+bash scripts/d17-source-acceptance.sh
 
 git diff --check
 git diff --cached --check

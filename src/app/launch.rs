@@ -2,9 +2,7 @@ use super::model::{AppError, parse_revision, parse_workstream};
 use super::{
     AttachmentPhase, Command, FromStr, LinuxProcessProbe, PathBuf, Presentation, PrivateRuntime,
     ProviderSessionId, Revision, RuntimeId, RuntimePaths, StateRoot, Stdio, await_launch_release,
-    env,
 };
-use crate::application::{AttachEvidence, LocalApplication};
 use crate::presentation::{PresentationAction, PresentationError, PresentationPaneRole};
 use std::path::Path;
 
@@ -35,7 +33,7 @@ pub(super) fn runtime_launch(
     }
 }
 
-/// Runs one fixed local presentation action. The helper receives only values
+/// Runs one fixed D17 presentation action. The helper receives only values
 /// emitted by the private presentation key table; it never evaluates an
 /// arbitrary tmux command or shell fragment.
 pub(super) fn presentation_control(
@@ -49,59 +47,21 @@ pub(super) fn presentation_control(
     let action = PresentationAction::from_str(action)?;
     let presentation =
         Presentation::from_control(root.base(), presentation_socket, presentation_session)?;
-    let result = match action {
+    presentation.validate_presentation_client(client_name)?;
+    match action {
         PresentationAction::LiteralCtrlB => {
             send_presentation_literal_ctrl_b(root, &presentation, source_pane)
         }
         other => presentation
             .control_with_client(other, source_pane, Some(client_name))
             .map_err(AppError::from),
-    };
-    if result.is_err() {
-        let _ = presentation
-            .show_guidance("Presentation action unavailable; exact owned state required");
-    }
-    result
-}
-
-/// Runs the fixed utility-shell launch barrier inside the newly-created pane.
-/// The barrier disables retention through the exact private presentation
-/// socket before replacing itself with the ordinary interactive shell.
-pub(super) fn presentation_shell(
-    root: &StateRoot,
-    presentation_socket: PathBuf,
-    presentation_session: String,
-    shell: PathBuf,
-    cwd: PathBuf,
-) -> Result<(), AppError> {
-    let presentation =
-        Presentation::from_control(root.base(), presentation_socket, presentation_session)?;
-    let pane = env::var("TMUX_PANE")
-        .map_err(|_| PresentationError::ControlRefused("utility pane identity is unavailable"))?;
-    presentation.prepare_utility_pane(&pane)?;
-    if !cwd.is_dir() {
-        return Err(
-            PresentationError::ControlRefused("registered project root is unavailable").into(),
-        );
-    }
-    let mut command = Command::new(shell);
-    command.current_dir(cwd).arg("-i");
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        Err(AppError::RuntimeExec(command.exec()))
-    }
-    #[cfg(not(unix))]
-    {
-        let status = command.status().map_err(AppError::Io)?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(AppError::RuntimeExited)
-        }
     }
 }
 
+/// Routes literal Ctrl-b to the exact nested Runtime only after proving the
+/// D17 provider attachment. A provider pane with missing, stale, or failed
+/// attachment evidence is left untouched, so the nested provider prefix can
+/// never be consumed accidentally by the outer presentation server.
 fn send_presentation_literal_ctrl_b(
     root: &StateRoot,
     presentation: &Presentation,
@@ -123,8 +83,8 @@ fn send_presentation_literal_ctrl_b(
         .into());
     }
     presentation.validate_provider_context(status.workstream_id)?;
-    let state = crate::state::open_current_only(&StateRoot::select(root.base()))?;
-    let mut registry = state.into_host_registry()?;
+    let state = crate::state::open_d17_current_only(&StateRoot::select(root.base()))?;
+    let mut registry = state.into_d17_host_registry()?;
     let runtime_record =
         crate::actions::preflight_attachment(root, &mut registry, status.workstream_id)?;
     let tmux = super::SystemTmux::default();
@@ -212,62 +172,8 @@ pub(super) fn opencode_observer_standby(
     crate::provider::opencode::run_standby(root, &context).map_err(AppError::OpenCodeObserver)
 }
 
-/// Runs an attachment only inside the presentation provider pane.
-///
-/// A provider pane is reserved for native provider bytes. The navigator refreshes
-/// lifecycle state independently, so an unavailable or unexpectedly stopped
-/// Runtime must leave this pane blank rather than render a CLI diagnostic.
-pub(super) fn provider_attach(
-    root: &StateRoot,
-    workstream_id: &str,
-    presentation_socket: PathBuf,
-    presentation_session: String,
-    attempt_id: &str,
-) -> Result<(), AppError> {
-    let presentation =
-        Presentation::from_control(root.base(), presentation_socket, presentation_session)?;
-    let attempt_id =
-        uuid::Uuid::parse_str(attempt_id).map_err(AppError::InvalidAttachmentAttempt)?;
-    presentation.report_attachment_phase(attempt_id, AttachmentPhase::Running)?;
-    let outcome = (|| -> Result<(), AppError> {
-        let workstream_id = parse_workstream(workstream_id)?;
-        let mut application = LocalApplication::open_host_local(
-            StateRoot::select(root.base()),
-            crate::application::operating_system_hostname(),
-        )
-        .map_err(AppError::Application)?;
-        let snapshot = application.snapshot().map_err(AppError::Application)?;
-        let workstream = snapshot
-            .active_workstreams()
-            .chain(snapshot.archived_workstreams())
-            .find(|workstream| workstream.workstream_id == workstream_id)
-            .ok_or(AppError::Application(
-                crate::application::ApplicationError::UnknownLocalIdentity,
-            ))?;
-        let runtime = workstream
-            .runtime
-            .ok_or(AppError::NoRuntime(workstream_id))?;
-        application
-            .attach(AttachEvidence {
-                workstream_id,
-                runtime_id: runtime.runtime_id,
-                expected_workstream_revision: workstream.revision,
-                expected_runtime_revision: runtime.revision,
-            })
-            .map_err(AppError::Application)?;
-        attach_runtime(root, workstream_id)
-    })();
-    let phase = if outcome.is_ok() {
-        AttachmentPhase::Completed
-    } else {
-        AttachmentPhase::Failed
-    };
-    presentation.report_attachment_phase(attempt_id, phase)?;
-    provider_wait()
-}
-
 /// Runs a proven schema-14 attachment only inside the D17 presentation pane.
-/// It keeps the original D16 application facade out of the schema-14 route and
+/// It keeps the retired application facade out of the schema-14 route and
 /// repeats the workstream/runtime revisions immediately before private tmux
 /// attachment.
 #[allow(
@@ -312,40 +218,11 @@ pub(super) fn provider_attach_d17(
     provider_wait()
 }
 
-/// Attaches this terminal to a local private provider Runtime after the typed
-/// facade has proved its exact identity and revisions.
-pub(super) fn attach_runtime(
-    root: &StateRoot,
-    workstream_id: crate::domain::WorkstreamId,
-) -> Result<(), AppError> {
-    let state = crate::state::open_current_only(&StateRoot::select(root.base()))?;
-    let mut registry = state.into_host_registry()?;
-    let record = crate::actions::preflight_attachment(root, &mut registry, workstream_id)?;
-    let tmux = super::SystemTmux::default();
-    let process_probe = LinuxProcessProbe;
-    let runtime = PrivateRuntime::new(
-        &tmux,
-        &process_probe,
-        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
-    );
-    runtime.prepare_attach()?;
-    let mut command = runtime.attach_command();
-    command.stderr(Stdio::null());
-    let status = command.status().map_err(AppError::Io)?;
-    if status.success()
-        || crate::actions::await_deliberate_park(root, record.runtime_id, record.workstream_id)?
-    {
-        Ok(())
-    } else {
-        Err(AppError::AttachFailed)
-    }
-}
-
 /// Attaches only a D17 Runtime that is neither owned nor fenced by an
 /// unfinished onboarding operation. The D17 Navigator passes the same snapshot
 /// revisions through the outer helper, so stale cards can never authorize an
 /// attachment after a different state transition.
-fn attach_runtime_d17(
+pub(super) fn attach_runtime_d17(
     root: &StateRoot,
     workstream_id: crate::domain::WorkstreamId,
     expected_workstream_revision: Revision,

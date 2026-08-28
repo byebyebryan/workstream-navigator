@@ -76,6 +76,15 @@ pub(crate) enum D17Row {
     Operation(D17OperationSnapshot),
 }
 
+/// The bounded setup variants that can be shown in a contextual readiness
+/// guide. The guide never carries provider argv, prompts, or profile paths.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum D17ObserverSetupKind {
+    Create,
+    Update,
+    TrustReview,
+}
+
 impl D17Row {
     #[must_use]
     pub(crate) const fn id(&self) -> Option<D17RowId> {
@@ -151,6 +160,13 @@ pub(crate) enum D17Command {
         expected_operation_revision: Revision,
         provider: ProviderKind,
     },
+    /// Opens the contextual setup guide before a Codex action can proceed.
+    /// The guide carries no provider argv or profile path.
+    AcceptObserverSetup {
+        kind: D17ObserverSetupKind,
+    },
+    /// Dismisses the contextual observer setup guide without any mutation.
+    CancelObserverSetup,
     Rename {
         workstream_id: WorkstreamId,
         expected_workstream_revision: Revision,
@@ -171,6 +187,9 @@ pub(crate) enum D17Modal {
         workstream_id: WorkstreamId,
         expected_workstream_revision: Revision,
         value: String,
+    },
+    ObserverConsent {
+        kind: D17ObserverSetupKind,
     },
 }
 
@@ -240,6 +259,13 @@ impl D17Navigator {
     /// action. This never crosses into provider panes or durable state.
     pub(crate) fn set_guidance(&mut self, guidance: &'static str) {
         self.model.set_guidance(guidance);
+    }
+
+    /// Shows the bounded readiness guide for a Codex observer action. The
+    /// guide is presentation-local; native profile setup remains owned by the
+    /// account-shell helper after the user explicitly consents there.
+    pub(crate) fn request_observer_setup(&mut self, kind: D17ObserverSetupKind) {
+        self.model.request_observer_setup(kind);
     }
 
     #[must_use]
@@ -317,6 +343,11 @@ impl D17Model {
 
     pub(crate) fn set_guidance(&mut self, guidance: &'static str) {
         self.guidance = Some(guidance);
+    }
+
+    pub(crate) fn request_observer_setup(&mut self, kind: D17ObserverSetupKind) {
+        self.guidance = None;
+        self.modal = Some(D17Modal::ObserverConsent { kind });
     }
 
     pub(crate) fn set_shell_location(&mut self, location: D17ShellLocation) {
@@ -709,6 +740,21 @@ impl D17Model {
     }
 
     fn handle_modal_key(&mut self, key: KeyCode) -> D17Command {
+        if matches!(self.modal, Some(D17Modal::ObserverConsent { .. })) {
+            return match key {
+                KeyCode::Esc | KeyCode::Char('n') => {
+                    self.modal = None;
+                    D17Command::CancelObserverSetup
+                }
+                KeyCode::Enter | KeyCode::Char('y') => {
+                    let Some(D17Modal::ObserverConsent { kind }) = self.modal.take() else {
+                        return D17Command::None;
+                    };
+                    D17Command::AcceptObserverSetup { kind }
+                }
+                _ => D17Command::None,
+            };
+        }
         match key {
             KeyCode::Esc => {
                 self.modal = None;
@@ -745,6 +791,7 @@ impl D17Model {
             return D17Command::None;
         };
         match modal {
+            D17Modal::ObserverConsent { kind } => D17Command::AcceptObserverSetup { kind },
             D17Modal::ConfirmArchive {
                 workstream_id,
                 expected_workstream_revision,
@@ -1062,6 +1109,7 @@ fn control_bindings(model: &D17Model) -> &'static [(&'static str, &'static str)]
         return match modal {
             D17Modal::ConfirmArchive { .. } => &[("Enter / y", "archive"), ("n / Esc", "cancel")],
             D17Modal::Rename { .. } => &[("Enter", "rename"), ("Esc", "cancel")],
+            D17Modal::ObserverConsent { .. } => &[("Enter / y", "continue"), ("n / Esc", "cancel")],
         };
     }
     match model.page() {
@@ -1220,6 +1268,10 @@ fn help_overlay(area: Rect) -> Rect {
 
 fn render_modal(frame: &mut Frame<'_>, area: Rect, modal: &D17Modal) {
     let (title, text) = match modal {
+        D17Modal::ObserverConsent { kind } => (
+            " Codex observer setup ",
+            observer_setup_modal_text(*kind).to_owned(),
+        ),
         D17Modal::ConfirmArchive { .. } => (
             " Archive session ",
             "Archive this managed session? Its live Runtime will be parked first.\n\nEnter or y confirms; n or Esc cancels.".to_owned(),
@@ -1245,6 +1297,20 @@ fn render_modal(frame: &mut Frame<'_>, area: Rect, modal: &D17Modal) {
         ),
         overlay,
     );
+}
+
+fn observer_setup_modal_text(kind: D17ObserverSetupKind) -> &'static str {
+    match kind {
+        D17ObserverSetupKind::Create => {
+            "Codex needs the exact WSNav-owned observer profile before this action can start.\n\nWSNav will create the owned profile after your consent, then open Codex's native /hooks trust review in the right-hand pane. This selected action stays pending and resumes only after exact trust and presentation checks succeed.\n\nEnter or y continues; n or Esc cancels."
+        }
+        D17ObserverSetupKind::Update => {
+            "The exact WSNav-owned Codex observer declaration needs an explicit update before this action can start.\n\nWSNav will update the owned declaration after your consent, then open Codex's native /hooks trust review in the right-hand pane. This selected action stays pending and resumes only after exact trust and presentation checks succeed.\n\nEnter or y continues; n or Esc cancels."
+        }
+        D17ObserverSetupKind::TrustReview => {
+            "Codex observer trust needs native review or exact crash-recovery finalization before this action can start.\n\nWSNav will open Codex's native /hooks trust review in the right-hand pane when review is required, or finalize an already-completed exact review. This selected action stays pending and resumes only after exact readiness and presentation checks succeed.\n\nEnter or y continues; n or Esc cancels."
+        }
+    }
 }
 
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
@@ -1454,7 +1520,8 @@ mod tests {
     use ratatui::{layout::Rect, style::Color};
 
     use super::{
-        D17Command, D17Modal, D17Model, D17Navigator, D17Page, D17Row, D17RowId, D17ShellLocation,
+        D17Command, D17Modal, D17Model, D17Navigator, D17ObserverSetupKind, D17Page, D17Row,
+        D17RowId, D17ShellLocation,
     };
     use crate::{
         d17_snapshot::{
@@ -1792,6 +1859,49 @@ mod tests {
                 .iter()
                 .any(|span| span.content == "onboarding")
         );
+    }
+
+    #[test]
+    fn observer_setup_guide_requires_explicit_consent_and_decline_is_side_effect_free() {
+        let (snapshot, _, _) = snapshot();
+        let mut model = D17Model::new(snapshot);
+        model.request_observer_setup(D17ObserverSetupKind::Create);
+        assert_eq!(
+            model.modal(),
+            Some(&D17Modal::ObserverConsent {
+                kind: D17ObserverSetupKind::Create,
+            })
+        );
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('n')),
+            D17Command::CancelObserverSetup
+        );
+        assert!(model.modal().is_none());
+
+        model.request_observer_setup(D17ObserverSetupKind::Update);
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Enter),
+            D17Command::AcceptObserverSetup {
+                kind: D17ObserverSetupKind::Update,
+            }
+        );
+        assert!(model.modal().is_none());
+    }
+
+    #[test]
+    fn observer_setup_controls_are_bounded_and_native_review_is_named() {
+        let (snapshot, _, _) = snapshot();
+        let mut model = D17Model::new(snapshot);
+        model.request_observer_setup(D17ObserverSetupKind::TrustReview);
+        let bindings = super::control_bindings(&model);
+        assert_eq!(
+            bindings,
+            &[("Enter / y", "continue"), ("n / Esc", "cancel")]
+        );
+        let text = super::observer_setup_modal_text(D17ObserverSetupKind::TrustReview);
+        assert!(text.contains("native /hooks"));
+        assert!(!text.contains("CODEX_HOME"));
+        assert!(!text.contains("--profile"));
     }
 
     #[test]

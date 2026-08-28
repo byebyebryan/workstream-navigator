@@ -1,26 +1,24 @@
-//! Dormant system adapter for the D17 account-shell gate.
+//! System adapter for the D17 account-shell gate.
 //!
 //! This is the only composition point that knows how to reopen inherited
 //! account-shell discovery paths against the real private state, tmux, Linux
-//! process table, and boot clock. The future hidden CLI may render its opaque
-//! capability on stdout, but this module itself never writes terminal output
-//! or exposes a command route. Its dormant direct-exec adapters are only
-//! callable after the future atomic Navigator cutover.
-
-#![allow(
-    dead_code,
-    reason = "the D17 account-shell control remains unreachable until the atomic Navigator cutover"
-)]
+//! process table, and boot clock. The routed hidden CLI renders only the opaque
+//! capability; this module itself never writes terminal output.
 
 use std::{
     ffi::OsString,
     path::PathBuf,
-    process::{self, Command},
+    process::{self, Command, Stdio},
 };
 
 use thiserror::Error;
 
 use crate::{
+    app::observer::{
+        ObserverActivation, ObserverActivationError, ObserverReadiness,
+        finalize_observer_trust_d17_under_lease, observer_readiness,
+        prepare_observer_activation_d17,
+    },
     d17_account_shell::{AccountShellContext, AccountShellError},
     d17_broker::{
         PrepareContext, PreparedHandoff, PresentationBinding, SystemWorktreeInspector,
@@ -39,6 +37,7 @@ use crate::{
         ExpectedProviderExecutable, LinuxProviderExecutableProbe, ReconcileError,
         finalize_opencode_observer_ready, prove_provider_exec,
     },
+    d17_review::D17ReviewDirectory,
     d17_shell_gate::{
         ShellGateContext, ShellGateDecision, ShellGateError, ShellGateInvocation,
         classify_shell_gate, prepare_managed_shell_gate, validate_invocation,
@@ -57,6 +56,7 @@ use crate::{
 /// opaque one-shot capability for the future helper's private channel.
 pub(crate) enum AccountShellGateOutcome {
     ExplicitlyUnmanaged,
+    ObserverReadinessRequired,
     Prepared(PreparedHandoff),
 }
 
@@ -64,6 +64,7 @@ impl std::fmt::Debug for AccountShellGateOutcome {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ExplicitlyUnmanaged => formatter.write_str("ExplicitlyUnmanaged"),
+            Self::ObserverReadinessRequired => formatter.write_str("ObserverReadinessRequired"),
             Self::Prepared(_) => formatter.write_str("Prepared(<opaque>)"),
         }
     }
@@ -79,11 +80,36 @@ pub(crate) enum AccountShellGateError {
     State,
     #[error("D17 shell invocation identity is unavailable")]
     InvocationIdentityUnavailable,
+    #[error("D17 Codex observer readiness is unavailable")]
+    ObserverReadinessUnavailable,
     #[error("D17 shell handoff is unavailable")]
     Gate(#[from] ShellGateError),
 }
 
-/// Bounded failure of the dormant final Codex account-shell exec path.
+/// Bounded failure for the account-shell-only interactive observer flow.  No
+/// provider diagnostic, argv, path, or process identity is rendered by this
+/// error: the wrapper owns the fixed user-facing fallback text.
+#[derive(Debug, Error)]
+pub(crate) enum AccountShellObserverSetupError {
+    #[error("D17 account-shell context is unavailable")]
+    Context(#[from] AccountShellError),
+    #[error("D17 observer state is unavailable")]
+    State,
+    #[error("D17 observer invocation identity is unavailable")]
+    InvocationIdentityUnavailable,
+    #[error("D17 observer provisional shell is unavailable")]
+    Shell,
+    #[error("D17 observer readiness is unavailable")]
+    Observer(#[from] ObserverActivationError),
+    #[error("D17 native Codex executable is unavailable")]
+    Executable,
+    #[error("D17 native observer review is unavailable")]
+    Review,
+    #[error("D17 observer native trust remains pending")]
+    TrustPending,
+}
+
+/// Bounded failure of the final Codex account-shell exec path.
 #[derive(Debug, Error)]
 pub(crate) enum AccountShellCodexLaunchError {
     #[error("D17 account-shell context is unavailable")]
@@ -104,7 +130,7 @@ pub(crate) enum AccountShellCodexLaunchError {
     Exec,
 }
 
-/// Bounded failure of the dormant final `OpenCode` account-shell exec path.
+/// Bounded failure of the final `OpenCode` account-shell exec path.
 /// Its `OpenCode` variant is an in-process control-flow boundary only; the
 /// hidden CLI will render one fixed diagnostic rather than its source detail.
 #[derive(Debug, Error)]
@@ -127,7 +153,7 @@ pub(crate) enum AccountShellOpenCodeLaunchError {
     Exec,
 }
 
-/// Bounded result of a dormant presentation-owned post-exec reconciliation.
+/// Bounded result of presentation-owned post-exec reconciliation.
 /// This path performs no provider I/O or process control: it can only record
 /// exact native-exec proof already visible in the adopted private pane.
 #[derive(Debug, Error)]
@@ -269,6 +295,21 @@ pub(crate) fn gate_from_account_shell(
     let presentation_binding = presentation_binding_from_account_context(&account_context)?;
     let root = StateRoot::select(account_context.state_root());
     let mut state = open_d17_current_only(&root).map_err(|_| AccountShellGateError::State)?;
+    // Readiness is a pure preflight.  A fresh or trust-pending observer must
+    // return before the provisional lease and broker can issue HandoffIssued;
+    // the wrapper may then offer the explicit interactive setup flow while
+    // retaining its original argv only in shell memory.
+    if command.provider() == ProviderKind::Codex {
+        let evidence = observer_readiness(&root, &state)
+            .map_err(|_| AccountShellGateError::ObserverReadinessUnavailable)?;
+        match evidence.readiness {
+            ObserverReadiness::Ready => {}
+            readiness if readiness.needs_interactive_setup() => {
+                return Ok(AccountShellGateOutcome::ObserverReadinessRequired);
+            }
+            _ => return Err(AccountShellGateError::ObserverReadinessUnavailable),
+        }
+    }
     let provisional_lease = state
         .acquire_d17_provisional_lease()
         .map_err(|_| AccountShellGateError::State)?;
@@ -298,6 +339,182 @@ pub(crate) fn gate_from_account_shell(
     };
     let prepared = prepare_managed_shell_gate(&mut state, &provisional_lease, &command, &context)?;
     Ok(AccountShellGateOutcome::Prepared(prepared))
+}
+
+/// Performs the explicit Codex observer setup requested by the account-shell
+/// wrapper.  The original provider argv never enters this route: it remains
+/// in the shell function and is retried only after this function returns
+/// success.  The native Codex review therefore owns every visible review byte
+/// in the same provider pane.
+#[allow(
+    clippy::too_many_lines,
+    reason = "The account-shell observer handoff keeps every exact revalidation boundary auditable in one flow."
+)]
+pub(crate) fn prepare_observer_from_account_shell(
+    shell_leader_pid: u32,
+) -> Result<(), AccountShellObserverSetupError> {
+    if shell_leader_pid == 0 {
+        return Err(AccountShellObserverSetupError::InvocationIdentityUnavailable);
+    }
+    let account_context = AccountShellContext::from_environment()?;
+    let presentation_binding = presentation_binding_from_account_context(&account_context)?;
+    let root = StateRoot::select(account_context.state_root());
+    let mut state =
+        open_d17_current_only(&root).map_err(|_| AccountShellObserverSetupError::State)?;
+    let provisional_lease = state
+        .acquire_d17_provisional_lease()
+        .map_err(|_| AccountShellObserverSetupError::State)?;
+    let slot = read_marker(state.root(), account_context.presentation_directory())
+        .map_err(|_| AccountShellObserverSetupError::Shell)?;
+    presentation_binding
+        .validate_slot(&slot)
+        .map_err(|_| AccountShellObserverSetupError::Shell)?;
+    if slot.phase() != crate::provisional::ProvisionalPhase::Materialized {
+        return Err(AccountShellObserverSetupError::Shell);
+    }
+    let process_probe = LinuxProcessProbe;
+    let caller_pid = process::id();
+    let caller_group = process_probe
+        .process_group_checked(caller_pid)
+        .map_err(|_| AccountShellObserverSetupError::InvocationIdentityUnavailable)?
+        .ok_or(AccountShellObserverSetupError::InvocationIdentityUnavailable)?;
+    let tmux = SystemTmux::default();
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, slot.runtime_paths().clone());
+    let live = slot
+        .revalidate_live_shell(&runtime, &process_probe)
+        .map_err(|_| AccountShellObserverSetupError::Shell)?;
+    validate_invocation(
+        &live,
+        ShellGateInvocation {
+            shell_leader_pid,
+            caller_pid,
+            caller_group,
+        },
+    )
+    .map_err(|_| AccountShellObserverSetupError::InvocationIdentityUnavailable)?;
+
+    let evidence = observer_readiness(&root, &state)?;
+    if evidence.readiness == ObserverReadiness::Ready {
+        return Ok(());
+    }
+    if !evidence.readiness.needs_interactive_setup() {
+        return Err(AccountShellObserverSetupError::Observer(
+            ObserverActivationError::NotReady,
+        ));
+    }
+    let activation =
+        prepare_observer_activation_d17(&root, &mut state, &provisional_lease, &evidence)?;
+    let expected = match activation {
+        ObserverActivation::Ready(_) => return Ok(()),
+        ObserverActivation::ReviewRequired(integration) => integration,
+    };
+    // Do not hold the host-wide provisional lock while a human performs native
+    // trust review.  The exact slot and presentation binding are captured and
+    // revalidated below before lifecycle state can become Ready.
+    let post_activation_slot = read_marker(state.root(), account_context.presentation_directory())
+        .map_err(|_| AccountShellObserverSetupError::Shell)?;
+    if post_activation_slot != slot {
+        return Err(AccountShellObserverSetupError::Shell);
+    }
+    provisional_lease
+        .revalidate_for_mutation(root.base())
+        .map_err(|_| AccountShellObserverSetupError::State)?;
+    drop(state);
+    drop(provisional_lease);
+
+    let mut review_directory = D17ReviewDirectory::create(
+        account_context.presentation_directory(),
+        slot.presentation_id(),
+        slot.presentation_revision(),
+    )
+    .map_err(|_| AccountShellObserverSetupError::Review)?;
+    let review_context = Presentation::d17_context_from_directory(
+        account_context.state_root(),
+        account_context.presentation_directory(),
+    )
+    .map_err(|_| AccountShellObserverSetupError::Review)?;
+    if review_context.presentation_id() != slot.presentation_id()
+        || review_context.presentation_revision() != slot.presentation_revision()
+    {
+        return Err(AccountShellObserverSetupError::Review);
+    }
+    let review_result = run_native_observer_review(&expected, &review_directory.path());
+    let cleanup_result = review_directory.cleanup();
+    if cleanup_result.is_err() {
+        return Err(AccountShellObserverSetupError::Review);
+    }
+    let status = review_result?;
+
+    let mut state =
+        open_d17_current_only(&root).map_err(|_| AccountShellObserverSetupError::State)?;
+    let provisional_lease = state
+        .acquire_d17_provisional_lease()
+        .map_err(|_| AccountShellObserverSetupError::State)?;
+    let current_slot = read_marker(state.root(), account_context.presentation_directory())
+        .map_err(|_| AccountShellObserverSetupError::Shell)?;
+    presentation_binding
+        .validate_slot(&current_slot)
+        .map_err(|_| AccountShellObserverSetupError::Shell)?;
+    if current_slot != slot {
+        return Err(AccountShellObserverSetupError::Shell);
+    }
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, current_slot.runtime_paths().clone());
+    let live = current_slot
+        .revalidate_live_shell(&runtime, &process_probe)
+        .map_err(|_| AccountShellObserverSetupError::Shell)?;
+    let caller_group = process_probe
+        .process_group_checked(process::id())
+        .map_err(|_| AccountShellObserverSetupError::InvocationIdentityUnavailable)?
+        .ok_or(AccountShellObserverSetupError::InvocationIdentityUnavailable)?;
+    validate_invocation(
+        &live,
+        ShellGateInvocation {
+            shell_leader_pid,
+            caller_pid: process::id(),
+            caller_group,
+        },
+    )
+    .map_err(|_| AccountShellObserverSetupError::InvocationIdentityUnavailable)?;
+    let _ready =
+        finalize_observer_trust_d17_under_lease(&root, state, &provisional_lease, &expected)
+            .map_err(AccountShellObserverSetupError::Observer)?;
+    if !status.success() {
+        return Err(AccountShellObserverSetupError::TrustPending);
+    }
+    Ok(())
+}
+
+fn run_native_observer_review(
+    integration: &crate::state::CodexIntegration,
+    review_directory: &std::path::Path,
+) -> Result<std::process::ExitStatus, AccountShellObserverSetupError> {
+    let path = std::env::var_os("PATH").ok_or(AccountShellObserverSetupError::Executable)?;
+    let executable = ExpectedProviderExecutable::resolve_from_path(ProviderKind::Codex, &path)
+        .map_err(|_| AccountShellObserverSetupError::Executable)?;
+    let codex_home = integration
+        .ownership
+        .canonical_path
+        .parent()
+        .filter(|path| path.is_absolute())
+        .ok_or(AccountShellObserverSetupError::Review)?;
+    let arguments = [
+        "--profile".to_owned(),
+        OBSERVER_PROFILE_NAME.to_owned(),
+        "-C".to_owned(),
+        review_directory.to_string_lossy().into_owned(),
+    ];
+    let program = executable.native_program(&arguments);
+    let (program, arguments) = program
+        .split_first()
+        .ok_or(AccountShellObserverSetupError::Executable)?;
+    Command::new(program)
+        .args(arguments)
+        .env("CODEX_HOME", codex_home)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|_| AccountShellObserverSetupError::Review)
 }
 
 /// Replaces the exact provisional shell with its already grammar-normalized
@@ -395,7 +612,7 @@ pub(crate) fn exec_codex_from_account_shell(
 }
 
 /// Requires the exact current-binary observer declaration and native trust
-/// before a dormant D17 helper can consume a Codex launch capability. The
+/// before the D17 helper can consume a Codex launch capability. The
 /// record's profile parent, rather than inherited shell state, becomes the
 /// explicit `CODEX_HOME` for the final native exec.
 fn d17_codex_observer_home(state: &D16State) -> Result<PathBuf, AccountShellCodexLaunchError> {
@@ -463,8 +680,8 @@ fn exec_codex_program(_program: &[OsString], _codex_home: &std::path::Path) -> s
 /// later failure transitions the same operation to recovery-required rather
 /// than guessing that the session is absent or retrying it.
 ///
-/// A successful Unix `execve` never returns. This routine has no CLI route
-/// until the atomic D17 Navigator cutover.
+/// A successful Unix `execve` never returns. The hidden launch-helper CLI is
+/// the only routed caller.
 #[allow(
     clippy::too_many_lines,
     reason = "the exact lease-held OpenCode failure boundaries must remain reviewable in one linear handoff"

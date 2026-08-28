@@ -1,16 +1,10 @@
-//! Dormant D17 shell-gate authority boundary.
+//! D17 shell-gate authority boundary.
 //!
-//! The future hidden shell child classifies its provider command before it
+//! The hidden shell child classifies its provider command before it
 //! opens state or obtains the provisional lease.  A managed command then has
 //! to prove that it was invoked by the exact private shell recorded in the
 //! presentation marker before the broker may reserve a Runtime.  This module
-//! performs no provider effect and remains unreachable until the atomic D17
-//! Navigator cutover.
-
-#![allow(
-    dead_code,
-    reason = "the D17 shell gate remains unreachable until the atomic Navigator cutover"
-)]
+//! performs no provider effect.
 
 use std::{ffi::OsString, path::Path};
 
@@ -99,7 +93,7 @@ pub(crate) struct ShellGateContext<'a> {
     pub(crate) worktree_inspector: &'a dyn WorktreeInspector,
 }
 
-/// Bounded refusal reasons for the dormant shell gate. They deliberately
+/// Bounded refusal reasons for the shell gate. They deliberately
 /// retain neither the command, token, paths, process identifiers, nor host
 /// clock values.
 #[derive(Debug, Error)]

@@ -57,14 +57,6 @@ pub(super) enum Commands {
         workstream_id: String,
         attention_revision: i64,
     },
-    /// Internal Ratatui process run inside an owned presentation pane.
-    #[command(name = "_navigator", hide = true)]
-    NavigatorPane {
-        #[arg(long)]
-        presentation_socket: PathBuf,
-        #[arg(long)]
-        presentation_session: String,
-    },
     /// Internal schema-14 Ratatui process run inside a D17 presentation pane.
     #[command(name = "_navigator_d17", hide = true)]
     NavigatorPaneD17 {
@@ -95,7 +87,16 @@ pub(super) enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         arguments: Vec<std::ffi::OsString>,
     },
-    /// Internal fixed presentation control helper.
+    /// Internal interactive D17 Codex observer setup from an exact provisional
+    /// account shell. It is not a public setup or trust command.
+    #[command(name = "_d17_observer_setup", hide = true)]
+    D17ObserverSetup {
+        #[arg(long)]
+        shell_leader_pid: u32,
+        #[arg(long)]
+        consent: bool,
+    },
+    /// Internal fixed D17 two-pane presentation control helper.
     #[command(name = "_presentation_control", hide = true)]
     PresentationControl {
         #[arg(long)]
@@ -109,35 +110,9 @@ pub(super) enum Commands {
         #[arg(long)]
         client_name: String,
     },
-    /// Internal local utility-shell launch barrier.
-    #[command(name = "_presentation_shell", hide = true)]
-    PresentationShell {
-        #[arg(long)]
-        presentation_socket: PathBuf,
-        #[arg(long)]
-        presentation_session: String,
-        #[arg(long)]
-        shell: PathBuf,
-        #[arg(long)]
-        cwd: PathBuf,
-    },
     /// Internal blank provider-pane placeholder before an exact attachment is selected.
     #[command(name = "_provider_wait", hide = true)]
     ProviderWait,
-    /// Internal temporary native Codex observer-review surface.
-    #[command(name = "_observer_review", hide = true)]
-    ObserverReview,
-    /// Internal local provider-pane attachment helper.
-    #[command(name = "_provider_attach", hide = true)]
-    ProviderAttach {
-        workstream_id: String,
-        #[arg(long)]
-        presentation_socket: PathBuf,
-        #[arg(long)]
-        presentation_session: String,
-        #[arg(long)]
-        attempt_id: String,
-    },
     /// Internal schema-14 provider attachment helper for a proven D17 Runtime.
     #[command(name = "_provider_attach_d17", hide = true)]
     ProviderAttachD17 {
@@ -219,11 +194,8 @@ pub(super) const fn is_provider_pane_command(command: Option<&Commands>) -> bool
     matches!(
         command,
         Some(
-            Commands::ProviderAttach { .. }
+            Commands::PresentationControl { .. }
                 | Commands::ProviderAttachD17 { .. }
-                | Commands::PresentationControl { .. }
-                | Commands::PresentationShell { .. }
-                | Commands::ObserverReview
                 | Commands::RuntimeLaunch { .. }
         )
     )
@@ -246,4 +218,8 @@ pub(super) const fn is_d17_shell_gate_command(command: Option<&Commands>) -> boo
 
 pub(super) const fn is_d17_shell_launch_helper_command(command: Option<&Commands>) -> bool {
     matches!(command, Some(Commands::D17LaunchHelper { .. }))
+}
+
+pub(super) const fn is_d17_observer_setup_command(command: Option<&Commands>) -> bool {
+    matches!(command, Some(Commands::D17ObserverSetup { .. }))
 }

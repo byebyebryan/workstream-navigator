@@ -299,6 +299,52 @@ impl HostRegistry {
         })
     }
 
+    /// Updates only the lifecycle of an exactly captured observer row.  The
+    /// ownership fields and revision form an optimistic fence so native trust
+    /// finalization cannot silently advance a row that another actor changed
+    /// while the review process was running.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the captured ownership/revision no longer names
+    /// the current integration row or the state write cannot commit.
+    pub fn set_codex_integration_lifecycle(
+        &mut self,
+        expected: &CodexIntegration,
+        lifecycle: IntegrationLifecycle,
+    ) -> Result<CodexIntegration, StateError> {
+        let revision = expected.revision.next();
+        let changed = self
+            .connection
+            .execute(
+                "UPDATE codex_integrations SET lifecycle = ?1, revision = ?2
+                 WHERE profile_name = ?3 AND canonical_profile_path = ?4
+                   AND owner_id = ?5 AND profile_schema_version = ?6
+                   AND hook_executable_path = ?7 AND generated_content_hash = ?8
+                   AND revision = ?9",
+                params![
+                    integration_lifecycle_text(lifecycle),
+                    revision.value(),
+                    OBSERVER_PROFILE_NAME,
+                    expected.ownership.canonical_path.to_string_lossy(),
+                    expected.ownership.owner_id,
+                    i64::from(expected.ownership.profile_schema_version),
+                    expected.ownership.hook_executable.to_string_lossy(),
+                    expected.ownership.content_hash,
+                    expected.revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if changed != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        Ok(CodexIntegration {
+            ownership: expected.ownership.clone(),
+            lifecycle,
+            revision,
+        })
+    }
+
     /// Returns whether any managed runtime is not durably stopped.
     ///
     /// # Errors

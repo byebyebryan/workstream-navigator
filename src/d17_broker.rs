@@ -1,21 +1,16 @@
-//! Dormant D17 shell-promotion broker.
+//! D17 shell-promotion broker.
 //!
 //! This crate-private seam joins the presentation marker, live private-shell
 //! proof, provider grammar, Git worktree inspection, and schema-14 state
-//! reservation. It deliberately does not expose a CLI command, create a
-//! provider process, attach a terminal, or invoke a helper.
-
-#![allow(
-    dead_code,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-)]
+//! reservation. It deliberately does not create a provider process, attach a
+//! terminal, or invoke a helper.
 
 use std::{ffi::OsString, path::Path};
 
 use thiserror::Error;
 
 use crate::{
-    domain::{IdGenerator, OperationId, ProviderKind, Revision},
+    domain::{IdGenerator, ProviderKind, Revision},
     onboarding::{LaunchCapability, ShellCommandDecision, classify_shell_command},
     provisional::{ProvisionalPhase, ProvisionalSlot, SlotError, read_marker, update_marker},
     repository::{RepositoryError, RepositoryRegistration, inspect_containing_worktree},
@@ -106,7 +101,8 @@ pub(crate) struct PrepareContext<'a, 'runtime> {
 /// The one live token emitted after a durable reservation and exact marker
 /// handoff. Its Debug output cannot reveal the token.
 pub(crate) struct PreparedHandoff {
-    operation_id: OperationId,
+    #[cfg(test)]
+    operation_id: crate::domain::OperationId,
     capability: LaunchCapability,
 }
 
@@ -121,8 +117,9 @@ impl std::fmt::Debug for PreparedHandoff {
 }
 
 impl PreparedHandoff {
+    #[cfg(test)]
     #[must_use]
-    pub(crate) const fn operation_id(&self) -> OperationId {
+    pub(crate) const fn operation_id(&self) -> crate::domain::OperationId {
         self.operation_id
     }
 
@@ -181,6 +178,7 @@ pub(crate) fn prepare(
     )?;
     provisional_lease.revalidate_for_mutation(state.root())?;
     Ok(PreparedHandoff {
+        #[cfg(test)]
         operation_id,
         capability: reservation.into_capability(),
     })
@@ -458,7 +456,7 @@ mod tests {
     #[test]
     #[allow(
         clippy::too_many_lines,
-        reason = "the complete dormant D17 authority handoff is one auditable fixture"
+        reason = "the complete D17 authority handoff is one auditable fixture"
     )]
     fn broker_reserves_and_consumes_once_after_exact_marker_shell_and_grammar_proof() {
         let temporary = tempfile::tempdir().unwrap();

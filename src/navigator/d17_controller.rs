@@ -21,17 +21,27 @@ use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use thiserror::Error;
 
 use crate::{
+    app::observer::{
+        ObserverActivation, ObserverReadiness, ObserverReadinessEvidence,
+        finalize_observer_trust_d17_under_lease, observer_readiness,
+        prepare_observer_activation_d17,
+    },
     d17_account_shell::{AccountShellContext, AccountShellLaunch},
+    d17_reconcile::ExpectedProviderExecutable,
+    d17_review::D17ReviewDirectory,
     d17_shell_control::reconcile_provider_exec_from_presentation,
     d17_snapshot::{D17Snapshot, D17SnapshotError, read_snapshot},
     domain::{OperationId, ProviderKind, Revision, RuntimeId, WorkstreamId},
     presentation::{Presentation, PresentationError},
-    provisional::{ProvisionalPhase, ProvisionalSlot, SlotError, SlotGeneration, read_marker},
+    provisional::{
+        PreHandoffRecovery, ProvisionalPhase, ProvisionalSlot, SlotError, SlotGeneration,
+        read_marker, reconcile_pre_handoff_under_lease,
+    },
     runtime::{LinuxProcessProbe, PrivateRuntime, SystemTmux},
     state::{StateRoot, open_d17_current_only},
 };
 
-use super::d17::{D17Command, D17Navigator, D17ShellLocation};
+use super::d17::{D17Command, D17Navigator, D17ObserverSetupKind, D17ShellLocation};
 
 /// Errors that prevent the D17 pane from rendering its schema-14-only
 /// Workstreams view.
@@ -69,8 +79,15 @@ pub(crate) fn run_d17_navigator(
             .map_err(|_| PresentationError::D17ContextUnavailable)?;
     let seed_cwd = context.seed_cwd().to_path_buf();
     let home = env::var_os("HOME").map(PathBuf::from);
+    // Reconcile any interrupted pre-effect marker before taking the passive
+    // snapshot.  A failure stays visible as bounded guidance; it must not
+    // become permission to allocate a replacement candidate.
+    let startup_recovery = reconcile_pre_handoff_presentation(root, &presentation);
     let snapshot = read_snapshot(root)?;
     let mut navigator = D17Navigator::new(snapshot);
+    if startup_recovery.is_err() {
+        navigator.set_guidance("Provisional shell recovery is unavailable; exact state required");
+    }
     let mut observed_shell_cwd = None;
     refresh_shell_location(
         root,
@@ -85,6 +102,7 @@ pub(crate) fn run_d17_navigator(
     let mut last_refresh = Instant::now();
     let mut mouse_down = None;
     let mut promoted_runtime = None;
+    let mut pending_observer = None;
 
     let quit = loop {
         if redraw {
@@ -104,6 +122,7 @@ pub(crate) fn run_d17_navigator(
                         &mut navigator,
                         &presentation,
                         FocusAfter::Provider,
+                        &mut pending_observer,
                     ) {
                         break true;
                     }
@@ -160,6 +179,7 @@ pub(crate) fn run_d17_navigator(
                             &mut navigator,
                             &presentation,
                             FocusAfter::Navigator,
+                            &mut pending_observer,
                         )
                     {
                         break true;
@@ -176,6 +196,21 @@ pub(crate) fn run_d17_navigator(
                 }
                 _ => {}
             }
+        }
+        if let Some(command) = finish_pending_observer_review(
+            root,
+            &mut navigator,
+            &presentation,
+            &mut pending_observer,
+        ) && execute_d17_command(
+            command,
+            root,
+            &mut navigator,
+            &presentation,
+            FocusAfter::Provider,
+            &mut pending_observer,
+        ) {
+            break true;
         }
         if last_refresh.elapsed() >= Duration::from_millis(500) {
             match refresh_provider_exec(root, &presentation) {
@@ -343,6 +378,119 @@ enum FocusAfter {
     Navigator,
 }
 
+/// Process-local intent retained while Codex native observer review owns the
+/// right-hand presentation pane. It deliberately carries only typed IDs and
+/// revisions; no provider argv, prompt, output, or capture is retained.
+enum PendingObserverIntent {
+    Managed(ManagedAction),
+    NewAtSameLocation {
+        source_workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        provider: ProviderKind,
+    },
+}
+
+impl PendingObserverIntent {
+    fn into_command(self) -> D17Command {
+        match self {
+            Self::Managed(action) => match action {
+                ManagedAction::Start {
+                    workstream_id,
+                    expected_workstream_revision,
+                    provider,
+                } => D17Command::Start {
+                    workstream_id,
+                    expected_workstream_revision,
+                    provider,
+                },
+                ManagedAction::Recover {
+                    workstream_id,
+                    expected_workstream_revision,
+                    provider,
+                } => D17Command::Recover {
+                    workstream_id,
+                    expected_workstream_revision,
+                    provider,
+                },
+                ManagedAction::Fork {
+                    source_workstream_id,
+                    expected_workstream_revision,
+                    provider,
+                } => D17Command::Fork {
+                    source_workstream_id,
+                    expected_workstream_revision,
+                    provider,
+                },
+                ManagedAction::RecoverOperation {
+                    operation_id,
+                    expected_operation_revision,
+                    provider,
+                } => D17Command::RecoverOperation {
+                    operation_id,
+                    expected_operation_revision,
+                    provider,
+                },
+                ManagedAction::Park {
+                    workstream_id,
+                    expected_workstream_revision,
+                } => D17Command::Park {
+                    workstream_id,
+                    expected_workstream_revision,
+                },
+                ManagedAction::Archive {
+                    workstream_id,
+                    expected_workstream_revision,
+                } => D17Command::Archive {
+                    workstream_id,
+                    expected_workstream_revision,
+                },
+                ManagedAction::Restore {
+                    workstream_id,
+                    expected_workstream_revision,
+                } => D17Command::Restore {
+                    workstream_id,
+                    expected_workstream_revision,
+                },
+                ManagedAction::AcknowledgeResult {
+                    workstream_id,
+                    expected_attention_revision,
+                } => D17Command::AcknowledgeResult {
+                    workstream_id,
+                    expected_attention_revision,
+                },
+                ManagedAction::Rename {
+                    workstream_id,
+                    expected_workstream_revision,
+                    name,
+                } => D17Command::Rename {
+                    workstream_id,
+                    expected_workstream_revision,
+                    name,
+                },
+            },
+            Self::NewAtSameLocation {
+                source_workstream_id,
+                expected_workstream_revision,
+                provider,
+            } => D17Command::NewAtSameLocation {
+                source_workstream_id,
+                expected_workstream_revision,
+                provider,
+            },
+        }
+    }
+}
+
+struct PendingObserverSetup {
+    intent: PendingObserverIntent,
+    kind: D17ObserverSetupKind,
+    evidence: ObserverReadinessEvidence,
+    presentation_context: crate::presentation::D17PresentationContext,
+    marker: Option<ProvisionalSlot>,
+    expected_integration: Option<crate::state::CodexIntegration>,
+    review_directory: Option<D17ReviewDirectory>,
+}
+
 /// Executes one D17 model command while keeping keyboard- and mouse-originated
 /// focus policy explicit. Mouse activation switches the provider attachment
 /// but leaves keyboard focus in Navigator.
@@ -356,6 +504,7 @@ fn execute_d17_command(
     navigator: &mut D17Navigator,
     presentation: &Presentation,
     focus_after: FocusAfter,
+    pending_observer: &mut Option<PendingObserverSetup>,
 ) -> bool {
     match command {
         D17Command::Quit => true,
@@ -400,6 +549,24 @@ fn execute_d17_command(
             expected_workstream_revision,
             provider,
         } => {
+            let Some(PendingObserverIntent::NewAtSameLocation {
+                source_workstream_id,
+                expected_workstream_revision,
+                provider,
+            }) = prepare_observer_or_request(
+                root,
+                navigator,
+                presentation,
+                PendingObserverIntent::NewAtSameLocation {
+                    source_workstream_id,
+                    expected_workstream_revision,
+                    provider,
+                },
+                pending_observer,
+            )
+            else {
+                return false;
+            };
             match start_d17_same_location(
                 root,
                 source_workstream_id,
@@ -442,16 +609,19 @@ fn execute_d17_command(
             expected_workstream_revision,
             provider,
         } => {
-            execute_managed_action(
+            let action = ManagedAction::Start {
+                workstream_id,
+                expected_workstream_revision,
+                provider,
+            };
+            execute_managed_action_or_request(
                 root,
                 navigator,
                 presentation,
                 focus_after,
-                ManagedAction::Start {
-                    workstream_id,
-                    expected_workstream_revision,
-                    provider,
-                },
+                provider,
+                action,
+                pending_observer,
             );
             false
         }
@@ -460,16 +630,19 @@ fn execute_d17_command(
             expected_workstream_revision,
             provider,
         } => {
-            execute_managed_action(
+            let action = ManagedAction::Recover {
+                workstream_id,
+                expected_workstream_revision,
+                provider,
+            };
+            execute_managed_action_or_request(
                 root,
                 navigator,
                 presentation,
                 focus_after,
-                ManagedAction::Recover {
-                    workstream_id,
-                    expected_workstream_revision,
-                    provider,
-                },
+                provider,
+                action,
+                pending_observer,
             );
             false
         }
@@ -542,16 +715,19 @@ fn execute_d17_command(
             expected_workstream_revision,
             provider,
         } => {
-            execute_managed_action(
+            let action = ManagedAction::Fork {
+                source_workstream_id,
+                expected_workstream_revision,
+                provider,
+            };
+            execute_managed_action_or_request(
                 root,
                 navigator,
                 presentation,
                 focus_after,
-                ManagedAction::Fork {
-                    source_workstream_id,
-                    expected_workstream_revision,
-                    provider,
-                },
+                provider,
+                action,
+                pending_observer,
             );
             false
         }
@@ -560,16 +736,30 @@ fn execute_d17_command(
             expected_operation_revision,
             provider,
         } => {
-            execute_managed_action(
+            let action = ManagedAction::RecoverOperation {
+                operation_id,
+                expected_operation_revision,
+                provider,
+            };
+            execute_managed_action_or_request(
                 root,
                 navigator,
                 presentation,
                 focus_after,
-                ManagedAction::RecoverOperation {
-                    operation_id,
-                    expected_operation_revision,
-                    provider,
-                },
+                provider,
+                action,
+                pending_observer,
+            );
+            false
+        }
+        D17Command::AcceptObserverSetup { kind } => {
+            accept_observer_setup(root, navigator, presentation, kind, pending_observer);
+            false
+        }
+        D17Command::CancelObserverSetup => {
+            pending_observer.take();
+            navigator.set_guidance(
+                "Codex observer setup was declined; no profile or trust state was changed",
             );
             false
         }
@@ -602,7 +792,7 @@ fn execute_d17_command(
 /// Schema-14-native managed lifecycle intent. This deliberately bypasses the
 /// retired schema-13 application facade: each variant carries only the exact
 /// durable IDs/revisions supplied by the passive D17 snapshot.
-enum ManagedAction {
+pub(crate) enum ManagedAction {
     Start {
         workstream_id: WorkstreamId,
         expected_workstream_revision: Revision,
@@ -644,6 +834,446 @@ enum ManagedAction {
         expected_workstream_revision: Revision,
         name: String,
     },
+}
+
+/// Performs the Codex readiness preflight before any managed action can
+/// reserve a Runtime or launch a provider. Setup/update/trust review is
+/// offered only through the contextual Navigator guide, which retains the
+/// typed action until exact native review has completed.
+#[allow(
+    clippy::too_many_lines,
+    clippy::manual_let_else,
+    clippy::single_match_else,
+    reason = "The readiness boundary keeps every exact evidence branch together for audit."
+)]
+fn execute_managed_action_or_request(
+    root: &StateRoot,
+    navigator: &mut D17Navigator,
+    presentation: &Presentation,
+    focus_after: FocusAfter,
+    _provider: ProviderKind,
+    action: ManagedAction,
+    pending_observer: &mut Option<PendingObserverSetup>,
+) {
+    let Some(PendingObserverIntent::Managed(action)) = prepare_observer_or_request(
+        root,
+        navigator,
+        presentation,
+        PendingObserverIntent::Managed(action),
+        pending_observer,
+    ) else {
+        return;
+    };
+    execute_managed_action(root, navigator, presentation, focus_after, action);
+}
+
+/// Reads the exact schema-14 observer state without reserving onboarding
+/// capability or mutating profile/state. This preflight is deliberately
+/// repeated at the action boundary because the Navigator snapshot is passive.
+#[allow(
+    clippy::too_many_lines,
+    clippy::manual_let_else,
+    clippy::single_match_else,
+    reason = "The readiness classifier keeps its fail-closed evidence branches together."
+)]
+fn prepare_observer_or_request(
+    root: &StateRoot,
+    navigator: &mut D17Navigator,
+    presentation: &Presentation,
+    intent: PendingObserverIntent,
+    pending_observer: &mut Option<PendingObserverSetup>,
+) -> Option<PendingObserverIntent> {
+    let provider = match &intent {
+        PendingObserverIntent::Managed(action) => match action {
+            ManagedAction::Start { provider, .. }
+            | ManagedAction::Recover { provider, .. }
+            | ManagedAction::Fork { provider, .. }
+            | ManagedAction::RecoverOperation { provider, .. } => *provider,
+            ManagedAction::Park { .. }
+            | ManagedAction::Archive { .. }
+            | ManagedAction::Restore { .. }
+            | ManagedAction::AcknowledgeResult { .. }
+            | ManagedAction::Rename { .. } => ProviderKind::Codex,
+        },
+        PendingObserverIntent::NewAtSameLocation { provider, .. } => *provider,
+    };
+    if provider != ProviderKind::Codex {
+        return Some(intent);
+    }
+    let state = match open_d17_current_only(root) {
+        Ok(state) => state,
+        Err(_) => {
+            navigator.set_guidance(
+                "Codex observer readiness is unavailable; exact schema-14 state is required",
+            );
+            return None;
+        }
+    };
+    let evidence = match observer_readiness(root, &state) {
+        Ok(evidence) => evidence,
+        Err(_) => {
+            navigator.set_guidance(
+                "Codex observer readiness is unavailable; exact ownership evidence is required",
+            );
+            return None;
+        }
+    };
+    match evidence.readiness {
+        ObserverReadiness::Ready => Some(intent),
+        ObserverReadiness::SetupRequired
+        | ObserverReadiness::UpdateRequired
+        | ObserverReadiness::TrustReviewRequired
+        | ObserverReadiness::TrustFinalizationRequired => {
+            if pending_observer.is_some() {
+                navigator.set_guidance(
+                    "Codex observer review is already active; finish that exact review first",
+                );
+                return None;
+            }
+            let kind = match evidence.readiness {
+                ObserverReadiness::SetupRequired => D17ObserverSetupKind::Create,
+                ObserverReadiness::UpdateRequired => D17ObserverSetupKind::Update,
+                ObserverReadiness::TrustReviewRequired
+                | ObserverReadiness::TrustFinalizationRequired => D17ObserverSetupKind::TrustReview,
+                _ => unreachable!("observer setup arm is exhaustive"),
+            };
+            let presentation_context = match presentation.d17_context() {
+                Ok(context) => context,
+                Err(_) => {
+                    navigator.set_guidance(
+                        "Codex observer setup is unavailable; exact presentation evidence changed",
+                    );
+                    return None;
+                }
+            };
+            let marker = match read_optional_d17_marker(root, presentation) {
+                Ok(marker) => marker,
+                Err(()) => {
+                    navigator.set_guidance(
+                        "Codex observer setup is unavailable; exact provisional evidence changed",
+                    );
+                    return None;
+                }
+            };
+            *pending_observer = Some(PendingObserverSetup {
+                intent,
+                kind,
+                evidence,
+                presentation_context,
+                marker,
+                expected_integration: None,
+                review_directory: None,
+            });
+            navigator.request_observer_setup(kind);
+            None
+        }
+        ObserverReadiness::Modified => {
+            navigator.set_guidance(
+                "Codex observer profile is modified; it was left untouched and needs exact review",
+            );
+            None
+        }
+        ObserverReadiness::Foreign => {
+            navigator.set_guidance(
+                "Codex observer profile is foreign; it was left untouched and needs exact ownership",
+            );
+            None
+        }
+        ObserverReadiness::Disabled => {
+            navigator.set_guidance("Codex observer integration is disabled; it was left untouched");
+            None
+        }
+        ObserverReadiness::Ambiguous | ObserverReadiness::Unknown => {
+            navigator.set_guidance(
+                "Codex observer evidence is ambiguous; no setup or provider launch was attempted",
+            );
+            None
+        }
+    }
+}
+
+fn read_optional_d17_marker(
+    root: &StateRoot,
+    presentation: &Presentation,
+) -> Result<Option<ProvisionalSlot>, ()> {
+    match read_marker(root.base(), &presentation.paths().directory) {
+        Ok(slot) => Ok(Some(slot)),
+        Err(SlotError::MarkerUnavailable) => Ok(None),
+        Err(_) => Err(()),
+    }
+}
+
+/// Applies the Navigator's explicit observer consent to one retained typed
+/// action. Profile setup occurs under the exact D17 provisional lease; native
+/// review then runs in the right-hand provider pane, and the action remains in
+/// process memory until its evidence is revalidated.
+#[allow(
+    clippy::too_many_lines,
+    clippy::manual_let_else,
+    clippy::single_match_else,
+    reason = "The consent boundary keeps mutation, review launch, and exact revalidation together."
+)]
+fn accept_observer_setup(
+    root: &StateRoot,
+    navigator: &mut D17Navigator,
+    presentation: &Presentation,
+    kind: D17ObserverSetupKind,
+    pending_observer: &mut Option<PendingObserverSetup>,
+) {
+    let Some(mut pending) = pending_observer.take() else {
+        navigator.set_guidance("Codex observer setup is unavailable; refresh and retry");
+        return;
+    };
+    if pending.kind != kind {
+        navigator.set_guidance("Codex observer setup changed; refresh exact state and retry");
+        return;
+    }
+    if presentation.d17_context().ok().as_ref() != Some(&pending.presentation_context)
+        || read_optional_d17_marker(root, presentation) != Ok(pending.marker.clone())
+    {
+        navigator.set_guidance(
+            "Codex observer setup is unavailable; exact presentation or provisional evidence changed",
+        );
+        return;
+    }
+    let mut state = match open_d17_current_only(root) {
+        Ok(state) => state,
+        Err(_) => {
+            navigator.set_guidance("Codex observer setup is unavailable; exact state is required");
+            return;
+        }
+    };
+    let provisional_lease = match state.acquire_d17_provisional_lease() {
+        Ok(lease) => lease,
+        Err(_) => {
+            navigator.set_guidance("Codex observer setup is unavailable; exact lease is required");
+            return;
+        }
+    };
+    let current_evidence = match observer_readiness(root, &state) {
+        Ok(evidence) => evidence,
+        Err(_) => {
+            navigator
+                .set_guidance("Codex observer setup is unavailable; exact ownership is required");
+            return;
+        }
+    };
+    if current_evidence != pending.evidence {
+        navigator.set_guidance("Codex observer setup changed; refresh exact state and retry");
+        return;
+    }
+    let activation = match prepare_observer_activation_d17(
+        root,
+        &mut state,
+        &provisional_lease,
+        &pending.evidence,
+    ) {
+        Ok(activation) => activation,
+        Err(_) => {
+            navigator.set_guidance(
+                "Codex observer setup is unavailable; exact ownership and Runtime evidence are required",
+            );
+            return;
+        }
+    };
+    if presentation.d17_context().ok().as_ref() != Some(&pending.presentation_context)
+        || read_optional_d17_marker(root, presentation) != Ok(pending.marker.clone())
+    {
+        navigator.set_guidance(
+            "Codex observer setup is unavailable; exact presentation or provisional evidence changed",
+        );
+        return;
+    }
+    let ObserverActivation::ReviewRequired(expected) = activation else {
+        let command = pending.intent.into_command();
+        drop(provisional_lease);
+        drop(state);
+        let _ = execute_d17_command(
+            command,
+            root,
+            navigator,
+            presentation,
+            FocusAfter::Provider,
+            pending_observer,
+        );
+        return;
+    };
+    let Some(path) = std::env::var_os("PATH") else {
+        navigator
+            .set_guidance("Codex observer review is unavailable; exact executable is required");
+        return;
+    };
+    let executable = match ExpectedProviderExecutable::resolve_from_path(ProviderKind::Codex, &path)
+    {
+        Ok(executable) => executable,
+        Err(_) => {
+            navigator
+                .set_guidance("Codex observer review is unavailable; exact executable is required");
+            return;
+        }
+    };
+    let Some(codex_home) = expected.ownership.canonical_path.parent() else {
+        navigator.set_guidance("Codex observer review is unavailable; exact profile is required");
+        return;
+    };
+    let mut review_directory = match D17ReviewDirectory::create(
+        &presentation.paths().directory,
+        pending.presentation_context.presentation_id(),
+        pending.presentation_context.presentation_revision(),
+    ) {
+        Ok(directory) => directory,
+        Err(_) => {
+            navigator.set_guidance(
+                "Codex observer review is unavailable; disposable review state is required",
+            );
+            return;
+        }
+    };
+    let detached_workstream_id = match presentation.d17_observer_attachment_context() {
+        Ok(workstream_id) => workstream_id,
+        Err(_) => {
+            let _ = review_directory.cleanup();
+            navigator.set_guidance(
+                "Codex observer review is unavailable; exact outer attachment evidence changed",
+            );
+            return;
+        }
+    };
+    drop(provisional_lease);
+    drop(state);
+    if presentation
+        .start_d17_observer_review(
+            executable.canonical_path(),
+            codex_home,
+            &review_directory.path(),
+            detached_workstream_id,
+        )
+        .is_err()
+    {
+        let _ = review_directory.cleanup();
+        navigator.set_guidance(
+            "Codex observer review is unavailable; the exact provider pane is not free",
+        );
+        return;
+    }
+    pending.expected_integration = Some(expected);
+    pending.review_directory = Some(review_directory);
+    *pending_observer = Some(pending);
+    if presentation.focus_provider().is_err() {
+        navigator.set_guidance(
+            "Complete Codex native /hooks review; provider-pane focus is unavailable",
+        );
+    } else {
+        navigator.set_guidance(
+            "Complete Codex native /hooks review in the right-hand pane; the selected action resumes after exact trust proof",
+        );
+    }
+}
+
+/// Polls only the exact native review pane. Once it exits, native trust and
+/// presentation/marker evidence are revalidated before the retained action is
+/// reconstructed and dispatched through the ordinary D17 boundary.
+#[allow(
+    clippy::manual_let_else,
+    clippy::single_match_else,
+    clippy::question_mark,
+    clippy::map_unwrap_or,
+    reason = "Review completion handles bounded cleanup and fail-closed evidence branches explicitly."
+)]
+fn finish_pending_observer_review(
+    root: &StateRoot,
+    navigator: &mut D17Navigator,
+    presentation: &Presentation,
+    pending_observer: &mut Option<PendingObserverSetup>,
+) -> Option<D17Command> {
+    let Some(pending) = pending_observer.as_ref() else {
+        return None;
+    };
+    if pending.review_directory.is_none() {
+        return None;
+    }
+    let finished = match presentation.d17_observer_review_finished() {
+        Ok(finished) => finished,
+        Err(_) => {
+            let pending = pending_observer.take();
+            if let Some(pending) = pending
+                && let Some(mut directory) = pending.review_directory
+            {
+                let _ = directory.cleanup();
+            }
+            navigator.set_guidance(
+                "Codex observer review was interrupted; exact provider evidence changed",
+            );
+            return None;
+        }
+    };
+    if !finished {
+        return None;
+    }
+    let Some(mut pending) = pending_observer.take() else {
+        return None;
+    };
+    let Some(mut review_directory) = pending.review_directory.take() else {
+        return None;
+    };
+    if review_directory.cleanup().is_err() {
+        navigator
+            .set_guidance("Codex observer review cleanup is unavailable; action remains stopped");
+        return None;
+    }
+    if presentation.d17_context().ok().as_ref() != Some(&pending.presentation_context)
+        || read_optional_d17_marker(root, presentation) != Ok(pending.marker.clone())
+    {
+        navigator.set_guidance(
+            "Codex observer review evidence changed; the selected action was not resumed",
+        );
+        return None;
+    }
+    let Some(expected) = pending.expected_integration.take() else {
+        navigator.set_guidance("Codex observer review evidence is unavailable; refresh and retry");
+        return None;
+    };
+    let mut state = match open_d17_current_only(root) {
+        Ok(state) => state,
+        Err(_) => {
+            navigator.set_guidance(
+                "Codex observer review finalization is unavailable; exact state is required",
+            );
+            return None;
+        }
+    };
+    let lease = match state.acquire_d17_provisional_lease() {
+        Ok(lease) => lease,
+        Err(_) => {
+            navigator.set_guidance(
+                "Codex observer review finalization is unavailable; exact lease is required",
+            );
+            return None;
+        }
+    };
+    if finalize_observer_trust_d17_under_lease(root, state, &lease, &expected).is_err() {
+        navigator.set_guidance(
+            "Codex observer trust remains pending; the selected action was not resumed",
+        );
+        return None;
+    }
+    let state = match open_d17_current_only(root) {
+        Ok(state) => state,
+        Err(_) => {
+            navigator.set_guidance("Codex observer readiness is unavailable; refresh and retry");
+            return None;
+        }
+    };
+    if observer_readiness(root, &state)
+        .map(|evidence| evidence.readiness == ObserverReadiness::Ready)
+        .unwrap_or(false)
+    {
+        Some(pending.intent.into_command())
+    } else {
+        navigator
+            .set_guidance("Codex observer readiness remains unavailable; action was not resumed");
+        None
+    }
 }
 
 /// Runs exactly one D17 lifecycle action, refreshes the passive projection,
@@ -730,7 +1360,7 @@ fn navigator_attachment_for(
     clippy::too_many_lines,
     reason = "one schema-14 action boundary keeps every lifecycle preflight and post-action attachment outcome auditable"
 )]
-fn apply_managed_action(
+pub(crate) fn apply_managed_action(
     root: &StateRoot,
     action: ManagedAction,
 ) -> Result<Option<WorkstreamId>, D17NavigatorError> {
@@ -1016,7 +1646,7 @@ struct SameLocationAttachment {
 
 /// Creates an independent native session using only a selected unfenced source
 /// Workstream's stored provider and Location, then returns the fresh passive
-/// snapshot plus exact attachment revisions. The normal D16 application and
+/// snapshot plus exact attachment revisions. The retired application and
 /// Project-browser paths are intentionally never opened here.
 fn start_d17_same_location(
     root: &StateRoot,
@@ -1134,6 +1764,10 @@ fn materialize_provisional_shell(
     root: &StateRoot,
     presentation: &Presentation,
 ) -> Result<(), D17NavigatorError> {
+    let recovery = reconcile_pre_handoff_presentation(root, presentation)?;
+    if recovery == PreHandoffRecovery::RuntimeOwned {
+        return Ok(());
+    }
     if reattach_materialized_provisional_shell(root, presentation)? {
         return Ok(());
     }
@@ -1142,6 +1776,26 @@ fn materialize_provisional_shell(
         presentation,
         &account_shell_inputs_from_environment()?,
     )
+}
+
+/// Runs the passive pre-effect reconciler while retaining the host-wide
+/// provisional lease.  A Runtime-owned result is deliberately surfaced to
+/// the caller so it cannot be mistaken for a fresh shell slot.
+fn reconcile_pre_handoff_presentation(
+    root: &StateRoot,
+    presentation: &Presentation,
+) -> Result<PreHandoffRecovery, D17NavigatorError> {
+    let unavailable = || D17NavigatorError::ProvisionalShellUnavailable;
+    let mut state = open_d17_current_only(root).map_err(|_| unavailable())?;
+    let provisional_lease = state
+        .acquire_d17_provisional_lease()
+        .map_err(|_| unavailable())?;
+    reconcile_pre_handoff_under_lease(
+        &mut state,
+        &provisional_lease,
+        &presentation.paths().directory,
+    )
+    .map_err(|_| unavailable())
 }
 
 /// Opens the initially selected provisional shell only after fresh D17

@@ -1,10 +1,10 @@
-//! D16 state boundary.
+//! Host-local D16/D17 state boundary.
 //!
-//! This module owns the D16 state boundary. Current-only opens, observer
-//! transitions, fresh creation, and the explicit schema-12 cutover are the
-//! only supported production modes. The exact three retired client database
-//! filenames remain transition evidence only; no client catalog is opened or
-//! imported.
+//! D16 established the host-local registry and D17 extends it with schema-14
+//! onboarding authority. Current schema-14 opens, observer transitions, fresh
+//! creation, and explicit schema-12/schema-13 migrations are the supported
+//! production modes. The exact three retired client database filenames remain
+//! transition evidence only; no client catalog is opened or imported.
 
 #![allow(
     clippy::missing_errors_doc,
@@ -63,11 +63,9 @@ use super::{
     workstream::{next_activity_sequence, touch_workstream},
 };
 
-/// The D16 host schema version and sole fresh/current production boundary.
+/// The historical D16 host schema version and D17 migration source.
 pub const D16_HOST_SCHEMA_VERSION: i64 = 13;
-/// The D17 host schema version. It is understood only by the explicit,
-/// currently dormant cutover migration; ordinary D16 opens continue to reject
-/// it as a future schema until the replacement application boundary exists.
+/// The active D17 host schema version and fresh/current production boundary.
 pub const D17_HOST_SCHEMA_VERSION: i64 = 14;
 /// The only legacy host schema accepted by the confirmed-cutover migration and
 /// its exact fixture.
@@ -94,6 +92,10 @@ const MAX_PROJECT_PROJECTION_LOCATIONS: usize = 4096;
 /// parked a D17 onboarding recovery.  It records recovery resolution, never
 /// provider-exec proof; the retained Runtime may later be resumed normally.
 const D17_PARKED_RECOVERY_RESOLVED_OUTCOME: &str = r#"{"code":"d17_parked_recovery_resolved_v1"}"#;
+/// Exact terminal journal evidence written when presentation authority cancels
+/// an unconsumed, pre-effect onboarding capability.  The operation remains
+/// as a bounded audit record while its attempt-only graph is removed.
+const D17_ONBOARDING_CANCELLED_OUTCOME: &str = r#"{"code":"d17_onboarding_cancelled_v1"}"#;
 /// The final outer margin reserved for generation-scoped observer degraded
 /// marker recording after a bounded observer write has failed.
 pub const OBSERVER_DEGRADED_MARKER_BUDGET: Duration = Duration::from_millis(250);
@@ -127,9 +129,9 @@ pub const HOST_SCHEMA_13_PROJECT_SQL: &str = "
                                       native_session_id, settled_message_id);
 ";
 
-/// D17's schema-14 cutover fragment. The later atomic Navigator replacement
-/// consumes the pending lock metadata before any actor creates or recognizes
-/// `provisional.lock`; the dormant capability-journal columns retain only
+/// D17's schema-14 cutover fragment. Navigator startup consumes the pending
+/// lock metadata before any actor creates or recognizes `provisional.lock`;
+/// the capability-journal columns retain only
 /// bounded verifier/digest references, never provider command or shell data.
 pub const HOST_SCHEMA_14_ONBOARDING_SQL: &str = "
     DROP TABLE project_browser_settings;
@@ -568,14 +570,10 @@ pub struct ProjectLocationWorkstreamRegistration {
     pub workstream: ExternalWorkstream,
 }
 
-/// Complete private input for one dormant D17 broker preparation.  It is
+/// Complete private input for one D17 broker preparation. It is
 /// deliberately crate-visible only: all paths and shell/process evidence stay
 /// within the broker/helper boundary and never enter a public snapshot.
 #[derive(Clone)]
-#[allow(
-    dead_code,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) struct OnboardingPrepareRequest {
     pub(crate) request_key: String,
     pub(crate) presentation_id: Uuid,
@@ -613,14 +611,13 @@ impl std::fmt::Debug for OnboardingPrepareRequest {
 
 /// A newly issued broker handoff.  The live capability remains in memory and
 /// is deliberately not copied into the operation, runtime, or snapshot.
-#[allow(
-    dead_code,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) struct OnboardingReservation {
     operation_id: OperationId,
+    #[cfg(test)]
     location_id: LocationId,
+    #[cfg(test)]
     workstream_id: WorkstreamId,
+    #[cfg(test)]
     runtime: RuntimeRecord,
     capability: LaunchCapability,
 }
@@ -632,37 +629,37 @@ impl std::fmt::Debug for OnboardingReservation {
             .field("operation_id", &"<opaque>")
             .field("location_id", &"<opaque>")
             .field("workstream_id", &"<opaque>")
-            .field("runtime", &self.runtime)
+            .field("runtime", &"<opaque>")
             .field("capability", &self.capability)
             .finish()
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-)]
 impl OnboardingReservation {
     #[must_use]
     pub(crate) const fn operation_id(&self) -> OperationId {
         self.operation_id
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) const fn location_id(&self) -> LocationId {
         self.location_id
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) const fn workstream_id(&self) -> WorkstreamId {
         self.workstream_id
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn runtime(&self) -> &RuntimeRecord {
         &self.runtime
     }
 
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn capability(&self) -> &LaunchCapability {
         &self.capability
@@ -678,11 +675,7 @@ impl OnboardingReservation {
 /// A request-key replay that found the one existing unresolved onboarding
 /// journal.  It never reissues the lost live token or creates another graph.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    clippy::struct_field_names,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-)]
+#[allow(clippy::struct_field_names)]
 pub(crate) struct ExistingOnboardingReservation {
     pub(crate) operation_id: OperationId,
     pub(crate) location_id: LocationId,
@@ -690,11 +683,7 @@ pub(crate) struct ExistingOnboardingReservation {
     pub(crate) runtime_id: RuntimeId,
 }
 
-#[allow(
-    dead_code,
-    clippy::large_enum_variant,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-)]
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum OnboardingPreparation {
     Issued(OnboardingReservation),
     Existing(ExistingOnboardingReservation),
@@ -704,11 +693,7 @@ pub(crate) enum OnboardingPreparation {
 /// establishes durable Runtime ownership but deliberately does not grant
 /// attach/action authority or imply provider exec proof.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    clippy::struct_field_names,
-    reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
-)]
+#[allow(clippy::struct_field_names)]
 pub(crate) struct OnboardingOwnership {
     pub(crate) operation_id: OperationId,
     pub(crate) location_id: LocationId,
@@ -722,10 +707,6 @@ pub(crate) struct OnboardingOwnership {
 /// has committed Runtime ownership; later unproven or recovery states stay
 /// visible but never grant ordinary action authority.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "the D17 Workstreams projection remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) enum D17OnboardingVisibility {
     Reserved,
     ActionFenced,
@@ -736,10 +717,6 @@ pub(crate) enum D17OnboardingVisibility {
 /// reserved Runtime. It intentionally excludes operation IDs, paths, shell
 /// evidence, capability metadata, and provider payloads.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "the D17 Workstreams projection remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) struct D17OnboardingWorkstreamProjection {
     pub(crate) workstream_id: WorkstreamId,
     pub(crate) runtime_id: RuntimeId,
@@ -751,14 +728,19 @@ pub(crate) struct D17OnboardingWorkstreamProjection {
 /// operation identity, paths, shell evidence, and capability metadata remain
 /// outside the display surface.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) struct D17OnboardingOperationInventory {
     pub(crate) operation_id: OperationId,
     pub(crate) workstream_id: WorkstreamId,
     pub(crate) runtime_id: RuntimeId,
+    pub(crate) phase: OnboardingPhase,
+}
+
+/// The bounded durable phase associated with one exact presentation marker.
+/// This read is intentionally smaller than the journal inventory: callers use
+/// it only to reconcile a marker crash window, never to build a snapshot.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct D17OnboardingMarkerOperation {
+    pub(crate) operation_id: OperationId,
     pub(crate) phase: OnboardingPhase,
 }
 
@@ -767,10 +749,6 @@ pub(crate) struct D17OnboardingOperationInventory {
 /// durable proof input only: the executable path and command line are never
 /// stored in the onboarding journal or exposed through a snapshot.
 #[derive(Clone, Copy, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) struct OnboardingProviderExecutableIdentity {
     device: u64,
     inode: u64,
@@ -782,10 +760,6 @@ impl std::fmt::Debug for OnboardingProviderExecutableIdentity {
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
-)]
 impl OnboardingProviderExecutableIdentity {
     pub(crate) fn new(device: u64, inode: u64) -> Result<Self, StateError> {
         if inode == 0 || i64::try_from(device).is_err() || i64::try_from(inode).is_err() {
@@ -809,19 +783,11 @@ impl OnboardingProviderExecutableIdentity {
 /// proved that the adopted private pane still contains the expected native
 /// provider executable. State stores no executable path or command line.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) struct OnboardingProviderExecEvidence {
     provider_pid: u32,
     provider_birth: String,
 }
 
-#[allow(
-    dead_code,
-    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
-)]
 impl OnboardingProviderExecEvidence {
     pub(crate) fn new(provider_pid: u32, provider_birth: String) -> Result<Self, StateError> {
         if provider_pid == 0 {
@@ -841,10 +807,6 @@ impl OnboardingProviderExecEvidence {
 /// and runtime generation are necessary for local proof but never belong in a
 /// public snapshot or diagnostic.
 #[derive(Clone, Debug, Eq, PartialEq)]
-#[allow(
-    dead_code,
-    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) struct OnboardingProviderExecTarget {
     ownership: OnboardingOwnership,
     provider: ProviderKind,
@@ -853,10 +815,6 @@ pub(crate) struct OnboardingProviderExecTarget {
     executable_identity: OnboardingProviderExecutableIdentity,
 }
 
-#[allow(
-    dead_code,
-    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
-)]
 impl OnboardingProviderExecTarget {
     #[must_use]
     pub(crate) const fn ownership(&self) -> OnboardingOwnership {
@@ -904,10 +862,6 @@ impl std::fmt::Debug for OnboardingPreparation {
 /// of this structure; their exact commitment is the capability claim digest.
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-#[allow(
-    dead_code,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-)]
 struct PersistedOnboardingIntent {
     version: u8,
     presentation_id: Uuid,
@@ -922,6 +876,15 @@ struct PersistedOnboardingIntent {
     registry_generation: String,
     argv_digest: String,
     boot_provenance: String,
+    /// Whether this onboarding attempt inserted its Location row.  Older
+    /// schema-14 journals omit this field and therefore fail closed against
+    /// destructive location cleanup during recovery.
+    #[serde(default)]
+    location_created: bool,
+    /// Whether the inserted Location also created its Project row.  This is
+    /// only cleanup authority for an exact fresh attempt graph.
+    #[serde(default)]
+    project_created: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1006,10 +969,6 @@ impl D16State {
     /// lifecycle registry. This deliberately does not make the existing D16
     /// application schema-14-capable: callers must opt into the replacement
     /// D17 boundary, which has no Project-browser authority.
-    #[allow(
-        dead_code,
-        reason = "the D17 application boundary remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn into_d17_host_registry(self) -> Result<HostRegistry, StateError> {
         if self.mode != D16OpenMode::D17Current {
             return Err(StateError::StateRecoveryRequired(
@@ -1073,10 +1032,6 @@ impl D16State {
     /// Workstreams surface. Schema 14 removed the Project-browser table, so
     /// this explicit mode is the only projection path that may read Projects
     /// after the atomic cutover.
-    #[allow(
-        dead_code,
-        reason = "the D17 Workstreams projection remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn d17_project_projections(&self) -> Result<Vec<ProjectProjection>, StateError> {
         ensure_d17_current_mode(self.mode)?;
         validate_schema14(&self.connection)?;
@@ -1088,10 +1043,6 @@ impl D16State {
     /// exact Runtime relationship: a malformed or duplicate relationship
     /// refuses the whole snapshot instead of exposing a possibly unowned
     /// Runtime card.
-    #[allow(
-        dead_code,
-        reason = "the D17 Workstreams projection remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn d17_onboarding_workstream_projections(
         &self,
     ) -> Result<Vec<D17OnboardingWorkstreamProjection>, StateError> {
@@ -1129,10 +1080,6 @@ impl D16State {
     /// Returns the bounded exact D17 journal inventory required to reconcile
     /// a presentation-private provisional marker. It validates each durable
     /// operation against the Runtime it claims before returning any entry.
-    #[allow(
-        dead_code,
-        reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
-    )]
     #[allow(
         clippy::too_many_lines,
         reason = "the bounded journal inventory validates every retained onboarding phase and its exact Runtime relationship together"
@@ -1255,10 +1202,6 @@ impl D16State {
     /// Lists the exact private path set for every retained Runtime. This is
     /// classifier input only; neither paths nor session names enter a D17
     /// navigator snapshot or provider command.
-    #[allow(
-        dead_code,
-        reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn d17_registered_runtime_paths(&self) -> Result<Vec<RuntimePaths>, StateError> {
         ensure_d17_current_mode(self.mode)?;
         validate_schema14(&self.connection)?;
@@ -1297,10 +1240,6 @@ impl D16State {
     /// schema-14-only D17 boundary. It is launch-readiness evidence only: the
     /// D17 shell helper must still inspect the exact profile before it selects
     /// `--profile wsnav-observer` for a native Codex exec.
-    #[allow(
-        dead_code,
-        reason = "the D17 account-shell exec boundary remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn d17_codex_integration(
         &self,
     ) -> Result<Option<super::models::CodexIntegration>, StateError> {
@@ -2323,14 +2262,13 @@ impl D16State {
         lease.revalidate_for_mutation(&self.root)
     }
 
-    /// Performs the explicit, lease-bound schema-13 to schema-14 groundwork
-    /// step for D17's later atomic Navigator cutover.
+    /// Performs the explicit, lease-bound schema-13 to schema-14 migration used
+    /// by D17 Navigator startup.
     ///
-    /// This method is intentionally not reachable from an ordinary command:
-    /// D16 continues to own the active schema-13 UI and state path until its
-    /// shell-first replacement is complete. The migration only removes the
-    /// obsolete browser settings table and records pending provisional-lock
-    /// installation metadata; it never creates or adopts `provisional.lock`.
+    /// Ordinary D17 startup reaches this only after proving that no legacy D16
+    /// presentation remains. The migration removes the obsolete browser
+    /// settings table and records pending provisional-lock installation
+    /// metadata; it never creates or adopts `provisional.lock`.
     ///
     /// # Errors
     ///
@@ -2372,8 +2310,8 @@ impl D16State {
     /// written and synced. A ready lock is never recreated: missing,
     /// replaced, malformed, or busy evidence fails closed.
     ///
-    /// This remains a dormant cutover seam. No current D16 command invokes
-    /// it, and it never materializes a shell or launches a provider.
+    /// D17 startup invokes this cutover-authority variant only while completing
+    /// schema migration. It never materializes a shell or launches a provider.
     ///
     /// # Errors
     ///
@@ -2555,15 +2493,10 @@ impl D16State {
         Ok(provisional)
     }
 
-    /// Transactionally reserves the D17 Project/Location/Workstream/Runtime
-    /// graph for one marker-owned candidate and records a verifier-backed
-    /// handoff.  This is intentionally a dormant cutover seam: it requires
-    /// both the migration lease and the stable provisional lease, creates no
-    /// marker or tmux artifact, and never launches a provider.
-    #[allow(
-        dead_code,
-        reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-    )]
+    /// Historical cutover-authority variant retained only to test the exact
+    /// schema-14 transition boundary. Production D17 uses the current-mode
+    /// entrypoint below.
+    #[cfg(test)]
     pub(crate) fn prepare_d17_onboarding(
         &mut self,
         transition_lease: &TransitionLease,
@@ -2583,12 +2516,7 @@ impl D16State {
     /// opening. The caller must retain the exact D17 provisional lease; a
     /// pre-schema-14 migration lease cannot authorize this path.
     ///
-    /// This remains an unreachable broker seam. It creates no marker, tmux
-    /// artifact, Runtime process, or provider process.
-    #[allow(
-        dead_code,
-        reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-    )]
+    /// It creates no marker, tmux artifact, Runtime process, or provider process.
     pub(crate) fn prepare_d17_onboarding_current(
         &mut self,
         provisional_lease: &ProvisionalLease,
@@ -2596,7 +2524,7 @@ impl D16State {
         id_generator: &dyn IdGenerator,
     ) -> Result<OnboardingPreparation, StateError> {
         self.prepare_d17_onboarding_authorized(
-            D17OnboardingAuthority::Current,
+            D17OnboardingAuthority::Current(std::marker::PhantomData),
             provisional_lease,
             request,
             id_generator,
@@ -2686,6 +2614,17 @@ impl D16State {
             &transaction,
             request.repository.project_root.as_path(),
         )?;
+        let location_created = existing_location.is_none();
+        let project_created = if location_created {
+            match request.repository.remote_identity_fingerprint.as_deref() {
+                Some(fingerprint) => {
+                    find_project_by_fingerprint(&transaction, fingerprint)?.is_none()
+                }
+                None => true,
+            }
+        } else {
+            false
+        };
         let location_id = existing_location.map_or_else(
             || LocationId::from(id_generator.uuid()),
             |location| location.location_id,
@@ -2708,6 +2647,8 @@ impl D16State {
             registry_generation: registry_generation.clone(),
             argv_digest: request.argv_digest.clone(),
             boot_provenance: request.boot_provenance.clone(),
+            location_created,
+            project_created,
         };
         let expected_revisions_json =
             serde_json::to_string(&intent).map_err(|_| StateError::InvalidOnboardingPreparation)?;
@@ -2816,21 +2757,514 @@ impl D16State {
         provisional_lease.revalidate_for_mutation(&self.root)?;
         Ok(OnboardingPreparation::Issued(OnboardingReservation {
             operation_id,
+            #[cfg(test)]
             location_id,
+            #[cfg(test)]
             workstream_id,
+            #[cfg(test)]
             runtime,
             capability,
         }))
     }
 
-    /// Atomically consumes one revalidated D17 launch capability and records
-    /// the durable Runtime-owned launch fence.  The caller is responsible for
-    /// marker/process/cwd proof before this seam; this state transition does
-    /// not launch, attach, signal, or otherwise contact a provider.
+    /// Reads the one durable onboarding journal that may belong to an exact
+    /// provisional marker.  The comparison is deliberately marker-scoped:
+    /// no shell, path, capability, or provider payload is returned.  A
+    /// mismatch is a closed refusal rather than an adoption opportunity.
+    pub(crate) fn d17_onboarding_marker_operation_current(
+        &self,
+        provisional_lease: &ProvisionalLease,
+        presentation_id: Uuid,
+        presentation_revision: Revision,
+        slot_generation: Uuid,
+        candidate_runtime_id: RuntimeId,
+        handoff_request: Option<OperationId>,
+    ) -> Result<Option<D17OnboardingMarkerOperation>, StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        validate_schema14(&self.connection)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT operation_id, phase, expected_revisions_json
+                 FROM compound_operations
+                 WHERE kind = 'onboard'
+                 ORDER BY operation_id
+                 LIMIT ?1",
+            )
+            .map_err(StateError::Sqlite)?;
+        let rows = statement
+            .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(StateError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::Sqlite)?;
+        drop(statement);
+        if rows.len() > MAX_NAVIGATOR_WORKSTREAMS {
+            return Err(StateError::NavigatorSnapshotTooLarge);
+        }
+        let mut match_result = None;
+        for (operation_id, phase, encoded_intent) in rows {
+            let operation_id = operation_id
+                .parse::<OperationId>()
+                .map_err(|_| StateError::MalformedHostSchema)?;
+            if handoff_request.is_some_and(|expected| expected != operation_id) {
+                continue;
+            }
+            let intent: PersistedOnboardingIntent = serde_json::from_str(&encoded_intent)
+                .map_err(|_| StateError::MalformedHostSchema)?;
+            if intent.candidate_runtime_id == candidate_runtime_id
+                && (intent.presentation_id != presentation_id
+                    || intent.presentation_revision != presentation_revision
+                    || intent.slot_generation != slot_generation)
+            {
+                return Err(StateError::OperationRequestMismatch);
+            }
+            let identity_matches = intent.presentation_id == presentation_id
+                && intent.presentation_revision == presentation_revision
+                && intent.slot_generation == slot_generation
+                && intent.candidate_runtime_id == candidate_runtime_id;
+            if !identity_matches {
+                if handoff_request == Some(operation_id) {
+                    return Err(StateError::OperationRequestMismatch);
+                }
+                continue;
+            }
+            let operation_phase =
+                operation_phase_from_text(&phase).map_err(|_| StateError::MalformedHostSchema)?;
+            let onboarding_phase = OnboardingPhase::from_operation_phase(operation_phase)
+                .ok_or(StateError::OnboardingOperationUnavailable)?;
+            if match_result
+                .replace(D17OnboardingMarkerOperation {
+                    operation_id,
+                    phase: onboarding_phase,
+                })
+                .is_some()
+            {
+                return Err(StateError::MalformedHostSchema);
+            }
+        }
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        if handoff_request.is_some() && match_result.is_none() {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+        Ok(match_result)
+    }
+
+    /// Cancels one exact, unconsumed D17 onboarding attempt.  The transaction
+    /// proves the marker identity against the journal, verifies that no
+    /// Runtime/provider effect crossed the ownership fence, invalidates the
+    /// persisted capability, removes only attempt-owned graph rows, and
+    /// leaves a terminal bounded rollback record so replay cannot succeed.
+    ///
+    /// A `false` result means that no journal belongs to this marker (the
+    /// marker may be a materialization-only crash).  Any identity, lifecycle,
+    /// or effect ambiguity returns an error without mutation.  Capability
+    /// expiry, boot provenance, and unrelated registry writes do not weaken
+    /// this exact pre-effect cleanup authority: cancellation is the journal's
+    /// serialized winner under the provisional lease.
     #[allow(
-        dead_code,
-        reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::type_complexity,
+        reason = "the exact marker identity and lease fields are the cancellation authority"
     )]
+    pub(crate) fn cancel_d17_onboarding_current(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        presentation_id: Uuid,
+        presentation_revision: Revision,
+        slot_generation: Uuid,
+        candidate_runtime_id: RuntimeId,
+        runtime_paths: &RuntimePaths,
+        handoff_request: Option<OperationId>,
+    ) -> Result<bool, StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        validate_schema14(&self.connection)?;
+        let canonical_root =
+            fs::canonicalize(&self.root).map_err(|_| StateError::InvalidOnboardingPreparation)?;
+        if runtime_paths != &RuntimePaths::for_runtime(&canonical_root, candidate_runtime_id) {
+            return Err(StateError::InvalidOnboardingPreparation);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        let mut statement = transaction
+            .prepare(
+                "SELECT operation_id, phase, expected_revisions_json,
+                        launch_token_expiry_monotonic, effect_watermark, outcome_json,
+                        launch_token_id, launch_token_verifier,
+                        launch_claims_digest, revision
+                 FROM compound_operations
+                 WHERE kind = 'onboard'
+                 ORDER BY operation_id
+                 LIMIT ?1",
+            )
+            .map_err(StateError::Sqlite)?;
+        let rows = statement
+            .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<String>>(8)?,
+                    row.get::<_, i64>(9)?,
+                ))
+            })
+            .map_err(StateError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::Sqlite)?;
+        drop(statement);
+        if rows.len() > MAX_NAVIGATOR_WORKSTREAMS {
+            return Err(StateError::NavigatorSnapshotTooLarge);
+        }
+
+        let mut matched = None;
+        for row in rows {
+            let operation_id = row
+                .0
+                .parse::<OperationId>()
+                .map_err(|_| StateError::MalformedHostSchema)?;
+            if handoff_request.is_some_and(|expected| expected != operation_id) {
+                continue;
+            }
+            let intent: PersistedOnboardingIntent =
+                serde_json::from_str(&row.2).map_err(|_| StateError::MalformedHostSchema)?;
+            if intent.candidate_runtime_id == candidate_runtime_id
+                && (intent.presentation_id != presentation_id
+                    || intent.presentation_revision != presentation_revision
+                    || intent.slot_generation != slot_generation)
+            {
+                return Err(StateError::OperationRequestMismatch);
+            }
+            let identity_matches = intent.presentation_id == presentation_id
+                && intent.presentation_revision == presentation_revision
+                && intent.slot_generation == slot_generation
+                && intent.candidate_runtime_id == candidate_runtime_id;
+            if !identity_matches {
+                if handoff_request == Some(operation_id) {
+                    return Err(StateError::OperationRequestMismatch);
+                }
+                continue;
+            }
+            if matched.is_some() {
+                return Err(StateError::MalformedHostSchema);
+            }
+            matched = Some((operation_id, row, intent));
+        }
+        let Some((operation_id, row, intent)) = matched else {
+            let runtime_exists: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM runtimes WHERE runtime_id = ?1)",
+                    [candidate_runtime_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(StateError::Sqlite)?;
+            if runtime_exists {
+                return Err(StateError::OnboardingOperationUnavailable);
+            }
+            transaction.commit().map_err(StateError::Sqlite)?;
+            provisional_lease.revalidate_for_mutation(&self.root)?;
+            return Ok(false);
+        };
+        if row.1 == "rolled_back" {
+            if row.5.as_deref() != Some(D17_ONBOARDING_CANCELLED_OUTCOME)
+                || row.4.is_some()
+                || row.6.is_some()
+                || row.7.is_some()
+                || row.8.is_some()
+            {
+                return Err(StateError::MalformedHostSchema);
+            }
+            transaction.commit().map_err(StateError::Sqlite)?;
+            provisional_lease.revalidate_for_mutation(&self.root)?;
+            return Ok(false);
+        }
+        if row.1 != "capability_issued" {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+        let _ = row.3.ok_or(StateError::MalformedHostSchema)?;
+        if row.4.is_some() || row.5.is_some() {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+        if row.6.is_none() || row.7.is_none() || row.8.is_none() {
+            return Err(StateError::MalformedHostSchema);
+        }
+        if intent.version != 1 || intent.lease_generation != provisional_lease.lease_generation() {
+            return Err(StateError::OperationRequestMismatch);
+        }
+        let runtime: Option<(
+            String,
+            String,
+            String,
+            String,
+            String,
+            Option<i64>,
+            Option<String>,
+            String,
+        )> = transaction
+            .query_row(
+                "SELECT runtimes.workstream_id, workstreams.location_id,
+                            runtimes.provider, runtimes.tmux_generation,
+                            runtimes.tmux_session, runtimes.provider_pid,
+                            runtimes.process_birth, runtimes.cwd
+                     FROM runtimes
+                     JOIN workstreams ON workstreams.workstream_id = runtimes.workstream_id
+                     WHERE runtimes.runtime_id = ?1",
+                [candidate_runtime_id.to_string()],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?;
+        let Some((
+            workstream_id,
+            location_id,
+            provider,
+            runtime_generation,
+            session,
+            provider_pid,
+            process_birth,
+            runtime_cwd,
+        )) = runtime
+        else {
+            return Err(StateError::MalformedHostSchema);
+        };
+        if workstream_id != intent.workstream_id.to_string()
+            || location_id != intent.location_id.to_string()
+            || provider != intent.provider.as_str()
+            || runtime_generation != intent.runtime_generation
+            || session != runtime_paths.session_name
+            || provider_pid.is_some()
+            || process_birth.is_some()
+        {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+        let lifecycle: String = transaction
+            .query_row(
+                "SELECT lifecycle FROM runtimes WHERE runtime_id = ?1",
+                [candidate_runtime_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StateError::Sqlite)?;
+        if lifecycle != "starting" {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+        let bindings: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM provider_bindings WHERE runtime_id = ?1",
+                [candidate_runtime_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StateError::Sqlite)?;
+        let handles: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM opencode_runtime_handles WHERE runtime_id = ?1",
+                [candidate_runtime_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StateError::Sqlite)?;
+        let targets: i64 = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM d17_onboarding_exec_targets WHERE operation_id = ?1",
+                [operation_id.to_string()],
+                |row| row.get(0),
+            )
+            .map_err(StateError::Sqlite)?;
+        if bindings != 0 || handles != 0 || targets != 0 {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+
+        // Capture the exact Location/Project relationship before deleting the
+        // attempt graph.  Missing or changed rows are ambiguous and therefore
+        // leave the transaction untouched.
+        let location: Option<(Option<String>, String)> = transaction
+            .query_row(
+                "SELECT project_id, repository_path FROM project_locations
+                 WHERE location_id = ?1",
+                [intent.location_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?;
+        let Some((project_id, repository_path)) = location else {
+            return Err(StateError::MalformedHostSchema);
+        };
+        if runtime_cwd != repository_path {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+        if !intent.location_created {
+            // A pre-existing location is never destructive cleanup authority.
+            // Its Runtime/workstream are still exact attempt rows and can be
+            // removed; the retained Location/Project history stays intact.
+        } else if intent.project_created {
+            let project_id = project_id
+                .as_deref()
+                .ok_or(StateError::MalformedHostSchema)?
+                .parse::<ProjectId>()
+                .map_err(|_| StateError::MalformedHostSchema)?;
+            let project: Option<(String, i64)> = transaction
+                .query_row(
+                    "SELECT label_location_id, revision FROM projects WHERE project_id = ?1",
+                    [project_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(StateError::Sqlite)?;
+            let Some((label_location_id, _revision)) = project else {
+                return Err(StateError::MalformedHostSchema);
+            };
+            let location_count: i64 = transaction
+                .query_row(
+                    "SELECT COUNT(*) FROM project_locations WHERE project_id = ?1",
+                    [project_id.to_string()],
+                    |row| row.get(0),
+                )
+                .map_err(StateError::Sqlite)?;
+            if label_location_id != intent.location_id.to_string() || location_count != 1 {
+                return Err(StateError::OnboardingOperationUnavailable);
+            }
+            let detached = transaction
+                .execute(
+                    "UPDATE project_locations SET project_id = NULL
+                     WHERE location_id = ?1 AND project_id = ?2",
+                    params![intent.location_id.to_string(), project_id.to_string()],
+                )
+                .map_err(StateError::Sqlite)?;
+            if detached != 1 {
+                return Err(StateError::ConcurrentWrite);
+            }
+            let deleted = transaction
+                .execute(
+                    "DELETE FROM projects WHERE project_id = ?1 AND label_location_id = ?2",
+                    params![project_id.to_string(), intent.location_id.to_string()],
+                )
+                .map_err(StateError::Sqlite)?;
+            if deleted != 1 {
+                return Err(StateError::ConcurrentWrite);
+            }
+        } else if let Some(project_id) = project_id.as_deref() {
+            let label_location_id: String = transaction
+                .query_row(
+                    "SELECT label_location_id FROM projects WHERE project_id = ?1",
+                    [project_id],
+                    |row| row.get(0),
+                )
+                .map_err(StateError::Sqlite)?;
+            if label_location_id == intent.location_id.to_string() {
+                return Err(StateError::OnboardingOperationUnavailable);
+            }
+        }
+
+        let repository_path = PathBuf::from(repository_path);
+        if intent.location_created
+            && (!is_normalized_absolute_utf8_path(&repository_path)
+                || repository_path
+                    != repository_path
+                        .canonicalize()
+                        .map_err(|_| StateError::MalformedHostSchema)?)
+        {
+            return Err(StateError::MalformedHostSchema);
+        }
+        let deleted = transaction
+            .execute(
+                "DELETE FROM runtimes WHERE runtime_id = ?1 AND workstream_id = ?2
+                 AND lifecycle = 'starting' AND provider_pid IS NULL
+                 AND process_birth IS NULL",
+                params![
+                    candidate_runtime_id.to_string(),
+                    intent.workstream_id.to_string()
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if deleted != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        let deleted = transaction
+            .execute(
+                "DELETE FROM workstreams WHERE workstream_id = ?1
+                 AND location_id = ?2 AND lifecycle = 'open'",
+                params![
+                    intent.workstream_id.to_string(),
+                    intent.location_id.to_string()
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if deleted != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        if intent.location_created {
+            let deleted = transaction
+                .execute(
+                    "DELETE FROM project_locations WHERE location_id = ?1
+                     AND repository_path = ?2",
+                    params![
+                        intent.location_id.to_string(),
+                        repository_path.to_string_lossy()
+                    ],
+                )
+                .map_err(StateError::Sqlite)?;
+            if deleted != 1 {
+                return Err(StateError::ConcurrentWrite);
+            }
+        }
+        let operation_revision = Revision::try_from(row.9)?;
+        let next_operation_revision = next_revision(operation_revision)?;
+        let updated = transaction
+            .execute(
+                "UPDATE compound_operations
+                 SET phase = 'rolled_back', outcome_json = ?1, revision = ?2,
+                     launch_token_id = NULL, launch_token_verifier = NULL,
+                     launch_token_expiry_monotonic = NULL, launch_claims_digest = NULL
+                 WHERE operation_id = ?3 AND kind = 'onboard'
+                   AND phase = 'capability_issued' AND revision = ?4
+                   AND effect_watermark IS NULL AND outcome_json IS NULL",
+                params![
+                    D17_ONBOARDING_CANCELLED_OUTCOME,
+                    next_operation_revision.value(),
+                    operation_id.to_string(),
+                    operation_revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if updated != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        validate_project_membership_transaction(&transaction)?;
+        validate_schema14(&transaction)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        Ok(true)
+    }
+
+    /// Historical cutover-authority consume variant retained only for
+    /// transition-boundary tests. Production D17 uses the current-mode
+    /// entrypoint below.
+    #[cfg(test)]
     pub(crate) fn consume_d17_onboarding(
         &mut self,
         transition_lease: &TransitionLease,
@@ -2851,10 +3285,6 @@ impl D16State {
     /// Atomically consumes one D17 launch capability from a normal
     /// schema-14 opening. The provisional lease remains the only mutable
     /// shell-slot authority; provider execution remains outside this seam.
-    #[allow(
-        dead_code,
-        reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn consume_d17_onboarding_current(
         &mut self,
         provisional_lease: &ProvisionalLease,
@@ -2863,7 +3293,7 @@ impl D16State {
         now_monotonic_millis: i64,
     ) -> Result<OnboardingOwnership, StateError> {
         self.consume_d17_onboarding_authorized(
-            D17OnboardingAuthority::Current,
+            D17OnboardingAuthority::Current(std::marker::PhantomData),
             provisional_lease,
             request,
             token,
@@ -3016,10 +3446,6 @@ impl D16State {
     /// Runtime ownership has committed. The identity comes from the resolved
     /// canonical native executable and is committed atomically with the
     /// preparation phase; no executable path or command line is stored.
-    #[allow(
-        dead_code,
-        reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn record_d17_provider_preparation_current(
         &mut self,
         provisional_lease: &ProvisionalLease,
@@ -3039,10 +3465,6 @@ impl D16State {
     /// Records the point at which provider-specific preparation may have an
     /// external effect. The caller must record this before making that effect;
     /// this state seam itself does not contact a provider.
-    #[allow(
-        dead_code,
-        reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn record_d17_provider_external_effect_started_current(
         &mut self,
         provisional_lease: &ProvisionalLease,
@@ -3063,10 +3485,6 @@ impl D16State {
     /// while the D17 journal remains at that boundary, so a different session
     /// can never be adopted and a future native exec has one durable root
     /// session to revalidate.
-    #[allow(
-        dead_code,
-        reason = "the D17 OpenCode helper remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn record_d17_opencode_created_session_current(
         &mut self,
         provisional_lease: &ProvisionalLease,
@@ -3132,10 +3550,6 @@ impl D16State {
     /// temporary precreation server is already gone when this commits; this
     /// row is only durable identity evidence for the later detached observer,
     /// never authority to contact or replace a provider.
-    #[allow(
-        dead_code,
-        reason = "the D17 OpenCode observer controller remains unreachable until the atomic Navigator cutover"
-    )]
     #[allow(
         clippy::too_many_lines,
         reason = "the transaction keeps D17 handle identity validation and its one insert boundary auditable together"
@@ -3269,10 +3683,6 @@ impl D16State {
     /// Callers use this after an ambiguous provider effect or a failed final
     /// exec that cannot be classified as Codex's known absence. It never
     /// rolls back graph rows, reissues a capability, or contacts a provider.
-    #[allow(
-        dead_code,
-        reason = "the D17 recovery controller remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn record_d17_recovery_required_current(
         &mut self,
         provisional_lease: &ProvisionalLease,
@@ -3382,10 +3792,6 @@ impl D16State {
     /// Records the final durable boundary immediately before the helper would
     /// execute the native provider. It intentionally does not expose an
     /// unproven Runtime to ordinary attachment or action authority.
-    #[allow(
-        dead_code,
-        reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn record_d17_provider_exec_started_current(
         &mut self,
         provisional_lease: &ProvisionalLease,
@@ -3405,10 +3811,6 @@ impl D16State {
     /// that neither a provider process nor a binding can exist. This is a
     /// terminal onboarding fact, not ordinary attachment/action authority;
     /// later recovery decides guarded rollback.
-    #[allow(
-        dead_code,
-        reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn record_d17_codex_exec_failed_known_absent_current(
         &mut self,
         provisional_lease: &ProvisionalLease,
@@ -3580,10 +3982,7 @@ impl D16State {
     /// Loads the exact Runtime-owned D17 operation that is eligible for an
     /// external provider-exec proof. This read remains lease-bound so a stale
     /// presentation marker cannot race a later reconciliation mutation.
-    #[allow(
-        dead_code,
-        reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
-    )]
+    #[cfg(test)]
     pub(crate) fn d17_onboarding_exec_proof_ownership_current(
         &self,
         provisional_lease: &ProvisionalLease,
@@ -3596,10 +3995,6 @@ impl D16State {
 
     /// Loads the full private D17 target needed for local post-exec proof.
     /// This remains unavailable to snapshots and ordinary D16 actions.
-    #[allow(
-        dead_code,
-        reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn d17_onboarding_exec_proof_target_current(
         &self,
         provisional_lease: &ProvisionalLease,
@@ -3628,10 +4023,6 @@ impl D16State {
     /// provider-exec operation. This is deliberately a D17-only read: the
     /// caller must still corroborate the returned PID/birth pair against the
     /// live process table before it can activate ordinary attachment.
-    #[allow(
-        dead_code,
-        reason = "the D17 OpenCode observer controller remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn d17_opencode_observer_ready_current(
         &self,
         provisional_lease: &ProvisionalLease,
@@ -3671,10 +4062,6 @@ impl D16State {
     /// Loads an already proven provider-exec target so presentation-private
     /// marker reconciliation can complete after a state-before-marker crash.
     /// It performs no provider I/O and exposes no public snapshot data.
-    #[allow(
-        dead_code,
-        reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn d17_onboarding_exec_proven_target_current(
         &self,
         provisional_lease: &ProvisionalLease,
@@ -3704,10 +4091,6 @@ impl D16State {
     /// `provider_exec_started` revision, preserves the unbound `starting`
     /// Runtime lifecycle, and never starts, attaches, signals, or contacts a
     /// provider.
-    #[allow(
-        dead_code,
-        reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
-    )]
     pub(crate) fn record_d17_provider_exec_proven_current(
         &mut self,
         provisional_lease: &ProvisionalLease,
@@ -3740,10 +4123,6 @@ impl D16State {
     /// at `provider_exec_started`.  This is the only state a post-exec
     /// `OpenCode` observer may adopt; ordinary attachment remains fenced until
     /// the controller has independently established the exact observer.
-    #[allow(
-        dead_code,
-        reason = "the D17 OpenCode observer controller remains unreachable until the atomic Navigator cutover"
-    )]
     #[allow(
         clippy::too_many_lines,
         reason = "the transaction keeps D17 process evidence and its no-activation invariant auditable together"
@@ -4292,12 +4671,12 @@ pub fn open_current_only(root: &StateRoot) -> Result<D16State, StateError> {
     })
 }
 
-/// Opens a schema-14 root for the dormant D17-specific state boundary.
+/// Opens a schema-14 root for the active D17-specific state boundary.
 ///
-/// This is intentionally not a compatibility path for the active D16
+/// This is intentionally not a compatibility path for the retired D16
 /// `HostRegistry`: the removed browser table and D17 onboarding columns mean
-/// the regular D16 navigator must not be pointed at it. The future D17
-/// application boundary acquires and revalidates `provisional.lock` before
+/// the regular D16 navigator must not be pointed at it. The D17 Navigator
+/// boundary acquires and revalidates `provisional.lock` before
 /// every marker or onboarding mutation.
 pub fn open_d17_current_only(root: &StateRoot) -> Result<D16State, StateError> {
     validate_state_root_directory(root.base())?;
@@ -4800,8 +5179,9 @@ fn ensure_d17_current_mode(mode: D16OpenMode) -> Result<(), StateError> {
 /// its separately retained provisional lease.
 #[derive(Clone, Copy)]
 enum D17OnboardingAuthority<'lease> {
+    #[cfg(test)]
     Cutover(&'lease TransitionLease),
-    Current,
+    Current(std::marker::PhantomData<&'lease ()>),
 }
 
 /// The private mutation class for one D17 onboarding journal transition.
@@ -4849,28 +5229,24 @@ const D17_CODEX_EXEC_FAILED_KNOWN_ABSENT_WATERMARK: &str = "d17-codex-exec-faile
 impl D17OnboardingAuthority<'_> {
     fn revalidate(self, mode: D16OpenMode, root: &Path) -> Result<(), StateError> {
         match self {
+            #[cfg(test)]
             Self::Cutover(transition_lease) => {
                 ensure_cutover_transition_mode(mode)?;
                 transition_lease.revalidate_for_mutation(root)
             }
-            Self::Current => ensure_d17_current_mode(mode),
+            Self::Current(_) => {
+                let _ = root;
+                ensure_d17_current_mode(mode)
+            }
         }
     }
 }
 
 #[derive(Clone, Copy)]
-#[allow(
-    dead_code,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-)]
 struct ExistingOnboardingLocation {
     location_id: LocationId,
 }
 
-#[allow(
-    dead_code,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-)]
 fn validate_onboarding_prepare_request(
     request: &OnboardingPrepareRequest,
     state_root: &Path,
@@ -4905,10 +5281,6 @@ fn validate_onboarding_prepare_request(
     Ok(())
 }
 
-#[allow(
-    dead_code,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-)]
 fn is_normalized_absolute_utf8_path(path: &Path) -> bool {
     path.is_absolute()
         && path.to_str().is_some()
@@ -4920,10 +5292,6 @@ fn is_normalized_absolute_utf8_path(path: &Path) -> bool {
         })
 }
 
-#[allow(
-    dead_code,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-)]
 fn load_registry_generation(transaction: &rusqlite::Transaction<'_>) -> Result<String, StateError> {
     let generation: String = transaction
         .query_row(
@@ -4936,10 +5304,6 @@ fn load_registry_generation(transaction: &rusqlite::Transaction<'_>) -> Result<S
     Ok(generation)
 }
 
-#[allow(
-    dead_code,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-)]
 fn load_location_for_repository_path(
     transaction: &rusqlite::Transaction<'_>,
     repository_path: &Path,
@@ -4968,10 +5332,6 @@ fn load_location_for_repository_path(
     }
 }
 
-#[allow(
-    dead_code,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-)]
 fn onboarding_claims(
     operation_id: OperationId,
     location_id: LocationId,
@@ -5004,10 +5364,6 @@ fn onboarding_claims(
     .map_err(|_error: CapabilityError| StateError::InvalidOnboardingPreparation)
 }
 
-#[allow(
-    dead_code,
-    reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
-)]
 fn map_onboarding_capability_error(error: CapabilityError) -> StateError {
     match error {
         CapabilityError::Expired => StateError::OnboardingCapabilityExpired,
@@ -5019,9 +5375,8 @@ fn map_onboarding_capability_error(error: CapabilityError) -> StateError {
 }
 
 #[allow(
-    dead_code,
     clippy::too_many_lines,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
+    reason = "the D17 replay loader keeps the full bounded onboarding identity comparison auditable"
 )]
 fn load_existing_onboarding_preparation(
     transaction: &rusqlite::Transaction<'_>,
@@ -5142,9 +5497,8 @@ fn load_existing_onboarding_preparation(
 /// registry-generation, intent, claim-digest, and graph checks before a later
 /// provider fence can advance.
 #[allow(
-    dead_code,
     clippy::too_many_lines,
-    reason = "the D17 helper remains unreachable until the atomic Navigator cutover"
+    reason = "the D17 ownership validator keeps every durable handoff identity check auditable"
 )]
 fn validate_d17_owned_onboarding_transaction(
     transaction: &rusqlite::Transaction<'_>,
@@ -5395,9 +5749,8 @@ type D17ExecProofRuntimeRow = (
 /// command, path, provider payload, or marker data, and it refuses every phase
 /// except the requested final pre-exec or already-proven reconciliation fence.
 #[allow(
-    dead_code,
     clippy::too_many_lines,
-    reason = "the D17 reconciler remains unreachable until the atomic Navigator cutover"
+    reason = "the D17 exec-proof loader keeps every bounded process and ownership check auditable"
 )]
 fn load_d17_exec_proof_target(
     transaction: &rusqlite::Transaction<'_>,
@@ -5540,10 +5893,6 @@ fn load_d17_exec_proof_target(
     })
 }
 
-#[allow(
-    dead_code,
-    reason = "the D17 broker remains unreachable until the atomic Navigator cutover"
-)]
 fn insert_onboarding_location(
     transaction: &rusqlite::Transaction<'_>,
     request: &OnboardingPrepareRequest,
@@ -9337,6 +9686,38 @@ mod tests {
         OnboardingProviderExecutableIdentity::new(31, 37).unwrap()
     }
 
+    fn issued_d17_onboarding_fixture(
+        candidate_runtime_id: RuntimeId,
+    ) -> (
+        tempfile::TempDir,
+        PathBuf,
+        D16State,
+        ProvisionalLease,
+        OnboardingPrepareRequest,
+        OnboardingReservation,
+    ) {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let mut state = fresh_create_d17(&state_path, &SequenceIds::default()).unwrap();
+        let provisional = state.acquire_d17_provisional_lease().unwrap();
+        let request = onboarding_prepare_request(&state_path, candidate_runtime_id);
+        let reservation = match state
+            .prepare_d17_onboarding_current(&provisional, &request, &SequenceIds::default())
+            .unwrap()
+        {
+            OnboardingPreparation::Issued(reservation) => reservation,
+            OnboardingPreparation::Existing(_) => panic!("first preparation must issue"),
+        };
+        (
+            temporary,
+            state_path,
+            state,
+            provisional,
+            request,
+            reservation,
+        )
+    }
+
     fn sample_journal() -> ObserverHandoverJournal {
         ObserverHandoverJournal {
             version: 1,
@@ -10347,6 +10728,301 @@ mod tests {
             73
         );
         validate_schema14(&state.connection).unwrap();
+    }
+
+    #[test]
+    fn schema14_cancels_only_an_exact_unconsumed_onboarding_graph_and_rejects_replay() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let mut state = fresh_create_d17(&state_path, &SequenceIds::default()).unwrap();
+        let provisional = state.acquire_d17_provisional_lease().unwrap();
+        let candidate_runtime_id = RuntimeId::from(Uuid::from_u128(7_030));
+        let request = onboarding_prepare_request(&state_path, candidate_runtime_id);
+        let issued = match state
+            .prepare_d17_onboarding_current(&provisional, &request, &SequenceIds::default())
+            .unwrap()
+        {
+            OnboardingPreparation::Issued(reservation) => reservation,
+            OnboardingPreparation::Existing(_) => panic!("first preparation must issue"),
+        };
+        assert!(
+            state
+                .cancel_d17_onboarding_current(
+                    &provisional,
+                    request.presentation_id,
+                    request.presentation_revision,
+                    request.slot_generation,
+                    request.candidate_runtime_id,
+                    &request.runtime_paths,
+                    Some(issued.operation_id()),
+                )
+                .unwrap()
+        );
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT phase, outcome_json, launch_token_id,
+                            launch_token_verifier, launch_token_expiry_monotonic,
+                            launch_claims_digest
+                     FROM compound_operations WHERE operation_id = ?1",
+                    [issued.operation_id().to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<String>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                            row.get::<_, Option<i64>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                "rolled_back".to_owned(),
+                D17_ONBOARDING_CANCELLED_OUTCOME.to_owned(),
+                None,
+                None,
+                None,
+                None,
+            )
+        );
+        for table in ["runtimes", "workstreams", "project_locations"] {
+            assert_eq!(
+                state
+                    .connection
+                    .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                        row.get::<_, i64>(0)
+                    })
+                    .unwrap(),
+                0,
+                "cancellation must remove only the fresh attempt graph",
+            );
+        }
+        validate_schema14(&state.connection).unwrap();
+        assert!(matches!(
+            state.consume_d17_onboarding_current(
+                &provisional,
+                &request,
+                issued.capability().token(),
+                request.now_monotonic_millis + 2,
+            ),
+            Err(StateError::OnboardingOperationUnavailable)
+        ));
+    }
+
+    #[test]
+    fn schema14_cancellation_remains_authoritative_after_expiry_boot_or_registry_change() {
+        for (case_index, case) in ["expired", "rebooted", "registry-write"]
+            .into_iter()
+            .enumerate()
+        {
+            let candidate_runtime_id =
+                RuntimeId::from(Uuid::from_u128(7_040 + u128::try_from(case_index).unwrap()));
+            let (_temporary, state_path, mut state, provisional, request, reservation) =
+                issued_d17_onboarding_fixture(candidate_runtime_id);
+            match case {
+                "expired" => {
+                    state
+                        .connection
+                        .execute(
+                            "UPDATE compound_operations
+                             SET launch_token_expiry_monotonic = 1
+                             WHERE operation_id = ?1",
+                            [reservation.operation_id().to_string()],
+                        )
+                        .unwrap();
+                }
+                "rebooted" => {
+                    let encoded: String = state
+                        .connection
+                        .query_row(
+                            "SELECT expected_revisions_json FROM compound_operations
+                             WHERE operation_id = ?1",
+                            [reservation.operation_id().to_string()],
+                            |row| row.get(0),
+                        )
+                        .unwrap();
+                    let mut intent: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+                    intent["boot_provenance"] =
+                        serde_json::Value::String(format!("d17-boot-v1:sha256:{}", "c".repeat(64)));
+                    state
+                        .connection
+                        .execute(
+                            "UPDATE compound_operations SET expected_revisions_json = ?1
+                             WHERE operation_id = ?2",
+                            rusqlite::params![
+                                serde_json::to_string(&intent).unwrap(),
+                                reservation.operation_id().to_string()
+                            ],
+                        )
+                        .unwrap();
+                }
+                "registry-write" => {
+                    state
+                        .connection
+                        .execute(
+                            "UPDATE host_identity SET registry_generation = 'unrelated-generation'
+                             WHERE singleton = 1",
+                            [],
+                        )
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                state
+                    .cancel_d17_onboarding_current(
+                        &provisional,
+                        request.presentation_id,
+                        request.presentation_revision,
+                        request.slot_generation,
+                        request.candidate_runtime_id,
+                        &request.runtime_paths,
+                        Some(reservation.operation_id()),
+                    )
+                    .unwrap(),
+                "{case} must not invalidate exact pre-effect cleanup authority"
+            );
+            assert!(matches!(
+                state.consume_d17_onboarding_current(
+                    &provisional,
+                    &request,
+                    reservation.capability().token(),
+                    request.now_monotonic_millis + 2,
+                ),
+                Err(StateError::OnboardingOperationUnavailable)
+            ));
+            let _ = state_path;
+        }
+    }
+
+    #[test]
+    fn schema14_cancellation_rejects_wrong_marker_or_request_without_mutation() {
+        let (_temporary, _state_path, mut state, provisional, request, reservation) =
+            issued_d17_onboarding_fixture(RuntimeId::from(Uuid::from_u128(7_031)));
+        let wrong_marker = state
+            .cancel_d17_onboarding_current(
+                &provisional,
+                Uuid::from_u128(702),
+                request.presentation_revision,
+                request.slot_generation,
+                request.candidate_runtime_id,
+                &request.runtime_paths,
+                Some(reservation.operation_id()),
+            )
+            .unwrap_err();
+        assert!(matches!(wrong_marker, StateError::OperationRequestMismatch));
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT phase FROM compound_operations WHERE operation_id = ?1",
+                    [reservation.operation_id().to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "capability_issued"
+        );
+
+        let wrong_request = state
+            .cancel_d17_onboarding_current(
+                &provisional,
+                request.presentation_id,
+                request.presentation_revision,
+                request.slot_generation,
+                request.candidate_runtime_id,
+                &request.runtime_paths,
+                Some(OperationId::from(Uuid::from_u128(7_099))),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            wrong_request,
+            StateError::OnboardingOperationUnavailable
+        ));
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT phase FROM compound_operations WHERE operation_id = ?1",
+                    [reservation.operation_id().to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "capability_issued"
+        );
+    }
+
+    #[test]
+    fn schema14_cancellation_refuses_runtime_owned_or_effect_phases() {
+        let (_temporary, _state_path, mut state, provisional, request, reservation) =
+            issued_d17_onboarding_fixture(RuntimeId::from(Uuid::from_u128(7_032)));
+        let ownership = state
+            .consume_d17_onboarding_current(
+                &provisional,
+                &request,
+                reservation.capability().token(),
+                request.now_monotonic_millis + 1,
+            )
+            .unwrap();
+        assert_eq!(
+            ownership.operation_id,
+            reservation.operation_id(),
+            "fixture must reach the runtime-ownership fence"
+        );
+        let runtime_owned = state
+            .cancel_d17_onboarding_current(
+                &provisional,
+                request.presentation_id,
+                request.presentation_revision,
+                request.slot_generation,
+                request.candidate_runtime_id,
+                &request.runtime_paths,
+                Some(reservation.operation_id()),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            runtime_owned,
+            StateError::OnboardingOperationUnavailable
+        ));
+
+        let (_temporary, _state_path, mut state, provisional, request, reservation) =
+            issued_d17_onboarding_fixture(RuntimeId::from(Uuid::from_u128(7_033)));
+        state
+            .connection
+            .execute(
+                "UPDATE compound_operations SET phase = 'provider_preparation'
+                 WHERE operation_id = ?1",
+                [reservation.operation_id().to_string()],
+            )
+            .unwrap();
+        let effect_phase = state
+            .cancel_d17_onboarding_current(
+                &provisional,
+                request.presentation_id,
+                request.presentation_revision,
+                request.slot_generation,
+                request.candidate_runtime_id,
+                &request.runtime_paths,
+                Some(reservation.operation_id()),
+            )
+            .unwrap_err();
+        assert!(matches!(
+            effect_phase,
+            StateError::OnboardingOperationUnavailable
+        ));
+        assert_eq!(
+            state
+                .connection
+                .query_row(
+                    "SELECT phase FROM compound_operations WHERE operation_id = ?1",
+                    [reservation.operation_id().to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            "provider_preparation"
+        );
     }
 
     #[test]

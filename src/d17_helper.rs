@@ -1,20 +1,14 @@
-//! Dormant D17 launch-helper state boundary.
+//! D17 launch-helper state boundary.
 //!
-//! This is deliberately a no-provider-effect seam.  It models the handoff a
-//! hidden helper will use after replacing the controlled provisional shell,
-//! and leaves actual provider preparation, `execve`, and post-exec proof to
-//! later provider-specific and reconciler slices.
-
-#![allow(
-    dead_code,
-    reason = "the D17 launch helper remains unreachable until the atomic Navigator cutover"
-)]
+//! This seam owns the state transitions used by the hidden helper after it
+//! replaces the controlled provisional shell. Provider-specific execution and
+//! post-exec proof remain in their dedicated adapters.
 
 use thiserror::Error;
 
 use crate::{
     d17_broker::{BrokerError, PrepareContext, consume, request_from_context},
-    domain::{OperationId, ProviderKind, RuntimeId},
+    domain::ProviderKind,
     state::d16::{OnboardingOwnership, OnboardingProviderExecutableIdentity},
     state::{D16State, ProvisionalLease, StateError},
 };
@@ -38,21 +32,6 @@ impl std::fmt::Debug for ProviderPreparation {
 }
 
 impl ProviderPreparation {
-    #[must_use]
-    pub(crate) const fn provider(&self) -> ProviderKind {
-        self.provider
-    }
-
-    #[must_use]
-    pub(crate) const fn operation_id(&self) -> OperationId {
-        self.ownership.operation_id
-    }
-
-    #[must_use]
-    pub(crate) const fn runtime_id(&self) -> RuntimeId {
-        self.ownership.runtime_id
-    }
-
     #[must_use]
     pub(crate) const fn ownership(&self) -> OnboardingOwnership {
         *self.ownership
@@ -131,15 +110,6 @@ impl std::fmt::Debug for OpenCodeSessionFence {
     }
 }
 
-impl OpenCodeSessionFence {
-    /// Returns the opaque native session only to the final direct provider
-    /// command builder. It is never exposed through snapshots or diagnostics.
-    #[must_use]
-    pub(crate) fn session(&self) -> &crate::domain::ProviderSessionId {
-        &self.session
-    }
-}
-
 impl std::fmt::Debug for ProviderExecFence {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -151,13 +121,15 @@ impl std::fmt::Debug for ProviderExecFence {
 }
 
 impl ProviderExecFence {
+    #[cfg(test)]
     #[must_use]
-    pub(crate) const fn operation_id(&self) -> OperationId {
+    pub(crate) const fn operation_id(&self) -> crate::domain::OperationId {
         self.ownership.operation_id
     }
 
+    #[cfg(test)]
     #[must_use]
-    pub(crate) const fn runtime_id(&self) -> RuntimeId {
+    pub(crate) const fn runtime_id(&self) -> crate::domain::RuntimeId {
         self.ownership.runtime_id
     }
 }

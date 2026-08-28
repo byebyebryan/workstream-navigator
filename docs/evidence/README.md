@@ -37,6 +37,7 @@ to make their old procedures appear current.
 - [D8.2 OpenCode Fork and recovery acceptance](acceptance/d8.2-opencode-fork-recovery.md)
 - [D12 ephemeral Workstream shell](acceptance/d12-ephemeral-shell.md)
 - [D16 host-local simplification](acceptance/d16-host-local.md)
+- [D17 shell-first managed-session onboarding](acceptance/d17-shell-first.md)
 
 ## Design spikes
 

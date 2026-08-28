@@ -1,20 +1,102 @@
 # Workstream Navigator V1 Roadmap
 
-Date: 2026-08-27
+Date: 2026-08-28
 
-Status: D0-D16 complete; D16 host-local implementation, disposable repository
-gate, and operator-gated live local and SSH-entered-host acceptance complete;
-source-installed operator beta. D17 shell-first managed-session onboarding is
-now routed by the ordinary Navigator: fresh roots initialize directly at schema
-14, idle schema-13 roots migrate transactionally only after a legacy
-presentation is absent, and an interrupted schema-13 or schema-14 restart
-resumes the same transition and stable provisional-lock installation. The Navigator starts
-the dedicated D17 pane, renders the pinned shell card, and `n` creates a
-selected Workstream's same-provider/same-Location session. The public
-arbitrary-location `register` and provider-override `new-workstream` commands
-are removed. This checkpoint has disposable automated evidence only; D17 live
-Codex/OpenCode promotion acceptance remains explicitly operator-gated and is
-not complete.
+Status: D0-D17 complete; source-installed operator beta. D17 shell-first
+managed-session onboarding is routed by the ordinary Navigator: fresh roots
+initialize directly at schema 14, idle schema-13 roots migrate transactionally
+only after a legacy presentation is absent, and interrupted schema-13 or
+schema-14 restart resumes the same transition and stable provisional-lock
+installation. The Navigator starts the dedicated D17 pane, renders the pinned
+Shell card, and `n` creates a selected Workstream's same-provider/
+same-Location session. The public arbitrary-location `register` and
+provider-override `new-workstream` commands are removed. The post-cutover
+reconciliation gaps are closed; the repository gate and sanitized,
+operator-gated live Codex/OpenCode acceptance pass with complete disposable
+cleanup.
+
+### 2026-08-28 D17 post-cutover reconciliation closure
+
+The ordinary shell-first flow is active: fresh schema-14 startup, initial shell
+materialization, brokered Codex/OpenCode handoff, managed-card promotion,
+attachment, lifecycle actions, and the two-page Navigator have disposable Rust
+evidence and sanitized operator-gated live acceptance.
+
+The correction pass closes the review findings without weakening the approved
+contract:
+
+- one routed lease-held reconciler handles interrupted `materializing`, dead
+  `materialized`, and terminal state-first rollback. It removes only exact
+  presentation-owned pre-handoff marker/runtime artifacts after conclusive
+  private-server absence, repairs a durable `RuntimeOwned` marker without
+  stopping or deleting the Runtime, and leaves live, unknown, ambiguous,
+  modified, or foreign evidence untouched;
+- the schema-14 cancellation transaction revokes an issued but unconsumed
+  capability, validates the complete presentation/slot/candidate/path/operation
+  identity, removes only the attempt-created graph, preserves pre-existing
+  Location/Project rows, records terminal `rolled_back`, and makes replay fail.
+  Expiry, reboot provenance, or an unrelated registry write does not erase the
+  exact pre-effect cleanup authority;
+- every retained public management command now uses the schema-14 snapshot and
+  revision-fenced action boundary. Passive queries have no provider/tmux side
+  effect, and direct Codex actions return typed readiness-required guidance
+  rather than installing a profile or opening native review; and
+- the retired schema-13 application facade, D16 Navigator/controller, and
+  `_navigator`, `_presentation_shell`, and `_provider_attach` routes are gone.
+  D16 remains only where transition, legacy-presentation proof/drain, and
+  historical migration require it; no compatibility workflow was added.
+
+The closure audit found one additional fresh-root gap: a provisional Codex
+launch could reach broker reservation before an observer profile was ready.
+The shell gate now checks first. Its wrapper keeps the original bounded argv
+only in process memory, asks explicit consent, hosts native `/hooks` review,
+and retries only after exact readiness. Managed actions use a typed
+process-local pending action and revalidate presentation, attachment,
+integration, trust, and original action revisions before automatic resume.
+Stopped/parked attachments may surrender only the disposable outer helper after
+exact private-Runtime absence proof; live or ambiguous attachments fail closed.
+
+The final review found that both native Codex review paths still cleaned their
+disposable cwd by pathname with recursive removal. They now share one
+presentation-owned review-directory boundary. A bounded marker records the
+presentation identity/revision, owner PID/birth, and parent/directory
+device/inode; cleanup quarantines and revalidates the exact empty directory and
+marker before non-recursive removal. A new review never adopts a dead owner.
+After presentation teardown has stopped both its pane and any provisional
+Runtime, the presentation owner completes interrupted cleanup. Replacement,
+non-empty, malformed, foreign, or ambiguous evidence remains untouched and
+blocks cleanup. Disposable tests cover normal cleanup, live/dead-owner fences,
+parent and directory replacement, malformed artifacts, retirement crash gaps,
+and presentation-close recovery.
+
+A first disposable mixed-provider live attempt then falsified two adjacent
+assumptions before final acceptance. The Codex profile-mutation fence counted a
+live OpenCode Runtime even though that provider cannot consume the Codex
+profile; it now skips OpenCode while still requiring exact absence for every
+Codex Runtime and failing closed on provider mismatch or ambiguous Codex
+evidence. OpenCode Park also exposed that a ready observer's child handle was
+dropped by the long-lived Navigator; the observer could exit as an unreaped
+zombie and turn cleanup into `recovery_required/unknown`. The Navigator now
+retains a detached waiter for every ready observer, and helper-only cleanup
+classifies an exact birth-matched Linux zombie as stopped without changing
+native provider process-group authority. That failed run was completely
+cleaned and is not acceptance evidence.
+
+The corrected repository gate passes with 501 tests plus package verification,
+license/advisory policy, formatting, Clippy, shell/Python checks, the disposable
+presentation harness, and the D17 source/CLI cutover check. The separate live
+acceptance passed both providers without submitting a provider prompt or turn:
+OpenCode reached its ready observer/binding state, while Codex retained the
+contractual `starting`/unbound blank landing until Park. Both preserved exact
+candidate Runtime/process/socket identity, derived a fresh Shell, parked
+cleanly, and received complete disposable cleanup. The Codex observer was also
+removed exactly after its Runtime stopped.
+
+The review-directory correction above was repository-gated after that live
+run. It changes only ownership/recovery of the empty native-review cwd; the
+exact post-review executable was not replayed against a live provider, so the
+acceptance record keeps the two artifact hashes and does not claim binary
+parity.
 
 ### 2026-08-27 D17 presentation-start falsification resolved
 
@@ -23,8 +105,8 @@ activation because it still selected the D16-only `_navigator` pane. Atomic
 cutover now starts `_navigator_d17` only after the schema-14 state boundary is
 ready. Disposable tests prove fresh schema-14 creation, idle schema-13
 migration, both restart recovery boundaries, and refusal to migrate beneath a
-live D16 presentation. The remaining acceptance work is provider-promotion and
-operator-gated live evidence, not a D16-pane fallback.
+live D16 presentation. Provider promotion and operator-gated live evidence
+subsequently passed; no D16-pane fallback was restored.
 
 The D0-D15 entries below preserve truthful historical implementation and
 acceptance evidence. D3 and later SSH, remote, cross-host, and combined
@@ -259,8 +341,8 @@ cutover; contextual `n` is the only same-provider/same-Location fast path.
 Passive process detection, hook-only adoption, pane-text inference, and
 provider launches that bypass the broker remain unmanaged.
 
-The dormant account-shell control adapter now has no routed CLI but composes
-both provider-specific final handoffs under the retained lease. Before either
+The routed account-shell control adapter composes both provider-specific final
+handoffs under the retained lease. Before either
 provider preparation it resolves the canonical native executable and commits
 only its bounded device/inode identity with `provider_preparation`; paths and
 argv remain transient. Post-exec proof compares that durable identity with
@@ -271,11 +353,12 @@ immediately before its temporary private server can `POST /session`, binds only
 the exact returned blank session, then records `provider_exec_started`. Any
 failure after ownership consumption that is not Codex's direct-exec known
 absence becomes `recovery_required`; OpenCode never retries or invents a
-replacement session. A dormant presentation-owned reconciliation adapter can
+replacement session. The presentation-owned reconciliation adapter can
 then compare the adopted pane's `/proc/<pid>/exe` identity against that durable
-record without provider I/O or process control. These adapters remain dormant
-and have exercised only disposable unit seams, not a user shell, provider
-installation, or live Runtime.
+record without provider I/O or process control. Historical spike descriptions
+call these adapters dormant; the current binary routes them, the repository
+gate exercises their disposable seams, and formal live provider acceptance is
+recorded separately.
 
 [Spike 0019](evidence/spikes/0019-brokered-onboarding-shell.md) validates a
 single-phase controlled-function-plus-`exec` candidate in a synthetic
@@ -295,20 +378,23 @@ conservative fresh-TUI parser for Codex `0.150.0` and OpenCode `1.18.23`; it
 does not validate helper/broker integration or provider effects.
 [Spike 0025](evidence/spikes/0025-d17-provisional-ownership.md) separately
 validates the serialized marker-to-owned-runtime winner model and action fence;
-concurrent implementation, recovery, and provider effects remain unproven.
+the spike itself does not prove concurrent production recovery or provider
+effects.
 [Spike 0026](evidence/spikes/0026-d17-provider-effect-journal.md) separately
 validates synthetic Codex no-effect and OpenCode known/ambiguous POST journal
 ordering; it does not validate the real state/helper/provider integration.
-The separate observer-ancestry revalidation passed on Codex `0.150.0`, while a
-real brokered Codex launch remains a D17 gate. D17.0 remains the first
-implementation gate for the complete handshake, grammar, wrapper, ownership,
-and recovery contract.
+The current binary now routes the production handshake and provider adapters;
+that implementation and its disposable Rust tests are separate from the spike
+evidence. The post-cutover correction closes conclusive pre-provider recovery
+and the remaining cross-actor race matrix in repository tests. Formal sanitized
+live Codex promotion passed with native operator trust and complete cleanup.
 OpenCode activation requires the D17-specific staged observer proof in
 design.md: it may not become attachable merely because the pane executable was
 proven. The retained blank-session endpoint/session handle is bound before the
 final exec, then a post-exec controller must record the unchanged native
 PID/birth, establish the exact detached observer, and commit final activation
-only after the observer is Ready. That work is not yet user-facing.
+only after the observer is Ready. That path is routed and passed disposable
+tests plus formal live OpenCode promotion.
 [Spike 0020](evidence/spikes/0020-opencode-1.18.23-revalidation.md) revalidates
 the OpenCode fresh-session/provider lifecycle assumptions on `1.18.23`; it does
 not replace the required D17 broker implementation and Bash/Zsh acceptance.
@@ -603,7 +689,7 @@ This document owns sequencing, exit gates, and progress.
 | D14 | Private tmux copy-mode scroll convergence | Complete (2026-08-18) |
 | D15 | Fluid local Workstream switching | Complete |
 | D16 | Host-local product simplification | Complete (2026-08-20) |
-| D17 | Shell-first managed-session onboarding | Planned |
+| D17 | Shell-first managed-session onboarding | Complete (2026-08-28) |
 
 The completed checkpoints describe the source-installed operator-beta at the
 time of their acceptance. [Spike 0009](evidence/spikes/0009-codex-hook-environment-boundary.md)
@@ -4311,12 +4397,12 @@ D16 closes only when all of the following are true:
 
 ## D17 - Shell-first managed-session onboarding
 
-Status: in progress. The product contract, schema-14 cutover, shell-first
-Navigator, marker-backed provisional Runtime, brokered Codex/OpenCode promotion,
-and managed-card attachment path are active. Disposable automated evidence and
-iterative local operator testing cover the current implementation, and the
-complete repository gate passes. Explicitly operator-gated live Codex/OpenCode
-acceptance remains open.
+Status: complete on 2026-08-28. The product contract, schema-14 cutover,
+shell-first Navigator, marker-backed provisional Runtime, brokered
+Codex/OpenCode promotion, managed-card attachment, recovery, public-command
+cutover, and retired-D16 removal are active. Disposable automated evidence, the
+complete repository gate, and explicitly operator-gated live Codex/OpenCode
+acceptance pass with complete cleanup.
 
 ### Goal
 
@@ -4695,7 +4781,7 @@ failure is recovery-required and cannot be retried as a clean launch; a known
 OpenCode binding remains on the same Runtime/Workstream for exact recovery or
 resume and never receives a second POST.
 
-### Evidence basis and remaining falsification gates
+### Evidence basis and closed falsification gates
 
 - Spike 0019 proves only a single-phase controlled-function-plus-`exec`
   candidate. Spike 0021 validates the narrow synthetic
@@ -4707,16 +4793,19 @@ non-login baseline parity and its Bash login preflight, Spike 0023 separately
 validates the isolated schema-14 stable-lock lifecycle, and Spike 0024 pins the
 versioned fresh-TUI grammar. The probes do not prove their cross-actor
 integration, cancellation/crash recovery, or native provider effects.
-  The separate Codex `0.150.0` run revalidates observer ancestry only; real
-  native Codex promotion, terminal behavior, and output retention remain exit
-  gates.
-- D17.0 is the first falsification gate: disposable Bash/Zsh evidence must
-  validate or reject the two-phase handshake, one marker-backed candidate
+  The separate Codex `0.150.0` spike revalidates observer ancestry only. The
+  D17 acceptance record separately proves real native promotion, exact process
+  and socket continuity, the content-free blank landing, Park, observer
+  removal, and cleanup.
+- D17.0 production paths and disposable tests now cover the original
+  repository falsification surface, including the post-cutover recovery and
+  observer-readiness corrections. The enforced matrix validates the two-phase
+  handshake, one marker-backed candidate
   RuntimeId with final full-UUID `RuntimePaths` fields (directory, socket,
   configuration, and session), exact non-login wrapper startup and function
   precedence, bounded argv handling, provider grammar, signals, cancellation,
-  crash gaps, and shell-leader PID/birth/process-group preservation before
-  production onboarding work begins. It must prove the schema/HostId transaction
+  crash gaps, and shell-leader PID/birth/process-group preservation. It must
+  prove the schema/HostId transaction
   commits schema-14 ownership and `pending` lease metadata before lock
   creation/recognition, that schema-13 code/path does neither, and that
   pending-before-file, file-before-ready, ready-steady-state, and crash/restart
@@ -4777,22 +4866,26 @@ integration, cancellation/crash recovery, or native provider effects.
   only to the unproven Runtime; selecting the fresh card may attach its separate
   provisional server but grants no authority over that Runtime.
 - Spike 0020 passes the bounded OpenCode `1.18.23` fresh-session/provider
-  lifecycle revalidation. It supports the adapter contract but is not evidence
-  that OpenCode promotion through the D17 broker is implemented.
-- Before implementation can rely on account-shell interception, disposable
-  tests must prove the exact function, quoting, argument, signal, and `exec`
+  lifecycle revalidation. It supports the adapter contract; current production
+  routing and formal live promotion are separate passing evidence.
+- D17.0 repository closure includes disposable tests for the exact function,
+  quoting, argument, signal, and `exec`
   behavior for both Bash and Zsh. Login-shell mode and unsupported or ambiguous
   startup contexts must show bounded unavailable guidance and must not launch a
   managed provider. A missing/deleted/unsafe/ambiguous seed cwd must likewise
   fail closed without fallback or Project authority.
-- The broker must prove how Codex contextual observer readiness completes
-  before final `exec`, and how OpenCode's non-idempotent blank-session
-  precreation remains journaled under the same reserved Runtime authority.
+- The broker suite proves Codex observer readiness before reservation/final
+  `exec`, and keeps OpenCode's non-idempotent blank-session precreation
+  journaled under the same reserved Runtime authority.
 
 ### Implementation slices
 
-1. **D17.0 handshake and grammar falsification.** Build disposable synthetic
-   Bash/Zsh evidence for the two-phase prepare-token-helper handshake, exact
+The descriptions below preserve the approved delivery decomposition. Their
+current reconciliation status is explicit in each heading; repository and live
+evidence remain separately identified.
+
+1. **D17.0 handshake and grammar falsification — repository complete.** Build disposable
+   synthetic Bash/Zsh evidence for the two-phase prepare-token-helper handshake, exact
    non-login wrapper startup/baseline behavior, closed fresh-TUI grammar,
    bounded argument transfer, signals, cancellation, crash gaps, and
    shell-leader PID/birth/process-group preservation. Exercise one
@@ -4814,12 +4907,12 @@ integration, cancellation/crash recovery, or native provider effects.
    premature action, stuck operation, blind rollback, duplicate ownership/shell,
    or second POST. Exercise issuance-to-helper cancellation/crash, replay,
    expiry, duplicate helper, and every bound-claim mismatch before provider
-  effect. Spikes 0021-0024 close only the narrow two-phase topology,
-  account-wrapper, isolated stable-lock, and versioned grammar risks; their
-  listed limits and every unresolved falsification above still stop the
-  production slices.
-2. **Dormant/test-only provisional ownership.** Add the presentation-scoped
-   ownership/card model and private provisional server behind internal test
+   effect. Spikes 0021-0024 close only the narrow two-phase topology,
+   account-wrapper, isolated stable-lock, and versioned grammar risks; the
+   production suite supplies the integrated evidence those historical probes
+   deliberately did not.
+2. **Dormant/test-only provisional ownership — implemented and activated.** Add
+   the presentation-scoped ownership/card model and private provisional server behind internal test
    seams, including deterministic presentation seed cwd, exact final-form
    candidate `RuntimePaths` fields (directory, socket, configuration, and
    session), fresh `slot_generation`, singleton derivation, detach/reattach,
@@ -4828,8 +4921,8 @@ integration, cancellation/crash recovery, or native provider effects.
    remains exactly usable through this slice and the next slices; do not remove
    or repurpose its Projects, picker, browser, refresh, or provider-choice
    paths yet.
-3. **Broker, journal, and migration support.** Add the prepare broker, hidden
-   launch-helper boundary, request authentication, bounded Git-root and
+3. **Broker, journal, and migration support — implemented.** Add the prepare
+   broker, hidden launch-helper boundary, request authentication, bounded Git-root and
    provider-grammar adapters, bounded `runtime_owned_launching` through
    `provider_exec_proven`/known-absent/recovery-required phases, the host-local
    no-provider-effect reconciler, and crash/recovery journal support while D16
@@ -4837,13 +4930,15 @@ integration, cancellation/crash recovery, or native provider effects.
    Migration groundwork may understand schema 14, but does not remove the D16
    settings or action surface before the replacement is ready. D16 onboarding
    remains exactly usable through slice 4.
-4. **Provider promotion.** Complete Codex observer-readiness and OpenCode
-   blank-session preparation inside the onboarding journal, preserve exact
+4. **Provider promotion — complete.** Complete
+   Codex observer-readiness and OpenCode blank-session preparation inside the onboarding journal, preserve exact
    Runtime/process authority, provider-exec proof, and conclusive versus
    ambiguous effects through the validated helper handoff for both Bash and Zsh.
-   This work stays behind internal seams until the atomic cutover.
-5. **Atomic schema-14 and Navigator cutover.** In one coherent product
-   cutover, migrate schema 13 transactionally to 14, remove
+   This work stayed behind internal seams until the atomic cutover and is now
+   routed by the ordinary D17 flow.
+5. **Atomic schema-14 and Navigator cutover — complete.** In one coherent
+   product cutover, migrate schema 13
+   transactionally to 14, remove
    `ProjectBrowserSettings` and Project-browser action DTOs, remove the
    Projects/provider-picker/browser/refresh UI, render the pinned shell card
    and in-place promotion, keep Archived, and make `n` the same-provider/
@@ -4852,12 +4947,15 @@ integration, cancellation/crash recovery, or native provider effects.
    equivalent `host register-checkout` form in this same cutover. D16 ordinary
    onboarding stays available until this replacement is complete; no hidden
    D16 compatibility behavior remains after cutover.
-6. **Recovery and dead-code cleanup.** Reconcile interrupted onboarding,
-   remove dead D16 chooser/registration code and the public arbitrary-location
-   registration command after the atomic cutover rather than preserving hidden
-   compatibility behavior, and keep bypassed provider launches unmanaged.
-7. **Acceptance and operator docs.** Run focused tests, complete repository
-   gates, and explicitly operator-gated live Codex/OpenCode shell promotion
+6. **Recovery and dead-code cleanup — complete.** Reconcile
+   interrupted onboarding, move each retained public management command to an
+   exact schema-14 boundary or remove it through an explicit product decision,
+   remove dead D16 chooser/registration code and hidden routes after the atomic
+   cutover rather than preserving compatibility behavior, and keep bypassed
+   provider launches unmanaged.
+7. **Acceptance and operator docs — complete.** Run focused tests, complete
+   repository gates, and explicitly
+   operator-gated live Codex/OpenCode shell promotion
    with sanitized evidence and complete disposable cleanup.
 
 Each slice is independently reviewable and runs its focused tests plus diff
@@ -4867,8 +4965,10 @@ checks. `scripts/check` is mandatory before every checkpoint commit.
 
 D17 closes only when all of the following are true:
 
-- exactly one derived provisional shell card is visible, lazily materialized
-  with one fresh `slot_generation`, one marker-backed candidate RuntimeId, and
+- exactly one derived provisional shell card is visible. Fresh presentation
+  startup materializes it only after both owned panes are proven; each later
+  derived card is materialized on explicit `Enter`, with one fresh
+  `slot_generation`, one marker-backed candidate RuntimeId, and
   final full-UUID `RuntimePaths` fields (directory, socket, configuration, and
   session). It remains usable across managed-card switching in the same
   presentation, starts clean shells at the presentation seed cwd, preserves a

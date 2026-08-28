@@ -5,9 +5,12 @@ coding-agent workstreams on the machine where it is running. It adds
 organization, attachment, status, and a few compound workstream actions
 around the provider's native terminal UI.
 
-> **D17 status:** implementation is in progress. The shell-first Navigator and
-> brokered Codex/OpenCode promotion path are active and the repository gate
-> passes; final operator-gated live acceptance remains open. See the
+> **D17 status:** complete. The shell-first Navigator and brokered
+> Codex/OpenCode promotion path are active. Exact pre-provider recovery,
+> schema-14 public-command routing, retired-D16 cleanup, and fresh-state Codex
+> observer readiness are implemented. The repository gate and sanitized,
+> operator-gated live Codex/OpenCode acceptance pass with complete disposable
+> cleanup. See the
 > [roadmap](docs/roadmap.md#d17---shell-first-managed-session-onboarding).
 
 ## Host-local by design
@@ -76,20 +79,29 @@ managed Workstream while adding a fresh Shell card.
 ## Observer readiness
 
 Observer setup is not a Hosts page, settings page, or manual normal-workflow
-mode. Startup detects readiness read-only. If a requested Codex Start, Resume,
-Fork, or recovery action needs an unready observer, WSNav captures that exact
-intent and its revisions, then offers a contextual guide.
+mode. Startup detects readiness read-only. Before a provisional shell can
+reserve a Codex launch, its process-local wrapper asks for explicit consent and
+opens native review; the original bounded argv remains only in shell memory and
+is retried only after exact readiness. If an existing managed Codex Start,
+Resume, Fork, or recovery action needs an unready observer, WSNav captures that
+exact intent and its revisions, then offers the same contextual review in the
+right pane.
 
-The guide asks for explicit consent before creating or updating one exact
-WSNav-owned profile, opens the provider's native trust review without granting
-trust, and resumes the captured intent only after exact readiness and revision
-revalidation. Declining changes nothing. Foreign, modified, disabled,
-ambiguous, or live-Runtime-blocked integration state fails closed while
+The review path creates or updates one exact WSNav-owned profile only after
+consent, opens the provider's native trust UI without granting trust, and
+continues only after exact readiness and revision revalidation. Declining
+changes nothing. Foreign, modified, disabled,
+ambiguous, or live-Codex-Runtime-blocked integration state fails closed while
 existing Runtime attachment remains available. Exact profile removal is an
 exceptional cleanup operation, not a setup option; it verifies ownership,
-preserves foreign or modified state, and refuses while managed Runtimes are
-live. A non-interactive CLI request returns bounded guidance to use
+preserves foreign or modified state, and refuses while managed Codex Runtimes
+are live. A non-interactive CLI request returns bounded guidance to use
 interactive `wsnav` rather than installing or reviewing a profile.
+
+Its empty review cwd is owned by the exact presentation and removed only after
+bounded process and filesystem identity checks. Cleanup is non-recursive;
+interrupted cleanup is completed by presentation teardown after possible users
+have stopped, while changed or non-empty paths are preserved.
 
 ## The D16 state boundary
 

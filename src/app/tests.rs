@@ -1,30 +1,165 @@
-use std::fmt::Write as _;
-
 use super::{
-    HostRegistry, IntegrationLifecycle, ObserverProfile, Path, Presentation, StateRoot,
+    StateRoot,
     cli::{
-        Cli, Commands, is_d17_shell_gate_command, is_d17_shell_launch_helper_command,
-        is_observer_command, is_provider_pane_command,
+        Cli, Commands, is_d17_observer_setup_command, is_d17_shell_gate_command,
+        is_d17_shell_launch_helper_command, is_observer_command, is_provider_pane_command,
     },
     dispatch,
     model::AppError,
-    observer::{finalize_native_trust, prepare_observer_activation_with_manager},
 };
-use crate::domain::RandomIdGenerator;
+use crate::{
+    domain::RandomIdGenerator,
+    provider::codex::profile::{OBSERVER_PROFILE_SCHEMA_VERSION, ProfileOwnership},
+    state::IntegrationLifecycle,
+};
 use clap::{CommandFactory as _, Parser as _};
 
-fn fresh_root(temporary: &tempfile::TempDir) -> StateRoot {
-    let path = temporary.path().join("state");
-    let root = StateRoot::create(&path).unwrap();
-    crate::state::fresh_create(&path, &RandomIdGenerator).unwrap();
-    root
+fn schema14_workstream_fixture() -> (tempfile::TempDir, StateRoot, crate::domain::WorkstreamId) {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_path = temporary.path().join("state");
+    let checkout = temporary.path().join("checkout");
+    std::fs::create_dir(&checkout).unwrap();
+    let mut state = crate::state::fresh_create(&state_path, &RandomIdGenerator).unwrap();
+    let registration = state
+        .register_project_location_with_initial_workstream(
+            &checkout,
+            "checkout",
+            None,
+            None,
+            crate::domain::ProviderKind::Codex,
+            &RandomIdGenerator,
+        )
+        .unwrap();
+    drop(state);
+
+    let transition_path = state_path.join(crate::state::TRANSITION_LOCK_FILE);
+    let transition_file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&transition_path)
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&transition_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    drop(transition_file);
+    let root = StateRoot::select(&state_path);
+    let lease = crate::state::acquire_transition_lease(&state_path).unwrap();
+    let mut state = crate::state::open_cutover_transition(&root, &lease).unwrap();
+    state.migrate_schema13_to14(&lease).unwrap();
+    drop(state);
+    drop(lease);
+    std::fs::remove_file(transition_path).unwrap();
+
+    (temporary, root, registration.workstream.workstream_id)
 }
 
-fn open_registry(root: &StateRoot) -> HostRegistry {
-    crate::state::open_current_only(root)
-        .unwrap()
-        .into_host_registry()
-        .unwrap()
+#[test]
+fn retained_passive_commands_open_schema14_without_provider_effects() {
+    let operations = tempfile::tempdir().unwrap();
+    let operations_state = operations.path().join("state");
+    drop(crate::state::fresh_create_d17(&operations_state, &RandomIdGenerator).unwrap());
+    let operations_cli = Cli::try_parse_from([
+        "wsnav",
+        "--state-root",
+        operations_state.to_str().unwrap(),
+        "operations",
+    ])
+    .unwrap();
+    assert!(dispatch::execute(operations_cli).is_ok());
+
+    let (_temporary, root, workstream_id) = schema14_workstream_fixture();
+    let status_cli = Cli::try_parse_from([
+        "wsnav",
+        "--state-root",
+        root.base().to_str().unwrap(),
+        "status",
+        &workstream_id.to_string(),
+    ])
+    .unwrap();
+    assert!(dispatch::execute(status_cli).is_ok());
+}
+
+#[test]
+fn retained_observer_commands_use_the_schema14_boundary() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_path = temporary.path().join("state");
+    drop(crate::state::fresh_create_d17(&state_path, &RandomIdGenerator).unwrap());
+
+    let doctor = Cli::try_parse_from([
+        "wsnav",
+        "--state-root",
+        state_path.to_str().unwrap(),
+        "doctor",
+    ])
+    .unwrap();
+    assert!(dispatch::execute(doctor).is_ok());
+
+    let remove = Cli::try_parse_from([
+        "wsnav",
+        "--state-root",
+        state_path.to_str().unwrap(),
+        "remove-observer",
+    ])
+    .unwrap();
+    assert!(matches!(
+        dispatch::execute(remove),
+        Err(AppError::ObserverNotInstalled)
+    ));
+}
+
+#[test]
+fn direct_codex_start_refuses_unready_observer_without_mutating_schema14_state() {
+    let (temporary, root, workstream_id) = schema14_workstream_fixture();
+    let codex_home = temporary.path().join("codex");
+    std::fs::create_dir(&codex_home).unwrap();
+    let profile = codex_home.join("wsnav-observer.config.toml");
+    let ownership = ProfileOwnership {
+        canonical_path: profile,
+        owner_id: "test-owner".to_owned(),
+        profile_schema_version: OBSERVER_PROFILE_SCHEMA_VERSION,
+        hook_executable: std::env::current_exe().unwrap(),
+        content_hash: "test-hash".to_owned(),
+    };
+    let state = crate::state::open_d17_current_only(&root).unwrap();
+    let mut registry = state.into_d17_host_registry().unwrap();
+    let expected_integration = registry
+        .record_codex_integration(ownership, IntegrationLifecycle::TrustPending)
+        .unwrap();
+    drop(registry);
+    let start = Cli::try_parse_from([
+        "wsnav",
+        "--state-root",
+        root.base().to_str().unwrap(),
+        "start",
+        &workstream_id.to_string(),
+    ])
+    .unwrap();
+
+    assert!(matches!(
+        dispatch::execute(start),
+        Err(AppError::D17ObserverReadinessRequired)
+    ));
+    let state = crate::state::open_d17_current_only(&root).unwrap();
+    assert_eq!(
+        state.d17_codex_integration().unwrap(),
+        Some(expected_integration)
+    );
+    assert!(
+        state
+            .d17_onboarding_workstream_projections()
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        state
+            .into_d17_host_registry()
+            .unwrap()
+            .runtime_for_workstream(workstream_id)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -122,36 +257,6 @@ fn normal_d17_startup_resumes_a_schema13_transition_before_opening_a_presentatio
     assert_eq!(
         state.schema_version().unwrap(),
         crate::state::D17_HOST_SCHEMA_VERSION
-    );
-}
-
-#[test]
-fn normal_d17_startup_refuses_to_migrate_beneath_a_live_d16_presentation() {
-    let temporary = tempfile::tempdir().unwrap();
-    let state_path = temporary.path().join("state");
-    let root = StateRoot::create(&state_path).unwrap();
-    drop(crate::state::fresh_create(&state_path, &RandomIdGenerator).unwrap());
-    let navigator = temporary.path().join("navigator-fixture");
-    std::fs::write(&navigator, "#!/bin/sh\nexec sleep 60\n").unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&navigator, std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-    let presentation = Presentation::fresh_with_executable(&state_path, navigator);
-    presentation.start().unwrap();
-
-    let result = dispatch::prepare_d17_navigator_state(&root);
-    presentation.close().unwrap();
-
-    assert!(matches!(
-        result,
-        Err(AppError::D17CutoverNeedsPresentationClosed)
-    ));
-    let state = crate::state::open_current_only(&root).unwrap();
-    assert_eq!(
-        state.schema_version().unwrap(),
-        crate::state::D16_HOST_SCHEMA_VERSION
     );
 }
 
@@ -315,21 +420,9 @@ fn state_free_opencode_helpers_are_hidden_and_not_observer_or_provider_pane_comm
 }
 
 #[test]
-fn provider_pane_helpers_are_local_and_silent() {
-    let local = Cli::try_parse_from([
-        "wsnav",
-        "_provider_attach",
-        "00000000-0000-0000-0000-000000000001",
-        "--presentation-socket",
-        "/state/presentation/presentation-0123456789ab/tmux.sock",
-        "--presentation-session",
-        "wsnav-presentation-0123456789ab",
-        "--attempt-id",
-        "00000000-0000-0000-0000-000000000002",
-    ])
-    .unwrap();
-    assert!(is_provider_pane_command(local.command.as_ref()));
-    assert!(!is_observer_command(local.command.as_ref()));
+fn retired_provider_and_presentation_helpers_are_unparseable_but_d17_control_is_typed() {
+    assert!(Cli::try_parse_from(["wsnav", "_navigator"]).is_err());
+    assert!(Cli::try_parse_from(["wsnav", "_provider_attach"]).is_err());
     assert!(Cli::try_parse_from(["wsnav", "_provider_remote_attach"]).is_err());
 
     let d17 = Cli::try_parse_from([
@@ -361,25 +454,67 @@ fn provider_pane_helpers_are_local_and_silent() {
     assert!(is_provider_pane_command(d17.command.as_ref()));
     assert!(!is_observer_command(d17.command.as_ref()));
 
-    let review = Cli::try_parse_from(["wsnav", "_observer_review"]).unwrap();
-    assert!(is_provider_pane_command(review.command.as_ref()));
-    assert!(!is_observer_command(review.command.as_ref()));
-    let shell = Cli::try_parse_from([
+    assert!(Cli::try_parse_from(["wsnav", "_observer_review"]).is_err());
+    assert!(Cli::try_parse_from(["wsnav", "_presentation_shell"]).is_err());
+    assert!(Cli::try_parse_from(["wsnav", "_presentation_ssh_shell"]).is_err());
+
+    let control = Cli::try_parse_from([
         "wsnav",
-        "_presentation_shell",
+        "_presentation_control",
         "--presentation-socket",
         "/state/presentation/presentation-0123456789ab/tmux.sock",
         "--presentation-session",
         "wsnav-presentation-0123456789ab",
-        "--shell",
-        "/bin/sh",
-        "--cwd",
-        "/tmp/project",
+        "--action",
+        "focus-next",
+        "--source-pane",
+        "%0",
+        "--client-name",
+        "/dev/pts/9",
     ])
     .unwrap();
-    assert!(is_provider_pane_command(shell.command.as_ref()));
-    assert!(!is_observer_command(shell.command.as_ref()));
-    assert!(Cli::try_parse_from(["wsnav", "_presentation_ssh_shell"]).is_err());
+    assert!(matches!(
+        control.command.as_ref(),
+        Some(Commands::PresentationControl { action, .. }) if action == "focus-next"
+    ));
+    assert!(is_provider_pane_command(control.command.as_ref()));
+
+    let setup = Cli::try_parse_from([
+        "wsnav",
+        "_d17_observer_setup",
+        "--shell-leader-pid",
+        "42",
+        "--consent",
+    ])
+    .unwrap();
+    assert!(is_d17_observer_setup_command(setup.command.as_ref()));
+    assert!(!is_provider_pane_command(setup.command.as_ref()));
+}
+
+#[test]
+fn observer_setup_decline_returns_failure_without_opening_or_mutating_state() {
+    let temporary = tempfile::tempdir().unwrap();
+    let state_path = temporary.path().join("state");
+    drop(crate::state::fresh_create_d17(&state_path, &RandomIdGenerator).unwrap());
+    let cli = Cli {
+        state_root: Some(state_path.clone()),
+        command: Some(Commands::D17ObserverSetup {
+            shell_leader_pid: 42,
+            consent: false,
+        }),
+    };
+    assert!(matches!(
+        dispatch::execute(cli),
+        Err(AppError::D17ShellControlUnavailable)
+    ));
+    let state = crate::state::open_d17_current_only(&StateRoot::select(&state_path)).unwrap();
+    assert!(state.d17_codex_integration().unwrap().is_none());
+    assert!(
+        state
+            .d17_onboarding_workstream_projections()
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[test]
@@ -443,140 +578,4 @@ fn normal_help_and_parser_exclude_retired_surfaces() {
             "{retired}"
         );
     }
-}
-
-#[test]
-fn native_trust_is_recorded_only_after_codex_completes_the_exact_review() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = fresh_root(&temporary);
-    let mut registry = open_registry(&root);
-    let manager = ObserverProfile::new(
-        temporary.path().join("codex-home"),
-        temporary.path().join("bin/wsnav"),
-        root.base(),
-    );
-    let ownership = manager.install("owner".to_owned(), None).unwrap();
-    registry
-        .record_codex_integration(ownership.clone(), IntegrationLifecycle::TrustPending)
-        .unwrap();
-
-    assert!(!finalize_native_trust(&mut registry, &manager, &ownership).unwrap());
-
-    std::fs::write(
-        manager.path(),
-        format!(
-            "{}{}",
-            manager.rendered(),
-            complete_native_trust_suffix(&manager)
-        ),
-    )
-    .unwrap();
-
-    assert!(finalize_native_trust(&mut registry, &manager, &ownership).unwrap());
-    assert_eq!(
-        registry.codex_integration().unwrap().unwrap().lifecycle,
-        IntegrationLifecycle::Ready
-    );
-}
-
-#[test]
-fn navigator_activation_creates_one_owned_profile_and_requires_native_review() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = fresh_root(&temporary);
-    let mut registry = open_registry(&root);
-    let manager = test_observer_profile(temporary.path(), &root);
-
-    let activation =
-        prepare_observer_activation_with_manager(&root, &mut registry, &manager).unwrap();
-
-    assert_eq!(
-        activation,
-        super::observer::ObserverActivation::ReviewRequired
-    );
-    assert!(manager.path().is_file());
-    assert_eq!(
-        registry.codex_integration().unwrap().unwrap().lifecycle,
-        IntegrationLifecycle::TrustPending
-    );
-}
-
-#[test]
-fn navigator_activation_reopens_missing_native_trust_without_setup_command() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = fresh_root(&temporary);
-    let mut registry = open_registry(&root);
-    let manager = test_observer_profile(temporary.path(), &root);
-    let ownership = manager.install("owner".to_owned(), None).unwrap();
-    registry
-        .record_codex_integration(ownership, IntegrationLifecycle::Ready)
-        .unwrap();
-
-    let activation =
-        prepare_observer_activation_with_manager(&root, &mut registry, &manager).unwrap();
-
-    assert_eq!(
-        activation,
-        super::observer::ObserverActivation::ReviewRequired
-    );
-    assert_eq!(
-        registry.codex_integration().unwrap().unwrap().lifecycle,
-        IntegrationLifecycle::TrustPending
-    );
-}
-
-#[test]
-fn navigator_activation_migrates_an_exact_prior_executable_before_review() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = fresh_root(&temporary);
-    let mut registry = open_registry(&root);
-    let previous = ObserverProfile::new(
-        temporary.path().join("codex-home"),
-        temporary.path().join("bin/wsnav-old"),
-        root.base(),
-    );
-    let ownership = previous.install("owner".to_owned(), None).unwrap();
-    registry
-        .record_codex_integration(ownership, IntegrationLifecycle::Ready)
-        .unwrap();
-    let manager = test_observer_profile(temporary.path(), &root);
-
-    let activation =
-        prepare_observer_activation_with_manager(&root, &mut registry, &manager).unwrap();
-
-    assert_eq!(
-        activation,
-        super::observer::ObserverActivation::ReviewRequired
-    );
-    let integration = registry.codex_integration().unwrap().unwrap();
-    assert_eq!(integration.lifecycle, IntegrationLifecycle::TrustPending);
-    assert_eq!(
-        integration.ownership.hook_executable,
-        temporary.path().join("bin/wsnav")
-    );
-    assert_eq!(
-        std::fs::read_to_string(manager.path()).unwrap(),
-        manager.rendered()
-    );
-}
-
-fn test_observer_profile(root: &Path, state_root: &StateRoot) -> ObserverProfile {
-    ObserverProfile::new(
-        root.join("codex-home"),
-        root.join("bin/wsnav"),
-        state_root.base(),
-    )
-}
-
-fn complete_native_trust_suffix(manager: &ObserverProfile) -> String {
-    let mut suffix = String::from("\n[hooks.state]\n");
-    for hook in ["session_start", "user_prompt_submit", "stop", "session_end"] {
-        let key =
-            serde_json::to_string(&format!("{}:{hook}:0:0", manager.path().display())).unwrap();
-        writeln!(
-            suffix,
-            "\n[hooks.state.{key}]\ntrusted_hash = \"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\""
-        )
-        .unwrap();
-    }
-    suffix
 }

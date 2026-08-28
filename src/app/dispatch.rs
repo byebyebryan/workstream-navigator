@@ -1,29 +1,22 @@
-use super::{
-    Presentation, StateRoot, materialize_initial_provisional_shell, run_d17_navigator,
-    run_local_navigator,
-};
+use super::{Presentation, StateRoot, materialize_initial_provisional_shell, run_d17_navigator};
 use super::{
     cli::{Cli, Commands},
     launch::{
-        OpenCodeObserverArguments, OpenCodeObserverStandbyArguments, attach_runtime,
-        opencode_observer, opencode_observer_standby, presentation_control, presentation_shell,
-        provider_attach, provider_attach_d17, provider_wait, runtime_launch,
+        OpenCodeObserverArguments, OpenCodeObserverStandbyArguments, attach_runtime_d17,
+        opencode_observer, opencode_observer_standby, presentation_control, provider_attach_d17,
+        provider_wait, runtime_launch,
     },
     local::observe_hook,
     model::{
         AppError, default_state_root, parse_operation, parse_provider, parse_revision,
         parse_workstream,
     },
-    observer::{doctor, observer_review, remove_observer},
+    observer::{ObserverReadiness, doctor, observer_readiness, remove_observer},
 };
 use std::io::Write as _;
 
-use crate::application::{
-    ApplicationAction, ApplicationError, ApplicationOutcome, ApplicationSnapshot, AttentionKind,
-    HostRegistryApplicationBackend, LocalApplication, ProviderCapability,
-    operating_system_hostname,
-};
 use crate::domain::ProviderKind;
+use crate::navigator::{ManagedAction, apply_managed_action};
 use crate::onboarding::valid_launch_capability_token;
 
 pub(super) fn execute(cli: Cli) -> Result<(), AppError> {
@@ -51,6 +44,13 @@ pub(super) fn execute(cli: Cli) -> Result<(), AppError> {
     } = command
     {
         return d17_launch_helper(&capability, &provider, &arguments);
+    }
+    if let Commands::D17ObserverSetup {
+        shell_leader_pid,
+        consent,
+    } = command
+    {
+        return d17_observer_setup(shell_leader_pid, consent);
     }
     if let Commands::OpenCodeServeBarrier {
         executable,
@@ -120,6 +120,9 @@ fn d17_shell_gate(
         crate::d17_shell_control::AccountShellGateOutcome::ExplicitlyUnmanaged => {
             Err(AppError::D17ShellGateUnmanaged)
         }
+        crate::d17_shell_control::AccountShellGateOutcome::ObserverReadinessRequired => {
+            Err(AppError::D17ObserverReadinessRequired)
+        }
         crate::d17_shell_control::AccountShellGateOutcome::Prepared(handoff) => {
             let capability = handoff.capability().token();
             if !valid_launch_capability_token(capability) {
@@ -158,14 +161,21 @@ fn d17_launch_helper(
     }
 }
 
+/// Runs the only interactive observer setup route.  The account-shell
+/// wrapper has already collected explicit consent; this hidden route merely
+/// revalidates the exact provisional shell, installs/updates the owned
+/// declaration, and hosts Codex's native `/hooks` review in that same pane.
+fn d17_observer_setup(shell_leader_pid: u32, consent: bool) -> Result<(), AppError> {
+    if !consent {
+        return Err(AppError::D17ShellControlUnavailable);
+    }
+    crate::d17_shell_control::prepare_observer_from_account_shell(shell_leader_pid)
+        .map_err(|_| AppError::D17ShellControlUnavailable)
+}
+
 fn execute_root_command(root: &StateRoot, command: Commands) -> Result<(), AppError> {
     match command {
         Commands::Navigator => navigator(root),
-        Commands::NavigatorPane {
-            presentation_socket,
-            presentation_session,
-        } => run_local_navigator(root, presentation_socket, presentation_session)
-            .map_err(AppError::D16Navigator),
         Commands::NavigatorPaneD17 {
             presentation_socket,
             presentation_session,
@@ -185,14 +195,7 @@ fn execute_root_command(root: &StateRoot, command: Commands) -> Result<(), AppEr
             &source_pane,
             &client_name,
         ),
-        Commands::PresentationShell {
-            presentation_socket,
-            presentation_session,
-            shell,
-            cwd,
-        } => presentation_shell(root, presentation_socket, presentation_session, shell, cwd),
         Commands::ProviderWait => provider_wait(),
-        Commands::ObserverReview => observer_review(root),
         command => execute_root_surface(root, command),
     }
 }
@@ -203,18 +206,6 @@ fn execute_root_command(root: &StateRoot, command: Commands) -> Result<(), AppEr
 )]
 fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppError> {
     match command {
-        Commands::ProviderAttach {
-            workstream_id,
-            presentation_socket,
-            presentation_session,
-            attempt_id,
-        } => provider_attach(
-            root,
-            &workstream_id,
-            presentation_socket,
-            presentation_session,
-            &attempt_id,
-        ),
         Commands::ProviderAttachD17 {
             workstream_id,
             expected_workstream_revision,
@@ -282,7 +273,9 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
         Commands::OpenCodeObserverStandby { .. } => {
             unreachable!("standby observer is dispatched before state-root creation")
         }
-        Commands::D17ShellGate { .. } | Commands::D17LaunchHelper { .. } => {
+        Commands::D17ShellGate { .. }
+        | Commands::D17LaunchHelper { .. }
+        | Commands::D17ObserverSetup { .. } => {
             unreachable!("D17 account-shell control is dispatched before state-root creation")
         }
         Commands::Doctor => exceptional_observer(root, false),
@@ -298,14 +291,11 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
         | Commands::Operations
         | Commands::RecoverOperation { .. }
         | Commands::Rename { .. }
-        | Commands::Acknowledge { .. } => execute_d16_local_command(root, command),
+        | Commands::Acknowledge { .. } => execute_d17_local_command(root, command),
         Commands::Navigator
-        | Commands::NavigatorPane { .. }
         | Commands::NavigatorPaneD17 { .. }
         | Commands::PresentationControl { .. }
-        | Commands::PresentationShell { .. }
         | Commands::ProviderWait
-        | Commands::ObserverReview
         | Commands::Hook
         | Commands::OpenCodeServeBarrier { .. }
         | Commands::OpenCodeServeGuardian { .. } => {
@@ -315,8 +305,8 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
 }
 
 fn exceptional_observer(root: &StateRoot, remove: bool) -> Result<(), AppError> {
-    let state = crate::state::open_current_only(&StateRoot::select(root.base()))?;
-    let registry = state.into_host_registry()?;
+    let state = crate::state::open_d17_current_only(&StateRoot::select(root.base()))?;
+    let registry = state.into_d17_host_registry()?;
     if remove {
         let mut registry = registry;
         remove_observer(root, &mut registry)
@@ -325,112 +315,125 @@ fn exceptional_observer(root: &StateRoot, remove: bool) -> Result<(), AppError> 
     }
 }
 
-fn open_local_application(
-    root: &StateRoot,
-) -> Result<LocalApplication<HostRegistryApplicationBackend>, AppError> {
-    LocalApplication::open_host_local(StateRoot::select(root.base()), operating_system_hostname())
-        .map_err(AppError::Application)
-}
-
+/// Runs the retained public scripting/diagnostic command matrix directly
+/// against the active schema-14 snapshot/action boundary.  Passive status and
+/// operation queries stop after the bounded snapshot read and never launch a
+/// provider or inspect tmux.
 #[allow(
     clippy::too_many_lines,
-    reason = "The public local command matrix remains one auditable typed-facade dispatch boundary."
+    reason = "the public D17 command matrix is one auditable revision-fenced boundary"
 )]
-fn execute_d16_local_command(root: &StateRoot, command: Commands) -> Result<(), AppError> {
-    let mut application = open_local_application(root)?;
-    let snapshot = application.snapshot().map_err(AppError::Application)?;
+fn execute_d17_local_command(root: &StateRoot, command: Commands) -> Result<(), AppError> {
+    let snapshot =
+        crate::d17_snapshot::read_snapshot(root).map_err(|_| AppError::D17AttachmentUnavailable)?;
     match command {
         Commands::ForkWorkstream {
             source_workstream_id,
         } => {
-            let source_id = parse_workstream(&source_workstream_id)?;
-            let source = find_workstream(&snapshot, source_id)?;
-            let capability = capability(&snapshot, source.provider)?;
-            if !capability.eligible_for_fork() {
-                return Err(AppError::NoEligibleLocalProvider);
-            }
-            apply_and_report(
-                &mut application,
-                ApplicationAction::Fork {
-                    source_workstream_id: source_id,
+            let source_workstream_id = parse_workstream(&source_workstream_id)?;
+            let source = d17_workstream(&snapshot, source_workstream_id)?;
+            require_direct_codex_observer_ready(root, source.provider)?;
+            apply_managed_action(
+                root,
+                ManagedAction::Fork {
+                    source_workstream_id,
                     expected_workstream_revision: source.revision,
                     provider: source.provider,
                 },
             )
+            .map_err(AppError::D17Navigator)?;
+            Ok(())
         }
         Commands::Start { workstream_id } => {
             let workstream_id = parse_workstream(&workstream_id)?;
-            let workstream = find_workstream(&snapshot, workstream_id)?;
-            apply_and_report(
-                &mut application,
-                ApplicationAction::Start {
+            let workstream = d17_workstream(&snapshot, workstream_id)?;
+            require_direct_codex_observer_ready(root, workstream.provider)?;
+            apply_managed_action(
+                root,
+                ManagedAction::Start {
                     workstream_id,
-                    expected_revision: workstream.revision,
+                    expected_workstream_revision: workstream.revision,
                     provider: workstream.provider,
                 },
             )
+            .map_err(AppError::D17Navigator)?;
+            Ok(())
         }
         Commands::Recover { workstream_id } => {
             let workstream_id = parse_workstream(&workstream_id)?;
-            let workstream = find_workstream(&snapshot, workstream_id)?;
-            apply_and_report(
-                &mut application,
-                ApplicationAction::Recover {
+            let workstream = d17_workstream(&snapshot, workstream_id)?;
+            require_direct_codex_observer_ready(root, workstream.provider)?;
+            apply_managed_action(
+                root,
+                ManagedAction::Recover {
                     workstream_id,
-                    expected_revision: workstream.revision,
+                    expected_workstream_revision: workstream.revision,
                     provider: workstream.provider,
                 },
             )
+            .map_err(AppError::D17Navigator)?;
+            Ok(())
         }
         Commands::Attach { workstream_id } => {
             let workstream_id = parse_workstream(&workstream_id)?;
-            let workstream = find_workstream(&snapshot, workstream_id)?;
+            let workstream = d17_workstream(&snapshot, workstream_id)?;
             let runtime = workstream
                 .runtime
-                .ok_or(AppError::NoRuntime(workstream_id))?;
-            application
-                .attach(crate::application::AttachEvidence {
-                    workstream_id,
-                    runtime_id: runtime.runtime_id,
-                    expected_workstream_revision: workstream.revision,
-                    expected_runtime_revision: runtime.revision,
-                })
-                .map_err(AppError::Application)?;
-            attach_runtime(root, workstream_id)
+                .ok_or(AppError::D17AttachmentUnavailable)?;
+            if workstream.onboarding.is_some() {
+                return Err(AppError::D17AttachmentUnavailable);
+            }
+            attach_runtime_d17(
+                root,
+                workstream_id,
+                workstream.revision,
+                runtime.runtime_id,
+                runtime.revision,
+            )
         }
         Commands::Park { workstream_id } => {
             let workstream_id = parse_workstream(&workstream_id)?;
-            let workstream = find_workstream(&snapshot, workstream_id)?;
-            apply_and_report(
-                &mut application,
-                ApplicationAction::Park {
+            let workstream = d17_workstream(&snapshot, workstream_id)?;
+            apply_managed_action(
+                root,
+                ManagedAction::Park {
                     workstream_id,
-                    expected_revision: workstream.revision,
+                    expected_workstream_revision: workstream.revision,
                 },
             )
+            .map_err(AppError::D17Navigator)?;
+            Ok(())
         }
         Commands::Archive {
             workstream_id,
             revision,
-        } => apply_and_report(
-            &mut application,
-            ApplicationAction::Archive {
-                workstream_id: parse_workstream(&workstream_id)?,
-                expected_revision: parse_revision(revision)?,
-            },
-        ),
+        } => {
+            apply_managed_action(
+                root,
+                ManagedAction::Archive {
+                    workstream_id: parse_workstream(&workstream_id)?,
+                    expected_workstream_revision: parse_revision(revision)?,
+                },
+            )
+            .map_err(AppError::D17Navigator)?;
+            Ok(())
+        }
         Commands::Restore {
             workstream_id,
             revision,
-        } => apply_and_report(
-            &mut application,
-            ApplicationAction::Restore {
-                workstream_id: parse_workstream(&workstream_id)?,
-                expected_revision: parse_revision(revision)?,
-            },
-        ),
+        } => {
+            apply_managed_action(
+                root,
+                ManagedAction::Restore {
+                    workstream_id: parse_workstream(&workstream_id)?,
+                    expected_workstream_revision: parse_revision(revision)?,
+                },
+            )
+            .map_err(AppError::D17Navigator)?;
+            Ok(())
+        }
         Commands::Status { workstream_id } => {
-            let workstream = find_workstream(&snapshot, parse_workstream(&workstream_id)?)?;
+            let workstream = d17_workstream(&snapshot, parse_workstream(&workstream_id)?)?;
             println!(
                 "workstream {} provider={:?} lifecycle={:?} archived={} revision={} runtime={}",
                 workstream.workstream_id,
@@ -440,14 +443,7 @@ fn execute_d16_local_command(root: &StateRoot, command: Commands) -> Result<(), 
                 workstream.revision.value(),
                 workstream.runtime.map_or_else(
                     || "none".to_owned(),
-                    |runtime| {
-                        let rendered_status = if runtime.observer_degraded {
-                            crate::domain::RuntimeStatus::Unknown
-                        } else {
-                            runtime.status
-                        };
-                        format!("{:?}/{}", rendered_status, runtime.revision.value())
-                    }
+                    |runtime| format!("{:?}/{}", runtime.status, runtime.revision.value()),
                 ),
             );
             Ok(())
@@ -471,79 +467,83 @@ fn execute_d16_local_command(root: &StateRoot, command: Commands) -> Result<(), 
                 .unresolved_operations
                 .iter()
                 .find(|operation| operation.operation_id == operation_id)
-                .ok_or_else(|| AppError::Application(ApplicationError::UnknownLocalIdentity))?;
-            apply_and_report(
-                &mut application,
-                ApplicationAction::RecoverOperation {
+                .ok_or(AppError::D17AttachmentUnavailable)?;
+            require_direct_codex_observer_ready(root, operation.provider)?;
+            apply_managed_action(
+                root,
+                ManagedAction::RecoverOperation {
                     operation_id,
-                    expected_revision: operation.revision,
+                    expected_operation_revision: operation.revision,
                     provider: operation.provider,
                 },
             )
+            .map_err(AppError::D17Navigator)?;
+            Ok(())
         }
         Commands::Rename {
             workstream_id,
             revision,
             name,
-        } => apply_and_report(
-            &mut application,
-            ApplicationAction::Rename {
-                workstream_id: parse_workstream(&workstream_id)?,
-                expected_revision: parse_revision(revision)?,
-                name,
-            },
-        ),
+        } => {
+            apply_managed_action(
+                root,
+                ManagedAction::Rename {
+                    workstream_id: parse_workstream(&workstream_id)?,
+                    expected_workstream_revision: parse_revision(revision)?,
+                    name,
+                },
+            )
+            .map_err(AppError::D17Navigator)?;
+            Ok(())
+        }
         Commands::Acknowledge {
             workstream_id,
             attention_revision,
-        } => apply_and_report(
-            &mut application,
-            ApplicationAction::AcknowledgeAttention {
-                workstream_id: parse_workstream(&workstream_id)?,
-                expected_revision: parse_revision(attention_revision)?,
-                kind: AttentionKind::Result,
-            },
-        ),
-        _ => unreachable!("non-local command reached the D16 local facade"),
-    }
-}
-
-fn apply_and_report(
-    application: &mut LocalApplication<HostRegistryApplicationBackend>,
-    action: ApplicationAction,
-) -> Result<(), AppError> {
-    match application.apply(action).map_err(AppError::Application)? {
-        ApplicationOutcome::ObserverReadinessRequired(_) => {
-            Err(AppError::ObserverReadinessGuideRequired)
+        } => {
+            apply_managed_action(
+                root,
+                ManagedAction::AcknowledgeResult {
+                    workstream_id: parse_workstream(&workstream_id)?,
+                    expected_attention_revision: parse_revision(attention_revision)?,
+                },
+            )
+            .map_err(AppError::D17Navigator)?;
+            Ok(())
         }
-        ApplicationOutcome::Applied { .. }
-        | ApplicationOutcome::Created { .. }
-        | ApplicationOutcome::BrowserListed(_)
-        | ApplicationOutcome::ProjectRefreshed { .. } => Ok(()),
+        _ => Err(AppError::D17AttachmentUnavailable),
     }
 }
 
-fn find_workstream(
-    snapshot: &ApplicationSnapshot,
-    workstream_id: crate::domain::WorkstreamId,
-) -> Result<&crate::application::WorkstreamSnapshot, AppError> {
-    snapshot
-        .active_workstreams()
-        .chain(snapshot.archived_workstreams())
-        .find(|workstream| workstream.workstream_id == workstream_id)
-        .ok_or_else(|| AppError::Application(ApplicationError::UnknownLocalIdentity))
+/// Direct scripting commands are intentionally non-interactive.  A Codex
+/// launch may proceed only when the exact observer profile is already Ready;
+/// setup, native trust review, and profile updates remain contextual UI/shell
+/// flows and never occur as a side effect of this boundary.
+fn require_direct_codex_observer_ready(
+    root: &StateRoot,
+    provider: ProviderKind,
+) -> Result<(), AppError> {
+    if provider != ProviderKind::Codex {
+        return Ok(());
+    }
+    let state = crate::state::open_d17_current_only(root)?;
+    let evidence =
+        observer_readiness(root, &state).map_err(|_| AppError::D17AttachmentUnavailable)?;
+    if evidence.readiness == ObserverReadiness::Ready {
+        Ok(())
+    } else {
+        Err(AppError::D17ObserverReadinessRequired)
+    }
 }
 
-fn capability(
-    snapshot: &ApplicationSnapshot,
-    provider: ProviderKind,
-) -> Result<ProviderCapability, AppError> {
+fn d17_workstream(
+    snapshot: &crate::d17_snapshot::D17Snapshot,
+    workstream_id: crate::domain::WorkstreamId,
+) -> Result<&crate::d17_snapshot::D17WorkstreamSnapshot, AppError> {
     snapshot
-        .provider_capabilities
+        .workstreams
         .iter()
-        .find(|capability| capability.provider == provider)
-        .copied()
-        .ok_or(AppError::NoEligibleLocalProvider)
+        .find(|workstream| workstream.workstream_id == workstream_id)
+        .ok_or(AppError::D17AttachmentUnavailable)
 }
 
 fn navigator(root: &StateRoot) -> Result<(), AppError> {
@@ -701,5 +701,7 @@ fn drain_only_presentation(
         proof.socket().to_path_buf(),
         proof.session_name().to_owned(),
     )?;
-    presentation.attach().map_err(AppError::Presentation)
+    presentation
+        .attach_legacy_drain()
+        .map_err(AppError::Presentation)
 }

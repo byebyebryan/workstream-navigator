@@ -48,16 +48,12 @@ pub(crate) enum AppError {
     #[cfg(not(unix))]
     #[error("native provider exited during the internal launch handoff")]
     RuntimeExited,
-    #[error("workstream {0} has no runtime")]
-    NoRuntime(WorkstreamId),
     #[error("CODEX_HOME cannot be determined")]
     CodexHomeUnavailable,
     #[error("observer profile is not installed; open wsnav to activate it")]
     ObserverNotInstalled,
     #[error("observer profile removal is refused while a managed runtime is live")]
     LiveRuntimePreventsRemoval,
-    #[error("observer activation is refused while a managed runtime is live")]
-    LiveRuntimePreventsObserverActivation,
     #[error(transparent)]
     Repository(#[from] crate::repository::RepositoryError),
     #[error(transparent)]
@@ -75,8 +71,6 @@ pub(crate) enum AppError {
     #[error(transparent)]
     AppServer(#[from] crate::provider::codex::app_server::AppServerError),
     #[error(transparent)]
-    D16Navigator(#[from] crate::navigator::D16NavigatorError),
-    #[error(transparent)]
     D17Navigator(#[from] crate::navigator::D17NavigatorError),
     #[error(transparent)]
     Presentation(#[from] crate::presentation::PresentationError),
@@ -87,17 +81,13 @@ pub(crate) enum AppError {
     #[error(transparent)]
     State(#[from] crate::state::StateError),
     #[error(transparent)]
-    Application(#[from] crate::application::ApplicationError),
-    #[error(transparent)]
     Startup(#[from] crate::startup::StartupError),
     #[error(transparent)]
     Cutover(#[from] crate::cutover::CutoverError),
-    #[error("the local action requires the Navigator observer guide and native review")]
-    ObserverReadinessGuideRequired,
-    #[error("no eligible local provider is available for this action")]
-    NoEligibleLocalProvider,
     #[error("the D17 account-shell command is explicitly unmanaged")]
     D17ShellGateUnmanaged,
+    #[error("the D17 Codex observer requires interactive setup")]
+    D17ObserverReadinessRequired,
     #[error("the D17 account-shell command is unavailable")]
     D17ShellControlUnavailable,
     #[error("the D17 runtime attachment is unavailable")]

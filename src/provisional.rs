@@ -1,14 +1,9 @@
 //! D17 presentation-private provisional-slot authority.
 //!
 //! This module owns only the bounded marker contract for an unregistered
-//! candidate Runtime.  It deliberately cannot create, attach, signal, or
-//! adopt a tmux server; the atomic Navigator cutover will compose it with the
-//! stable host lease, presentation proof, and broker/helper boundaries.
-
-#![allow(
-    dead_code,
-    reason = "the D17 provisional marker remains unreachable until the atomic Navigator cutover"
-)]
+//! candidate Runtime. It composes with the stable host lease, presentation
+//! proof, and broker/helper boundaries but cannot itself adopt a managed
+//! Runtime.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -27,7 +22,8 @@ use crate::{
         classify_d17_provisional_inventory,
     },
     runtime::{
-        NativeLaunch, PrivateRuntime, ProcessGroupProbe, RuntimePaths, RuntimeProbe, RuntimeStartup,
+        LinuxProcessProbe, NativeLaunch, PrivateRuntime, ProcessGroupProbe, RuntimePaths,
+        RuntimeProbe, RuntimeStartup, SystemTmux,
     },
     state::{D16State, ProvisionalLease, StateError},
 };
@@ -54,6 +50,7 @@ pub(crate) enum ProvisionalPhase {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg(test)]
 pub(crate) enum CleanupAuthority {
     ExactProvisional,
     None,
@@ -122,10 +119,6 @@ pub(crate) enum SlotError {
 /// Bounded failure from the D17 host-wide provisional-slot classifier. It
 /// retains no marker, Runtime path, journal, shell, or provider detail.
 #[derive(Debug, Error)]
-#[allow(
-    dead_code,
-    reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) enum HostInventoryError {
     #[error("D17 provisional state is unavailable")]
     State(#[from] StateError),
@@ -152,10 +145,6 @@ pub(crate) enum HostRetirementError {
 /// Runtime path, so a caller cannot turn an unavailable or occupied host into
 /// a discovery oracle.
 #[derive(Debug, Error)]
-#[allow(
-    dead_code,
-    reason = "the D17 materialization boundary remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) enum HostMaterializationError {
     #[error("D17 provisional state is unavailable")]
     Inventory(#[from] HostInventoryError),
@@ -171,20 +160,42 @@ pub(crate) enum HostMaterializationError {
     Slot(#[from] SlotError),
 }
 
+/// Bounded result of startup/close reconciliation for a pre-effect marker.
+/// `RuntimeOwned` means durable helper consumption won the race and the marker
+/// was repaired without touching the Runtime; `Cleaned` means exact candidate
+/// artifacts and any unconsumed graph were removed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PreHandoffRecovery {
+    Unchanged,
+    Cleaned,
+    RuntimeOwned,
+}
+
+/// Bounded refusal from pre-effect provisional recovery.  It intentionally
+/// carries no path, process, operation, or provider detail.
+#[derive(Debug, Error)]
+pub(crate) enum PreHandoffRecoveryError {
+    #[error("D17 provisional recovery state is unavailable")]
+    State(#[from] StateError),
+    #[error("D17 provisional recovery marker is unavailable")]
+    Slot(#[from] SlotError),
+    #[error("D17 provisional Runtime evidence is unavailable")]
+    Runtime,
+    #[error("D17 provisional recovery is ambiguous")]
+    Ambiguous,
+}
+
 const PROVISIONAL_MARKER_VERSION: u8 = 2;
 const MAX_PROVISIONAL_MARKER_BYTES: usize = 8 * 1024;
 const MAX_SHELL_BIRTH_BYTES: usize = 256;
 const MAX_TMUX_PANE_ID_BYTES: usize = 64;
+const PROVISIONAL_SHELL_ARTIFACT_NAMES: [&str; 2] = [".wsnav-d17-bashrc", ".zshrc"];
 pub(crate) const PROVISIONAL_MARKER_FILE: &str = "d17-provisional.json";
 
 /// Rebuilds the complete host-wide singleton inventory while retaining the
 /// stable provisional lease. It performs no marker, runtime, tmux, process,
 /// provider, or filesystem mutation; callers must revalidate the same lease
 /// again immediately before any later materialization step.
-#[allow(
-    dead_code,
-    reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) fn classify_host_inventory(
     state: &D16State,
     provisional_lease: &ProvisionalLease,
@@ -195,6 +206,361 @@ pub(crate) fn classify_host_inventory(
     provisional_lease.revalidate_for_mutation(state.root())?;
     classify_d17_provisional_inventory(state.root(), &registered_runtime_paths, &operations)
         .map_err(HostInventoryError::from)
+}
+
+/// Reconciles a marker that has not crossed the durable Runtime-owned fence.
+/// It is safe to call during every D17 startup/reconnect while the caller
+/// holds the host-wide provisional lease.  Live or unknown evidence remains
+/// untouched; only a missing private tmux server proves that no provisional
+/// shell remains to preserve.
+pub(crate) fn reconcile_pre_handoff_under_lease(
+    state: &mut D16State,
+    provisional_lease: &ProvisionalLease,
+    presentation_directory: &Path,
+) -> Result<PreHandoffRecovery, PreHandoffRecoveryError> {
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    reconcile_pre_handoff_with_runtime(
+        state,
+        provisional_lease,
+        presentation_directory,
+        &tmux,
+        &process_probe,
+    )
+}
+
+/// Testable seam for [`reconcile_pre_handoff_under_lease`].  The runtime probe
+/// is read-only; no process or tmux control occurs on this path.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn reconcile_pre_handoff_with_runtime(
+    state: &mut D16State,
+    provisional_lease: &ProvisionalLease,
+    presentation_directory: &Path,
+    tmux: &dyn crate::runtime::TmuxClient,
+    process_probe: &dyn crate::runtime::ProcessProbe,
+) -> Result<PreHandoffRecovery, PreHandoffRecoveryError> {
+    provisional_lease.revalidate_for_mutation(state.root())?;
+    let slot = match read_marker(state.root(), presentation_directory) {
+        Ok(slot) => slot,
+        Err(SlotError::MarkerUnavailable) => return Ok(PreHandoffRecovery::Unchanged),
+        Err(error) => return Err(error.into()),
+    };
+    let context = Presentation::d17_context_from_directory(state.root(), presentation_directory)
+        .map_err(|_| PreHandoffRecoveryError::Ambiguous)?;
+    if slot.presentation_id() != context.presentation_id()
+        || slot.presentation_revision() != context.presentation_revision()
+        || slot.seed_cwd() != context.seed_cwd()
+        || slot.runtime_paths()
+            != &RuntimePaths::for_runtime(state.root(), slot.candidate_runtime_id())
+    {
+        return Err(PreHandoffRecoveryError::Ambiguous);
+    }
+    if matches!(
+        slot.phase(),
+        ProvisionalPhase::RuntimeOwnedLaunching
+            | ProvisionalPhase::ProviderExecProven
+            | ProvisionalPhase::Cancelled
+    ) {
+        return Ok(PreHandoffRecovery::Unchanged);
+    }
+
+    let runtime = PrivateRuntime::new(tmux, process_probe, slot.runtime_paths().clone());
+    let operation = state.d17_onboarding_marker_operation_current(
+        provisional_lease,
+        slot.presentation_id(),
+        slot.presentation_revision(),
+        slot.slot_generation(),
+        slot.candidate_runtime_id(),
+        slot.handoff_request().map(OperationId::from),
+    )?;
+    if slot.phase() == ProvisionalPhase::Materializing && operation.is_some() {
+        return Err(PreHandoffRecoveryError::Ambiguous);
+    }
+
+    let registered_candidate = state
+        .d17_registered_runtime_paths()?
+        .iter()
+        .any(|paths| paths == slot.runtime_paths());
+
+    // Durable Runtime ownership wins any marker-write race.  Repair only the
+    // marker phase after proving that the exact candidate is registered; the
+    // provider/runtime are never stopped or rolled back.
+    if slot.phase() == ProvisionalPhase::HandoffIssued
+        && operation.is_some_and(|operation| {
+            matches!(
+                operation.phase,
+                crate::domain::OnboardingPhase::RuntimeOwnedLaunching
+                    | crate::domain::OnboardingPhase::ProviderPreparation
+                    | crate::domain::OnboardingPhase::ProviderExternalEffectStarted
+                    | crate::domain::OnboardingPhase::ProviderExecStarted
+                    | crate::domain::OnboardingPhase::KnownAbsentExec
+                    | crate::domain::OnboardingPhase::RecoveryRequired
+                    | crate::domain::OnboardingPhase::ProviderExecProven
+            )
+        })
+    {
+        if !registered_candidate {
+            return Err(PreHandoffRecoveryError::Ambiguous);
+        }
+        let operation = operation.ok_or(PreHandoffRecoveryError::Ambiguous)?;
+        let mut repaired = slot.clone();
+        repaired.consume_handoff(operation.operation_id.as_uuid())?;
+        provisional_lease.revalidate_for_mutation(state.root())?;
+        update_marker(state.root(), presentation_directory, &slot, &repaired)?;
+        provisional_lease.revalidate_for_mutation(state.root())?;
+        return Ok(PreHandoffRecovery::RuntimeOwned);
+    }
+
+    let exact_pre_effect_operation = operation.is_some_and(|operation| {
+        operation.phase == crate::domain::OnboardingPhase::CapabilityIssued
+    });
+    if registered_candidate && !exact_pre_effect_operation {
+        // A managed Runtime sharing this candidate path is never an
+        // attempt-only cleanup target, even if the marker appears pre-effect.
+        return Err(PreHandoffRecoveryError::Ambiguous);
+    }
+
+    let probe = runtime
+        .probe()
+        .map_err(|_| PreHandoffRecoveryError::Runtime)?;
+    if !matches!(probe, RuntimeProbe::Missing) {
+        // Live and unknown servers may still contain the account shell or an
+        // externally changed process.  Preserve every artifact and wait for a
+        // fresh exact presentation/marker decision.
+        return Ok(PreHandoffRecovery::Unchanged);
+    }
+
+    // A state-first cancellation may have committed just before a marker or
+    // candidate-artifact cleanup was interrupted.  The terminal rollback
+    // record is exact cleanup evidence, never a reason to reissue/consume.
+    if operation
+        .is_some_and(|operation| operation.phase == crate::domain::OnboardingPhase::RolledBack)
+    {
+        provisional_lease.revalidate_for_mutation(state.root())?;
+        remove_exact_provisional_artifacts(state.root(), presentation_directory, &slot)?;
+        provisional_lease.revalidate_for_mutation(state.root())?;
+        return Ok(PreHandoffRecovery::Cleaned);
+    }
+
+    // A missing private server is conclusive no-effect evidence for these
+    // phases.  Capability cancellation is transactional; marker/artifacts
+    // are removed only after that state boundary commits.
+    state.cancel_d17_onboarding_current(
+        provisional_lease,
+        slot.presentation_id(),
+        slot.presentation_revision(),
+        slot.slot_generation(),
+        slot.candidate_runtime_id(),
+        slot.runtime_paths(),
+        slot.handoff_request().map(OperationId::from),
+    )?;
+    provisional_lease.revalidate_for_mutation(state.root())?;
+    remove_exact_provisional_artifacts(state.root(), presentation_directory, &slot)?;
+    provisional_lease.revalidate_for_mutation(state.root())?;
+    Ok(PreHandoffRecovery::Cleaned)
+}
+
+/// Cancels the exact pre-effect graph during an authoritative presentation
+/// close.  Unlike startup reconciliation, this function permits a live
+/// candidate only after the caller has independently revalidated its shell
+/// lineage; it still never touches the Runtime itself.
+pub(crate) fn cancel_pre_handoff_under_lease(
+    state: &mut D16State,
+    provisional_lease: &ProvisionalLease,
+    presentation_directory: &Path,
+    slot: &ProvisionalSlot,
+) -> Result<bool, PreHandoffRecoveryError> {
+    let context = Presentation::d17_context_from_directory(state.root(), presentation_directory)
+        .map_err(|_| PreHandoffRecoveryError::Ambiguous)?;
+    if slot.presentation_id() != context.presentation_id()
+        || slot.presentation_revision() != context.presentation_revision()
+        || slot.seed_cwd() != context.seed_cwd()
+        || slot.runtime_paths()
+            != &RuntimePaths::for_runtime(state.root(), slot.candidate_runtime_id())
+    {
+        return Err(PreHandoffRecoveryError::Ambiguous);
+    }
+    if !matches!(
+        slot.phase(),
+        ProvisionalPhase::Materializing
+            | ProvisionalPhase::Materialized
+            | ProvisionalPhase::HandoffIssued
+    ) {
+        return Err(PreHandoffRecoveryError::Ambiguous);
+    }
+    let operation = state.d17_onboarding_marker_operation_current(
+        provisional_lease,
+        slot.presentation_id(),
+        slot.presentation_revision(),
+        slot.slot_generation(),
+        slot.candidate_runtime_id(),
+        slot.handoff_request().map(OperationId::from),
+    )?;
+    if operation.is_none()
+        && state
+            .d17_registered_runtime_paths()?
+            .iter()
+            .any(|paths| paths == slot.runtime_paths())
+    {
+        return Err(PreHandoffRecoveryError::Ambiguous);
+    }
+    state
+        .cancel_d17_onboarding_current(
+            provisional_lease,
+            slot.presentation_id(),
+            slot.presentation_revision(),
+            slot.slot_generation(),
+            slot.candidate_runtime_id(),
+            slot.runtime_paths(),
+            slot.handoff_request().map(OperationId::from),
+        )
+        .map_err(PreHandoffRecoveryError::from)
+}
+
+/// Removes only the marker and the three exact private runtime artifacts for
+/// an unregistered candidate.  Every directory entry is checked first; an
+/// unexpected or changed entry refuses the whole operation.
+pub(crate) fn remove_exact_provisional_artifacts(
+    state_root: &Path,
+    presentation_directory: &Path,
+    expected: &ProvisionalSlot,
+) -> Result<(), SlotError> {
+    if !matches!(
+        expected.phase(),
+        ProvisionalPhase::Materializing
+            | ProvisionalPhase::Materialized
+            | ProvisionalPhase::HandoffIssued
+            | ProvisionalPhase::Cancelled
+    ) {
+        return Err(SlotError::MarkerTransitionInvalid);
+    }
+    let state_root = canonical_state_root(state_root)?;
+    if expected.runtime_paths()
+        != &RuntimePaths::for_runtime(&state_root, expected.candidate_runtime_id())
+    {
+        return Err(SlotError::MarkerRuntimePathsMismatch);
+    }
+    remove_exact_provisional_runtime_artifacts(&state_root, expected)?;
+    remove_exact_marker(&state_root, presentation_directory, expected)
+}
+
+/// Proves that the candidate Runtime directory contains only the private
+/// artifacts created by the provisional owner.  This is deliberately a
+/// separate read-only seam so a caller can complete the proof before asking
+/// tmux to stop a live provisional server; `park` must never get a chance to
+/// recursively remove an unreviewed directory.
+pub(crate) fn validate_exact_provisional_runtime_artifacts(
+    state_root: &Path,
+    expected: &ProvisionalSlot,
+) -> Result<(), SlotError> {
+    inspect_exact_provisional_runtime_artifacts(state_root, expected).map(|_| ())
+}
+
+type RuntimeArtifactEntries = (Option<fs::Metadata>, Vec<(PathBuf, fs::Metadata)>);
+
+/// Removes only the exact candidate Runtime directory, leaving the marker in
+/// place for a caller that still needs its marker inode proof (presentation
+/// close uses this ordering before removing the outer presentation).
+pub(crate) fn remove_exact_provisional_runtime_artifacts(
+    state_root: &Path,
+    expected: &ProvisionalSlot,
+) -> Result<(), SlotError> {
+    let (directory_before, entries) =
+        inspect_exact_provisional_runtime_artifacts(state_root, expected)?;
+    let Some(directory_before) = directory_before else {
+        return Ok(());
+    };
+    for (path, before) in entries {
+        let after = fs::symlink_metadata(&path).map_err(|_| SlotError::MarkerOwnershipChanged)?;
+        if !same_file_identity(&before, &after) {
+            return Err(SlotError::MarkerOwnershipChanged);
+        }
+        fs::remove_file(path).map_err(map_marker_io)?;
+    }
+    let directory = &expected.runtime_paths().directory;
+    let directory_after = fs::symlink_metadata(directory).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            SlotError::MarkerOwnershipChanged
+        } else {
+            SlotError::MarkerIo
+        }
+    })?;
+    if !same_file_identity(&directory_before, &directory_after) {
+        return Err(SlotError::MarkerOwnershipChanged);
+    }
+    let mut remaining = fs::read_dir(directory).map_err(|_| SlotError::MarkerIo)?;
+    if remaining
+        .next()
+        .transpose()
+        .map_err(|_| SlotError::MarkerIo)?
+        .is_some()
+    {
+        return Err(SlotError::MarkerOwnershipChanged);
+    }
+    fs::remove_dir(directory).map_err(map_marker_io)?;
+    Ok(())
+}
+
+fn inspect_exact_provisional_runtime_artifacts(
+    state_root: &Path,
+    expected: &ProvisionalSlot,
+) -> Result<RuntimeArtifactEntries, SlotError> {
+    let state_root = canonical_state_root(state_root)?;
+    if expected.runtime_paths()
+        != &RuntimePaths::for_runtime(&state_root, expected.candidate_runtime_id())
+    {
+        return Err(SlotError::MarkerRuntimePathsMismatch);
+    }
+    let directory = &expected.runtime_paths().directory;
+    let directory_metadata = match fs::symlink_metadata(directory) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok((None, Vec::new()));
+        }
+        Err(_) => return Err(SlotError::MarkerIo),
+        Ok(metadata)
+            if metadata.file_type().is_symlink()
+                || !metadata.is_dir()
+                || !is_private_owner_directory(&metadata) =>
+        {
+            return Err(SlotError::MarkerOwnershipChanged);
+        }
+        Ok(metadata) => metadata,
+    };
+    let expected_paths = [
+        expected.runtime_paths().socket.clone(),
+        expected.runtime_paths().config.clone(),
+        expected.runtime_paths().launch_barrier(),
+        expected
+            .runtime_paths()
+            .directory
+            .join(PROVISIONAL_SHELL_ARTIFACT_NAMES[0]),
+        expected
+            .runtime_paths()
+            .directory
+            .join(PROVISIONAL_SHELL_ARTIFACT_NAMES[1]),
+    ];
+    let entries = fs::read_dir(directory)
+        .map_err(|_| SlotError::MarkerIo)?
+        .map(|entry| {
+            let path = entry.map_err(|_| SlotError::MarkerIo)?.path();
+            if !expected_paths.iter().any(|expected| expected == &path) {
+                return Err(SlotError::MarkerOwnershipChanged);
+            }
+            let metadata =
+                fs::symlink_metadata(&path).map_err(|_| SlotError::MarkerOwnershipChanged)?;
+            if metadata.file_type().is_symlink() {
+                return Err(SlotError::MarkerOwnershipChanged);
+            }
+            let is_socket = path == expected.runtime_paths().socket;
+            if (is_socket && !is_private_runtime_socket(&metadata))
+                || (!is_socket && !is_private_regular_file(&metadata))
+            {
+                return Err(SlotError::MarkerOwnershipChanged);
+            }
+            Ok((path, metadata))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((Some(directory_metadata), entries))
 }
 
 /// Retires the exact presentation-private marker after durable onboarding has
@@ -242,10 +608,6 @@ pub(crate) fn retire_provider_exec_proven_marker(
 /// The raw materializer is deliberately test-only. Production callers must
 /// pass through this proof and revalidate the same lease immediately after
 /// their marker-first materialization attempt.
-#[allow(
-    dead_code,
-    reason = "the D17 materialization boundary remains unreachable until the atomic Navigator cutover"
-)]
 pub(crate) fn validate_fresh_host_materialization(
     state: &D16State,
     provisional_lease: &ProvisionalLease,
@@ -288,40 +650,10 @@ pub(crate) fn validate_fresh_host_materialization(
     revalidate_host_materialization_lease(state, provisional_lease)
 }
 
-/// Materializes a D17 provisional shell only after the caller proves an exact
-/// D17 presentation, vacant host-wide slot, and unused candidate Runtime
-/// under the same retained lease. A post-attempt lease revalidation keeps any
-/// crash evidence conservative rather than returning a usable candidate.
-#[allow(
-    dead_code,
-    reason = "the D17 materialization boundary remains unreachable until the atomic Navigator cutover"
-)]
-pub(crate) fn materialize_private_shell_under_lease(
-    state: &D16State,
-    provisional_lease: &ProvisionalLease,
-    presentation_directory: &Path,
-    slot: &ProvisionalSlot,
-    runtime: &PrivateRuntime<'_>,
-    launch: &NativeLaunch,
-    process_group_probe: &dyn ProcessGroupProbe,
-) -> Result<ProvisionalSlot, HostMaterializationError> {
-    materialize_private_shell_under_lease_inner(
-        state,
-        provisional_lease,
-        presentation_directory,
-        slot,
-        runtime,
-        launch,
-        None,
-        process_group_probe,
-    )
-}
-
-/// Lease-held variant of [`materialize_private_shell_under_lease`] that first
-/// writes a fixed account-shell startup plan for this exact private Runtime.
+/// Lease-held materializer that first writes a fixed account-shell startup
+/// plan for this exact private Runtime.
 #[allow(
     clippy::too_many_arguments,
-    dead_code,
     reason = "the exact lease, presentation, Runtime, launch, startup, and process evidence must remain visible at one D17 materialization fence"
 )]
 pub(crate) fn materialize_private_shell_with_startup_under_lease(
@@ -708,8 +1040,8 @@ pub(crate) fn materialize_private_shell(
 }
 
 /// Materializes a provisional shell only after a startup plan bound to this
-/// exact candidate Runtime has written its private artifacts. This remains a
-/// dormant D17 composition seam; it does not alter the D16 materializer.
+/// exact candidate Runtime has written its private artifacts. This test-only
+/// entrypoint exercises the same inner boundary without host state.
 #[cfg(test)]
 pub(crate) fn materialize_private_shell_with_startup(
     state_root: &Path,
@@ -949,6 +1281,36 @@ fn is_private_regular_file(metadata: &fs::Metadata) -> bool {
     }
 }
 
+fn is_private_owner_directory(metadata: &fs::Metadata) -> bool {
+    if !metadata.is_dir() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        metadata.uid() == nix::unistd::geteuid().as_raw() && metadata.mode() & 0o777 == 0o700
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn is_private_runtime_socket(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+        use std::os::unix::fs::MetadataExt;
+        metadata.file_type().is_socket()
+            && metadata.uid() == nix::unistd::geteuid().as_raw()
+            && matches!(metadata.mode() & 0o777, 0o600 | 0o700)
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.is_file()
+    }
+}
+
 fn is_tmux_pane_id(value: &str) -> bool {
     let Some(identifier) = value.strip_prefix('%') else {
         return false;
@@ -1105,6 +1467,7 @@ impl ProvisionalSlot {
         Ok(observed)
     }
 
+    #[cfg(test)]
     const fn cleanup_authority(&self) -> CleanupAuthority {
         match self.phase {
             ProvisionalPhase::Materializing
@@ -1116,6 +1479,7 @@ impl ProvisionalSlot {
         }
     }
 
+    #[cfg(test)]
     const fn action_allowed(&self) -> bool {
         matches!(self.phase, ProvisionalPhase::ProviderExecProven)
     }
@@ -1165,6 +1529,7 @@ impl ProvisionalSlot {
         Ok(())
     }
 
+    #[cfg(test)]
     fn cancel_unconsumed(&mut self, request: Uuid) -> Result<(), SlotError> {
         if self.phase != ProvisionalPhase::HandoffIssued {
             return Err(SlotError::HandoffUnavailable);
@@ -1243,22 +1608,31 @@ mod tests {
         fs,
         path::PathBuf,
         str::FromStr,
+        sync::atomic::{AtomicU64, Ordering},
     };
 
     use uuid::Uuid;
 
     use super::{
-        CleanupAuthority, PROVISIONAL_MARKER_FILE, ProvisionalMarker, ProvisionalPhase,
-        ProvisionalShellEvidence, ProvisionalSlot, SlotError, SlotGeneration,
+        CleanupAuthority, PROVISIONAL_MARKER_FILE, PreHandoffRecoveryError, ProvisionalMarker,
+        ProvisionalPhase, ProvisionalShellEvidence, ProvisionalSlot, SlotError, SlotGeneration,
         materialize_private_shell, materialize_private_shell_with_startup, read_marker,
-        update_marker, write_new_marker,
+        reconcile_pre_handoff_with_runtime, update_marker, write_new_marker,
     };
     use crate::{
-        domain::{Revision, RuntimeId},
+        domain::{IdGenerator, ProviderKind, Revision, RuntimeId},
+        onboarding::{ShellCommandDecision, classify_shell_command},
+        presentation::{Presentation, PresentationPaths, create_paths_for_test},
+        repository::RepositoryRegistration,
         runtime::{
             NativeLaunch, PrivateRuntime, ProcessGroupInfo, ProcessGroupProbe, ProcessProbe,
             ProcessProbeError, RuntimeError, RuntimePaths, RuntimeStartup, TmuxClient,
             TmuxInvocation, TmuxResponse,
+        },
+        state::{
+            D16State, ProvisionalLease,
+            d16::{OnboardingPreparation, OnboardingPrepareRequest, OnboardingReservation},
+            fresh_create_d17,
         },
     };
 
@@ -1431,6 +1805,570 @@ mod tests {
         )
         .unwrap();
         (temporary, slot)
+    }
+
+    #[derive(Default)]
+    struct RecoveryIds(AtomicU64);
+
+    impl IdGenerator for RecoveryIds {
+        fn uuid(&self) -> Uuid {
+            Uuid::from_u128(0x9000 + u128::from(self.0.fetch_add(1, Ordering::Relaxed)))
+        }
+    }
+
+    struct RecoveryFixture {
+        temporary: tempfile::TempDir,
+        state_path: PathBuf,
+        presentation_directory: PathBuf,
+        state: D16State,
+        provisional_lease: ProvisionalLease,
+        slot: ProvisionalSlot,
+        request: Option<OnboardingPrepareRequest>,
+        reservation: Option<OnboardingReservation>,
+    }
+
+    fn recovery_request(
+        state_path: &std::path::Path,
+        presentation_id: Uuid,
+        presentation_revision: Revision,
+        slot_generation: Uuid,
+        candidate_runtime_id: RuntimeId,
+    ) -> OnboardingPrepareRequest {
+        let worktree_root = state_path.join("recovery-worktree");
+        fs::create_dir(&worktree_root).unwrap();
+        let shell_cwd = worktree_root.join("nested");
+        fs::create_dir(&shell_cwd).unwrap();
+        let arguments = [OsString::from("--model"), OsString::from("gpt-5.6")];
+        let ShellCommandDecision::ManagedFresh(launch) =
+            classify_shell_command(ProviderKind::Codex, &arguments).unwrap()
+        else {
+            panic!("fixture command must be promotable");
+        };
+        OnboardingPrepareRequest {
+            request_key: format!("d17-recovery-request-{candidate_runtime_id}"),
+            presentation_id,
+            presentation_revision,
+            slot_generation,
+            candidate_runtime_id,
+            runtime_paths: RuntimePaths::for_runtime(state_path, candidate_runtime_id),
+            provider: ProviderKind::Codex,
+            repository: RepositoryRegistration {
+                project_root: worktree_root,
+                display_name: "recovery-worktree".to_owned(),
+                remote_identity_fingerprint: Some(format!("git-remote-v1:{}", "a".repeat(64))),
+                remote_identity_display: Some("github.com/example/recovery".to_owned()),
+            },
+            shell_cwd,
+            shell_pid: 710,
+            shell_birth: "birth-710".to_owned(),
+            shell_process_group: 710,
+            shell_session: 710,
+            argv_digest: launch.argv_digest().to_owned(),
+            boot_provenance: format!("d17-boot-v1:sha256:{}", "b".repeat(64)),
+            now_monotonic_millis: 10,
+            expiry_monotonic_millis: 1_010,
+        }
+    }
+
+    fn recovery_fixture(materialized: bool, handoff: bool) -> RecoveryFixture {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let mut state = fresh_create_d17(&state_path, &RecoveryIds::default()).unwrap();
+        let provisional_lease = state.acquire_d17_provisional_lease().unwrap();
+        let presentation_directory = state_path
+            .join("presentation")
+            .join("presentation-000000000001");
+        let presentation_paths = PresentationPaths {
+            directory: presentation_directory.clone(),
+            socket: presentation_directory.join("tmux.sock"),
+            config: presentation_directory.join("tmux.conf"),
+            attachment_status: presentation_directory.join("attachment.json"),
+            session_name: "wsnav-presentation-000000000001".to_owned(),
+        };
+        create_paths_for_test(&presentation_paths).unwrap();
+        // Reuse the deterministic paths above rather than the random helper
+        // used by production owners; the context marker still proves the
+        // exact directory/session relationship.
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        let presentation = Presentation::from_control(
+            &state_path,
+            presentation_paths.socket.clone(),
+            presentation_paths.session_name.clone(),
+        )
+        .unwrap();
+        let presentation_id = Uuid::from_u128(0x1700);
+        let context = presentation
+            .initialize_d17_context(presentation_id, &seed)
+            .unwrap();
+        let candidate_runtime_id = RuntimeId::from(Uuid::from_u128(0x9000));
+        let slot_generation = Uuid::from_u128(0x1701);
+        let mut slot = ProvisionalSlot::materializing(
+            &state_path,
+            presentation_id,
+            context.presentation_revision(),
+            provisional_lease.lease_generation(),
+            candidate_runtime_id,
+            SlotGeneration::new(slot_generation),
+            &seed,
+        )
+        .unwrap();
+        if materialized {
+            slot.record_shell_evidence(shell_evidence()).unwrap();
+        }
+        let (request, reservation) = if handoff {
+            let request = recovery_request(
+                &state_path,
+                presentation_id,
+                context.presentation_revision(),
+                slot_generation,
+                candidate_runtime_id,
+            );
+            let reservation = match state
+                .prepare_d17_onboarding_current(
+                    &provisional_lease,
+                    &request,
+                    &RecoveryIds::default(),
+                )
+                .unwrap()
+            {
+                OnboardingPreparation::Issued(reservation) => reservation,
+                OnboardingPreparation::Existing(_) => panic!("fixture must issue once"),
+            };
+            slot.issue_handoff(reservation.operation_id().as_uuid())
+                .unwrap();
+            (Some(request), Some(reservation))
+        } else {
+            (None, None)
+        };
+        write_new_marker(&state_path, &presentation_directory, &slot).unwrap();
+        RecoveryFixture {
+            temporary,
+            state_path,
+            presentation_directory,
+            state,
+            provisional_lease,
+            slot,
+            request,
+            reservation,
+        }
+    }
+
+    #[derive(Default)]
+    struct RecoveryTmux {
+        calls: RefCell<Vec<TmuxInvocation>>,
+        responses: RefCell<VecDeque<TmuxResponse>>,
+    }
+
+    impl RecoveryTmux {
+        fn with_responses(responses: impl IntoIterator<Item = TmuxResponse>) -> Self {
+            Self {
+                calls: RefCell::default(),
+                responses: RefCell::new(responses.into_iter().collect()),
+            }
+        }
+    }
+
+    impl TmuxClient for RecoveryTmux {
+        fn invoke(&self, invocation: &TmuxInvocation) -> Result<TmuxResponse, RuntimeError> {
+            self.calls.borrow_mut().push(invocation.clone());
+            self.responses
+                .borrow_mut()
+                .pop_front()
+                .ok_or_else(|| RuntimeError::TmuxRejected("unexpected probe call".to_owned()))
+        }
+    }
+
+    struct RecoveryProcessProbe;
+
+    impl ProcessProbe for RecoveryProcessProbe {
+        fn process_birth(&self, _pid: u32) -> Option<String> {
+            None
+        }
+    }
+
+    fn no_server_probe() -> RecoveryTmux {
+        RecoveryTmux::with_responses([TmuxResponse {
+            success: false,
+            stdout: String::new(),
+            stderr: "no server running on the private socket".to_owned(),
+        }])
+    }
+
+    fn unknown_server_probe() -> RecoveryTmux {
+        RecoveryTmux::with_responses([TmuxResponse {
+            success: false,
+            stdout: String::new(),
+            stderr: "can't find session: private".to_owned(),
+        }])
+    }
+
+    fn live_server_probe(seed: &std::path::Path) -> RecoveryTmux {
+        RecoveryTmux::with_responses([
+            TmuxResponse {
+                success: true,
+                stdout: String::new(),
+                stderr: String::new(),
+            },
+            TmuxResponse {
+                success: true,
+                stdout: "%17\n".to_owned(),
+                stderr: String::new(),
+            },
+            TmuxResponse {
+                success: true,
+                stdout: "4242\n".to_owned(),
+                stderr: String::new(),
+            },
+            TmuxResponse {
+                success: true,
+                stdout: format!("{}\n", seed.display()),
+                stderr: String::new(),
+            },
+        ])
+    }
+
+    #[cfg(unix)]
+    fn exact_runtime_artifacts(slot: &ProvisionalSlot) -> std::os::unix::net::UnixListener {
+        use std::os::unix::fs::PermissionsExt;
+
+        fs::create_dir_all(&slot.runtime_paths().directory).unwrap();
+        fs::set_permissions(
+            slot.runtime_paths().directory.as_path(),
+            fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
+        let listener =
+            std::os::unix::net::UnixListener::bind(slot.runtime_paths().socket.as_path()).unwrap();
+        fs::set_permissions(
+            slot.runtime_paths().socket.as_path(),
+            fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        for path in [
+            slot.runtime_paths().config.clone(),
+            slot.runtime_paths().launch_barrier(),
+            slot.runtime_paths().directory.join(".wsnav-d17-bashrc"),
+            slot.runtime_paths().directory.join(".zshrc"),
+        ] {
+            fs::write(&path, b"fixture").unwrap();
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        listener
+    }
+
+    #[test]
+    fn recovery_cleans_missing_server_materializing_candidate() {
+        let mut fixture = recovery_fixture(false, false);
+        let tmux = no_server_probe();
+        let result = reconcile_pre_handoff_with_runtime(
+            &mut fixture.state,
+            &fixture.provisional_lease,
+            &fixture.presentation_directory,
+            &tmux,
+            &RecoveryProcessProbe,
+        )
+        .unwrap();
+
+        assert_eq!(result, super::PreHandoffRecovery::Cleaned);
+        assert!(
+            !fixture
+                .presentation_directory
+                .join(PROVISIONAL_MARKER_FILE)
+                .exists()
+        );
+        assert!(!fixture.slot.runtime_paths().directory.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn recovery_cleans_missing_server_materialized_candidate_artifacts() {
+        let mut fixture = recovery_fixture(true, false);
+        let _socket = exact_runtime_artifacts(&fixture.slot);
+        let tmux = no_server_probe();
+        let result = reconcile_pre_handoff_with_runtime(
+            &mut fixture.state,
+            &fixture.provisional_lease,
+            &fixture.presentation_directory,
+            &tmux,
+            &RecoveryProcessProbe,
+        )
+        .unwrap();
+
+        assert_eq!(result, super::PreHandoffRecovery::Cleaned);
+        assert!(
+            !fixture
+                .presentation_directory
+                .join(PROVISIONAL_MARKER_FILE)
+                .exists()
+        );
+        assert!(!fixture.slot.runtime_paths().directory.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn recovery_cancels_handoff_graph_cleans_artifacts_and_rejects_replay() {
+        let mut fixture = recovery_fixture(true, true);
+        let _socket = exact_runtime_artifacts(&fixture.slot);
+        let token = fixture
+            .reservation
+            .as_ref()
+            .unwrap()
+            .capability()
+            .token()
+            .to_owned();
+        let tmux = no_server_probe();
+        let result = reconcile_pre_handoff_with_runtime(
+            &mut fixture.state,
+            &fixture.provisional_lease,
+            &fixture.presentation_directory,
+            &tmux,
+            &RecoveryProcessProbe,
+        )
+        .unwrap();
+
+        assert_eq!(result, super::PreHandoffRecovery::Cleaned);
+        assert!(
+            !fixture
+                .presentation_directory
+                .join(PROVISIONAL_MARKER_FILE)
+                .exists()
+        );
+        assert!(!fixture.slot.runtime_paths().directory.exists());
+        let operation_id = fixture.reservation.as_ref().unwrap().operation_id();
+        assert_eq!(
+            fixture
+                .state
+                .d17_onboarding_operation_inventory()
+                .unwrap()
+                .into_iter()
+                .find(|operation| operation.operation_id == operation_id)
+                .map(|operation| operation.phase),
+            Some(crate::domain::OnboardingPhase::RolledBack)
+        );
+        let request = fixture.request.as_ref().unwrap();
+        assert!(matches!(
+            fixture.state.consume_d17_onboarding_current(
+                &fixture.provisional_lease,
+                request,
+                &token,
+                request.now_monotonic_millis + 1,
+            ),
+            Err(crate::state::StateError::OnboardingOperationUnavailable)
+        ));
+    }
+
+    #[test]
+    fn recovery_removes_interrupted_state_first_rollback_on_restart() {
+        let mut fixture = recovery_fixture(true, true);
+        let operation_id = fixture.reservation.as_ref().unwrap().operation_id();
+        let request = fixture.request.as_ref().unwrap();
+        fixture
+            .state
+            .cancel_d17_onboarding_current(
+                &fixture.provisional_lease,
+                request.presentation_id,
+                request.presentation_revision,
+                request.slot_generation,
+                request.candidate_runtime_id,
+                &request.runtime_paths,
+                Some(operation_id),
+            )
+            .unwrap();
+        let tmux = no_server_probe();
+        let result = reconcile_pre_handoff_with_runtime(
+            &mut fixture.state,
+            &fixture.provisional_lease,
+            &fixture.presentation_directory,
+            &tmux,
+            &RecoveryProcessProbe,
+        )
+        .unwrap();
+
+        assert_eq!(result, super::PreHandoffRecovery::Cleaned);
+        assert!(
+            !fixture
+                .presentation_directory
+                .join(PROVISIONAL_MARKER_FILE)
+                .exists()
+        );
+    }
+
+    #[test]
+    fn recovery_repairs_runtime_owned_marker_without_stopping_or_deleting() {
+        let mut fixture = recovery_fixture(true, true);
+        let request = fixture.request.as_ref().unwrap();
+        let reservation = fixture.reservation.as_ref().unwrap();
+        fixture
+            .state
+            .consume_d17_onboarding_current(
+                &fixture.provisional_lease,
+                request,
+                reservation.capability().token(),
+                request.now_monotonic_millis + 1,
+            )
+            .unwrap();
+        let tmux = no_server_probe();
+        let result = reconcile_pre_handoff_with_runtime(
+            &mut fixture.state,
+            &fixture.provisional_lease,
+            &fixture.presentation_directory,
+            &tmux,
+            &RecoveryProcessProbe,
+        )
+        .unwrap();
+
+        assert_eq!(result, super::PreHandoffRecovery::RuntimeOwned);
+        assert_eq!(
+            read_marker(&fixture.state_path, &fixture.presentation_directory)
+                .unwrap()
+                .phase(),
+            ProvisionalPhase::RuntimeOwnedLaunching
+        );
+        assert!(!fixture.slot.runtime_paths().directory.exists());
+        assert_eq!(tmux.calls.borrow().len(), 0);
+        assert_eq!(
+            fixture.state.d17_onboarding_operation_inventory().unwrap(),
+            vec![crate::state::d16::D17OnboardingOperationInventory {
+                operation_id: reservation.operation_id(),
+                workstream_id: fixture.reservation.as_ref().unwrap().workstream_id(),
+                runtime_id: fixture.slot.candidate_runtime_id(),
+                phase: crate::domain::OnboardingPhase::RuntimeOwnedLaunching,
+            }]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn recovery_preserves_live_unknown_foreign_and_changed_evidence() {
+        let mut live_fixture = recovery_fixture(true, false);
+        let _socket = {
+            #[cfg(unix)]
+            {
+                exact_runtime_artifacts(&live_fixture.slot)
+            }
+        };
+        let tmux = live_server_probe(&live_fixture.slot.seed_cwd);
+        assert_eq!(
+            reconcile_pre_handoff_with_runtime(
+                &mut live_fixture.state,
+                &live_fixture.provisional_lease,
+                &live_fixture.presentation_directory,
+                &tmux,
+                &RecoveryProcessProbe,
+            )
+            .unwrap(),
+            super::PreHandoffRecovery::Unchanged
+        );
+        assert!(
+            live_fixture
+                .presentation_directory
+                .join(PROVISIONAL_MARKER_FILE)
+                .exists()
+        );
+
+        let mut unknown_fixture = recovery_fixture(true, false);
+        let _socket = {
+            #[cfg(unix)]
+            {
+                exact_runtime_artifacts(&unknown_fixture.slot)
+            }
+        };
+        let tmux = unknown_server_probe();
+        assert_eq!(
+            reconcile_pre_handoff_with_runtime(
+                &mut unknown_fixture.state,
+                &unknown_fixture.provisional_lease,
+                &unknown_fixture.presentation_directory,
+                &tmux,
+                &RecoveryProcessProbe,
+            )
+            .unwrap(),
+            super::PreHandoffRecovery::Unchanged
+        );
+        assert!(
+            unknown_fixture
+                .presentation_directory
+                .join(PROVISIONAL_MARKER_FILE)
+                .exists()
+        );
+
+        let mut foreign_fixture = recovery_fixture(true, false);
+        fs::create_dir_all(&foreign_fixture.slot.runtime_paths().directory).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(
+                &foreign_fixture.slot.runtime_paths().directory,
+                fs::Permissions::from_mode(0o700),
+            )
+            .unwrap();
+        }
+        fs::write(
+            foreign_fixture
+                .slot
+                .runtime_paths()
+                .directory
+                .join("foreign-artifact"),
+            b"foreign",
+        )
+        .unwrap();
+        let tmux = no_server_probe();
+        assert!(matches!(
+            reconcile_pre_handoff_with_runtime(
+                &mut foreign_fixture.state,
+                &foreign_fixture.provisional_lease,
+                &foreign_fixture.presentation_directory,
+                &tmux,
+                &RecoveryProcessProbe,
+            ),
+            Err(PreHandoffRecoveryError::Slot(
+                SlotError::MarkerOwnershipChanged
+            ))
+        ));
+        assert!(
+            foreign_fixture
+                .presentation_directory
+                .join(PROVISIONAL_MARKER_FILE)
+                .exists()
+        );
+        assert!(
+            foreign_fixture
+                .slot
+                .runtime_paths()
+                .directory
+                .join("foreign-artifact")
+                .exists()
+        );
+
+        let mut changed_fixture = recovery_fixture(true, false);
+        let marker_path = changed_fixture
+            .presentation_directory
+            .join(PROVISIONAL_MARKER_FILE);
+        let mut marker: serde_json::Value =
+            serde_json::from_slice(&fs::read(&marker_path).unwrap()).unwrap();
+        marker["seed_cwd"] = serde_json::Value::String(
+            changed_fixture
+                .temporary
+                .path()
+                .join("changed-seed")
+                .to_string_lossy()
+                .into_owned(),
+        );
+        fs::create_dir(changed_fixture.temporary.path().join("changed-seed")).unwrap();
+        fs::write(&marker_path, serde_json::to_vec(&marker).unwrap()).unwrap();
+        let tmux = no_server_probe();
+        assert!(matches!(
+            reconcile_pre_handoff_with_runtime(
+                &mut changed_fixture.state,
+                &changed_fixture.provisional_lease,
+                &changed_fixture.presentation_directory,
+                &tmux,
+                &RecoveryProcessProbe,
+            ),
+            Err(PreHandoffRecoveryError::Ambiguous)
+        ));
+        assert!(marker_path.exists());
     }
 
     #[test]

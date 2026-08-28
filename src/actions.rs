@@ -1,6 +1,6 @@
-//! Host-local lifecycle actions shared by the direct CLI and D16 application.
+//! Host-local lifecycle actions shared by the direct CLI and D17 Navigator.
 //!
-//! These actions own native process effects. The CLI and application only parse
+//! These actions own native process effects. The CLI and Navigator only parse
 //! intent and render outcomes; neither gets to reimplement launch or
 //! private-tmux authority.
 

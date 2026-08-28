@@ -301,9 +301,7 @@ fn private_presentation_has_only_owned_roles_and_bounded_key_tables() {
     assert!(!prefix.contains("run-shell -b"));
     assert_eq!(
         binding_keys(&prefix),
-        BTreeSet::from([
-            "\"", "%", "?", "d", "o", "x", "Up", "Down", "Left", "Right", "C-b",
-        ])
+        BTreeSet::from(["?", "d", "o", "Up", "Down", "Left", "Right", "C-b",])
     );
     let started = Instant::now();
     let status = tmux_command(&paths.socket)
@@ -519,9 +517,9 @@ fn tmux_control_binding_expands_only_intentional_formats() {
     let binding = tmux_output(&paths.socket, ["list-keys", "-T", "prefix"]);
     let command = binding
         .lines()
-        .find(|line| line.contains("--action suppress-split"))
+        .find(|line| line.contains("--action focus-next"))
         .and_then(extract_run_shell_command)
-        .expect("fixed suppress-split binding");
+        .expect("fixed focus-next binding");
     let output = tmux_command(&paths.socket)
         .args(["run-shell", "-t", NAVIGATOR_PANE])
         .arg(&command)
@@ -550,7 +548,7 @@ fn tmux_control_binding_expands_only_intentional_formats() {
         &arguments[7..11],
         &[
             "--action".to_owned(),
-            "suppress-split".to_owned(),
+            "focus-next".to_owned(),
             "--source-pane".to_owned(),
             "%0".to_owned(),
         ]
@@ -994,7 +992,9 @@ fn nested_runtime_literal_ctrl_b_reaches_the_provider_as_one_byte() {
     runtime.send_literal_ctrl_b().unwrap();
 
     let deadline = Instant::now() + READINESS_TIMEOUT;
-    while !capture.exists() && Instant::now() < deadline {
+    while fs::metadata(&capture).map_or(0, |metadata| metadata.len()) < 1
+        && Instant::now() < deadline
+    {
         thread::sleep(READINESS_POLL);
     }
     assert_eq!(fs::read(&capture).unwrap(), [2]);

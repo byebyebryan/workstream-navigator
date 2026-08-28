@@ -90,6 +90,10 @@ const MIGRATION_BUDGET: Duration = Duration::from_millis(500);
 const MAX_PROJECT_REFRESH_MEMBERS: usize = 256;
 const MAX_PROJECT_PROJECTION_PROJECTS: usize = 512;
 const MAX_PROJECT_PROJECTION_LOCATIONS: usize = 4096;
+/// Exact terminal journal evidence written only after the user has explicitly
+/// parked a D17 onboarding recovery.  It records recovery resolution, never
+/// provider-exec proof; the retained Runtime may later be resumed normally.
+const D17_PARKED_RECOVERY_RESOLVED_OUTCOME: &str = r#"{"code":"d17_parked_recovery_resolved_v1"}"#;
 /// The final outer margin reserved for generation-scoped observer degraded
 /// marker recording after a bounded observer write has failed.
 pub const OBSERVER_DEGRADED_MARKER_BUDGET: Duration = Duration::from_millis(250);
@@ -1129,6 +1133,10 @@ impl D16State {
         dead_code,
         reason = "the D17 provisional singleton classifier remains unreachable until the atomic Navigator cutover"
     )]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the bounded journal inventory validates every retained onboarding phase and its exact Runtime relationship together"
+    )]
     pub(crate) fn d17_onboarding_operation_inventory(
         &self,
     ) -> Result<Vec<D17OnboardingOperationInventory>, StateError> {
@@ -1137,7 +1145,7 @@ impl D16State {
         let mut statement = self
             .connection
             .prepare(
-                "SELECT operation_id, phase, expected_revisions_json
+                "SELECT operation_id, phase, expected_revisions_json, outcome_json
                  FROM compound_operations
                  WHERE kind = 'onboard'
                  ORDER BY operation_id
@@ -1150,6 +1158,7 @@ impl D16State {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })
             .map_err(StateError::Sqlite)?
@@ -1161,19 +1170,47 @@ impl D16State {
 
         let mut seen_workstreams = BTreeSet::new();
         let mut inventory = Vec::with_capacity(operations.len());
-        for (operation_id, phase, encoded_intent) in operations {
+        for (operation_id, phase, encoded_intent, outcome_json) in operations {
             let operation_id = Uuid::parse_str(&operation_id)
                 .map(OperationId::from)
                 .map_err(StateError::InvalidPersistedUuid)?;
-            let phase =
+            let operation_phase =
                 operation_phase_from_text(&phase).map_err(|_| StateError::MalformedHostSchema)?;
-            let phase = OnboardingPhase::from_operation_phase(phase)
-                .ok_or(StateError::MalformedHostSchema)?;
             let intent: PersistedOnboardingIntent = serde_json::from_str(&encoded_intent)
                 .map_err(|_| StateError::MalformedHostSchema)?;
             if intent.version != 1 || !seen_workstreams.insert(intent.workstream_id) {
                 return Err(StateError::MalformedHostSchema);
             }
+            // A recovery-required Runtime may be explicitly parked. That
+            // commits the onboarding journal without claiming its original
+            // native exec was proven.  The exact, bounded outcome is durable
+            // evidence of that decision; its Runtime may subsequently be
+            // resumed, so current stopped/parked lifecycle is not required.
+            if operation_phase == crate::domain::OperationPhase::Committed {
+                let retained_runtime: Option<(String, String)> = self
+                    .connection
+                    .query_row(
+                        "SELECT workstream_id, provider
+                         FROM runtimes
+                         WHERE runtimes.runtime_id = ?1",
+                        [intent.candidate_runtime_id.to_string()],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()
+                    .map_err(StateError::Sqlite)?;
+                if outcome_json.as_deref() != Some(D17_PARKED_RECOVERY_RESOLVED_OUTCOME)
+                    || retained_runtime
+                        != Some((
+                            intent.workstream_id.to_string(),
+                            intent.provider.as_str().to_owned(),
+                        ))
+                {
+                    return Err(StateError::MalformedHostSchema);
+                }
+                continue;
+            }
+            let phase = OnboardingPhase::from_operation_phase(operation_phase)
+                .ok_or(StateError::MalformedHostSchema)?;
 
             let runtime: Option<(String, String)> = self
                 .connection
@@ -3249,6 +3286,97 @@ impl D16State {
             D17OnboardingAdvance::Normal(OnboardingPhase::RecoveryRequired),
             None,
         )
+    }
+
+    /// Resolves one terminal D17 onboarding recovery only after an explicit
+    /// Park has stopped the exact adopted Runtime and recorded the exact
+    /// Workstream as parked. This commits the onboarding journal without
+    /// asserting that the original provider exec was proven, without deleting
+    /// its Runtime/binding, and without contacting or retrying a provider.
+    ///
+    /// The stable provisional lease serializes this terminal classification
+    /// with every remaining onboarding participant. A caller supplies the
+    /// revision returned by the completed Park action, so a later Runtime or
+    /// Workstream transition cannot be mistaken for that deliberate recovery.
+    pub(crate) fn resolve_d17_parked_recovery_current(
+        &mut self,
+        provisional_lease: &ProvisionalLease,
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+    ) -> Result<(), StateError> {
+        ensure_d17_current_mode(self.mode)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        validate_schema14(&self.connection)?;
+        let operation = self
+            .d17_onboarding_operation_inventory()?
+            .into_iter()
+            .find(|operation| {
+                operation.workstream_id == workstream_id
+                    && operation.phase == OnboardingPhase::RecoveryRequired
+            })
+            .ok_or(StateError::OnboardingOperationUnavailable)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        let operation_revision = transaction
+            .query_row(
+                "SELECT revision FROM compound_operations
+                 WHERE operation_id = ?1 AND kind = 'onboard' AND phase = 'recovery_required'",
+                [operation.operation_id.to_string()],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .map(Revision::try_from)
+            .transpose()?
+            .ok_or(StateError::OnboardingOperationUnavailable)?;
+        let runtime: Option<(String, String, String, i64)> = transaction
+            .query_row(
+                "SELECT runtimes.runtime_id, runtimes.lifecycle,
+                        workstreams.lifecycle, workstreams.revision
+                 FROM runtimes
+                 JOIN workstreams ON workstreams.workstream_id = runtimes.workstream_id
+                 WHERE runtimes.runtime_id = ?1 AND runtimes.workstream_id = ?2",
+                params![operation.runtime_id.to_string(), workstream_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?;
+        let Some((runtime_id, runtime_lifecycle, workstream_lifecycle, revision)) = runtime else {
+            return Err(StateError::OnboardingOperationUnavailable);
+        };
+        if runtime_id != operation.runtime_id.to_string()
+            || runtime_lifecycle != "stopped"
+            || workstream_lifecycle != "parked"
+            || Revision::try_from(revision)? != expected_workstream_revision
+        {
+            return Err(StateError::ConcurrentWrite);
+        }
+        let next_operation_revision = next_revision(operation_revision)?;
+        let updated = transaction
+            .execute(
+                "UPDATE compound_operations
+                 SET phase = 'committed', outcome_json = ?1, revision = ?2
+                 WHERE operation_id = ?3 AND kind = 'onboard'
+                   AND phase = 'recovery_required' AND revision = ?4
+                   AND outcome_json IS NULL",
+                params![
+                    D17_PARKED_RECOVERY_RESOLVED_OUTCOME,
+                    next_operation_revision.value(),
+                    operation.operation_id.to_string(),
+                    operation_revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if updated != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        validate_schema14(&transaction)?;
+        provisional_lease.revalidate_for_mutation(&self.root)?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        provisional_lease.revalidate_for_mutation(&self.root)
     }
 
     /// Records the final durable boundary immediately before the helper would
@@ -5846,7 +5974,7 @@ fn validate_schema14_onboarding_operation_columns(
     let mut statement = connection
         .prepare(
             "SELECT kind, phase, launch_token_id, launch_token_verifier,
-                    launch_token_expiry_monotonic, launch_claims_digest
+                    launch_token_expiry_monotonic, launch_claims_digest, outcome_json
              FROM compound_operations ORDER BY operation_id",
         )
         .map_err(StateError::Sqlite)?;
@@ -5858,6 +5986,7 @@ fn validate_schema14_onboarding_operation_columns(
         let token_verifier: Option<String> = row.get(3).map_err(StateError::Sqlite)?;
         let token_expiry: Option<i64> = row.get(4).map_err(StateError::Sqlite)?;
         let claims_digest: Option<String> = row.get(5).map_err(StateError::Sqlite)?;
+        let outcome_json: Option<String> = row.get(6).map_err(StateError::Sqlite)?;
         if kind == "onboard" {
             validate_schema14_onboarding_operation(
                 &phase,
@@ -5865,6 +5994,7 @@ fn validate_schema14_onboarding_operation_columns(
                 token_verifier.as_deref(),
                 token_expiry,
                 claims_digest.as_deref(),
+                outcome_json.as_deref(),
             )?;
         } else if token_id.is_some()
             || token_verifier.is_some()
@@ -5892,7 +6022,8 @@ fn validate_schema14_onboarding_exec_targets(connection: &Connection) -> Result<
         .prepare(
             "SELECT targets.operation_id, targets.provider,
                     targets.executable_device, targets.executable_inode,
-                    operations.kind, operations.phase, operations.expected_revisions_json
+                    operations.kind, operations.phase, operations.expected_revisions_json,
+                    operations.outcome_json
              FROM d17_onboarding_exec_targets AS targets
              JOIN compound_operations AS operations
                ON operations.operation_id = targets.operation_id
@@ -5908,6 +6039,7 @@ fn validate_schema14_onboarding_exec_targets(connection: &Connection) -> Result<
         let kind: String = row.get(4).map_err(StateError::Sqlite)?;
         let phase: String = row.get(5).map_err(StateError::Sqlite)?;
         let encoded_intent: String = row.get(6).map_err(StateError::Sqlite)?;
+        let outcome_json: Option<String> = row.get(7).map_err(StateError::Sqlite)?;
         if operation_id.parse::<OperationId>().is_err() || kind != "onboard" {
             return Err(StateError::MalformedHostSchema);
         }
@@ -5919,19 +6051,25 @@ fn validate_schema14_onboarding_exec_targets(connection: &Connection) -> Result<
             u64::try_from(inode).map_err(|_| StateError::MalformedHostSchema)?,
         )
         .map_err(|_| StateError::MalformedHostSchema)?;
-        let phase =
+        let operation_phase =
             operation_phase_from_text(&phase).map_err(|_| StateError::MalformedHostSchema)?;
-        let phase =
-            OnboardingPhase::from_operation_phase(phase).ok_or(StateError::MalformedHostSchema)?;
-        if !matches!(
+        let committed_park_resolution = operation_phase == crate::domain::OperationPhase::Committed;
+        let phase = OnboardingPhase::from_operation_phase(operation_phase);
+        if committed_park_resolution {
+            if outcome_json.as_deref() != Some(D17_PARKED_RECOVERY_RESOLVED_OUTCOME) {
+                return Err(StateError::MalformedHostSchema);
+            }
+        } else if !matches!(
             phase,
-            OnboardingPhase::ProviderPreparation
-                | OnboardingPhase::ProviderExternalEffectStarted
-                | OnboardingPhase::ProviderExecStarted
-                | OnboardingPhase::ProviderExecProven
-                | OnboardingPhase::KnownAbsentExec
-                | OnboardingPhase::RecoveryRequired
-                | OnboardingPhase::RolledBack
+            Some(
+                OnboardingPhase::ProviderPreparation
+                    | OnboardingPhase::ProviderExternalEffectStarted
+                    | OnboardingPhase::ProviderExecStarted
+                    | OnboardingPhase::ProviderExecProven
+                    | OnboardingPhase::KnownAbsentExec
+                    | OnboardingPhase::RecoveryRequired
+                    | OnboardingPhase::RolledBack
+            )
         ) {
             return Err(StateError::MalformedHostSchema);
         }
@@ -5950,10 +6088,18 @@ fn validate_schema14_onboarding_operation(
     token_verifier: Option<&str>,
     token_expiry: Option<i64>,
     claims_digest: Option<&str>,
+    outcome_json: Option<&str>,
 ) -> Result<(), StateError> {
-    let phase = operation_phase_from_text(phase).map_err(|_| StateError::MalformedHostSchema)?;
-    let phase =
-        OnboardingPhase::from_operation_phase(phase).ok_or(StateError::MalformedHostSchema)?;
+    let operation_phase =
+        operation_phase_from_text(phase).map_err(|_| StateError::MalformedHostSchema)?;
+    let committed_park_resolution = operation_phase == crate::domain::OperationPhase::Committed;
+    let phase = OnboardingPhase::from_operation_phase(operation_phase);
+    if phase.is_none() && !committed_park_resolution {
+        return Err(StateError::MalformedHostSchema);
+    }
+    if committed_park_resolution && outcome_json != Some(D17_PARKED_RECOVERY_RESOLVED_OUTCOME) {
+        return Err(StateError::MalformedHostSchema);
+    }
     let capability_is_absent = token_id.is_none()
         && token_verifier.is_none()
         && token_expiry.is_none()
@@ -5963,13 +6109,17 @@ fn validate_schema14_onboarding_operation(
         (Some(_), Some(_), Some(_), Some(_))
     );
     match phase {
-        OnboardingPhase::Prepared if !capability_is_absent => {
+        None if committed_park_resolution && !capability_is_complete => {
             return Err(StateError::MalformedHostSchema);
         }
-        OnboardingPhase::RolledBack if !(capability_is_absent || capability_is_complete) => {
+        None if committed_park_resolution => {}
+        Some(OnboardingPhase::Prepared) if !capability_is_absent => {
             return Err(StateError::MalformedHostSchema);
         }
-        OnboardingPhase::Prepared | OnboardingPhase::RolledBack => {}
+        Some(OnboardingPhase::RolledBack) if !(capability_is_absent || capability_is_complete) => {
+            return Err(StateError::MalformedHostSchema);
+        }
+        Some(OnboardingPhase::Prepared | OnboardingPhase::RolledBack) => {}
         _ if !capability_is_complete => return Err(StateError::MalformedHostSchema),
         _ => {}
     }

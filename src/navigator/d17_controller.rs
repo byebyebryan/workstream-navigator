@@ -1,19 +1,14 @@
-//! Dormant D17 schema-14 Navigator pane.
+//! D17 schema-14 Navigator pane.
 //!
-//! This controller deliberately owns only terminal setup and passive D17
-//! snapshots while the shell-card materialization and provider-attachment
-//! effects are still being completed. It is reachable solely from the hidden
-//! D17 presentation pane command, never from the ordinary D16 Navigator.
-
-#![allow(
-    dead_code,
-    reason = "the D17 Navigator pane remains unreachable until the atomic cutover"
-)]
+//! This controller owns terminal setup, passive snapshots, shell-card
+//! materialization, and exact presentation attachment. It is reached solely
+//! from the hidden D17 presentation-pane command.
 
 use std::{
     env,
+    ffi::OsStr,
     io::{self, Stdout},
-    path::PathBuf,
+    path::{Component, Path, PathBuf},
     time::{Duration, Instant},
 };
 
@@ -29,17 +24,17 @@ use crate::{
     d17_account_shell::{AccountShellContext, AccountShellLaunch},
     d17_shell_control::reconcile_provider_exec_from_presentation,
     d17_snapshot::{D17Snapshot, D17SnapshotError, read_snapshot},
-    domain::RuntimeId,
+    domain::{OperationId, ProviderKind, Revision, RuntimeId, WorkstreamId},
     presentation::{Presentation, PresentationError},
     provisional::{ProvisionalPhase, ProvisionalSlot, SlotError, SlotGeneration, read_marker},
     runtime::{LinuxProcessProbe, PrivateRuntime, SystemTmux},
     state::{StateRoot, open_d17_current_only},
 };
 
-use super::d17::{D17Command, D17Navigator};
+use super::d17::{D17Command, D17Navigator, D17ShellLocation};
 
-/// Errors that prevent the dormant D17 pane from rendering its passive,
-/// schema-14-only Workstreams view.
+/// Errors that prevent the D17 pane from rendering its schema-14-only
+/// Workstreams view.
 #[derive(Debug, Error)]
 pub(crate) enum D17NavigatorError {
     #[error("D17 navigator terminal setup failed: {0}")]
@@ -52,12 +47,13 @@ pub(crate) enum D17NavigatorError {
     ProvisionalShellUnavailable,
     #[error("D17 same-location session creation is unavailable")]
     SameLocationSessionUnavailable,
+    #[error("D17 managed action is unavailable")]
+    ManagedActionUnavailable,
 }
 
 /// Runs the hidden schema-14 D17 Navigator pane. It validates the exact D17
 /// presentation context before reading state. The provisional-shell command is
-/// a lease-held marker-first materialization followed by an outer-pane attach;
-/// all other D17 actions remain inert until their complete controllers exist.
+/// a lease-held marker-first materialization followed by an outer-pane attach.
 #[allow(
     clippy::too_many_lines,
     reason = "The D17 loop keeps shell, promotion, exact attachment, and focus ordering in one auditable owner."
@@ -68,11 +64,22 @@ pub(crate) fn run_d17_navigator(
     session_name: String,
 ) -> Result<(), D17NavigatorError> {
     let presentation = Presentation::from_control(root.base(), socket, session_name)?;
-    let _context =
+    let context =
         Presentation::d17_context_from_directory(root.base(), &presentation.paths().directory)
             .map_err(|_| PresentationError::D17ContextUnavailable)?;
+    let seed_cwd = context.seed_cwd().to_path_buf();
+    let home = env::var_os("HOME").map(PathBuf::from);
     let snapshot = read_snapshot(root)?;
     let mut navigator = D17Navigator::new(snapshot);
+    let mut observed_shell_cwd = None;
+    refresh_shell_location(
+        root,
+        &presentation,
+        &seed_cwd,
+        home.as_deref(),
+        &mut observed_shell_cwd,
+        &mut navigator,
+    );
     let mut terminal = TerminalSession::enter().map_err(D17NavigatorError::Terminal)?;
     let mut redraw = true;
     let mut last_refresh = Instant::now();
@@ -196,6 +203,14 @@ pub(crate) fn run_d17_navigator(
                     promoted_runtime = None;
                 }
             }
+            refresh_shell_location(
+                root,
+                &presentation,
+                &seed_cwd,
+                home.as_deref(),
+                &mut observed_shell_cwd,
+                &mut navigator,
+            );
             redraw = true;
             last_refresh = Instant::now();
         }
@@ -205,6 +220,121 @@ pub(crate) fn run_d17_navigator(
         presentation.stop_d17_session()?;
     }
     Ok(())
+}
+
+/// Refreshes only presentation-local shell context. The cwd is exact live
+/// process evidence while a provisional account shell exists and never feeds
+/// registration or provider launch.
+fn refresh_shell_location(
+    root: &StateRoot,
+    presentation: &Presentation,
+    seed_cwd: &Path,
+    home: Option<&Path>,
+    observed: &mut Option<PathBuf>,
+    navigator: &mut D17Navigator,
+) {
+    let cwd = observe_shell_cwd(root, presentation, seed_cwd).ok();
+    if cwd.as_ref() == observed.as_ref() {
+        return;
+    }
+    let location = cwd.as_ref().map_or_else(
+        || D17ShellLocation::cwd("unavailable"),
+        |cwd| describe_shell_location(cwd, home),
+    );
+    navigator.set_shell_location(location);
+    *observed = cwd;
+}
+
+fn observe_shell_cwd(
+    root: &StateRoot,
+    presentation: &Presentation,
+    seed_cwd: &Path,
+) -> Result<PathBuf, D17NavigatorError> {
+    let slot = match read_marker(root.base(), &presentation.paths().directory) {
+        Ok(slot) => slot,
+        Err(SlotError::MarkerUnavailable) => return Ok(seed_cwd.to_path_buf()),
+        Err(_) => return Err(D17NavigatorError::ProvisionalShellUnavailable),
+    };
+    if !matches!(
+        slot.phase(),
+        ProvisionalPhase::Materialized | ProvisionalPhase::HandoffIssued
+    ) {
+        return Ok(seed_cwd.to_path_buf());
+    }
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, slot.runtime_paths().clone());
+    slot.revalidate_live_shell(&runtime, &process_probe)
+        .map(|shell| shell.cwd)
+        .map_err(|_| D17NavigatorError::ProvisionalShellUnavailable)
+}
+
+fn describe_shell_location(cwd: &Path, home: Option<&Path>) -> D17ShellLocation {
+    let cwd_label = home
+        .and_then(|home| cwd.strip_prefix(home).ok())
+        .and_then(|relative| {
+            if relative.as_os_str().is_empty() {
+                Some("~".to_owned())
+            } else {
+                abbreviated_path(relative).map(|relative| format!("~/{relative}"))
+            }
+        })
+        .or_else(|| abbreviated_path(cwd))
+        .unwrap_or_else(|| "unavailable".to_owned());
+    D17ShellLocation::cwd(&cwd_label)
+}
+
+fn abbreviated_path(path: &Path) -> Option<String> {
+    let absolute = path.is_absolute();
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(component) => Some(safe_path_component(component)),
+            Component::RootDir => None,
+            Component::CurDir | Component::ParentDir | Component::Prefix(_) => Some(None),
+        })
+        .collect::<Option<Vec<_>>>()?;
+    if components.is_empty() {
+        return absolute.then(|| "/".to_owned());
+    }
+    let last = components.len().saturating_sub(1);
+    let display = components
+        .iter()
+        .enumerate()
+        .map(|(index, component)| {
+            if index == last {
+                (*component).to_owned()
+            } else {
+                abbreviated_path_component(component)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/");
+    Some(if absolute {
+        format!("/{display}")
+    } else {
+        display
+    })
+}
+
+fn safe_path_component(component: &OsStr) -> Option<&str> {
+    component
+        .to_str()
+        .filter(|value| !value.is_empty() && !value.chars().any(char::is_control))
+}
+
+fn abbreviated_path_component(component: &str) -> String {
+    let mut characters = component.chars();
+    let first = characters
+        .next()
+        .expect("validated path component is non-empty");
+    if first == '.' {
+        characters
+            .next()
+            .map_or_else(|| ".".to_owned(), |next| format!(".{next}"))
+    } else {
+        first.to_string()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -307,8 +437,571 @@ fn execute_d17_command(
             }
             false
         }
+        D17Command::Start {
+            workstream_id,
+            expected_workstream_revision,
+            provider,
+        } => {
+            execute_managed_action(
+                root,
+                navigator,
+                presentation,
+                focus_after,
+                ManagedAction::Start {
+                    workstream_id,
+                    expected_workstream_revision,
+                    provider,
+                },
+            );
+            false
+        }
+        D17Command::Recover {
+            workstream_id,
+            expected_workstream_revision,
+            provider,
+        } => {
+            execute_managed_action(
+                root,
+                navigator,
+                presentation,
+                focus_after,
+                ManagedAction::Recover {
+                    workstream_id,
+                    expected_workstream_revision,
+                    provider,
+                },
+            );
+            false
+        }
+        D17Command::Park {
+            workstream_id,
+            expected_workstream_revision,
+        } => {
+            execute_managed_action(
+                root,
+                navigator,
+                presentation,
+                focus_after,
+                ManagedAction::Park {
+                    workstream_id,
+                    expected_workstream_revision,
+                },
+            );
+            false
+        }
+        D17Command::Archive {
+            workstream_id,
+            expected_workstream_revision,
+        } => {
+            execute_managed_action(
+                root,
+                navigator,
+                presentation,
+                focus_after,
+                ManagedAction::Archive {
+                    workstream_id,
+                    expected_workstream_revision,
+                },
+            );
+            false
+        }
+        D17Command::Restore {
+            workstream_id,
+            expected_workstream_revision,
+        } => {
+            execute_managed_action(
+                root,
+                navigator,
+                presentation,
+                focus_after,
+                ManagedAction::Restore {
+                    workstream_id,
+                    expected_workstream_revision,
+                },
+            );
+            false
+        }
+        D17Command::AcknowledgeResult {
+            workstream_id,
+            expected_attention_revision,
+        } => {
+            execute_managed_action(
+                root,
+                navigator,
+                presentation,
+                focus_after,
+                ManagedAction::AcknowledgeResult {
+                    workstream_id,
+                    expected_attention_revision,
+                },
+            );
+            false
+        }
+        D17Command::Fork {
+            source_workstream_id,
+            expected_workstream_revision,
+            provider,
+        } => {
+            execute_managed_action(
+                root,
+                navigator,
+                presentation,
+                focus_after,
+                ManagedAction::Fork {
+                    source_workstream_id,
+                    expected_workstream_revision,
+                    provider,
+                },
+            );
+            false
+        }
+        D17Command::RecoverOperation {
+            operation_id,
+            expected_operation_revision,
+            provider,
+        } => {
+            execute_managed_action(
+                root,
+                navigator,
+                presentation,
+                focus_after,
+                ManagedAction::RecoverOperation {
+                    operation_id,
+                    expected_operation_revision,
+                    provider,
+                },
+            );
+            false
+        }
+        D17Command::Rename {
+            workstream_id,
+            expected_workstream_revision,
+            name,
+        } => {
+            execute_managed_action(
+                root,
+                navigator,
+                presentation,
+                focus_after,
+                ManagedAction::Rename {
+                    workstream_id,
+                    expected_workstream_revision,
+                    name,
+                },
+            );
+            false
+        }
+        D17Command::ShowGuidance(guidance) => {
+            navigator.set_guidance(guidance);
+            false
+        }
         D17Command::None => false,
     }
+}
+
+/// Schema-14-native managed lifecycle intent. This deliberately bypasses the
+/// retired schema-13 application facade: each variant carries only the exact
+/// durable IDs/revisions supplied by the passive D17 snapshot.
+enum ManagedAction {
+    Start {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        provider: ProviderKind,
+    },
+    Recover {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        provider: ProviderKind,
+    },
+    Park {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+    },
+    Archive {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+    },
+    Restore {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+    },
+    AcknowledgeResult {
+        workstream_id: WorkstreamId,
+        expected_attention_revision: Revision,
+    },
+    Fork {
+        source_workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        provider: ProviderKind,
+    },
+    RecoverOperation {
+        operation_id: OperationId,
+        expected_operation_revision: Revision,
+        provider: ProviderKind,
+    },
+    Rename {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        name: String,
+    },
+}
+
+/// Runs exactly one D17 lifecycle action, refreshes the passive projection,
+/// and attaches only a freshly proved non-onboarding Runtime. Every failure
+/// remains bounded Navigator guidance; no management text reaches a provider
+/// pane.
+fn execute_managed_action(
+    root: &StateRoot,
+    navigator: &mut D17Navigator,
+    presentation: &Presentation,
+    focus_after: FocusAfter,
+    action: ManagedAction,
+) {
+    let restored_workstream = match &action {
+        ManagedAction::Restore { workstream_id, .. } => Some(*workstream_id),
+        _ => None,
+    };
+    let outcome = apply_managed_action(root, action);
+    let Ok(attachment_workstream) = outcome else {
+        navigator
+            .set_guidance("Managed session action is unavailable; refresh exact state and retry");
+        return;
+    };
+    let Ok(snapshot) = read_snapshot(root) else {
+        navigator.set_guidance("Managed session action completed; refreshed state is unavailable");
+        return;
+    };
+    navigator.replace_snapshot(snapshot);
+    if let Some(workstream_id) = restored_workstream {
+        if !navigator.select_workstream(workstream_id) {
+            navigator.set_guidance("Managed session restored; its active card is unavailable");
+        }
+        return;
+    }
+    let Some(workstream_id) = attachment_workstream else {
+        return;
+    };
+    if !navigator.select_workstream(workstream_id) {
+        navigator.set_guidance("Managed session action completed; its active card is unavailable");
+        return;
+    }
+    let attachment = navigator_attachment_for(root, workstream_id);
+    let Some((workstream_revision, runtime_id, runtime_revision)) = attachment else {
+        navigator.set_guidance("Managed session started; exact Runtime attachment is not ready");
+        return;
+    };
+    if presentation
+        .attach_d17_workstream(
+            workstream_id,
+            workstream_revision,
+            runtime_id,
+            runtime_revision,
+        )
+        .is_err()
+    {
+        navigator.set_guidance("Managed session started; exact Runtime attachment is unavailable");
+    } else if focus_after == FocusAfter::Provider && presentation.focus_provider().is_err() {
+        navigator.set_guidance("Managed session started; provider-pane focus is unavailable");
+    }
+}
+
+/// Re-reads only the bounded snapshot fields needed for an exact post-action
+/// attachment. D17 onboarding rows remain excluded even if the action result
+/// is otherwise successful.
+fn navigator_attachment_for(
+    root: &StateRoot,
+    workstream_id: WorkstreamId,
+) -> Option<(Revision, RuntimeId, Revision)> {
+    let snapshot = read_snapshot(root).ok()?;
+    let workstream = snapshot.workstreams.iter().find(|workstream| {
+        workstream.workstream_id == workstream_id
+            && !workstream.archived
+            && workstream.onboarding.is_none()
+    })?;
+    let runtime = workstream.runtime?;
+    Some((workstream.revision, runtime.runtime_id, runtime.revision))
+}
+
+/// Executes against the schema-14 registry only after the current D17
+/// snapshot has revalidated the exact action target. The short preflight is a
+/// fence against stale navigator commands; durable action routines repeat
+/// their own Workstream/attention revision checks before mutation.
+#[allow(
+    clippy::too_many_lines,
+    reason = "one schema-14 action boundary keeps every lifecycle preflight and post-action attachment outcome auditable"
+)]
+fn apply_managed_action(
+    root: &StateRoot,
+    action: ManagedAction,
+) -> Result<Option<WorkstreamId>, D17NavigatorError> {
+    let snapshot = read_snapshot(root)?;
+    let state =
+        open_d17_current_only(root).map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+    let mut registry = state
+        .into_d17_host_registry()
+        .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+    match action {
+        ManagedAction::Start {
+            workstream_id,
+            expected_workstream_revision,
+            provider,
+        } => {
+            require_active_d17_workstream(
+                &snapshot,
+                workstream_id,
+                expected_workstream_revision,
+                Some(provider),
+            )?;
+            crate::actions::start(
+                root,
+                &mut registry,
+                workstream_id,
+                Some(expected_workstream_revision),
+            )
+            .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            Ok(Some(workstream_id))
+        }
+        ManagedAction::Recover {
+            workstream_id,
+            expected_workstream_revision,
+            provider,
+        } => {
+            require_active_d17_workstream(
+                &snapshot,
+                workstream_id,
+                expected_workstream_revision,
+                Some(provider),
+            )?;
+            crate::actions::recover(
+                root,
+                &mut registry,
+                workstream_id,
+                Some(expected_workstream_revision),
+            )
+            .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            Ok(Some(workstream_id))
+        }
+        ManagedAction::Park {
+            workstream_id,
+            expected_workstream_revision,
+        } => {
+            require_parkable_d17_workstream(
+                &snapshot,
+                workstream_id,
+                expected_workstream_revision,
+            )?;
+            let resolves_onboarding_recovery = snapshot.workstreams.iter().any(|workstream| {
+                workstream.workstream_id == workstream_id
+                    && workstream.onboarding
+                        == Some(crate::d17_snapshot::D17OnboardingStatus::RecoveryRequired)
+            });
+            let parked_revision = crate::actions::park(
+                root,
+                &mut registry,
+                workstream_id,
+                Some(expected_workstream_revision),
+            )
+            .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            drop(registry);
+            if resolves_onboarding_recovery {
+                resolve_parked_onboarding_recovery(root, workstream_id, parked_revision)?;
+            }
+            Ok(None)
+        }
+        ManagedAction::Archive {
+            workstream_id,
+            expected_workstream_revision,
+        } => {
+            require_active_d17_workstream(
+                &snapshot,
+                workstream_id,
+                expected_workstream_revision,
+                None,
+            )?;
+            crate::actions::archive(
+                root,
+                &mut registry,
+                workstream_id,
+                expected_workstream_revision,
+            )
+            .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            Ok(None)
+        }
+        ManagedAction::Restore {
+            workstream_id,
+            expected_workstream_revision,
+        } => {
+            let workstream = snapshot
+                .workstreams
+                .iter()
+                .find(|workstream| {
+                    workstream.workstream_id == workstream_id
+                        && workstream.archived
+                        && workstream.revision == expected_workstream_revision
+                })
+                .ok_or(D17NavigatorError::ManagedActionUnavailable)?;
+            if workstream.onboarding.is_some() {
+                return Err(D17NavigatorError::ManagedActionUnavailable);
+            }
+            crate::actions::restore(&mut registry, workstream_id, expected_workstream_revision)
+                .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            Ok(None)
+        }
+        ManagedAction::AcknowledgeResult {
+            workstream_id,
+            expected_attention_revision,
+        } => {
+            snapshot
+                .workstreams
+                .iter()
+                .find(|workstream| {
+                    workstream.workstream_id == workstream_id
+                        && workstream.onboarding.is_none()
+                        && workstream.result_unseen
+                        && workstream.attention_revision == expected_attention_revision
+                })
+                .ok_or(D17NavigatorError::ManagedActionUnavailable)?;
+            registry
+                .acknowledge_result_attention(workstream_id, expected_attention_revision)
+                .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            Ok(None)
+        }
+        ManagedAction::Fork {
+            source_workstream_id,
+            expected_workstream_revision,
+            provider,
+        } => {
+            require_active_d17_workstream(
+                &snapshot,
+                source_workstream_id,
+                expected_workstream_revision,
+                Some(provider),
+            )?;
+            let request_key = uuid::Uuid::new_v4().simple().to_string();
+            let workstream_id = crate::actions::fork_workstream(
+                root,
+                &mut registry,
+                source_workstream_id,
+                Some(expected_workstream_revision),
+                request_key,
+            )
+            .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            Ok(Some(workstream_id))
+        }
+        ManagedAction::RecoverOperation {
+            operation_id,
+            expected_operation_revision,
+            provider,
+        } => {
+            snapshot
+                .unresolved_operations
+                .iter()
+                .find(|operation| {
+                    operation.operation_id == operation_id
+                        && operation.revision == expected_operation_revision
+                        && operation.provider == provider
+                        && operation.kind == crate::domain::OperationKind::Fork
+                })
+                .ok_or(D17NavigatorError::ManagedActionUnavailable)?;
+            let workstream_id = crate::actions::recover_managed_operation(
+                root,
+                &mut registry,
+                operation_id,
+                Some(expected_operation_revision),
+            )
+            .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            Ok(Some(workstream_id))
+        }
+        ManagedAction::Rename {
+            workstream_id,
+            expected_workstream_revision,
+            name,
+        } => {
+            require_active_d17_workstream(
+                &snapshot,
+                workstream_id,
+                expected_workstream_revision,
+                Some(ProviderKind::Codex),
+            )?;
+            if name.trim().is_empty() {
+                return Err(D17NavigatorError::ManagedActionUnavailable);
+            }
+            crate::actions::rename(
+                &mut registry,
+                workstream_id,
+                expected_workstream_revision,
+                &name,
+            )
+            .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            Ok(None)
+        }
+    }
+}
+
+/// Closes only the terminal recovery journal for an exact Runtime that the
+/// preceding Park action already stopped. This does not retry the original
+/// provider launch or roll back its binding.
+fn resolve_parked_onboarding_recovery(
+    root: &StateRoot,
+    workstream_id: WorkstreamId,
+    expected_workstream_revision: Revision,
+) -> Result<(), D17NavigatorError> {
+    let mut state =
+        open_d17_current_only(root).map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+    let provisional_lease = state
+        .acquire_d17_provisional_lease()
+        .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+    state
+        .resolve_d17_parked_recovery_current(
+            &provisional_lease,
+            workstream_id,
+            expected_workstream_revision,
+        )
+        .map_err(|_| D17NavigatorError::ManagedActionUnavailable)
+}
+
+fn require_active_d17_workstream(
+    snapshot: &D17Snapshot,
+    workstream_id: WorkstreamId,
+    expected_revision: Revision,
+    expected_provider: Option<ProviderKind>,
+) -> Result<(), D17NavigatorError> {
+    let workstream = snapshot
+        .workstreams
+        .iter()
+        .find(|workstream| {
+            workstream.workstream_id == workstream_id
+                && !workstream.archived
+                && workstream.revision == expected_revision
+                && expected_provider.is_none_or(|provider| workstream.provider == provider)
+        })
+        .ok_or(D17NavigatorError::ManagedActionUnavailable)?;
+    if workstream.onboarding.is_some() {
+        return Err(D17NavigatorError::ManagedActionUnavailable);
+    }
+    Ok(())
+}
+
+/// The terminal onboarding-recovery state exposes only explicit Park. The
+/// `ActionFenced` state permits no lifecycle mutation at all.
+fn require_parkable_d17_workstream(
+    snapshot: &D17Snapshot,
+    workstream_id: WorkstreamId,
+    expected_revision: Revision,
+) -> Result<(), D17NavigatorError> {
+    let workstream = snapshot
+        .workstreams
+        .iter()
+        .find(|workstream| {
+            workstream.workstream_id == workstream_id
+                && !workstream.archived
+                && workstream.revision == expected_revision
+        })
+        .ok_or(D17NavigatorError::ManagedActionUnavailable)?;
+    if workstream.onboarding == Some(crate::d17_snapshot::D17OnboardingStatus::ActionFenced) {
+        return Err(D17NavigatorError::ManagedActionUnavailable);
+    }
+    Ok(())
 }
 
 /// One exact post-start attachment claim for a session created from a selected
@@ -433,7 +1126,7 @@ fn refresh_provider_exec(root: &StateRoot, presentation: &Presentation) -> Provi
     }
 }
 
-/// Composes the dormant D17 shell card with the marker-first materializer.
+/// Composes the D17 shell card with the marker-first materializer.
 /// The retained provisional lease spans candidate allocation, account-shell
 /// startup/evidence, and outer-pane replacement; no provider command is
 /// constructed or launched here.
@@ -449,6 +1142,17 @@ fn materialize_provisional_shell(
         presentation,
         &account_shell_inputs_from_environment()?,
     )
+}
+
+/// Opens the initially selected provisional shell only after fresh D17
+/// presentation startup has finished creating and proving both owned panes.
+/// This uses the same marker/lease/materialization path as explicit Shell-card
+/// activation and never creates provider or registry authority.
+pub(crate) fn materialize_initial_provisional_shell(
+    root: &StateRoot,
+    presentation: &Presentation,
+) -> Result<(), D17NavigatorError> {
+    materialize_provisional_shell(root, presentation)
 }
 
 /// Reattaches the one exact materialized shell after the provider pane has
@@ -608,11 +1312,20 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AccountShellInputs, ProviderExecRefresh, materialize_provisional_shell_with_inputs,
-        reattach_materialized_provisional_shell, refresh_provider_exec, start_d17_same_location,
+        AccountShellInputs, ManagedAction, ProviderExecRefresh, apply_managed_action,
+        describe_shell_location, materialize_provisional_shell_with_inputs, observe_shell_cwd,
+        reattach_materialized_provisional_shell, refresh_provider_exec,
+        require_active_d17_workstream, require_parkable_d17_workstream, start_d17_same_location,
     };
     use crate::{
-        domain::{ProviderKind, RandomIdGenerator},
+        d17_snapshot::{
+            D17OnboardingStatus, D17ProjectSnapshot, D17Snapshot, D17WorkstreamSnapshot,
+        },
+        domain::{
+            LocationId, ProjectId, ProviderKind, ProviderSessionId, RandomIdGenerator, Revision,
+            WorkstreamId, WorkstreamLifecycle,
+        },
+        navigator::d17::D17ShellLocation,
         presentation::Presentation,
         process::output_bounded,
         provisional::{ProvisionalPhase, read_marker},
@@ -672,6 +1385,154 @@ mod tests {
         fs::remove_file(transition_lock).unwrap();
     }
 
+    fn managed_snapshot(onboarding: Option<D17OnboardingStatus>) -> (D17Snapshot, WorkstreamId) {
+        let project_id = ProjectId::from(Uuid::from_u128(801));
+        let location_id = LocationId::from(Uuid::from_u128(802));
+        let workstream_id = WorkstreamId::from(Uuid::from_u128(803));
+        (
+            D17Snapshot {
+                projects: vec![D17ProjectSnapshot {
+                    project_id,
+                    display_name: "checkout".to_owned(),
+                    locations: vec![],
+                }],
+                workstreams: vec![D17WorkstreamSnapshot {
+                    project_id,
+                    location_id,
+                    workstream_id,
+                    provider: ProviderKind::Codex,
+                    lifecycle: WorkstreamLifecycle::Open,
+                    archived: false,
+                    revision: Revision::INITIAL,
+                    runtime: None,
+                    onboarding,
+                    native_name: None,
+                    attention_revision: Revision::INITIAL,
+                    result_unseen: false,
+                    recovery_unseen: false,
+                }],
+                unresolved_operations: vec![],
+            },
+            workstream_id,
+        )
+    }
+
+    #[test]
+    fn schema14_action_preflight_keeps_onboarding_fences_out_of_lifecycle_actions() {
+        let (fenced, workstream_id) = managed_snapshot(Some(D17OnboardingStatus::ActionFenced));
+        assert!(
+            require_active_d17_workstream(
+                &fenced,
+                workstream_id,
+                Revision::INITIAL,
+                Some(ProviderKind::Codex),
+            )
+            .is_err()
+        );
+        assert!(
+            require_parkable_d17_workstream(&fenced, workstream_id, Revision::INITIAL).is_err()
+        );
+
+        let (recovery, workstream_id) =
+            managed_snapshot(Some(D17OnboardingStatus::RecoveryRequired));
+        assert!(
+            require_active_d17_workstream(
+                &recovery,
+                workstream_id,
+                Revision::INITIAL,
+                Some(ProviderKind::Codex),
+            )
+            .is_err()
+        );
+        assert!(
+            require_parkable_d17_workstream(&recovery, workstream_id, Revision::INITIAL).is_ok()
+        );
+
+        let (ordinary, workstream_id) = managed_snapshot(None);
+        assert!(
+            require_active_d17_workstream(
+                &ordinary,
+                workstream_id,
+                Revision::INITIAL,
+                Some(ProviderKind::Codex),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn schema14_restore_and_acknowledge_use_only_exact_durable_revisions() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let checkout = temporary.path().join("checkout");
+        fs::create_dir(&checkout).unwrap();
+        let mut state = fresh_create(&state_path, &RandomIdGenerator).unwrap();
+        let registered = state
+            .register_project_location_with_initial_workstream(
+                &checkout,
+                "checkout",
+                None,
+                None,
+                ProviderKind::OpenCode,
+                &RandomIdGenerator,
+            )
+            .unwrap();
+        drop(state);
+        migrate_existing_to_schema14(&state_path);
+
+        let root = StateRoot::select(&state_path);
+        let state = open_d17_current_only(&root).unwrap();
+        let mut registry = state.into_d17_host_registry().unwrap();
+        let overview = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == registered.workstream.workstream_id)
+            .unwrap();
+        let archived_revision = registry
+            .archive_workstream(overview.workstream_id, overview.revision, 1)
+            .unwrap();
+        drop(registry);
+
+        assert_eq!(
+            apply_managed_action(
+                &root,
+                ManagedAction::Restore {
+                    workstream_id: registered.workstream.workstream_id,
+                    expected_workstream_revision: archived_revision,
+                },
+            )
+            .unwrap(),
+            None
+        );
+        let restored = crate::d17_snapshot::read_snapshot(&root).unwrap();
+        assert!(!restored.workstreams[0].archived);
+
+        let state = open_d17_current_only(&root).unwrap();
+        let mut registry = state.into_d17_host_registry().unwrap();
+        let attention = registry
+            .mark_result_attention(
+                registered.workstream.workstream_id,
+                ProviderSessionId::new(ProviderKind::OpenCode, "session-a").unwrap(),
+                "turn-a".to_owned(),
+            )
+            .unwrap();
+        drop(registry);
+        assert_eq!(
+            apply_managed_action(
+                &root,
+                ManagedAction::AcknowledgeResult {
+                    workstream_id: registered.workstream.workstream_id,
+                    expected_attention_revision: attention.revision,
+                },
+            )
+            .unwrap(),
+            None
+        );
+        let acknowledged = crate::d17_snapshot::read_snapshot(&root).unwrap();
+        assert!(!acknowledged.workstreams[0].result_unseen);
+    }
+
     fn wait_for_private_client(socket: &Path) {
         for _ in 0..50 {
             let mut command = Command::new("tmux");
@@ -727,6 +1588,10 @@ mod tests {
         assert_eq!(marker.phase(), ProvisionalPhase::Materialized);
         let _runtime_guard = DisposableTmuxServerGuard(marker.runtime_paths().socket.clone());
         wait_for_private_client(&marker.runtime_paths().socket);
+        assert_eq!(
+            observe_shell_cwd(&root, &presentation, &seed).unwrap(),
+            seed.canonicalize().unwrap()
+        );
 
         assert!(reattach_materialized_provisional_shell(&root, &presentation).unwrap());
         assert_eq!(
@@ -741,6 +1606,25 @@ mod tests {
         presentation.close_d17().unwrap();
         assert!(!presentation.paths().directory.exists());
         assert!(!marker.runtime_paths().directory.exists());
+    }
+
+    #[test]
+    fn shell_location_abbreviates_cwd_without_git_display_discovery() {
+        let temporary = tempfile::tempdir().unwrap();
+        let home = temporary.path().join("home");
+        let nested = home.join("checkout/nested");
+        let notes = home.join("notes");
+        fs::create_dir_all(&nested).unwrap();
+        fs::create_dir_all(&notes).unwrap();
+
+        assert_eq!(
+            describe_shell_location(&nested, Some(&home)),
+            D17ShellLocation::cwd("~/c/nested")
+        );
+        assert_eq!(
+            describe_shell_location(&notes, Some(&home)),
+            D17ShellLocation::cwd("~/notes")
+        );
     }
 
     #[test]

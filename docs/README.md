@@ -2,13 +2,12 @@
 
 ## Status and authority
 
-D16 host-local implementation, disposable repository gate, and separately
-authorized live local and ordinary-SSH-entered-host acceptance are complete.
-The current source also includes documented post-acceptance rendering,
-attachment, Park convergence, and compact-navigator corrections; those
-follow-ups do not rewrite the earlier candidate's live-acceptance evidence.
-D17 shell-first managed-session onboarding is now the approved target design
-and next planned checkpoint; it is not implemented or accepted yet.
+D16 host-local implementation and its separately authorized live acceptance
+remain complete historical evidence. D17 shell-first managed-session
+onboarding is the active source-installed product: its schema-14 cutover,
+Navigator, brokered Codex/OpenCode promotion, and managed attachment paths are
+implemented, and the repository gate passes. Final explicitly operator-gated
+live Codex/OpenCode acceptance remains open.
 
 - [Product and architecture design](design.md) is the V1 contract.
 - [Delivery roadmap](roadmap.md) owns delivery order, checkpoint status, and
@@ -20,8 +19,7 @@ and next planned checkpoint; it is not implemented or accepted yet.
 
 ## Current operator contract
 
-This section describes the shipped D16 binary. It intentionally retains the
-Projects page and provider chooser until D17 implementation replaces them.
+This section describes the installed D17 binary.
 
 WSNav is host-local. Run it on the machine where the provider Runtime lives.
 For another machine, establish ordinary SSH in a separate terminal, tab, or
@@ -32,29 +30,24 @@ connection ends, the disposable presentation may be lost while the host-local
 Runtime and provider remain untouched; reconnect and rerun `wsnav` on that host
 to reattach.
 
-The reduced navigator has three direct pages: Workstreams (active
-Workstreams, Project-grouped), Projects (host-local Projects and Locations),
-and Archived (Project-grouped restore). `,` opens Projects and `.` opens
-Archived; `Esc` returns to Workstreams; `Left` and `Right` no longer cycle
-views. Workstreams keeps `Enter`, `n`, `f`, `p`, `x`, `a`, and `?`; Projects
-provides Location registration (`a`), browser-root configuration (`b`),
-Location-based New (`n`), and explicit metadata refresh (`r`); Archived uses
-`u` to restore without starting or attaching a provider. The installed
+The shell-first navigator has two direct pages: Workstreams and Archived. `.`
+opens Archived; `Esc` returns to Workstreams; `Left` and `Right` do not cycle
+views. Workstreams keeps `Enter`, `n`, `f`, `p`, `x`, `a`, and `?`; Archived
+uses `u` to restore without starting or attaching a provider. The installed
 `wsnav --help` output is the CLI reference for that exact binary.
 
-Projects registers exact host-local Git Locations through a bounded browser,
-rooted at `~` by default. It uses relative cursors and does not expose raw
-paths in snapshots or provider panes. Repository metadata is refreshed only by
-the explicit Projects action; ordinary redraw, attachment, and fast
-Workstream switching do not inspect Git. A selected Location can start a new
-Workstream even when its Project has no active Workstreams.
-
-New Workstream provider choice is explicit. A ready provider is selectable,
-and Codex also remains selectable when its exact observer setup, update, or
-native trust review can be completed by the contextual guide. From an existing
-Workstream, switching to a sole different provider still requires confirmation;
-WSNav never silently substitutes it. New provider conversations are independent
-and never migrate or copy context from the source Workstream.
+Workstreams starts with one pinned `Shell` card outside Project groups. A fresh
+presentation starts with that card selected and its account shell visible on
+the right; reconnect preserves the detached presentation's current surface.
+The stable two-line card shows `Shell`, then a cwd line that abbreviates every
+parent component and keeps the leaf folder whole, for example
+`~/c/workstream-navigator`. This display is neither persisted nor used as
+launch authority. Change directory with ordinary shell commands and run
+`codex` or `opencode`. The native command owns provider and launch-option
+choice. Successful brokered launch registers the detected worktree root,
+promotes that same selected card to a managed Workstream, and derives a fresh
+Shell card. There is no Projects page, provider picker, path picker, or
+below-provider split shell.
 
 Observer readiness is contextual rather than a page or manual setup mode.
 Startup detects it read-only. A Codex action that needs readiness opens a guide
@@ -83,15 +76,16 @@ can finish and quit the old presentation. Only an exact detached owned
 presentation may be retired under the transition lease; Runtime tmux servers,
 provider processes, sessions, and completed output are never targeted.
 
-## D17 target contract (not yet implemented)
+## D17 managed-onboarding contract
 
-D17 will reduce the ordinary navigator to Workstreams and Archived. Workstreams
-will always show one pinned `New session · shell` card. At presentation
+D17 reduces the ordinary navigator to Workstreams and Archived. Workstreams
+always shows one pinned `Shell` card. At presentation
 creation, WSNav captures, validates, and canonicalizes that presentation's
-invocation cwd as a private seed. Selecting the card lazily materializes one
-opaque candidate `RuntimeId` and creates the provisional tmux directory, socket,
-configuration, and session with the existing final full-UUID `RuntimePaths`
-form. The candidate ID, exact `RuntimePaths` fields (directory, socket,
+invocation cwd as a private seed. After both presentation panes are proven,
+fresh startup selects the card and materializes one opaque candidate
+`RuntimeId`, creating the provisional tmux directory, socket, configuration,
+and session with the existing final full-UUID `RuntimePaths` form. The
+candidate ID, exact `RuntimePaths` fields (directory, socket,
 configuration, and session), seed, and ownership evidence live only in the
 presentation-private marker; they do not create a registry Runtime or
 Workstream row. Before creating those artifacts, materialization proves the
@@ -110,7 +104,9 @@ seed. The pinned provisional card is a derived singleton with no durable card
 row. Each materialization mints a fresh opaque `slot_generation` in the marker;
 the capability and onboarding journal bind that generation to the candidate.
 
-The selected card opens a presentation-scoped account shell; the user changes
+The card is headed exactly `Shell` with no path-selection hint. It shows the
+bounded live cwd described above, then opens a presentation-scoped account
+shell; the user changes
 directory normally and types `codex` or `opencode`. D17 supports Bash and Zsh
 interactive non-login shells only. Shell-specific private wrappers inherit the
 validated presentation environment, original `HOME`, and (for Zsh) original
@@ -283,7 +279,7 @@ action. The current arbitrary-location `register <checkout> [--provider]`
 command (and equivalent public registration form) is removed at the atomic
 cutover; only the brokered shell can create a new Location/provider pair.
 
-The schema-13-to-14 migration will remove the obsolete Project-browser setting
+The schema-13-to-14 migration removes the obsolete Project-browser setting
 while preserving authoritative Projects, Locations, Workstreams, Runtimes,
 bindings, attention, and unfinished operations. D17 does not require a state
 wipe. Normal detach and reattach to the same owned presentation preserves the
@@ -304,52 +300,13 @@ source-based parity for contextual `n`: it inherits the exact source provider
 and Location and rejects provider/path overrides. Source-less arbitrary
 provider/path creation is broker-only.
 
-D17.0 remains unproven until disposable Bash/Zsh baseline matrices and a race
-of close/loss against materialization, prepare/token issuance, helper consume,
-OpenCode preparation/`POST /session`, and provider `exec` proves one lease
-winner with no managed kill, duplicate ownership, duplicate shell, or second
-POST. It proves the schema/HostId transaction commits schema-14 ownership before
-lock creation/recognition, that schema-13 code/path does neither, that a crash
-after the database commit but before file creation retries safely, and that a
-pre-schema-14 lock artifact is unexpected/ambiguous and remains untouched rather
-than adopted or deleted; no cross-store atomicity is assumed. It exercises the
-exact stable host-private `provisional.lock` across schema-14 pending-before-file,
-file-before-ready, ready steady-state, and ready missing/replacement crash and
-restart cases, plus creation/reuse, no-follow/root/path/inode validation, holder
-crash/restart, busy timeout, symlink/replacement/unlink-recreate refusal, and FD
-noninheritance. It also races
-passive snapshot, new attachment,
-Park/Resume/Fork/contextual `n`/`new-workstream`, archive/Rename,
-recovery/start retry, helper exit, exact exec error/proof, immediate provider
-exit, and restart across `runtime_owned_launching`, provider preparation/
-external-effect, and `provider_exec_started`, proving only full identity proof
-activates ordinary authority. It proves terminal known-absent plus no-effect
-evidence performs guarded rollback and ends onboarding, while terminal
-known-absent plus a known OpenCode binding ends onboarding in the exact
-stopped/recovery state with only binding-preserving Resume/recovery or explicit
-Park allowed; exec-error evidence alone never grants ordinary action, possible
-effects remain recovery-required, and no operation stays fenced indefinitely. It
-covers candidate collision/foreign-artifact
-refusal, marker deletion, multiple/unknown `run/runtime-*` artifacts, bounded
-namespace overflow, and stale rollback versus fresh-card materialization while
-excluding marker-backed candidates from ordinary registry inventory/probe/park/
-remove/recovery paths until durable adoption. The revision/slot-generation
-reconciler is idempotent across restart with outcome-specific counts: ambiguous
-or unknown evidence leaves every artifact untouched, blocks new materialization,
-and creates no new provisional server or marker (the derived singleton card may
-remain unavailable); conclusive clean/pre-effect rollback creates no duplicate
-and leaves one derived unmaterialized card; successful ownership leaves the
-adopted Runtime server plus one unmaterialized card; and clean pre-materialization
-has zero provisional servers. A two-presentation materialization race is
-serialized by the shared host lease: one valid candidate may materialize, while
-the other presentation recognizes that marker/artifact as busy/owned, keeps its
-derived card visible but unavailable, and creates no second server. It never
-normalizes unknown artifacts to a count of one or resets a newer marker. The
-post-commit action fence applies only to the unproven Runtime; selecting the
-fresh card may attach its separate provisional server but grants no authority
-over that Runtime. The [D17 roadmap
-checkpoint](roadmap.md#d17---shell-first-managed-session-onboarding) lists the
-complete exit gates and keeps the D16 binary as the current usable product.
+Disposable automated evidence covers the schema/lease boundaries, Bash/Zsh
+wrappers, marker-backed Runtime handoff, provider grammar, crash/recovery
+fences, exact attachment, card promotion/selection, live cwd display, and
+retired split-shell bindings. The [D17 roadmap
+checkpoint](roadmap.md#d17---shell-first-managed-session-onboarding) retains the
+complete exit gates. Final sanitized live Codex/OpenCode acceptance still
+requires explicit operator intent.
 
 ## Build and command references
 
@@ -357,6 +314,6 @@ The project is a source-installed operator beta. From a reviewed checkout,
 build and install at a high level with `cargo build --locked --release` and
 `install -m 755 target/release/wsnav ~/.local/bin/wsnav`; run `scripts/check`
 for the repository gate. `wsnav --help` is the installed CLI reference. D16
-cutover is available only through the ordinary interactive `wsnav` startup
-flow; there is no public transition command. The normal workflow is the
-Navigator beside the native provider TUI.
+cutover remains historical; current state opens at schema 14. The normal
+workflow is the Navigator beside either the provisional account shell or the
+native provider TUI.

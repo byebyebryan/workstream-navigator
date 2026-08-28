@@ -1,4 +1,7 @@
-use super::{Presentation, StateRoot, run_d17_navigator, run_local_navigator};
+use super::{
+    Presentation, StateRoot, materialize_initial_provisional_shell, run_d17_navigator,
+    run_local_navigator,
+};
 use super::{
     cli::{Cli, Commands},
     launch::{
@@ -553,6 +556,9 @@ fn navigator(root: &StateRoot) -> Result<(), AppError> {
     if fresh {
         let seed_cwd = std::env::current_dir().map_err(AppError::Io)?;
         presentation.start_d17(uuid::Uuid::new_v4(), &seed_cwd)?;
+        if materialize_initial_provisional_shell(root, &presentation).is_err() {
+            let _ = presentation.show_guidance("Initial shell unavailable; exact state required");
+        }
     } else {
         presentation.d17_context()?;
     }

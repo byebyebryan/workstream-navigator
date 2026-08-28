@@ -50,9 +50,6 @@ pub(super) fn presentation_control(
     let presentation =
         Presentation::from_control(root.base(), presentation_socket, presentation_session)?;
     let result = match action {
-        PresentationAction::CreateOrFocusShell => {
-            create_presentation_shell(root, &presentation, source_pane)
-        }
         PresentationAction::LiteralCtrlB => {
             send_presentation_literal_ctrl_b(root, &presentation, source_pane)
         }
@@ -105,47 +102,6 @@ pub(super) fn presentation_shell(
     }
 }
 
-fn create_presentation_shell(
-    root: &StateRoot,
-    presentation: &Presentation,
-    source_pane: &str,
-) -> Result<(), AppError> {
-    if presentation.focus_existing_utility_if_present(source_pane)? {
-        return Ok(());
-    }
-    let status = presentation
-        .attachment_status()?
-        .ok_or(PresentationError::ControlRefused(
-            "a Running attachment is required",
-        ))?;
-    if status.phase != AttachmentPhase::Running {
-        return Err(PresentationError::ControlRefused("a Running attachment is required").into());
-    }
-    presentation.validate_provider_context(status.workstream_id)?;
-    let state = crate::state::open_current_only(&StateRoot::select(root.base()))?;
-    let mut registry = state.into_host_registry()?;
-    let runtime = crate::actions::preflight_attachment(root, &mut registry, status.workstream_id)?;
-    let overview = registry
-        .workstream_overviews()?
-        .into_iter()
-        .find(|overview| overview.workstream_id == status.workstream_id)
-        .ok_or(PresentationError::ControlRefused(
-            "the registered Workstream is unavailable",
-        ))?;
-    if overview.archived_at_millis.is_some()
-        || overview.project_repository_path != runtime.cwd
-        || !runtime.cwd.is_dir()
-    {
-        return Err(PresentationError::ControlRefused(
-            "the registered project root is unavailable",
-        )
-        .into());
-    }
-    let shell = ordinary_interactive_shell()?;
-    presentation.create_or_focus_shell(source_pane, status.workstream_id, &runtime.cwd, &shell)?;
-    Ok(())
-}
-
 fn send_presentation_literal_ctrl_b(
     root: &StateRoot,
     presentation: &Presentation,
@@ -184,31 +140,6 @@ fn send_presentation_literal_ctrl_b(
     );
     runtime.send_literal_ctrl_b()?;
     Ok(())
-}
-
-fn ordinary_interactive_shell() -> Result<PathBuf, AppError> {
-    let shell = env::var_os("SHELL").unwrap_or_else(|| std::ffi::OsString::from("/bin/sh"));
-    validate_interactive_shell(&PathBuf::from(shell))
-}
-
-fn validate_interactive_shell(path: &Path) -> Result<PathBuf, AppError> {
-    let valid_path = path.is_absolute()
-        && path.to_str().is_some_and(|value| {
-            !value.is_empty() && !value.chars().any(|c| c.is_control() || c.is_whitespace())
-        });
-    #[cfg(unix)]
-    let executable = valid_path
-        && path.is_file()
-        && std::fs::metadata(path).is_ok_and(|metadata| {
-            use std::os::unix::fs::PermissionsExt;
-            metadata.permissions().mode() & 0o111 != 0
-        });
-    #[cfg(not(unix))]
-    let executable = valid_path && path.is_file();
-    if !executable {
-        return Err(PresentationError::ControlRefused("ordinary shell path is invalid").into());
-    }
-    Ok(path.to_path_buf())
 }
 
 pub(super) struct OpenCodeObserverArguments {
@@ -471,27 +402,5 @@ fn attach_runtime_d17(
 pub(super) fn provider_wait() -> Result<(), AppError> {
     loop {
         std::thread::sleep(std::time::Duration::from_secs(60));
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::validate_interactive_shell;
-    use std::path::Path;
-
-    #[test]
-    fn ordinary_shell_requires_an_executable_file() {
-        let current = std::env::current_exe().unwrap();
-        assert!(validate_interactive_shell(&current).is_ok());
-        assert!(validate_interactive_shell(Path::new("/tmp")).is_err());
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let temporary = tempfile::tempdir().unwrap();
-            let file = temporary.path().join("not-executable");
-            std::fs::write(&file, b"#!/bin/sh\n").unwrap();
-            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
-            assert!(validate_interactive_shell(&file).is_err());
-        }
     }
 }

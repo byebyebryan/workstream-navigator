@@ -15,4 +15,6 @@ pub use d16::{
     D16RowId, D16WorkstreamRow,
 };
 pub use d16_controller::{D16NavigatorError, run_local_navigator};
-pub(crate) use d17_controller::{D17NavigatorError, run_d17_navigator};
+pub(crate) use d17_controller::{
+    D17NavigatorError, materialize_initial_provisional_shell, run_d17_navigator,
+};

@@ -1456,9 +1456,13 @@ impl HostRegistryApplicationBackend {
                 let source =
                     self.workstream(&registry, source_workstream_id, None, Some(*provider))?;
                 self.ensure_workstream_observer_available(&source, Authority::Action)?;
-                let workstream_id =
-                    actions::recover_managed_operation(&self.root, &mut registry, *operation_id)
-                        .map_err(map_action_error)?;
+                let workstream_id = actions::recover_managed_operation(
+                    &self.root,
+                    &mut registry,
+                    *operation_id,
+                    Some(*expected_revision),
+                )
+                .map_err(map_action_error)?;
                 let current = self.workstream(&registry, workstream_id, None, Some(*provider))?;
                 Ok(ApplicationOutcome::Created {
                     workstream_id,

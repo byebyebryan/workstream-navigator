@@ -1,8 +1,8 @@
 //! Bounded, read-only Git repository registration metadata.
 //!
-//! The D16 registration path normalizes a supplied Git path to its primary
-//! project root. D17's dormant broker seam instead preserves the exact
-//! containing worktree root. Remote URLs are normalized in memory and
+//! The historical D16 registration path normalized a supplied Git path to its
+//! primary project root. D17 preserves the exact containing worktree root.
+//! Remote URLs are normalized in memory and
 //! discarded; only a versioned SHA-256 fingerprint and credential-free
 //! canonical display label are returned to callers.
 
@@ -81,7 +81,6 @@ pub fn inspect_containing_worktree(
         .take(64)
         .collect::<String>();
     let remote_identity = discover_remote_identity(&project_root)?;
-
     Ok(RepositoryRegistration {
         project_root,
         display_name,

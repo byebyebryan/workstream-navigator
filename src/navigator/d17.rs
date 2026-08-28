@@ -4,11 +4,6 @@
 //! intent. It does not open state, materialize a provisional shell, attach a
 //! provider, or render a provider pane.
 
-#![allow(
-    dead_code,
-    reason = "the D17 Workstreams navigator remains unreachable until the atomic cutover"
-)]
-
 use std::collections::BTreeMap;
 
 use crossterm::event::KeyCode;
@@ -17,12 +12,15 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap},
 };
 
 use crate::{
-    d17_snapshot::{D17OnboardingStatus, D17Snapshot, D17WorkstreamSnapshot},
-    domain::{ProviderKind, Revision, RuntimeId, WorkstreamId},
+    d17_snapshot::{D17OnboardingStatus, D17OperationSnapshot, D17Snapshot, D17WorkstreamSnapshot},
+    domain::{
+        OperationId, OperationKind, OperationPhase, ProviderKind, Revision, RuntimeId,
+        RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
+    },
 };
 
 /// The only ordinary D17 Navigator pages.
@@ -31,6 +29,22 @@ pub(crate) enum D17Page {
     #[default]
     Workstreams,
     Archived,
+}
+
+/// Presentation-local context shown on the provisional shell card. It is
+/// derived from the seed or exact live shell cwd, never persisted, and never
+/// used as registration or launch authority.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct D17ShellLocation {
+    cwd: String,
+}
+
+impl D17ShellLocation {
+    pub(crate) fn cwd(label: &str) -> Self {
+        Self {
+            cwd: safe_shell_location_label(label),
+        }
+    }
 }
 
 impl D17Page {
@@ -49,24 +63,35 @@ impl D17Page {
 pub(crate) enum D17RowId {
     ProvisionalShell,
     Workstream(WorkstreamId),
+    Operation(OperationId),
 }
 
 /// One rendered D17 Workstreams row. Project headings are context only and can
 /// never become an action target.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum D17Row {
-    ProvisionalShell,
+    ProvisionalShell { location: D17ShellLocation },
     ProjectHeader { display_name: String },
     Workstream(D17WorkstreamSnapshot),
+    Operation(D17OperationSnapshot),
 }
 
 impl D17Row {
     #[must_use]
     pub(crate) const fn id(&self) -> Option<D17RowId> {
         match self {
-            Self::ProvisionalShell => Some(D17RowId::ProvisionalShell),
+            Self::ProvisionalShell { .. } => Some(D17RowId::ProvisionalShell),
             Self::ProjectHeader { .. } => None,
             Self::Workstream(workstream) => Some(D17RowId::Workstream(workstream.workstream_id)),
+            Self::Operation(operation) => Some(D17RowId::Operation(operation.operation_id)),
+        }
+    }
+
+    #[must_use]
+    pub(crate) fn render_height(&self) -> usize {
+        match self {
+            Self::ProjectHeader { .. } => 1,
+            Self::ProvisionalShell { .. } | Self::Workstream(_) | Self::Operation(_) => 2,
         }
     }
 }
@@ -74,7 +99,7 @@ impl D17Row {
 /// The only effects a D17 terminal controller may request. Provider kind and
 /// location are carried only for contextual same-session actions; a new shell
 /// deliberately has neither field because the native command owns both.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum D17Command {
     None,
     Quit,
@@ -89,6 +114,63 @@ pub(crate) enum D17Command {
         source_workstream_id: WorkstreamId,
         expected_workstream_revision: Revision,
         provider: ProviderKind,
+    },
+    Start {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        provider: ProviderKind,
+    },
+    Recover {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        provider: ProviderKind,
+    },
+    Park {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+    },
+    Archive {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+    },
+    Restore {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+    },
+    AcknowledgeResult {
+        workstream_id: WorkstreamId,
+        expected_attention_revision: Revision,
+    },
+    Fork {
+        source_workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        provider: ProviderKind,
+    },
+    RecoverOperation {
+        operation_id: OperationId,
+        expected_operation_revision: Revision,
+        provider: ProviderKind,
+    },
+    Rename {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        name: String,
+    },
+    ShowGuidance(&'static str),
+}
+
+/// Process-local action confirmation/input state. It deliberately retains
+/// only one exact Workstream revision and bounded display text.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum D17Modal {
+    ConfirmArchive {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+    },
+    Rename {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        value: String,
     },
 }
 
@@ -106,14 +188,17 @@ pub(crate) struct D17ListGeometry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct D17Model {
     snapshot: D17Snapshot,
+    shell_location: D17ShellLocation,
     page: D17Page,
     selected: Option<D17RowId>,
     guidance: Option<&'static str>,
+    modal: Option<D17Modal>,
+    help_visible: bool,
 }
 
 /// Thin D17 Navigator wrapper. It owns only presentation-local selection and
 /// rendering state; state, shell materialization, provider launch, and tmux
-/// attachment stay outside this dormant seam until the atomic cutover.
+/// attachment stay in the controller.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct D17Navigator {
     model: D17Model,
@@ -127,11 +212,6 @@ impl D17Navigator {
         }
     }
 
-    #[must_use]
-    pub(crate) const fn model(&self) -> &D17Model {
-        &self.model
-    }
-
     pub(crate) const fn model_mut(&mut self) -> &mut D17Model {
         &mut self.model
     }
@@ -140,10 +220,20 @@ impl D17Navigator {
         self.model.replace_snapshot(snapshot);
     }
 
+    pub(crate) fn set_shell_location(&mut self, location: D17ShellLocation) {
+        self.model.set_shell_location(location);
+    }
+
     /// Transfers the presentation-local cursor to the managed card created by
     /// one exact provisional Runtime promotion.
     pub(crate) fn select_runtime(&mut self, runtime_id: RuntimeId) -> bool {
         self.model.select_runtime(runtime_id)
+    }
+
+    /// Moves the process-local cursor to one exact active Workstream after a
+    /// lifecycle/creation transition. It is never a durable mutation.
+    pub(crate) fn select_workstream(&mut self, workstream_id: WorkstreamId) -> bool {
+        self.model.select_workstream(workstream_id)
     }
 
     /// Sets bounded presentation-local guidance after an unavailable D17
@@ -192,9 +282,12 @@ impl D17Model {
     pub(crate) fn new(snapshot: D17Snapshot) -> Self {
         Self {
             snapshot,
+            shell_location: D17ShellLocation::cwd("unavailable"),
             page: D17Page::Workstreams,
             selected: Some(D17RowId::ProvisionalShell),
             guidance: None,
+            modal: None,
+            help_visible: false,
         }
     }
 
@@ -212,13 +305,27 @@ impl D17Model {
         self.guidance
     }
 
+    #[must_use]
+    pub(crate) const fn modal(&self) -> Option<&D17Modal> {
+        self.modal.as_ref()
+    }
+
+    #[must_use]
+    pub(crate) const fn help_visible(&self) -> bool {
+        self.help_visible
+    }
+
     pub(crate) fn set_guidance(&mut self, guidance: &'static str) {
         self.guidance = Some(guidance);
     }
 
+    pub(crate) fn set_shell_location(&mut self, location: D17ShellLocation) {
+        self.shell_location = location;
+    }
+
     #[must_use]
     pub(crate) fn rows(&self) -> Vec<D17Row> {
-        rows_for(&self.snapshot, self.page)
+        rows_for(&self.snapshot, self.page, &self.shell_location)
     }
 
     /// Replaces only passive snapshot data while retaining a still-visible
@@ -233,16 +340,25 @@ impl D17Model {
     }
 
     pub(crate) fn select_next(&mut self) {
+        if self.help_visible || self.modal.is_some() {
+            return;
+        }
         self.select_offset(1);
     }
 
     pub(crate) fn select_previous(&mut self) {
+        if self.help_visible || self.modal.is_some() {
+            return;
+        }
         self.select_offset(-1);
     }
 
     /// Selects one exact visible card and performs its primary action. This is
     /// the mouse equivalent of selecting the row and pressing Enter.
     pub(crate) fn activate_row(&mut self, row_id: D17RowId) -> D17Command {
+        if self.help_visible || self.modal.is_some() {
+            return D17Command::None;
+        }
         if !self.rows().iter().any(|row| row.id() == Some(row_id)) {
             return D17Command::None;
         }
@@ -269,16 +385,28 @@ impl D17Model {
         true
     }
 
+    pub(crate) fn select_workstream(&mut self, workstream_id: WorkstreamId) -> bool {
+        if !self
+            .snapshot
+            .workstreams
+            .iter()
+            .any(|workstream| !workstream.archived && workstream.workstream_id == workstream_id)
+        {
+            return false;
+        }
+        self.page = D17Page::Workstreams;
+        self.selected = Some(D17RowId::Workstream(workstream_id));
+        true
+    }
+
     /// Resolves one rendered list line to its exact actionable identity.
-    /// Project headings occupy one line and both card kinds occupy two.
+    /// Project headings occupy one line; the shell and managed cards occupy
+    /// two stable lines each.
     #[must_use]
     pub(crate) fn row_id_at_render_line(&self, line: usize) -> Option<D17RowId> {
         let mut cursor = 0_usize;
         for row in self.rows() {
-            let height = match row {
-                D17Row::ProjectHeader { .. } => 1,
-                D17Row::ProvisionalShell | D17Row::Workstream(_) => 2,
-            };
+            let height = row.render_height();
             if (cursor..cursor.saturating_add(height)).contains(&line) {
                 return row.id();
             }
@@ -291,13 +419,29 @@ impl D17Model {
     /// provider key input never flows through this model.
     #[must_use]
     pub(crate) fn handle_key(&mut self, key: KeyCode) -> D17Command {
+        if self.help_visible {
+            return match key {
+                KeyCode::Char('?' | 'q') | KeyCode::Esc => {
+                    self.help_visible = false;
+                    D17Command::None
+                }
+                _ => D17Command::None,
+            };
+        }
+        if self.modal.is_some() {
+            return self.handle_modal_key(key);
+        }
         match key {
             KeyCode::Char('q') => D17Command::Quit,
+            KeyCode::Char('?') => {
+                self.help_visible = true;
+                D17Command::None
+            }
             KeyCode::Char('.') => {
                 self.set_page(D17Page::Archived);
                 D17Command::None
             }
-            KeyCode::Char('w') => {
+            KeyCode::Char('w') | KeyCode::Esc => {
                 self.set_page(D17Page::Workstreams);
                 D17Command::None
             }
@@ -311,6 +455,12 @@ impl D17Model {
             }
             KeyCode::Enter => self.activate_selected(),
             KeyCode::Char('n') => self.new_from_selected(),
+            KeyCode::Char('f') => self.fork_selected(),
+            KeyCode::Char('p') => self.park_selected(),
+            KeyCode::Char('x') => self.archive_selected(),
+            KeyCode::Char('u') => self.restore_selected(),
+            KeyCode::Char('a') => self.acknowledge_selected(),
+            KeyCode::Char('r') => self.rename_or_recover_selected(),
             _ => D17Command::None,
         }
     }
@@ -348,23 +498,13 @@ impl D17Model {
     }
 
     fn activate_selected(&self) -> D17Command {
-        if self.page != D17Page::Workstreams {
-            return D17Command::None;
-        }
         match self.selected {
-            Some(D17RowId::ProvisionalShell) => D17Command::MaterializeProvisionalShell,
-            Some(D17RowId::Workstream(workstream_id)) => self
-                .selected_workstream(workstream_id)
-                .filter(|workstream| workstream.onboarding.is_none())
-                .and_then(|workstream| {
-                    workstream.runtime.map(|runtime| D17Command::Attach {
-                        workstream_id,
-                        expected_workstream_revision: workstream.revision,
-                        runtime_id: runtime.runtime_id,
-                        expected_runtime_revision: runtime.revision,
-                    })
-                })
-                .unwrap_or(D17Command::None),
+            Some(D17RowId::ProvisionalShell) if self.page == D17Page::Workstreams => {
+                D17Command::MaterializeProvisionalShell
+            }
+            Some(D17RowId::Workstream(workstream_id)) if self.page == D17Page::Workstreams => {
+                self.primary_workstream_action(workstream_id)
+            }
             _ => D17Command::None,
         }
     }
@@ -374,7 +514,11 @@ impl D17Model {
             return D17Command::None;
         };
         self.selected_workstream(workstream_id)
-            .filter(|workstream| !workstream.archived && workstream.onboarding.is_none())
+            .filter(|workstream| {
+                !workstream.archived
+                    && workstream.onboarding.is_none()
+                    && workstream.lifecycle != WorkstreamLifecycle::RecoveryRequired
+            })
             .map_or(D17Command::None, |workstream| {
                 D17Command::NewAtSameLocation {
                     source_workstream_id: workstream.workstream_id,
@@ -384,15 +528,272 @@ impl D17Model {
             })
     }
 
+    fn primary_workstream_action(&self, workstream_id: WorkstreamId) -> D17Command {
+        let Some(workstream) = self.selected_workstream(workstream_id) else {
+            return D17Command::None;
+        };
+        match workstream.onboarding {
+            Some(D17OnboardingStatus::ActionFenced) => {
+                D17Command::ShowGuidance(ONBOARDING_IN_PROGRESS_GUIDANCE)
+            }
+            Some(D17OnboardingStatus::RecoveryRequired) => {
+                D17Command::ShowGuidance(ONBOARDING_RECOVERY_GUIDANCE)
+            }
+            None if workstream.lifecycle == WorkstreamLifecycle::RecoveryRequired => {
+                D17Command::Recover {
+                    workstream_id,
+                    expected_workstream_revision: workstream.revision,
+                    provider: workstream.provider,
+                }
+            }
+            None if workstream.lifecycle == WorkstreamLifecycle::Parked
+                || workstream.runtime.is_none()
+                || workstream.runtime.is_some_and(|runtime| {
+                    matches!(
+                        runtime.status,
+                        RuntimeStatus::Stopped | RuntimeStatus::Unknown
+                    )
+                }) =>
+            {
+                D17Command::Start {
+                    workstream_id,
+                    expected_workstream_revision: workstream.revision,
+                    provider: workstream.provider,
+                }
+            }
+            None => workstream
+                .runtime
+                .map_or(D17Command::None, |runtime| D17Command::Attach {
+                    workstream_id,
+                    expected_workstream_revision: workstream.revision,
+                    runtime_id: runtime.runtime_id,
+                    expected_runtime_revision: runtime.revision,
+                }),
+        }
+    }
+
+    fn fork_selected(&self) -> D17Command {
+        let Some(D17RowId::Workstream(workstream_id)) = self.selected else {
+            return D17Command::None;
+        };
+        let Some(workstream) = self.selected_workstream(workstream_id) else {
+            return D17Command::None;
+        };
+        match workstream.onboarding {
+            Some(D17OnboardingStatus::ActionFenced) => {
+                D17Command::ShowGuidance(ONBOARDING_IN_PROGRESS_GUIDANCE)
+            }
+            Some(D17OnboardingStatus::RecoveryRequired) => {
+                D17Command::ShowGuidance(ONBOARDING_RECOVERY_GUIDANCE)
+            }
+            None if !workstream.archived => D17Command::Fork {
+                source_workstream_id: workstream_id,
+                expected_workstream_revision: workstream.revision,
+                provider: workstream.provider,
+            },
+            None => D17Command::None,
+        }
+    }
+
+    fn park_selected(&self) -> D17Command {
+        let Some(D17RowId::Workstream(workstream_id)) = self.selected else {
+            return D17Command::None;
+        };
+        let Some(workstream) = self.selected_workstream(workstream_id) else {
+            return D17Command::None;
+        };
+        if workstream.archived {
+            return D17Command::None;
+        }
+        match workstream.onboarding {
+            Some(D17OnboardingStatus::ActionFenced) => {
+                D17Command::ShowGuidance(ONBOARDING_IN_PROGRESS_GUIDANCE)
+            }
+            Some(D17OnboardingStatus::RecoveryRequired) | None => D17Command::Park {
+                workstream_id,
+                expected_workstream_revision: workstream.revision,
+            },
+        }
+    }
+
+    fn archive_selected(&mut self) -> D17Command {
+        let Some(D17RowId::Workstream(workstream_id)) = self.selected else {
+            return D17Command::None;
+        };
+        let Some(workstream) = self.selected_workstream(workstream_id) else {
+            return D17Command::None;
+        };
+        match workstream.onboarding {
+            Some(D17OnboardingStatus::ActionFenced) => {
+                D17Command::ShowGuidance(ONBOARDING_IN_PROGRESS_GUIDANCE)
+            }
+            Some(D17OnboardingStatus::RecoveryRequired) => {
+                D17Command::ShowGuidance(ONBOARDING_RECOVERY_GUIDANCE)
+            }
+            None if !workstream.archived => {
+                self.modal = Some(D17Modal::ConfirmArchive {
+                    workstream_id,
+                    expected_workstream_revision: workstream.revision,
+                });
+                D17Command::None
+            }
+            None => D17Command::None,
+        }
+    }
+
+    fn restore_selected(&self) -> D17Command {
+        if self.page != D17Page::Archived {
+            return D17Command::None;
+        }
+        let Some(D17RowId::Workstream(workstream_id)) = self.selected else {
+            return D17Command::None;
+        };
+        self.selected_workstream(workstream_id)
+            .filter(|workstream| workstream.archived)
+            .map_or(D17Command::None, |workstream| D17Command::Restore {
+                workstream_id,
+                expected_workstream_revision: workstream.revision,
+            })
+    }
+
+    fn acknowledge_selected(&self) -> D17Command {
+        if self.page != D17Page::Workstreams {
+            return D17Command::None;
+        }
+        let Some(D17RowId::Workstream(workstream_id)) = self.selected else {
+            return D17Command::None;
+        };
+        self.selected_workstream(workstream_id)
+            .filter(|workstream| {
+                !workstream.archived && workstream.onboarding.is_none() && workstream.result_unseen
+            })
+            .map_or(D17Command::None, |workstream| {
+                D17Command::AcknowledgeResult {
+                    workstream_id,
+                    expected_attention_revision: workstream.attention_revision,
+                }
+            })
+    }
+
+    fn rename_or_recover_selected(&mut self) -> D17Command {
+        match self.selected {
+            Some(D17RowId::Operation(operation_id)) if self.page == D17Page::Workstreams => self
+                .selected_operation(operation_id)
+                .map_or(D17Command::None, |operation| D17Command::RecoverOperation {
+                    operation_id,
+                    expected_operation_revision: operation.revision,
+                    provider: operation.provider,
+                }),
+            Some(D17RowId::Workstream(workstream_id)) if self.page == D17Page::Workstreams => {
+                let Some(workstream) = self.selected_workstream(workstream_id) else {
+                    return D17Command::None;
+                };
+                if workstream.onboarding == Some(D17OnboardingStatus::ActionFenced) {
+                    return D17Command::ShowGuidance(ONBOARDING_IN_PROGRESS_GUIDANCE);
+                }
+                if workstream.onboarding == Some(D17OnboardingStatus::RecoveryRequired) {
+                    return D17Command::ShowGuidance(ONBOARDING_RECOVERY_GUIDANCE);
+                }
+                if workstream.archived || workstream.provider != ProviderKind::Codex {
+                    return D17Command::ShowGuidance(RENAME_UNAVAILABLE_GUIDANCE);
+                }
+                self.modal = Some(D17Modal::Rename {
+                    workstream_id,
+                    expected_workstream_revision: workstream.revision,
+                    value: workstream.native_name.clone().unwrap_or_default(),
+                });
+                D17Command::None
+            }
+            _ => D17Command::None,
+        }
+    }
+
+    fn handle_modal_key(&mut self, key: KeyCode) -> D17Command {
+        match key {
+            KeyCode::Esc => {
+                self.modal = None;
+                D17Command::None
+            }
+            KeyCode::Char('n') if matches!(self.modal, Some(D17Modal::ConfirmArchive { .. })) => {
+                self.modal = None;
+                D17Command::None
+            }
+            KeyCode::Char('y') if matches!(self.modal, Some(D17Modal::ConfirmArchive { .. })) => {
+                self.confirm_modal()
+            }
+            KeyCode::Enter => self.confirm_modal(),
+            KeyCode::Backspace => {
+                if let Some(D17Modal::Rename { value, .. }) = self.modal.as_mut() {
+                    value.pop();
+                }
+                D17Command::None
+            }
+            KeyCode::Char(character) if !character.is_control() => {
+                if let Some(D17Modal::Rename { value, .. }) = self.modal.as_mut()
+                    && value.chars().count() < 256
+                {
+                    value.push(character);
+                }
+                D17Command::None
+            }
+            _ => D17Command::None,
+        }
+    }
+
+    fn confirm_modal(&mut self) -> D17Command {
+        let Some(modal) = self.modal.take() else {
+            return D17Command::None;
+        };
+        match modal {
+            D17Modal::ConfirmArchive {
+                workstream_id,
+                expected_workstream_revision,
+            } => D17Command::Archive {
+                workstream_id,
+                expected_workstream_revision,
+            },
+            D17Modal::Rename {
+                workstream_id,
+                expected_workstream_revision,
+                value,
+            } if !value.trim().is_empty() => D17Command::Rename {
+                workstream_id,
+                expected_workstream_revision,
+                name: value,
+            },
+            modal @ D17Modal::Rename { .. } => {
+                self.modal = Some(modal);
+                D17Command::ShowGuidance("Rename requires a non-empty native thread name")
+            }
+        }
+    }
+
     fn selected_workstream(&self, id: WorkstreamId) -> Option<&D17WorkstreamSnapshot> {
         self.snapshot
             .workstreams
             .iter()
             .find(|workstream| workstream.workstream_id == id)
     }
+
+    fn selected_operation(&self, id: OperationId) -> Option<&D17OperationSnapshot> {
+        self.snapshot
+            .unresolved_operations
+            .iter()
+            .find(|operation| operation.operation_id == id)
+    }
 }
 
-fn rows_for(snapshot: &D17Snapshot, page: D17Page) -> Vec<D17Row> {
+const ONBOARDING_IN_PROGRESS_GUIDANCE: &str =
+    "Managed session onboarding is still in progress; wait for exact provider proof";
+const ONBOARDING_RECOVERY_GUIDANCE: &str =
+    "Managed session requires onboarding recovery; only Park is currently available";
+const RENAME_UNAVAILABLE_GUIDANCE: &str = "The selected provider does not support navigator Rename";
+
+fn rows_for(
+    snapshot: &D17Snapshot,
+    page: D17Page,
+    shell_location: &D17ShellLocation,
+) -> Vec<D17Row> {
     let archived = page == D17Page::Archived;
     let mut workstreams_by_project = BTreeMap::<_, Vec<_>>::new();
     for workstream in snapshot
@@ -408,7 +809,9 @@ fn rows_for(snapshot: &D17Snapshot, page: D17Page) -> Vec<D17Row> {
 
     let mut rows = Vec::new();
     if page == D17Page::Workstreams {
-        rows.push(D17Row::ProvisionalShell);
+        rows.push(D17Row::ProvisionalShell {
+            location: shell_location.clone(),
+        });
     }
     for project in &snapshot.projects {
         let Some(workstreams) = workstreams_by_project.remove(&project.project_id) else {
@@ -418,6 +821,15 @@ fn rows_for(snapshot: &D17Snapshot, page: D17Page) -> Vec<D17Row> {
             display_name: project.display_name.clone(),
         });
         rows.extend(workstreams.into_iter().map(D17Row::Workstream));
+    }
+    if page == D17Page::Workstreams {
+        rows.extend(
+            snapshot
+                .unresolved_operations
+                .iter()
+                .copied()
+                .map(D17Row::Operation),
+        );
     }
     rows
 }
@@ -430,10 +842,11 @@ fn render_model(frame: &mut Frame<'_>, area: Rect, model: &D17Model) {
         .split(area);
     let selected = model.selected();
     let rows = model.rows();
+    let available_width = layout[0].width.saturating_sub(2);
     let items = rows
         .iter()
         .map(|row| {
-            let item = ListItem::new(row_lines(row));
+            let item = ListItem::new(row_lines(row, available_width));
             if row.id() == selected {
                 item.style(Style::default().bg(Color::DarkGray))
             } else {
@@ -485,22 +898,26 @@ fn render_model(frame: &mut Frame<'_>, area: Rect, model: &D17Model) {
             layout[1],
         );
     }
+    if model.help_visible() {
+        render_help(frame, area);
+    } else if let Some(modal) = model.modal() {
+        render_modal(frame, area, modal);
+    }
 }
 
-fn row_lines(row: &D17Row) -> Vec<Line<'static>> {
+fn row_lines(row: &D17Row, available_width: u16) -> Vec<Line<'static>> {
     match row {
-        D17Row::ProvisionalShell => vec![
-            Line::from(Span::styled(
-                " New session · shell ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(
-                "   Choose a directory, then run codex or opencode",
-                Style::default().fg(Color::Gray),
-            )),
-        ],
+        D17Row::ProvisionalShell { location } => {
+            vec![
+                Line::from(Span::styled(
+                    "Shell",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                )),
+                shell_context_line(&location.cwd, available_width, Color::Cyan),
+            ]
+        }
         D17Row::ProjectHeader { display_name } => vec![Line::from(Span::styled(
             display_name.clone(),
             Style::default()
@@ -511,6 +928,8 @@ fn row_lines(row: &D17Row) -> Vec<Line<'static>> {
             let runtime = match workstream.onboarding {
                 Some(D17OnboardingStatus::ActionFenced) => "onboarding",
                 Some(D17OnboardingStatus::RecoveryRequired) => "recovery",
+                None if workstream.lifecycle == WorkstreamLifecycle::Parked => "parked",
+                None if workstream.lifecycle == WorkstreamLifecycle::RecoveryRequired => "recovery",
                 None => workstream
                     .runtime
                     .map_or("stopped", |runtime| runtime_status_label(runtime.status)),
@@ -546,7 +965,68 @@ fn row_lines(row: &D17Row) -> Vec<Line<'static>> {
                 ]),
             ]
         }
+        D17Row::Operation(operation) => vec![
+            Line::from(vec![
+                Span::raw("  "),
+                Span::styled(
+                    operation_kind_label(operation.kind),
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(" · ", Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    operation_phase_label(operation.phase),
+                    Style::default().fg(Color::Red),
+                ),
+            ]),
+            Line::from(vec![
+                Span::raw("  ! "),
+                Span::styled(
+                    operation.operation_id.short(),
+                    Style::default().fg(Color::White),
+                ),
+            ]),
+        ],
     }
+}
+
+const fn operation_kind_label(kind: OperationKind) -> &'static str {
+    match kind {
+        OperationKind::Onboard => "Onboarding",
+        OperationKind::Start => "Start",
+        OperationKind::Fork => "Fork",
+    }
+}
+
+const fn operation_phase_label(phase: OperationPhase) -> &'static str {
+    match phase {
+        OperationPhase::Prepared => "prepared",
+        OperationPhase::CapabilityIssued => "issued",
+        OperationPhase::RuntimeOwnedLaunching | OperationPhase::ProviderExecStarted => "onboarding",
+        OperationPhase::ProviderPreparation => "preparing",
+        OperationPhase::ProviderExecProven => "proven",
+        OperationPhase::ExternalEffectStarted
+        | OperationPhase::ExecFailedKnownAbsent
+        | OperationPhase::AwaitingReconciliation
+        | OperationPhase::RecoveryRequired => "recovery",
+        OperationPhase::RolledBack => "rolled back",
+        OperationPhase::Committed => "committed",
+        OperationPhase::Failed => "failed",
+    }
+}
+
+fn shell_context_line(value: &str, available_width: u16, color: Color) -> Line<'static> {
+    let indent_width = usize::from(available_width).min(2);
+    let indent = " ".repeat(indent_width);
+    let content_budget = usize::from(available_width).saturating_sub(indent_width);
+    Line::from(vec![
+        Span::raw(indent),
+        Span::styled(
+            truncate_display(value, content_budget),
+            Style::default().fg(color),
+        ),
+    ])
 }
 
 const fn provider_label(provider: ProviderKind) -> &'static str {
@@ -575,33 +1055,217 @@ const fn runtime_status_label(status: crate::domain::RuntimeStatus) -> &'static 
 }
 
 fn control_bindings(model: &D17Model) -> &'static [(&'static str, &'static str)] {
+    if model.help_visible() {
+        return &[("? / Esc", "close help")];
+    }
+    if let Some(modal) = model.modal() {
+        return match modal {
+            D17Modal::ConfirmArchive { .. } => &[("Enter / y", "archive"), ("n / Esc", "cancel")],
+            D17Modal::Rename { .. } => &[("Enter", "rename"), ("Esc", "cancel")],
+        };
+    }
     match model.page() {
         D17Page::Workstreams => match model.selected() {
             Some(D17RowId::Workstream(workstream_id))
                 if model
                     .selected_workstream(workstream_id)
                     .is_some_and(|workstream| {
-                        !workstream.archived && workstream.onboarding.is_none()
+                        !workstream.archived
+                            && workstream.onboarding.is_none()
+                            && workstream.lifecycle != WorkstreamLifecycle::RecoveryRequired
                     }) =>
             {
                 &[
                     ("↑↓", "select"),
                     ("Enter", "open"),
                     ("n", "new here"),
+                    ("f", "fork"),
+                    ("p", "park"),
+                    ("x", "archive"),
+                    ("a", "acknowledge"),
+                    ("r", "rename"),
                     (".", "archived"),
+                    ("?", "help"),
                     ("q", "quit"),
                 ]
             }
+            Some(D17RowId::Workstream(workstream_id))
+                if model
+                    .selected_workstream(workstream_id)
+                    .is_some_and(|workstream| {
+                        !workstream.archived
+                            && workstream.onboarding == Some(D17OnboardingStatus::RecoveryRequired)
+                    }) =>
+            {
+                &[
+                    ("↑↓", "select"),
+                    ("p", "park"),
+                    (".", "archived"),
+                    ("?", "help"),
+                    ("q", "quit"),
+                ]
+            }
+            Some(D17RowId::Operation(_)) => &[
+                ("↑↓", "select"),
+                ("r", "recover"),
+                (".", "archived"),
+                ("?", "help"),
+                ("q", "quit"),
+            ],
             Some(D17RowId::ProvisionalShell) => &[
                 ("↑↓", "select"),
                 ("Enter", "shell"),
                 (".", "archived"),
+                ("?", "help"),
                 ("q", "quit"),
             ],
-            _ => &[("↑↓", "select"), (".", "archived"), ("q", "quit")],
+            _ => &[
+                ("↑↓", "select"),
+                (".", "archived"),
+                ("?", "help"),
+                ("q", "quit"),
+            ],
         },
-        D17Page::Archived => &[("↑↓", "select"), ("w", "workstreams"), ("q", "quit")],
+        D17Page::Archived => &[
+            ("↑↓", "select"),
+            ("u", "restore"),
+            ("w / Esc", "workstreams"),
+            ("?", "help"),
+            ("q", "quit"),
+        ],
     }
+}
+
+/// Full-width, single-row Help content for the Navigator pane. It describes
+/// only current direct controls; contextual restrictions remain explicit
+/// rather than implying every key is always available.
+fn help_lines() -> Vec<Line<'static>> {
+    vec![
+        help_heading("Navigate"),
+        help_binding("↑↓", "select"),
+        help_binding("Enter", "open / shell"),
+        help_binding(".", "archived"),
+        help_binding("w / Esc", "workstreams"),
+        help_heading("Sessions"),
+        help_binding("n", "new at location"),
+        help_binding("f", "fork session"),
+        help_binding("p", "park session"),
+        help_binding("x", "archive session"),
+        help_binding("u", "restore session"),
+        help_binding("a", "acknowledge result"),
+        help_binding("r", "rename / recover Fork"),
+        help_binding("?/Esc/q", "close help"),
+    ]
+}
+
+fn help_heading(title: &'static str) -> Line<'static> {
+    Line::from(Span::styled(
+        title,
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
+
+/// One left-aligned binding per row. The action labels all begin in the same
+/// column, making the full-width sheet easy to scan without a table border.
+fn help_binding(key: &'static str, action: &'static str) -> Line<'static> {
+    const ACTION_COLUMN: usize = 8;
+    let key_width = display_width(key);
+    Line::from(vec![
+        Span::styled(
+            key,
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" ".repeat(ACTION_COLUMN.saturating_sub(key_width))),
+        Span::styled(action, Style::default().fg(Color::White)),
+    ])
+}
+
+fn render_help(frame: &mut Frame<'_>, area: Rect) {
+    let overlay = help_overlay(area);
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(
+        Paragraph::new(help_lines()).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Cyan))
+                .title(Span::styled(
+                    " Help ",
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )),
+        ),
+        overlay,
+    );
+}
+
+/// Gives Help every available Navigator column while fitting its border and
+/// fixed rows exactly to content. A shorter terminal necessarily clips, but
+/// no height is otherwise reserved or wasted.
+fn help_overlay(area: Rect) -> Rect {
+    let content_height = u16::try_from(help_lines().len().saturating_add(2)).unwrap_or(u16::MAX);
+    let height = content_height.min(area.height).max(1);
+    Rect::new(
+        area.x,
+        area.y
+            .saturating_add(area.height.saturating_sub(height).saturating_div(2)),
+        area.width,
+        height,
+    )
+}
+
+fn render_modal(frame: &mut Frame<'_>, area: Rect, modal: &D17Modal) {
+    let (title, text) = match modal {
+        D17Modal::ConfirmArchive { .. } => (
+            " Archive session ",
+            "Archive this managed session? Its live Runtime will be parked first.\n\nEnter or y confirms; n or Esc cancels.".to_owned(),
+        ),
+        D17Modal::Rename { value, .. } => (
+            " Rename Codex session ",
+            format!("Native thread name:\n\n{value}\n\nEnter confirms; Esc cancels."),
+        ),
+    };
+    let overlay = centered_rect(94, 52, area);
+    frame.render_widget(Clear, overlay);
+    frame.render_widget(
+        Paragraph::new(text).wrap(Wrap { trim: true }).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(Color::Yellow))
+                .title(Span::styled(
+                    title,
+                    Style::default()
+                        .fg(Color::Yellow)
+                        .add_modifier(Modifier::BOLD),
+                )),
+        ),
+        overlay,
+    );
+}
+
+fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
+    let width = area
+        .width
+        .saturating_mul(percent_x)
+        .saturating_div(100)
+        .max(1);
+    let height = area
+        .height
+        .saturating_mul(percent_y)
+        .saturating_div(100)
+        .max(1);
+    Rect::new(
+        area.x
+            .saturating_add(area.width.saturating_sub(width).saturating_div(2)),
+        area.y
+            .saturating_add(area.height.saturating_sub(height).saturating_div(2)),
+        width,
+        height,
+    )
 }
 
 fn controls_lines(model: &D17Model, width: u16) -> Vec<Line<'static>> {
@@ -698,6 +1362,73 @@ fn display_width(value: &str) -> usize {
     Line::raw(value).width()
 }
 
+fn truncate_display(value: &str, maximum: usize) -> String {
+    if maximum == 0 {
+        return String::new();
+    }
+    if display_width(value) <= maximum {
+        return value.to_owned();
+    }
+    if maximum == 1 {
+        return "…".to_owned();
+    }
+    let content_budget = maximum - 1;
+    let mut result = String::new();
+    let mut width = 0_usize;
+    for character in value.chars() {
+        let character_width = display_width(&character.to_string());
+        if width.saturating_add(character_width) > content_budget {
+            break;
+        }
+        result.push(character);
+        width = width.saturating_add(character_width);
+    }
+    result.push('…');
+    result
+}
+
+fn safe_shell_location_label(value: &str) -> String {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|character| character.is_control() || is_unicode_format(character))
+    {
+        return "unavailable".to_owned();
+    }
+    let mut bounded = value.chars().take(256).collect::<String>();
+    if bounded.len() < value.len() {
+        bounded.push('…');
+    }
+    bounded
+}
+
+fn is_unicode_format(character: char) -> bool {
+    matches!(
+        character as u32,
+        0x00AD
+            | 0x0600..=0x0605
+            | 0x061C
+            | 0x06DD
+            | 0x070F
+            | 0x0890..=0x0891
+            | 0x08E2
+            | 0x180E
+            | 0x200B..=0x200F
+            | 0x202A..=0x202E
+            | 0x2060..=0x2064
+            | 0x2066..=0x206F
+            | 0xFEFF
+            | 0xFFF9..=0xFFFB
+            | 0x110BD
+            | 0x110CD
+            | 0x13430..=0x1343F
+            | 0x1BCA0..=0x1BCA3
+            | 0x1D173..=0x1D17A
+            | 0xE0001
+            | 0xE0020..=0xE007F
+    )
+}
+
 fn list_geometry(area: Rect, model: &D17Model) -> D17ListGeometry {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -720,16 +1451,19 @@ fn list_geometry(area: Rect, model: &D17Model) -> D17ListGeometry {
 mod tests {
     use uuid::Uuid;
 
-    use ratatui::layout::Rect;
+    use ratatui::{layout::Rect, style::Color};
 
-    use super::{D17Command, D17Model, D17Navigator, D17Page, D17Row, D17RowId};
+    use super::{
+        D17Command, D17Modal, D17Model, D17Navigator, D17Page, D17Row, D17RowId, D17ShellLocation,
+    };
     use crate::{
         d17_snapshot::{
-            D17LocationSnapshot, D17OnboardingStatus, D17ProjectSnapshot, D17RuntimeSnapshot,
-            D17Snapshot, D17WorkstreamSnapshot,
+            D17LocationSnapshot, D17OnboardingStatus, D17OperationSnapshot, D17ProjectSnapshot,
+            D17RuntimeSnapshot, D17Snapshot, D17WorkstreamSnapshot,
         },
         domain::{
-            LocationId, ProjectId, ProviderKind, Revision, RuntimeId, RuntimeStatus, WorkstreamId,
+            LocationId, OperationId, OperationKind, OperationPhase, ProjectId, ProviderKind,
+            Revision, RuntimeId, RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
         },
     };
 
@@ -756,11 +1490,13 @@ mod tests {
                         location_id,
                         workstream_id: active,
                         provider: ProviderKind::Codex,
+                        lifecycle: WorkstreamLifecycle::Open,
                         archived: false,
                         revision: Revision::INITIAL,
                         runtime: None,
                         onboarding: None,
                         native_name: None,
+                        attention_revision: Revision::INITIAL,
                         result_unseen: false,
                         recovery_unseen: false,
                     },
@@ -769,15 +1505,18 @@ mod tests {
                         location_id,
                         workstream_id: archived,
                         provider: ProviderKind::OpenCode,
+                        lifecycle: WorkstreamLifecycle::Open,
                         archived: true,
                         revision: Revision::INITIAL,
                         runtime: None,
                         onboarding: None,
                         native_name: None,
+                        attention_revision: Revision::INITIAL,
                         result_unseen: false,
                         recovery_unseen: false,
                     },
                 ],
+                unresolved_operations: vec![],
             },
             active,
             archived,
@@ -792,7 +1531,7 @@ mod tests {
         assert_eq!(model.selected(), Some(D17RowId::ProvisionalShell));
         assert!(matches!(
             model.rows().first(),
-            Some(D17Row::ProvisionalShell)
+            Some(D17Row::ProvisionalShell { .. })
         ));
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Enter),
@@ -801,30 +1540,65 @@ mod tests {
     }
 
     #[test]
-    fn shell_card_renders_native_provider_choice_without_a_picker() {
+    fn shell_card_renders_live_context_without_onboarding_instructions() {
         let (snapshot, _, _) = snapshot();
-        let model = D17Model::new(snapshot);
+        let mut model = D17Model::new(snapshot);
+        model.set_shell_location(D17ShellLocation::cwd("~/c/workstream-navigator"));
         let rows = model.rows();
-        let shell = super::row_lines(&rows[0]);
+        let shell = super::row_lines(&rows[0], 30);
 
-        assert_eq!(shell[0].spans[0].content.as_ref(), " New session · shell ");
+        assert_eq!(shell[0].spans[0].content.as_ref(), "Shell");
         assert_eq!(
-            shell[1].spans[0].content.as_ref(),
-            "   Choose a directory, then run codex or opencode"
+            shell[1].spans[1].content.as_ref(),
+            "~/c/workstream-navigator"
         );
+        assert_eq!(shell.len(), 2);
         assert!(
-            shell
+            shell[1]
+                .spans
                 .iter()
-                .flat_map(|line| &line.spans)
-                .all(|span| !span.content.contains("picker"))
+                .map(|span| super::display_width(span.content.as_ref()))
+                .sum::<usize>()
+                <= 30
         );
+        let narrow = super::row_lines(&rows[0], 1);
+        assert!(
+            narrow[1]
+                .spans
+                .iter()
+                .map(|span| super::display_width(span.content.as_ref()))
+                .sum::<usize>()
+                <= 1
+        );
+        assert!(shell.iter().flat_map(|line| &line.spans).all(|span| {
+            !span.content.contains("Choose a directory")
+                && !span.content.contains("codex")
+                && !span.content.contains("opencode")
+        }));
     }
 
     #[test]
-    fn both_lines_of_each_card_are_exact_mouse_targets_but_headers_are_not() {
+    fn every_card_line_is_an_exact_mouse_target_but_headers_are_not() {
         let (snapshot, active, _) = snapshot();
-        let navigator = D17Navigator::new(snapshot);
+        let plain = D17Navigator::new(snapshot.clone());
         let area = Rect::new(0, 0, 32, 24);
+        let plain_geometry = plain.list_geometry(area);
+        let plain_x = plain_geometry.inner.x;
+        assert_eq!(
+            plain.row_at(area, plain_x, plain_geometry.inner.y),
+            Some(D17RowId::ProvisionalShell)
+        );
+        assert_eq!(
+            plain.row_at(area, plain_x, plain_geometry.inner.y.saturating_add(1)),
+            Some(D17RowId::ProvisionalShell)
+        );
+        assert_eq!(
+            plain.row_at(area, plain_x, plain_geometry.inner.y.saturating_add(2)),
+            None
+        );
+
+        let mut navigator = D17Navigator::new(snapshot);
+        navigator.set_shell_location(D17ShellLocation::cwd("~/c/workstream-navigator"));
         let geometry = navigator.list_geometry(area);
         let x = geometry.inner.x;
 
@@ -837,16 +1611,16 @@ mod tests {
             Some(D17RowId::ProvisionalShell)
         );
         assert_eq!(
-            navigator.row_at(area, x, geometry.inner.y.saturating_add(2)),
-            None
-        );
-        assert_eq!(
             navigator.row_at(area, x, geometry.inner.y.saturating_add(3)),
             Some(D17RowId::Workstream(active))
         );
         assert_eq!(
             navigator.row_at(area, x, geometry.inner.y.saturating_add(4)),
             Some(D17RowId::Workstream(active))
+        );
+        assert_eq!(
+            navigator.row_at(area, x, geometry.inner.y.saturating_add(5)),
+            None
         );
         assert_eq!(
             navigator.row_at(
@@ -941,6 +1715,35 @@ mod tests {
     }
 
     #[test]
+    fn help_is_full_width_colored_and_fits_its_content() {
+        let overlay = super::help_overlay(Rect::new(0, 0, 32, 24));
+        assert_eq!(overlay, Rect::new(0, 4, 32, 16));
+        assert_eq!(
+            super::help_overlay(Rect::new(0, 0, 32, 18)),
+            Rect::new(0, 1, 32, 16)
+        );
+
+        let lines = super::help_lines();
+        assert_eq!(lines.len(), 14);
+        assert!(lines.iter().all(|line| line.width() <= 30));
+        let rendered = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(rendered[1], "↑↓      select");
+        assert_eq!(rendered[6], "n       new at location");
+        assert_eq!(rendered[12], "r       rename / recover Fork");
+        assert_eq!(lines[0].spans[0].style.fg, Some(Color::Cyan));
+        assert_eq!(lines[6].spans[0].style.fg, Some(Color::Yellow));
+        assert_eq!(lines[13].spans[0].style.fg, Some(Color::Yellow));
+    }
+
+    #[test]
     fn new_inherits_the_selected_workstreams_provider_and_location_context() {
         let (snapshot, active, _) = snapshot();
         let mut model = D17Model::new(snapshot);
@@ -971,7 +1774,7 @@ mod tests {
         assert_eq!(model.selected(), Some(D17RowId::Workstream(active)));
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Enter),
-            D17Command::None
+            D17Command::ShowGuidance(super::ONBOARDING_IN_PROGRESS_GUIDANCE)
         );
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Char('n')),
@@ -982,7 +1785,7 @@ mod tests {
             .iter()
             .find(|row| row.id() == Some(D17RowId::Workstream(active)))
             .expect("active onboarding row");
-        let lines = super::row_lines(workstream);
+        let lines = super::row_lines(workstream, 30);
         assert!(
             lines[0]
                 .spans
@@ -1001,7 +1804,7 @@ mod tests {
             model
                 .rows()
                 .iter()
-                .all(|row| !matches!(row, D17Row::ProvisionalShell))
+                .all(|row| !matches!(row, D17Row::ProvisionalShell { .. }))
         );
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Char('n')),
@@ -1010,6 +1813,172 @@ mod tests {
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Enter),
             D17Command::None
+        );
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Esc),
+            D17Command::None
+        );
+        assert_eq!(model.page(), D17Page::Workstreams);
+        assert_eq!(model.selected(), Some(D17RowId::ProvisionalShell));
+    }
+
+    #[test]
+    fn primary_action_uses_durable_lifecycle_not_runtime_guesswork() {
+        {
+            let (mut snapshot, active, _) = snapshot();
+            snapshot.workstreams[0].lifecycle = WorkstreamLifecycle::Parked;
+            let mut model = D17Model::new(snapshot);
+            model.select_next();
+
+            assert_eq!(
+                model.handle_key(crossterm::event::KeyCode::Enter),
+                D17Command::Start {
+                    workstream_id: active,
+                    expected_workstream_revision: Revision::INITIAL,
+                    provider: ProviderKind::Codex,
+                }
+            );
+        }
+
+        let (mut snapshot, active, _) = snapshot();
+        snapshot.workstreams[0].lifecycle = WorkstreamLifecycle::RecoveryRequired;
+        let mut model = D17Model::new(snapshot);
+        model.select_next();
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Enter),
+            D17Command::Recover {
+                workstream_id: active,
+                expected_workstream_revision: Revision::INITIAL,
+                provider: ProviderKind::Codex,
+            }
+        );
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('n')),
+            D17Command::None
+        );
+    }
+
+    #[test]
+    fn lifecycle_keys_emit_exact_reversible_action_revisions() {
+        let (mut snapshot, active, archived) = snapshot();
+        snapshot.workstreams[0].result_unseen = true;
+        snapshot.workstreams[0].attention_revision = Revision::INITIAL.next();
+        let mut model = D17Model::new(snapshot);
+        model.select_next();
+
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('p')),
+            D17Command::Park {
+                workstream_id: active,
+                expected_workstream_revision: Revision::INITIAL,
+            }
+        );
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('f')),
+            D17Command::Fork {
+                source_workstream_id: active,
+                expected_workstream_revision: Revision::INITIAL,
+                provider: ProviderKind::Codex,
+            }
+        );
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('a')),
+            D17Command::AcknowledgeResult {
+                workstream_id: active,
+                expected_attention_revision: Revision::INITIAL.next(),
+            }
+        );
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('x')),
+            D17Command::None
+        );
+        model.select_next();
+        assert_eq!(model.selected(), Some(D17RowId::Workstream(active)));
+        assert_eq!(
+            model.modal(),
+            Some(&D17Modal::ConfirmArchive {
+                workstream_id: active,
+                expected_workstream_revision: Revision::INITIAL,
+            })
+        );
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Enter),
+            D17Command::Archive {
+                workstream_id: active,
+                expected_workstream_revision: Revision::INITIAL,
+            }
+        );
+
+        let _ = model.handle_key(crossterm::event::KeyCode::Char('.'));
+        assert_eq!(model.selected(), Some(D17RowId::Workstream(archived)));
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('u')),
+            D17Command::Restore {
+                workstream_id: archived,
+                expected_workstream_revision: Revision::INITIAL,
+            }
+        );
+    }
+
+    #[test]
+    fn recovery_operation_rename_help_and_onboarding_fences_are_explicit() {
+        {
+            let (mut snapshot, active, _) = snapshot();
+            let operation_id = OperationId::from(Uuid::from_u128(7));
+            snapshot.unresolved_operations = vec![D17OperationSnapshot {
+                operation_id,
+                kind: OperationKind::Fork,
+                provider: ProviderKind::Codex,
+                source_workstream_id: Some(active),
+                phase: OperationPhase::RecoveryRequired,
+                revision: Revision::INITIAL,
+            }];
+            let mut model = D17Model::new(snapshot);
+            model.select_next();
+            assert_eq!(
+                model.handle_key(crossterm::event::KeyCode::Char('r')),
+                D17Command::None
+            );
+            assert!(matches!(model.modal(), Some(D17Modal::Rename { .. })));
+            let _ = model.handle_key(crossterm::event::KeyCode::Esc);
+            model.select_next();
+            assert_eq!(model.selected(), Some(D17RowId::Operation(operation_id)));
+            assert_eq!(
+                model.handle_key(crossterm::event::KeyCode::Char('r')),
+                D17Command::RecoverOperation {
+                    operation_id,
+                    expected_operation_revision: Revision::INITIAL,
+                    provider: ProviderKind::Codex,
+                }
+            );
+            assert_eq!(
+                model.handle_key(crossterm::event::KeyCode::Char('?')),
+                D17Command::None
+            );
+            assert!(model.help_visible());
+            model.select_previous();
+            assert_eq!(model.selected(), Some(D17RowId::Operation(operation_id)));
+            assert_eq!(
+                model.handle_key(crossterm::event::KeyCode::Char('q')),
+                D17Command::None
+            );
+            assert!(!model.help_visible());
+        }
+
+        let (mut snapshot, active, _) = snapshot();
+        snapshot.workstreams[0].onboarding = Some(D17OnboardingStatus::RecoveryRequired);
+        let mut model = D17Model::new(snapshot);
+        model.select_next();
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('p')),
+            D17Command::Park {
+                workstream_id: active,
+                expected_workstream_revision: Revision::INITIAL,
+            }
+        );
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('f')),
+            D17Command::ShowGuidance(super::ONBOARDING_RECOVERY_GUIDANCE)
         );
     }
 }

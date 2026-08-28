@@ -4,18 +4,14 @@
 //! path. It is a passive registry read: materialization, provider launch,
 //! reconciliation, tmux, Git, and observer effects remain outside it.
 
-#![allow(
-    dead_code,
-    reason = "the D17 Workstreams navigator remains unreachable until the atomic cutover"
-)]
-
 use std::collections::BTreeMap;
 
 use thiserror::Error;
 
 use crate::{
     domain::{
-        LocationId, ProjectId, ProviderKind, Revision, RuntimeId, RuntimeStatus, WorkstreamId,
+        LocationId, OperationId, OperationKind, OperationPhase, ProjectId, ProviderKind, Revision,
+        RuntimeId, RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
     },
     state::{StateError, StateRoot, d16::D17OnboardingVisibility, open_d17_current_only},
 };
@@ -46,13 +42,30 @@ pub(crate) struct D17WorkstreamSnapshot {
     pub(crate) location_id: LocationId,
     pub(crate) workstream_id: WorkstreamId,
     pub(crate) provider: ProviderKind,
+    pub(crate) lifecycle: WorkstreamLifecycle,
     pub(crate) archived: bool,
     pub(crate) revision: Revision,
     pub(crate) runtime: Option<D17RuntimeSnapshot>,
     pub(crate) onboarding: Option<D17OnboardingStatus>,
     pub(crate) native_name: Option<String>,
+    /// Exact revision required to acknowledge sticky result attention. It is
+    /// bounded state only; the snapshot never carries attention content.
+    pub(crate) attention_revision: Revision,
     pub(crate) result_unseen: bool,
     pub(crate) recovery_unseen: bool,
+}
+
+/// One unresolved non-onboarding creation operation. The D17 Navigator shows
+/// it only as a recovery target; request keys, effect details, project paths,
+/// and provider payloads remain private to state.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct D17OperationSnapshot {
+    pub(crate) operation_id: OperationId,
+    pub(crate) kind: OperationKind,
+    pub(crate) provider: ProviderKind,
+    pub(crate) source_workstream_id: Option<WorkstreamId>,
+    pub(crate) phase: OperationPhase,
+    pub(crate) revision: Revision,
 }
 
 /// Bounded runtime status used only to select an exact existing Workstream.
@@ -78,6 +91,7 @@ pub(crate) enum D17OnboardingStatus {
 pub(crate) struct D17Snapshot {
     pub(crate) projects: Vec<D17ProjectSnapshot>,
     pub(crate) workstreams: Vec<D17WorkstreamSnapshot>,
+    pub(crate) unresolved_operations: Vec<D17OperationSnapshot>,
 }
 
 /// Bounded passive-snapshot failure. It never includes a private path,
@@ -106,6 +120,18 @@ pub(crate) fn read_snapshot(root: &StateRoot) -> Result<D17Snapshot, D17Snapshot
     let onboarding = state.d17_onboarding_workstream_projections()?;
     let registry = state.into_d17_host_registry()?;
     let workstreams = registry.workstream_overviews()?;
+    let unresolved_operations = registry
+        .unresolved_operation_overviews()?
+        .into_iter()
+        .map(|operation| D17OperationSnapshot {
+            operation_id: operation.operation_id,
+            kind: operation.kind,
+            provider: operation.provider,
+            source_workstream_id: operation.source_workstream_id,
+            phase: operation.phase,
+            revision: operation.revision,
+        })
+        .collect();
 
     let mut project_for_location = BTreeMap::new();
     let projects = projects
@@ -178,6 +204,7 @@ pub(crate) fn read_snapshot(root: &StateRoot) -> Result<D17Snapshot, D17Snapshot
                 location_id: workstream.location_id,
                 workstream_id: workstream.workstream_id,
                 provider: workstream.provider,
+                lifecycle: workstream.lifecycle,
                 archived: workstream.archived_at_millis.is_some(),
                 revision: workstream.revision,
                 runtime: workstream.runtime.map(|runtime| D17RuntimeSnapshot {
@@ -190,6 +217,10 @@ pub(crate) fn read_snapshot(root: &StateRoot) -> Result<D17Snapshot, D17Snapshot
                     .binding
                     .and_then(|binding| binding.observed_thread_name)
                     .filter(|name| !name.is_empty()),
+                attention_revision: workstream
+                    .attention
+                    .as_ref()
+                    .map_or(Revision::INITIAL, |attention| attention.revision),
                 result_unseen: workstream
                     .attention
                     .as_ref()
@@ -211,6 +242,7 @@ pub(crate) fn read_snapshot(root: &StateRoot) -> Result<D17Snapshot, D17Snapshot
     Ok(D17Snapshot {
         projects,
         workstreams,
+        unresolved_operations,
     })
 }
 
@@ -225,7 +257,10 @@ mod tests {
 
     use super::{D17OnboardingStatus, read_snapshot};
     use crate::{
-        domain::{ProviderKind, RandomIdGenerator, Revision, RuntimeId},
+        domain::{
+            ProviderKind, ProviderSessionId, RandomIdGenerator, Revision, RuntimeId,
+            WorkstreamLifecycle,
+        },
         onboarding::{ShellCommandDecision, classify_shell_command},
         presentation::{D17ProvisionalInventory, D17ProvisionalInventoryError},
         provisional::{HostInventoryError, classify_host_inventory},
@@ -283,8 +318,32 @@ mod tests {
             registered.workstream.workstream_id
         );
         assert_eq!(snapshot.workstreams[0].provider, ProviderKind::OpenCode);
+        assert_eq!(snapshot.workstreams[0].lifecycle, WorkstreamLifecycle::Open);
         assert!(!snapshot.workstreams[0].archived);
         assert!(snapshot.workstreams[0].runtime.is_none());
+        assert_eq!(
+            snapshot.workstreams[0].attention_revision,
+            Revision::INITIAL
+        );
+        assert!(snapshot.unresolved_operations.is_empty());
+
+        let state = open_d17_current_only(&root).unwrap();
+        let mut registry = state.into_d17_host_registry().unwrap();
+        registry
+            .mark_result_attention(
+                registered.workstream.workstream_id,
+                ProviderSessionId::new(ProviderKind::OpenCode, "session-a").unwrap(),
+                "turn-a".to_owned(),
+            )
+            .unwrap();
+        drop(registry);
+
+        let snapshot = read_snapshot(&root).unwrap();
+        assert!(snapshot.workstreams[0].result_unseen);
+        assert_eq!(
+            snapshot.workstreams[0].attention_revision,
+            Revision::INITIAL.next()
+        );
     }
 
     #[test]
@@ -398,5 +457,68 @@ mod tests {
             read_snapshot(&root).unwrap().workstreams[0].onboarding,
             Some(D17OnboardingStatus::RecoveryRequired)
         );
+
+        drop(provisional);
+        drop(state);
+        let state = open_d17_current_only(&root).unwrap();
+        let mut registry = state.into_d17_host_registry().unwrap();
+        let runtime = registry
+            .runtime_by_id(candidate_runtime_id)
+            .unwrap()
+            .unwrap();
+        registry
+            .park_runtime(candidate_runtime_id, runtime.revision)
+            .unwrap();
+        let parked_revision = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|workstream| {
+                workstream
+                    .runtime
+                    .as_ref()
+                    .is_some_and(|runtime| runtime.runtime_id == candidate_runtime_id)
+            })
+            .unwrap()
+            .revision;
+        drop(registry);
+
+        let mut state = open_d17_current_only(&root).unwrap();
+        let provisional = state.acquire_d17_provisional_lease().unwrap();
+        state
+            .resolve_d17_parked_recovery_current(
+                &provisional,
+                read_snapshot(&root).unwrap().workstreams[0].workstream_id,
+                parked_revision,
+            )
+            .unwrap();
+        drop(provisional);
+        drop(state);
+
+        let resolved = read_snapshot(&root).unwrap();
+        assert_eq!(
+            resolved.workstreams[0].lifecycle,
+            crate::domain::WorkstreamLifecycle::Parked
+        );
+        assert_eq!(resolved.workstreams[0].onboarding, None);
+
+        // The exact terminal journal outcome remains valid after ordinary
+        // Resume reuses the retained Runtime.  Requiring it to stay parked
+        // would incorrectly re-fence this Workstream on the next refresh.
+        let state = open_d17_current_only(&root).unwrap();
+        let mut registry = state.into_d17_host_registry().unwrap();
+        registry
+            .reserve_runtime_with_provider(
+                resolved.workstreams[0].workstream_id,
+                crate::domain::ProviderKind::Codex,
+            )
+            .unwrap();
+        drop(registry);
+        let resumed = read_snapshot(&root).unwrap();
+        assert_eq!(
+            resumed.workstreams[0].lifecycle,
+            crate::domain::WorkstreamLifecycle::Open
+        );
+        assert_eq!(resumed.workstreams[0].onboarding, None);
     }
 }

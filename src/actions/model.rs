@@ -170,6 +170,8 @@ pub enum ActionError {
     WorkstreamAlreadyArchived,
     #[error("workstream revision changed; refresh before acting")]
     WorkstreamRevisionConflict,
+    #[error("managed operation revision changed; refresh before acting")]
+    OperationRevisionConflict,
     #[error("managed Workstream fork requires provider recovery")]
     ForkRecoveryRequired,
     #[error(

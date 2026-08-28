@@ -1233,7 +1233,8 @@ impl Presentation {
     fn prepare_attach_with_size(&self, columns: u16, rows: u16) -> Result<(), PresentationError> {
         prepare_attach_window_with_size(&self.paths.session_name, columns, rows, |arguments| {
             self.invoke(None, arguments)
-        })
+        })?;
+        self.install_control_bindings()
     }
 
     /// Replaces only the outer provider attachment helper. The managed Codex
@@ -2272,9 +2273,6 @@ impl Presentation {
 
     fn install_control_bindings(&self) -> Result<(), PresentationError> {
         let bindings = [
-            ("\"", PresentationAction::CreateOrFocusShell),
-            ("%", PresentationAction::SuppressSplit),
-            ("x", PresentationAction::CloseShell),
             ("o", PresentationAction::FocusNext),
             ("Up", PresentationAction::FocusUp),
             ("Down", PresentationAction::FocusDown),
@@ -2298,6 +2296,17 @@ impl Presentation {
                 ],
             )?;
         }
+        for retired in ["\"", "%", "x"] {
+            self.invoke(
+                None,
+                vec![
+                    "unbind-key".into(),
+                    "-T".into(),
+                    "prefix".into(),
+                    retired.into(),
+                ],
+            )?;
+        }
         self.invoke(
             None,
             vec![
@@ -2316,7 +2325,7 @@ impl Presentation {
                 "prefix".into(),
                 "?".into(),
                 "display-message".into(),
-                "Ctrl+b: \" shell | % blocked | x close shell | o/directions focus | d detach | Ctrl+b literal | ? help".into(),
+                "Ctrl+b: o/directions focus | d detach | Ctrl+b literal | ? help".into(),
             ],
         )
     }
@@ -7548,7 +7557,7 @@ mod tests {
     }
 
     #[test]
-    fn presentation_config_rebuilds_bounded_d12_allowlists() {
+    fn presentation_config_rebuilds_bounded_allowlists() {
         assert_eq!(
             presentation_tmux_config(),
             concat!(
@@ -7670,7 +7679,7 @@ mod tests {
     }
 
     #[test]
-    fn control_binding_uses_fixed_shell_quoting_and_tmux_format_source() {
+    fn control_binding_uses_fixed_quoting_and_tmux_format_source() {
         let temporary = tempfile::tempdir().unwrap();
         let state_root = temporary.path().join("state's root/#{danger}/#(marker)");
         let presentation = Presentation {
@@ -7680,7 +7689,7 @@ mod tests {
         };
 
         let command = presentation
-            .control_shell_command(PresentationAction::SuppressSplit)
+            .control_shell_command(PresentationAction::FocusNext)
             .unwrap();
 
         assert!(command.contains("'/tmp/wsnav'\\''s executable/##{danger}/##(marker)'"));
@@ -7689,7 +7698,7 @@ mod tests {
         let source_only = command.replace("##{danger}", "").replace("##(marker)", "");
         assert_eq!(source_only.matches("#{").count(), 2);
         assert!(!source_only.contains("#("));
-        assert!(command.contains("--action suppress-split"));
+        assert!(command.contains("--action focus-next"));
         assert!(command.contains("--source-pane '#{pane_id}'"));
         assert!(command.contains("--client-name #{q:client_name}"));
         assert!(!command.contains("; tmux"));

@@ -5,12 +5,10 @@ coding-agent workstreams on the machine where it is running. It adds
 organization, attachment, status, and a few compound workstream actions
 around the provider's native terminal UI.
 
-> **D16 status:** complete on 2026-08-20. The host-local implementation,
-> disposable repository gate, and explicitly authorized live local and
-> ordinary-SSH-entered-host acceptance passed. The accepted executable is
-> installed on both tested hosts; see the
-> [roadmap](docs/roadmap.md#d16---host-local-simplification) and
-> [acceptance record](docs/evidence/acceptance/d16-host-local.md).
+> **D17 status:** implementation is in progress. The shell-first Navigator and
+> brokered Codex/OpenCode promotion path are active and the repository gate
+> passes; final operator-gated live acceptance remains open. See the
+> [roadmap](docs/roadmap.md#d17---shell-first-managed-session-onboarding).
 
 ## Host-local by design
 
@@ -44,44 +42,36 @@ and attach to the same Runtime.
 
 The provider pane remains a real native provider TUI. WSNav never writes
 status or management traffic into it, captures prompts/responses/output, or
-replaces completed provider results before the user acts. An optional
-short-lived utility shell may appear below the attached provider; it is
-presentation-only, host-local, and not persisted.
+replaces completed provider results before the user acts. The presentation has
+one right-hand surface: either a managed provider TUI or the provisional
+account shell selected from Workstreams. It does not add a split utility shell
+below a provider.
 
-## The reduced navigator
+## The shell-first navigator
 
-D16 has three direct pages. Page selection is process-local and is not
-persisted; `Left` and `Right` do not cycle views.
+D17 has two direct pages. Page selection is process-local and is not persisted;
+`Left` and `Right` do not cycle views.
 
 | Page | Purpose and direct controls |
 | --- | --- |
-| **Workstreams** | Default page with active Workstreams grouped by Project. `Enter` opens/starts/recovers, `n` starts at the selected Workstream's Location, `f` forks, `p` parks, `x` archives, `a` acknowledges attention, `r` recovers an unresolved operation, and `?` opens the page help. |
-| **Projects** | Host-local Projects and registered Locations. `a` opens the Location browser, `b` configures its host-local browser root, `n` starts at the selected Location (including a dormant Project), and `r` performs the explicit revision-checked repository metadata refresh. |
+| **Workstreams** | Default page with one pinned **Shell** card plus active Workstreams grouped by Project. `Enter` opens the selected shell or managed session; on a managed Workstream, `n` starts a same-provider session at its exact Location, `f` forks, `p` parks, `x` archives, `a` acknowledges attention, `r` recovers an unresolved operation, and `?` opens page help. |
 | **Archived** | Project-grouped archived Workstreams. `u` restores the selected Workstream and returns to Workstreams without launching or attaching a provider. |
 
-`,` opens or closes Projects; `.` opens or closes Archived; `Esc` returns to
-Workstreams. Footer hints pack into complete key/action pairs at the available
-width, and `?` shows a compact, colored page-specific reference. A Project with
-one Location is one selectable row rather than a repeated header and label
-source. When a Project has several Locations, its header is display-only and
-the selectable Locations form a minimal tree. Actions always resolve an exact
-Location or Workstream ID.
+`.` opens or closes Archived; `Esc` returns to Workstreams. Footer hints pack
+into complete key/action pairs at the available width, and `?` shows a compact,
+colored page-specific reference. Actions always resolve an exact Workstream ID
+or the presentation-local shell singleton.
 
-New Workstream actions choose a provider from current host capability evidence.
-Codex remains selectable when its contextual observer guide can complete exact
-setup, update, or native trust review. From an existing Workstream, a sole
-different provider still requires explicit confirmation; WSNav never silently
-substitutes providers or transfers conversation context.
-
-Project registration uses a host-private browser rooted at `~` by default.
-The browser shows bounded direct-child names and Git markers, uses a relative
-cursor, and keeps raw paths out of public snapshots and provider panes. The
-browser's `.` key toggles hidden directories for that browser only. `Right`
-enters a directory, `Left` moves toward the configured root, `Enter` registers
-a selected Git Location, and `Esc` closes the browser. Initial registration
-inspects that selected repository once; subsequent repository inspection occurs
-only through explicit Projects refresh. Normal redraw, attachment, and
-Workstream switching do not run Git.
+A fresh presentation starts with the Shell card selected and its account shell
+already visible on the right; reconnecting a detached presentation preserves
+its existing surface. The card is a stable two-line surface: `Shell`, then an
+abbreviated cwd with every parent shortened and the leaf folder kept whole,
+for example `~/c/workstream-navigator`. This presentation-local display
+evidence is neither persisted nor launch authority. Use ordinary shell
+commands to choose a directory, then run `codex` or `opencode`; the native
+command owns provider and launch-option choice. Successful brokered launch
+registers the detected Git worktree root and promotes that same card into the
+managed Workstream while adding a fresh Shell card.
 
 ## Observer readiness
 

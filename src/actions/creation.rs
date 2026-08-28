@@ -262,8 +262,12 @@ pub fn recover_managed_operation(
     root: &crate::state::StateRoot,
     registry: &mut HostRegistry,
     operation_id: OperationId,
+    expected_revision: Option<Revision>,
 ) -> Result<WorkstreamId, ActionError> {
     let plan = registry.fork_plan(operation_id)?;
+    if expected_revision.is_some_and(|expected| expected != plan.operation.revision) {
+        return Err(ActionError::OperationRevisionConflict);
+    }
     if plan.operation.phase == OperationPhase::Failed {
         return if plan.provider == ProviderKind::OpenCode {
             Err(ActionError::OpenCodeForkExternalEffectUnknown)

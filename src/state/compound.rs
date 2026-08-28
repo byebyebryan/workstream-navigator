@@ -675,7 +675,8 @@ impl HostRegistry {
             .prepare(
                 "SELECT operation_id, kind, phase, effect_watermark, revision
                  FROM compound_operations
-                 WHERE phase IN ('external_effect_started', 'awaiting_reconciliation', 'recovery_required')
+                 WHERE kind != 'onboard'
+                   AND phase IN ('external_effect_started', 'awaiting_reconciliation', 'recovery_required')
                  ORDER BY operation_id
                  LIMIT ?1",
             )

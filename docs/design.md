@@ -125,13 +125,14 @@ independent WSNav evidence.
   lost-Runtime recovery contract. Historical production acceptance covers
   OpenCode `1.18.11`; the provider contract was revalidated on `1.18.23`.
   Release numbers are diagnostic evidence, not compatibility authority.
-- A minimal terminal experience that defaults to the Navigator beside the
-  directly interactive native provider TUI and may temporarily add at most one
-  ephemeral utility shell below the provider.
+- A minimal terminal experience that defaults to the Navigator beside exactly
+  one directly interactive surface: the native provider TUI or the provisional
+  account shell.
 - One always-visible provisional shell card on Workstreams. The selected card
-  opens a presentation-scoped account shell, lets the user choose a directory
-  with ordinary shell commands, and recognizes only an explicit brokered
-  `codex` or `opencode` launch as authority to create a managed Workstream.
+  is headed `Shell`, reports live presentation-local cwd on a stable second
+  line, opens a presentation-scoped account shell, and recognizes only an
+  explicit brokered `codex` or `opencode` launch as authority to create a
+  managed Workstream.
 - One current-host registry with read-only capability and observer-readiness
   checks plus contextual readiness guidance.
 - Projects represented by one or more Git worktree roots detected and
@@ -276,14 +277,12 @@ operator terminal on the execution host
 └── dedicated host-local tmux presentation session (disposable)
     ├── navigator pane
     │   └── wsnav TUI with one pinned provisional-shell card
-    ├── provider pane
-    │   └── either
-    │       ├── wsnav attach helper -> exact Runtime tmux server
-    │       │                                      └── native provider TUI
-    │       └── one private provisional shell server
-    │           └── account shell with broker-owned provider functions
-    └── optional utility-shell pane (at most one; below provider)
-        └── account shell at exact ProjectLocation root
+    └── active pane
+        └── either
+            ├── wsnav attach helper -> exact Runtime tmux server
+            │                                      └── native provider TUI
+            └── one private provisional shell server
+                └── account shell with broker-owned provider functions
 
 wsnav TUI
 ├── current-host registry projection
@@ -357,29 +356,26 @@ touches no ordinary tmux server, and neither captures nor injects provider
 terminal bytes. Individual renderers retain their compact fallbacks for
 explicitly narrowed panes.
 
-The presentation begins with exactly the Navigator and provider panes. The
-D12 utility-shell action may split only the provider region once,
-placing one shell below the provider. `Ctrl+b "` is the sole shell-creation
-gesture: it creates and focuses that pane when absent and otherwise focuses the
-existing shell. `Ctrl+b %` does not create an alternate orientation or a
-second pane. Unknown or duplicate pane-role evidence is ambiguity and must
-leave the layout unchanged.
+The presentation has exactly the Navigator and one active pane. The active pane
+is either the selected managed Runtime attachment or the presentation's
+provisional account shell. Selecting another card replaces that exact surface;
+WSNav exposes no third pane or split-shell action. Unknown or duplicate
+pane-role evidence is ambiguity and must leave the layout unchanged.
 
 The private presentation does not inherit tmux's general-purpose prefix or root
 management tables. Its prefix table is rebuilt as an explicit allowlist:
-`Ctrl+b "` opens or focuses the shell; `Ctrl+b %` gives bounded guidance;
-`Ctrl+b x` confirms close
-only for the utility shell; `Ctrl+b d` detaches; `Ctrl+b o` and directional
-keys move among owned panes; `Ctrl+b Ctrl+b` delivers a literal `Ctrl+b` to the
-focused application without exposing the nested Runtime's tmux prefix table;
-and `Ctrl+b ?` shows only this curated help. Its root table retains only the
-primary mouse selection/forwarding and bounded scrolling/copy interactions
-required by the existing Navigator and native provider surfaces. Default
-right-click management menus, mouse split/swap/kill/respawn actions, arbitrary
-tmux command prompts, additional splits, windows, sessions, and layout mutation
-bindings are absent. These restrictions belong only to WSNav's private
-presentation server and never modify the user's ordinary tmux server or
-configuration.
+`Ctrl+b d` detaches; `Ctrl+b o` and directional keys move among the two owned
+panes; `Ctrl+b Ctrl+b` delivers a literal `Ctrl+b` to the focused application
+without exposing the nested Runtime's tmux prefix table; and `Ctrl+b ?` shows
+only this curated help. The retired D12 `Ctrl+b "`, `Ctrl+b %`, and `Ctrl+b x`
+bindings are explicitly absent, including when an older live presentation is
+reattached. The root table retains only the primary mouse
+selection/forwarding and bounded scrolling/copy interactions required by the
+Navigator and active native surface. Default right-click management menus,
+mouse split/swap/kill/respawn actions, arbitrary tmux command prompts,
+additional splits, windows, sessions, and layout mutation bindings are absent.
+These restrictions belong only to WSNav's private presentation server and never
+modify the user's ordinary tmux server or configuration.
 
 Both private tmux layers also own their copy-mode wheel behavior. They bind
 `WheelUpPane` and `WheelDownPane` in the `copy-mode` and `copy-mode-vi` tables
@@ -420,43 +416,25 @@ terminal widget rendered by Rust; it is a real tmux attachment to the host-owned
 provider runtime. This retains direct keyboard, mouse, resize, color, and native
 TUI behavior without building a PTY server or terminal emulator.
 
-The optional utility shell is presentation state, not a Workstream, Runtime,
-provider session, or durable terminal. It may open only beside one exact live
-`Running` provider attachment. The host resolves that attachment's opaque
-Workstream identity to its canonical registered ProjectLocation root. The
-host-local account shell starts there directly. Pending, completed, failed,
-blank, observer-review, dead, stale, or ambiguous provider surfaces create no
-shell.
-
-The shell keeps its launch host and root until it exits. Selecting a different
-Workstream automatically closes the exact utility pane before replacing the
-provider attachment; it never retargets the live shell or leaves Workstream B's
-provider above Workstream A's shell. This adds no confirmation step to the core
-switching workflow. Reselecting or reconnecting the same exact Workstream does
-not close its shell. If exact utility ownership or cleanup
-cannot be proven, the switch fails closed before changing the provider pane.
-This is a deliberate V1 simplicity choice: the utility is short-lived scratch
-space for the currently displayed Workstream, while longer-running commands
-belong in an ordinary terminal. Shell exit, `Ctrl+d`, automatic cross-Workstream
-cleanup, or the guarded shell-only close binding removes its pane immediately
-and restores the two-pane geometry; Navigator and provider dead-pane retention
-remain unchanged. WSNav persists no shell identity, command, output, history,
-terminal capture, or restoration record. A live shell may naturally survive a
-client detach only while its disposable presentation tmux server remains alive;
-presentation loss ends it, and WSNav never reconstructs it.
+The D17 provisional account shell supersedes the D12 below-provider utility
+shell as the sole account-shell surface. D12 remains historical implementation
+and acceptance evidence, but its split/focus/close controls are no longer part
+of V1. Reattachment strips those retired bindings from an older live
+presentation. An already-running proven utility pane is not killed merely by
+upgrade or reconnect; it may exit naturally and cannot be recreated.
 
 When this presentation is itself running inside an ordinary operator SSH
 session, an outer disconnect may end or detach the disposable presentation and
 its shell. It must not stop, park, rotate, or restart the host's private
 Runtime or provider. Reconnect to that host, rerun `wsnav`, and attach again.
 
-The D17 provisional onboarding shell is separate from that D12 utility shell.
 Exactly one provisional card is always visible on Workstreams, pinned outside
 Project groups. At presentation creation, WSNav captures, validates, and
 canonicalizes the invocation cwd as that presentation's private seed cwd.
-Selecting the card
-lazily materializes exactly one opaque candidate `RuntimeId` and fresh opaque
-`slot_generation`; it creates the
+After the fresh presentation has created and proven both owned panes, startup
+selects the card, materializes exactly one opaque candidate `RuntimeId` and
+fresh opaque `slot_generation`, and shows that account shell in the active pane.
+It creates the
 provisional tmux directory, socket, configuration, and session using the
 existing final full-UUID `RuntimePaths` fields (directory, socket,
 configuration, and session) for that candidate. The candidate
@@ -870,7 +848,7 @@ rather than a generic management landing page:
 
 ```text
 Workstreams
-├── New session · shell
+├── Shell
 ├── Project-grouped active Workstreams
 └── Recovery
 
@@ -920,13 +898,16 @@ ProjectLocation registration is a bounded host operation inside successful
 brokered promotion, and the shell remains the user's familiar path-selection
 surface.
 
-The Workstreams page retains its accepted muscle memory: `Enter` performs the
-primary open/start/recover action, `n` starts a sibling at the selected managed
-Workstream's exact ProjectLocation with the same provider, `f` forks, `p`
-parks, `a` acknowledges, and `?` toggles the full reference. On the provisional
-shell card, `Enter` opens or focuses the shell and `n` has no separate meaning.
-`Left` and `Right` remain inert. Archived may reuse letters because the active
-page and its visible footer make the page explicit.
+The Workstreams page retains its accepted muscle memory: `Enter` attaches a
+live Runtime, starts/resumes a parked or stopped one, or enters exact native
+recovery for an ordinary lost Runtime. `n` starts a sibling at the selected
+managed Workstream's exact ProjectLocation with the same provider; `f` forks;
+`p` parks; `x` opens the reversible archive confirmation; `a` acknowledges
+only result attention; `r` opens bounded Codex Rename or recovers the selected
+unresolved Fork; and `?` toggles the full reference. `u` on Archived restores
+without starting. On the provisional shell card, `Enter` opens or focuses the
+shell and `n` has no separate meaning. `Left` and `Right` remain inert. There
+is no hard delete: archive/restore is the sole Workstream visibility control.
 
 Workstreams always groups active Workstreams by Project. Groups sort by their
 newest included member's durable `last_activity_sequence`, descending, with
@@ -962,7 +943,14 @@ and mouse hit-testing use the same resulting list geometry.
 Project group headers use the accented Project name alone: no disclosure
 marker, Location count, active count, or archived count consumes that line.
 The provisional shell card is not rendered under a Project header and uses no
-persisted Location label. The footer owns action discovery.
+persisted Location label. Its first line is exactly `Shell`. Its stable second
+line renders the cwd with home as `~`, abbreviated parent components, and the
+leaf folder whole. The value refreshes when the exact live cwd changes and is
+bounded, cell-aware, presentation-local display evidence; it is never persisted
+and never becomes registration, launch, or retargeting authority.
+WSNav persists the exact containing worktree root only at promotion and does
+not follow or manage later branch/worktree changes. The footer owns action
+discovery.
 
 Footer hints are laid out as indivisible key/action pairs and packed across the
 number of physical lines required by the current pane width; they are never
@@ -2014,7 +2002,12 @@ credential, or environment dump is persisted.
   known-absent result is resolved atomically: provider-specific proof of no
   effect/binding permits guarded rollback and ends onboarding, while a known
   OpenCode binding ends onboarding in the exact stopped/recovery state where
-  only binding-preserving Resume/recovery or explicit Park is allowed.
+  only binding-preserving Resume/recovery or explicit Park is allowed. After
+  explicit Park has stopped that exact adopted Runtime and recorded the
+  Workstream parked under `provisional.lock`, it commits onboarding recovery
+  resolution without asserting that the original native exec was proven,
+  without deleting the retained binding, and without retrying a provider
+  effect; ordinary Resume then uses that retained binding.
 - One host has at most one owned `wsnav-observer` CodexIntegration.
 - One Workstream has at most one live Runtime.
 - One Runtime has one current ProviderBinding.
@@ -2147,8 +2140,8 @@ they never inspect or change project files.
 ### Onboard a managed session from the provisional shell
 
 ```text
-user selects New session · shell and presses Enter
--> navigator lazily materializes and opens the one presentation-scoped account
+user starts a fresh wsnav presentation
+-> navigator selects Shell and opens the one presentation-scoped account
    shell with one marker-backed candidate RuntimeId, fresh slot_generation, and
    final full-UUID
    `RuntimePaths` fields (directory, socket, configuration, and session)
@@ -2200,8 +2193,13 @@ user selects New session · shell and presses Enter
    attachable/actionable managed Runtime
 -> the selected shell card becomes the managed Workstream card, even when
    native binding is not ready
--> a fresh, unmaterialized New session · shell card appears
+-> a fresh, unmaterialized Shell card appears
 ```
+
+Pressing Enter on a later unmaterialized Shell card performs the same guarded
+materialization, while Enter on the initial or already materialized card
+reattaches its exact existing shell. Reconnecting a detached presentation does
+not reset its selected card or replace its current right-hand surface.
 
 Promotion establishes ownership of the managed Runtime, not necessarily the
 native session binding, and card/server semantics key off that ownership rather
@@ -2353,7 +2351,8 @@ rerunning wsnav reattaches it.
 The default view is intentionally small:
 
 ```text
-New session · shell
+Shell
+  ~/c/workstream-navigator
 Project
 ├── Tip thread name         working
 ├── Prior name ↻ unnamed    working

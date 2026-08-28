@@ -34,10 +34,12 @@ retired or superseded by D16 for the current product contract.
 ## 2026-08-26 D17 shell-first onboarding decision
 
 D17 dissolves the Projects page into the ordinary Workstreams experience.
-Workstreams always shows one pinned `New session · shell` card outside Project
+Workstreams always shows one pinned `Shell` card outside Project
 groups. At presentation creation WSNav captures, validates, and canonicalizes
-the invocation cwd as a presentation-private seed cwd. Selecting the card
-lazily materializes exactly one opaque candidate `RuntimeId` and creates its
+the invocation cwd as a presentation-private seed cwd. After both owned panes
+are created and proven, fresh startup selects the card, materializes exactly
+one opaque candidate `RuntimeId`, and shows its account shell in the active
+pane. Materialization creates its
 provisional tmux directory, socket, configuration, and session using the
 existing final full-UUID `RuntimePaths` fields (directory, socket,
 configuration, and session). The candidate ID, exact
@@ -177,7 +179,10 @@ for that Runtime refuse or wait with bounded `onboarding-in-progress` guidance.
 Passive snapshot/probe may show `starting`/`onboarding` and reconcile, but must
 not adopt helper/preparation processes, mark the Runtime lost, signal it, or
 expose ordinary action authority. Once terminal `recovery-required`, only exact
-recovery or explicit Park rules apply. A terminal known-absent exec result is
+recovery or explicit Park rules apply. An explicit Park resolves that terminal
+journal only after it proves the exact adopted Runtime stopped and Workstream
+parked under the provisional lease; it preserves the binding and never retries
+or asserts proof of the original native exec. A terminal known-absent exec result is
 not itself action authority: the reconciler must atomically resolve it. When
 provider-specific journal evidence proves no prior external effect or binding,
 guarded rollback ends onboarding and leaves the derived singleton card available
@@ -3283,8 +3288,9 @@ shell below the provider for short host-local work such as inspecting or
 manually operating Git. The shell is never a Workstream or durable session.
 
 The remote-shell and SSH-helper portions of this completed checkpoint are
-historical evidence. D16 retains only the host-local utility-shell semantics;
-ordinary SSH composition is outside WSNav.
+historical evidence. D16 retained the host-local utility-shell semantics; D17
+supersedes that surface with the pinned provisional shell card and retires the
+split/focus/close bindings. Ordinary SSH composition remains outside WSNav.
 
 Scope:
 
@@ -4305,17 +4311,12 @@ D16 closes only when all of the following are true:
 
 ## D17 - Shell-first managed-session onboarding
 
-Status: in progress. The product contract is approved; D17.0 studies, the
-D17.2 test-only ownership/private-runtime model, dormant presentation-private
-marker-backed materialization/evidence storage, marker-to-state prepare/consume
-broker, typed no-provider-effect helper fences, and dormant D17.3 grammar,
-command-classification, onboarding-phase, capability-journal, reservation, and
-ownership-consumption foundations have begun. No D17 user-facing behavior or
-provider launch path is
-implemented. The explicit schema-13-to-14 migration, stable provisional-lease,
-schema-14-only open, lease acquisition, reservation, ownership consumption,
-and marker-backed materialization/evidence storage foundations remain dormant,
-and no D17 acceptance is complete.
+Status: in progress. The product contract, schema-14 cutover, shell-first
+Navigator, marker-backed provisional Runtime, brokered Codex/OpenCode promotion,
+and managed-card attachment path are active. Disposable automated evidence and
+iterative local operator testing cover the current implementation, and the
+complete repository gate passes. Explicitly operator-gated live Codex/OpenCode
+acceptance remains open.
 
 ### Goal
 
@@ -4329,9 +4330,10 @@ private Runtime, recovery, privacy, and completed-output guarantees.
 - Workstreams and Archived are the only ordinary pages.
 - Workstreams always contains exactly one pinned provisional shell card outside
   Project groups. At presentation creation, WSNav captures, validates, and
-  canonicalizes the invocation cwd as a private seed cwd. The card is
-  materialized lazily with
-  exactly one opaque candidate `RuntimeId`; its provisional tmux directory,
+  canonicalizes the invocation cwd as a private seed cwd. Once both owned panes
+  are created and proven, fresh startup selects the card, materializes exactly
+  one opaque candidate `RuntimeId`, and shows the account shell in the active
+  pane; its provisional tmux directory,
   socket, configuration, and session use the existing final full-UUID
   `RuntimePaths` fields (directory, socket, configuration, and session).
   Candidate ID, exact `RuntimePaths` fields (directory,
@@ -4351,6 +4353,13 @@ private Runtime, recovery, privacy, and completed-output guarantees.
   preserves a live shell's actual cwd, and a new presentation captures its own
   seed. Missing, deleted, unsafe, or ambiguous seed evidence makes onboarding
   unavailable with guidance and never falls back.
+- The pinned card is headed exactly `Shell`; it contains no path-selection hint
+  and occupies a stable two lines. Its cwd line renders home as `~`, abbreviates
+  every parent component, and keeps the leaf folder whole. The value refreshes
+  on exact cwd changes. This read-only display evidence is not persisted and
+  never becomes registration, launch, or retargeting authority; WSNav records
+  the exact containing worktree root only at promotion and does not manage
+  branch/worktree changes.
 - The provisional account shell supports Bash and Zsh interactive non-login
   shells only. The launcher rejects login mode before it starts either shell:
   interactive login Bash does not load a supplied `--rcfile`, so the wrapper
@@ -4456,7 +4465,13 @@ marker, onboarding journal, presentation revision, and registry generation while
   render `starting`/`onboarding` and reconcile, but must not adopt helper or
   preparation processes, mark the Runtime lost, signal it, or expose ordinary
   action authority. Once terminal `recovery-required`, only exact recovery or
-  explicit Park rules apply. A host-local reconciler invoked by passive snapshot/action
+  explicit Park rules apply. An explicit Park may resolve that terminal
+  onboarding journal only after the exact adopted Runtime is stopped and its
+  Workstream is durably parked under the same provisional lease; it commits
+  recovery resolution without claiming that the original native exec was
+  proven, without deleting the retained binding, and without retrying a
+  provider effect. The ordinary Resume path then uses that retained binding.
+  A host-local reconciler invoked by passive snapshot/action
   preflight or restart recovery performs no provider effect; only after full
   operation/revision, RuntimeId/generation and exact `RuntimePaths` fields
   (directory, socket, configuration, and session), tmux pane/session,
@@ -4544,9 +4559,11 @@ marker, onboarding journal, presentation revision, and registry generation while
   proves no effect or binding, leaving the derived singleton card available but
   unmaterialized. A blank Codex TUI remains a managed `starting` row until its
   first authoritative SessionStart, without session-list or title inference.
-- D12's optional utility shell below an attached managed provider remains a
-  distinct, short-lived current-Workstream tool. D17 does not make utility
-  shells durable or permit multiple provisional shells.
+- The D17 provisional account shell is the only account-shell surface. The D12
+  below-provider utility shell and its split/focus/close bindings are retired;
+  an older live presentation is reconciled by removing those bindings without
+  killing an already-running proven shell process merely because WSNav was
+  upgraded or reattached.
 
 ### Durable-state contract
 
@@ -4824,7 +4841,7 @@ integration, cancellation/crash recovery, or native provider effects.
    blank-session preparation inside the onboarding journal, preserve exact
    Runtime/process authority, provider-exec proof, and conclusive versus
    ambiguous effects through the validated helper handoff for both Bash and Zsh.
-   This work stays dormant behind internal seams until the atomic cutover.
+   This work stays behind internal seams until the atomic cutover.
 5. **Atomic schema-14 and Navigator cutover.** In one coherent product
    cutover, migrate schema 13 transactionally to 14, remove
    `ProjectBrowserSettings` and Project-browser action DTOs, remove the
@@ -4979,10 +4996,13 @@ D17 closes only when all of the following are true:
   obsolete browser settings, and preserves all enumerated authoritative state;
 - Workstreams and Archived are the only pages; Project grouping is derived
   from retained Workstreams/Locations, no browser/root/refresh action survives,
-  and `n` uses the selected managed Workstream's exact provider and Location;
+  a fresh presentation starts with the Shell card selected and its guarded
+  account shell visible in the active pane, reconnect preserves the detached
+  surface, and `n` uses the selected managed Workstream's exact provider and
+  Location;
 - provider exit preserves the managed stopped/recoverable card and completed
-  output, provider cwd/worktree changes never retarget it, and D12 utility-shell
-  behavior remains distinct and bounded;
+  output, provider cwd/worktree changes never retarget it, and the presentation
+  exposes no below-provider utility-shell creation path;
 - all automated tests use disposable state roots, repositories, provider homes,
   account-shell startup files, and private tmux sockets; and
 - `scripts/check`, staged and unstaged `git diff --check`, focused D17 tests,
@@ -5004,7 +5024,6 @@ later aggregator. Ordinary SSH composition and one host-local wsnav instance
 per execution host are the supported multi-host workflow.
 
 The one D17 provisional onboarding shell does not approve durable or multiple
-per-Workstream shells. A future presentation could preserve each utility shell
-across Workstream switches, but that remains deferred until its multi-shell
-resource bound, background-shell visibility, transition rollback, and cleanup
-contract are explicitly approved.
+per-Workstream shells. Reintroducing any simultaneous provider-plus-shell or
+multi-shell surface remains deferred until its resource bound, background-shell
+visibility, transition rollback, and cleanup contract are explicitly approved.

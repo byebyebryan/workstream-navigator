@@ -4,13 +4,17 @@
 
 D16 host-local implementation and its separately authorized live acceptance
 remain complete historical evidence. D17 shell-first managed-session
-onboarding is complete and is the active source-installed product: its
+onboarding is complete and is the active source-installed product. D17.1's
+bounded state paging, active schema identity, process cleanup, tmux 3.4
+metadata parsing, and deterministic CI prerequisites are implemented. Its
+repository and Rust-1.88 gates pass and its exact artifact is installed; the
+D17.1 explicitly authorized disposable Codex/OpenCode replay passes with
+complete cleanup. D17's
 schema-14 cutover, Navigator, brokered Codex/OpenCode promotion, managed
 attachment paths, interrupted-shell and unconsumed-capability recovery,
 schema-14 public-command routing, retired-D16 removal, and fresh-state Codex
-observer readiness are implemented. The repository gate and explicitly
-operator-gated live Codex/OpenCode acceptance pass with complete disposable
-cleanup.
+observer readiness and recorded operator-gated acceptance remain complete for
+the artifact identified by that historical record.
 
 - [Product and architecture design](design.md) is the V1 contract.
 - [Delivery roadmap](roadmap.md) owns delivery order, checkpoint status, and

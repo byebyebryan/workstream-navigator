@@ -193,7 +193,7 @@ fn private_presentation_has_only_owned_roles_and_bounded_key_tables() {
             "-t",
             &format!("{}:navigator", paths.session_name),
             "-F",
-            "#{pane_id}\t#{@wsnav_role}",
+            "#{pane_id}|#{@wsnav_role}",
         ],
     );
     assert!(panes.contains("navigator"));
@@ -335,12 +335,12 @@ fn outer_presentation_protects_nested_provider_literal_prefix() {
             "-t",
             &format!("{}:navigator", paths.session_name),
             "-F",
-            "#{pane_id}\t#{@wsnav_role}",
+            "#{pane_id}|#{@wsnav_role}",
         ],
     )
     .lines()
     .find_map(|line| {
-        let (pane, role) = line.split_once('\t')?;
+        let (pane, role) = line.split_once('|')?;
         (role == "provider").then_some(pane.to_owned())
     })
     .expect("D17 provider pane");
@@ -516,14 +516,14 @@ fn tmux_has_client(socket: &Path, session: &str) -> bool {
         .args([
             "list-clients",
             "-F",
-            "#{client_name}\t#{session_name}\t#{window_name}",
+            "#{client_name}|#{session_name}|#{window_name}",
         ])
         .output();
     output.is_ok_and(|output| {
         output.status.success()
             && String::from_utf8_lossy(&output.stdout)
                 .lines()
-                .any(|line| line.split('\t').nth(1) == Some(session))
+                .any(|line| line.split('|').nth(1) == Some(session))
     })
 }
 
@@ -543,7 +543,7 @@ fn runtime_client_status(socket: &Path) -> Option<(String, String, String)> {
         .args([
             "list-clients",
             "-F",
-            "#{client_name}\t#{client_key_table}\t#{client_prefix}",
+            "#{client_name}|#{client_key_table}|#{client_prefix}",
         ])
         .output()
         .ok()?;
@@ -552,7 +552,7 @@ fn runtime_client_status(socket: &Path) -> Option<(String, String, String)> {
     }
     let text = String::from_utf8(output.stdout).ok()?;
     text.lines().find_map(|line| {
-        let fields = line.split('\t').collect::<Vec<_>>();
+        let fields = line.split('|').collect::<Vec<_>>();
         (fields.len() == 3).then(|| {
             (
                 fields[0].to_owned(),
@@ -635,7 +635,7 @@ fn pane_snapshot(paths: &PresentationPaths) -> Vec<String> {
             "-t",
             &format!("{}:navigator", paths.session_name),
             "-F",
-            "#{pane_id}\t#{@wsnav_role}\t#{@wsnav_workstream_id}\t#{pane_top}",
+            "#{pane_id}|#{@wsnav_role}|#{@wsnav_workstream_id}|#{pane_top}",
         ],
     )
     .lines()

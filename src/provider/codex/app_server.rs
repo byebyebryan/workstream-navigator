@@ -849,10 +849,10 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn app_server_cleanup_terminates_descendants_in_its_private_group() {
         use std::os::unix::process::CommandExt;
-        use std::{fs, path::Path, thread};
+        use std::{fs, thread};
 
         let temporary = tempfile::tempdir().unwrap();
         let pid_path = temporary.path().join("descendant.pid");
@@ -878,12 +878,9 @@ mod tests {
             })
             .expect("fake descendant wrote its PID");
         assert!(kill_and_reap(&mut child, process_group).is_ok());
-        for _ in 0..100 {
-            if !Path::new(&format!("/proc/{pid}")).exists() {
-                return;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        panic!("owned App Server descendant {pid} survived cleanup");
+        assert!(
+            !crate::process::linux_process_is_running(pid),
+            "owned App Server descendant {pid} survived cleanup"
+        );
     }
 }

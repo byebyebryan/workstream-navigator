@@ -40,8 +40,8 @@ pub use models::{
     CodexIntegration, CreatedWorkstream, EXTERNAL_EFFECT_UNKNOWN_CODE, ExternalWorkstream,
     ForkPlan, ForkPreparation, HostIdentity, HostRegistry, IntegrationLifecycle,
     OpenCodeLifecycleObservation, OpenCodeObserverStatus, OpenCodeRuntimeHandle,
-    OpenCodeSessionCreationOperation, OperationOverview, ProjectDirectoriesResponse,
-    ProjectDirectoryEntry, ProviderBinding, RuntimeRecord, StateError, StateRoot,
-    WorkstreamOverview,
+    OpenCodeSessionCreationOperation, OperationOverview, OperationOverviewPage,
+    ProjectDirectoriesResponse, ProjectDirectoryEntry, ProviderBinding, RuntimeRecord, StateError,
+    StateRoot, WorkstreamOverview, WorkstreamOverviewPage,
 };
 pub use schema::HOST_SCHEMA_VERSION;

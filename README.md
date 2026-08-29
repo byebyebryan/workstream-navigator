@@ -5,13 +5,15 @@ coding-agent workstreams on the machine where it is running. It adds
 organization, attachment, status, and a few compound workstream actions
 around the provider's native terminal UI.
 
-> **D17 status:** complete. The shell-first Navigator and brokered
+> **D17.1 status:** complete.
+> The shell-first Navigator and brokered
 > Codex/OpenCode promotion path are active. Exact pre-provider recovery,
 > schema-14 public-command routing, retired-D16 cleanup, and fresh-state Codex
-> observer readiness are implemented. The repository gate and sanitized,
-> operator-gated live Codex/OpenCode acceptance pass with complete disposable
-> cleanup. See the
-> [roadmap](docs/roadmap.md#d17---shell-first-managed-session-onboarding).
+> observer readiness are implemented. Retained state is read in bounded frames
+> without a one-frame total ceiling, and the deterministic stable/Rust-1.88 gates
+> pass. The exact D17.1 artifact is installed, and its separately authorized
+> disposable Codex/OpenCode replay passes with complete cleanup. See the
+> [roadmap](docs/roadmap.md#2026-08-28-d171-correctness-and-release-reconciliation).
 
 ## Host-local by design
 
@@ -127,12 +129,13 @@ The preserved host state includes HostIdentity, integrations, ProjectLocations
 and browser root, Workstream provider/activity/lifecycle fields, Runtime
 generations, OpenCode handles, provider bindings, attention, compound
 operations, private tmux servers, native provider sessions/history, and
-completed output. Schema 12 is migrated transactionally to schema 13 using
-`host.sqlite` only; fresh state is created directly at schema 13. Projects and
-label-source Locations are rebuilt deterministically from current-host
-ProjectLocations. Partial cleanup is retryable; a failed host migration leaves
-schema 12 intact and blocks ordinary navigation until the confirmed
-transition completes.
+completed output. D16 migrates schema 12 transactionally to schema 13 using
+`host.sqlite` only; D17 then migrates an idle schema-13 root to schema 14 after
+legacy presentation absence is proven. Fresh current state is created directly
+at schema 14. Projects and label-source Locations are rebuilt deterministically
+from current-host ProjectLocations. Partial cleanup is retryable; a failed D16
+host migration leaves schema 12 intact and blocks ordinary navigation until the
+confirmed transition completes.
 
 Before deletion, D16 proves ownership of any legacy presentation. An attached
 client, utility shell, or native observer-review surface blocks mutation. The
@@ -153,8 +156,10 @@ install -m 755 target/release/wsnav ~/.local/bin/wsnav
 wsnav
 ```
 
-Development requires Rust 1.88 or newer, Python 3, Cargo Deny 0.20.x, Git,
-`jq`, Ruff 0.16.x, and ShellCheck. Run the repository gate from the checkout:
+Runtime prerequisites are Git, tmux, Bash or Zsh, and the util-linux `script`
+command. Development additionally requires Rust 1.88 or newer, Python 3,
+Cargo Deny 0.20.x, `jq`, Ruff 0.16.x, Ripgrep, and ShellCheck. Run the
+repository gate from the checkout:
 
 ```console
 scripts/check

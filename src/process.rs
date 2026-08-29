@@ -17,6 +17,7 @@ use std::{
 use thiserror::Error;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_secs(10);
+const PROCESS_GROUP_CLEANUP_TIMEOUT: Duration = Duration::from_secs(1);
 const FALLBACK_INITIAL_WAIT: Duration = Duration::from_millis(1);
 const FALLBACK_MAX_WAIT: Duration = Duration::from_millis(20);
 
@@ -359,6 +360,12 @@ fn malformed_process_stat() -> io::Error {
 
 #[cfg(unix)]
 fn parse_process_stat(stat: &str) -> Result<(i32, i32), io::Error> {
+    let (_, process_group_id, session_id) = parse_process_stat_with_state(stat)?;
+    Ok((process_group_id, session_id))
+}
+
+#[cfg(unix)]
+fn parse_process_stat_with_state(stat: &str) -> Result<(char, i32, i32), io::Error> {
     let Some(close_paren) = stat.rfind(')') else {
         return Err(malformed_process_stat());
     };
@@ -374,12 +381,20 @@ fn parse_process_stat(stat: &str) -> Result<(i32, i32), io::Error> {
             .parse::<i32>()
             .map_err(|_| malformed_process_stat())
     };
-    Ok((parse_field(2)?, parse_field(3)?))
+    let mut state_chars = fields.first().ok_or_else(malformed_process_stat)?.chars();
+    let state = state_chars.next().ok_or_else(malformed_process_stat)?;
+    if state_chars.next().is_some() {
+        return Err(malformed_process_stat());
+    }
+    Ok((state, parse_field(2)?, parse_field(3)?))
 }
 
-#[cfg(unix)]
-fn process_group_has_member(group: OwnedProcessGroup) -> Result<bool, ProcessGroupError> {
-    let entries = std::fs::read_dir("/proc")
+#[cfg(target_os = "linux")]
+fn process_group_has_member_in(
+    proc_root: &Path,
+    group: OwnedProcessGroup,
+) -> Result<bool, ProcessGroupError> {
+    let entries = std::fs::read_dir(proc_root)
         .map_err(|error| ProcessGroupError::Probe(copy_io_error(&error)))?;
     for entry in entries {
         let entry = entry.map_err(|error| ProcessGroupError::Probe(copy_io_error(&error)))?;
@@ -390,18 +405,36 @@ fn process_group_has_member(group: OwnedProcessGroup) -> Result<bool, ProcessGro
         else {
             continue;
         };
-        let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        let stat = match std::fs::read_to_string(proc_root.join(pid.to_string()).join("stat")) {
             Ok(stat) => stat,
             Err(error) if process_entry_missing(&error) => continue,
             Err(error) => return Err(ProcessGroupError::Probe(copy_io_error(&error))),
         };
-        let (process_group_id, session_id) =
-            parse_process_stat(&stat).map_err(ProcessGroupError::Probe)?;
-        if process_group_matches(group, process_group_id, session_id) {
+        let (state, process_group_id, session_id) =
+            parse_process_stat_with_state(&stat).map_err(ProcessGroupError::Probe)?;
+        if state != 'Z' && process_group_matches(group, process_group_id, session_id) {
             return Ok(true);
         }
     }
     Ok(false)
+}
+
+#[cfg(target_os = "linux")]
+fn process_group_has_member(group: OwnedProcessGroup) -> Result<bool, ProcessGroupError> {
+    process_group_has_member_in(Path::new("/proc"), group)
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn linux_process_is_running(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|stat| parse_process_stat_with_state(&stat).ok())
+        .is_some_and(|(state, _, _)| state != 'Z')
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn process_group_has_member(group: OwnedProcessGroup) -> Result<bool, ProcessGroupError> {
+    process_group_exists(group)
 }
 
 #[cfg(unix)]
@@ -493,6 +526,23 @@ where
     }
 }
 
+#[cfg(unix)]
+fn wait_for_process_group_exit(
+    group: OwnedProcessGroup,
+    timeout: Duration,
+) -> Result<bool, ProcessGroupError> {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if !process_group_has_member(group)? {
+            return Ok(true);
+        }
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        thread::sleep(FALLBACK_MAX_WAIT);
+    }
+}
+
 /// Performs the common direct-child and process-group cleanup mechanics while
 /// leaving error precedence to each caller's public error contract.
 pub(crate) fn cleanup_child(
@@ -501,7 +551,8 @@ pub(crate) fn cleanup_child(
 ) -> Result<ChildCleanup, ChildCleanupError> {
     #[cfg(unix)]
     {
-        let process_group = process_group.and_then(|group| signal_process_group(group).err());
+        let process_group_signal_error =
+            process_group.and_then(|group| signal_process_group(group).err());
         let direct_kill = if child.try_wait().map_err(ChildCleanupError::Wait)?.is_none() {
             // `Child` remains exact authority for the direct process even
             // when the captured group has become empty or changed.
@@ -510,6 +561,19 @@ pub(crate) fn cleanup_child(
             None
         };
         let wait = child.wait().err();
+        let process_group = match (process_group, process_group_signal_error) {
+            (Some(group), None) => {
+                match wait_for_process_group_exit(group, PROCESS_GROUP_CLEANUP_TIMEOUT) {
+                    Ok(true) => None,
+                    Ok(false) => Some(ProcessGroupError::Probe(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "owned process group did not terminate",
+                    ))),
+                    Err(error) => Some(error),
+                }
+            }
+            (_, error) => error,
+        };
         Ok(ChildCleanup {
             direct_kill,
             wait,
@@ -674,6 +738,26 @@ mod tests {
             Err(ProcessGroupError::Probe(error))
                 if error.kind() == io::ErrorKind::NotADirectory
         ));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn process_group_scan_ignores_zombies_but_not_live_members() {
+        use std::fs;
+
+        let temporary = tempfile::tempdir().unwrap();
+        let proc_root = temporary.path().join("proc");
+        let group = OwnedProcessGroup {
+            process_group_id: 23,
+            session_id: 17,
+        };
+        let pid_directory = proc_root.join("42");
+        fs::create_dir_all(&pid_directory).unwrap();
+        fs::write(pid_directory.join("stat"), "42 (worker) Z 1 23 17").unwrap();
+        assert!(!process_group_has_member_in(&proc_root, group).unwrap());
+
+        fs::write(pid_directory.join("stat"), "42 (worker) S 1 23 17").unwrap();
+        assert!(process_group_has_member_in(&proc_root, group).unwrap());
     }
 
     #[test]
@@ -880,9 +964,9 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     fn successful_parent_does_not_leave_a_descendant_holding_control_pipes() {
-        use std::{fs, path::Path, thread};
+        use std::{fs, thread};
 
         let temporary = tempfile::tempdir().unwrap();
         let pid_path = temporary.path().join("descendant.pid");
@@ -908,12 +992,9 @@ mod tests {
                     })
             })
             .expect("fake descendant wrote its PID");
-        for _ in 0..100 {
-            if !Path::new(&format!("/proc/{pid}")).exists() {
-                return;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        panic!("owned descendant {pid} survived process-group cleanup");
+        assert!(
+            !linux_process_is_running(pid),
+            "owned descendant {pid} survived process-group cleanup"
+        );
     }
 }

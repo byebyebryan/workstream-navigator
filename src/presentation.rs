@@ -65,11 +65,16 @@ const LEGACY_SHELL_CLAIM_OPTION: &str = "@wsnav_shell_claim";
 const PRESENTATION_CLAIM_RETRY: Duration = Duration::from_millis(5);
 const NAVIGATOR_STOP_ATTEMPTS: usize = 20;
 const NAVIGATOR_STOP_RETRY: Duration = Duration::from_millis(5);
-const TOPOLOGY_FORMAT: &str = "#{pane_id}\t#{@wsnav_role}\t#{@wsnav_workstream_id}\t#{pane_dead}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{window_width}\t#{window_height}";
+// tmux 3.4 normalizes literal control separators in `-F` output. Every field
+// using this printable separator is either an owned identifier/enum or is
+// rejected fail-closed if the separator appears in legacy free-form evidence.
+const TMUX_FIELD_SEPARATOR: char = '|';
+const TMUX_FIELD_SEPARATOR_STR: &str = "|";
+const TOPOLOGY_FORMAT: &str = "#{pane_id}|#{@wsnav_role}|#{@wsnav_workstream_id}|#{pane_dead}|#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}|#{window_width}|#{window_height}";
 // This value is intentionally confined to the explicit schema-12 cutover
 // proof path below. Current presentation topology never reads or writes a host
 // alias, but cutover still needs to recognize the old layout exactly.
-const LEGACY_PROOF_TOPOLOGY_FORMAT: &str = "#{pane_id}\t#{@wsnav_role}\t#{@wsnav_host_alias}\t#{@wsnav_workstream_id}\t#{pane_dead}\t#{pane_pid}\t#{pane_current_command}\t#{pane_start_command}\t#{pane_title}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}\t#{window_width}\t#{window_height}";
+const LEGACY_PROOF_TOPOLOGY_FORMAT: &str = "#{pane_id}|#{@wsnav_role}|#{@wsnav_host_alias}|#{@wsnav_workstream_id}|#{pane_dead}|#{pane_pid}|#{pane_current_command}|#{pane_start_command}|#{pane_title}|#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}|#{window_width}|#{window_height}";
 const PRESENTATION_TMUX_CONFIG_PREFIX: &str = concat!(
     "set -g status off\n",
     "set -g mouse on\n",
@@ -1739,7 +1744,7 @@ impl Presentation {
             || client_name.len() > 256
             || client_name
                 .chars()
-                .any(|character| character.is_control() || character == '\t')
+                .any(|character| character.is_control() || character == TMUX_FIELD_SEPARATOR)
         {
             return Err(PresentationError::ControlRefused(
                 "invoking presentation client is invalid",
@@ -1750,11 +1755,11 @@ impl Presentation {
             vec![
                 "list-clients".into(),
                 "-F".into(),
-                "#{client_name}\t#{session_name}\t#{window_name}".into(),
+                "#{client_name}|#{session_name}|#{window_name}".into(),
             ],
         )?;
         if clients.lines().any(|line| {
-            let mut fields = line.split('\t');
+            let mut fields = line.split(TMUX_FIELD_SEPARATOR);
             fields.next() == Some(client_name)
                 && fields.next() == Some(self.paths.session_name.as_str())
                 && fields.next() == Some(NAVIGATOR_WINDOW)
@@ -2513,7 +2518,7 @@ impl Presentation {
             vec![
                 "list-clients".into(),
                 "-F".into(),
-                "#{client_name}\t#{session_name}\t#{window_name}".into(),
+                "#{client_name}|#{session_name}|#{window_name}".into(),
             ],
         )?;
         parse_client_rows(&clients, &self.paths.session_name)
@@ -4210,7 +4215,7 @@ fn inspect_legacy_presentation(
     let socket_path = directory.join("tmux.sock");
     let Some(session_output) = legacy_tmux_query(
         &socket_path,
-        ["list-sessions", "-F", "#{session_name}\t#{session_id}"],
+        ["list-sessions", "-F", "#{session_name}|#{session_id}"],
     )?
     else {
         return Ok(evidence);
@@ -4240,7 +4245,7 @@ fn inspect_legacy_presentation(
         [
             "list-clients",
             "-F",
-            "#{client_name}\t#{session_name}\t#{window_name}",
+            "#{client_name}|#{session_name}|#{window_name}",
         ],
     )?
     .ok_or(LegacyProbeFailure::Inaccessible)?;
@@ -4254,7 +4259,7 @@ fn inspect_legacy_presentation(
             "-t",
             session_name.as_str(),
             "-F",
-            "#{window_name}\t#{window_id}",
+            "#{window_name}|#{window_id}",
         ],
     ) {
         Ok(Some(output)) => output,
@@ -4588,7 +4593,7 @@ fn parse_session_rows(output: &str) -> Result<Vec<(String, String)>, LegacyProbe
         if line.is_empty() || rows.len() >= 2 {
             return Err(LegacyProbeFailure::Malformed);
         }
-        let mut fields = line.split('\t');
+        let mut fields = line.split(TMUX_FIELD_SEPARATOR);
         let Some(name) = fields.next() else {
             return Err(LegacyProbeFailure::Malformed);
         };
@@ -4613,7 +4618,7 @@ fn parse_window_rows(output: &str) -> Result<Vec<(String, String)>, LegacyProbeF
         if line.is_empty() || rows.len() >= 2 {
             return Err(LegacyProbeFailure::Malformed);
         }
-        let mut fields = line.split('\t');
+        let mut fields = line.split(TMUX_FIELD_SEPARATOR);
         let Some(name) = fields.next() else {
             return Err(LegacyProbeFailure::Malformed);
         };
@@ -4637,7 +4642,7 @@ fn parse_client_rows(
         if line.is_empty() || clients.len() >= MAX_LEGACY_CLIENTS {
             return Err(LegacyProbeFailure::Malformed);
         }
-        let mut fields = line.split('\t');
+        let mut fields = line.split(TMUX_FIELD_SEPARATOR);
         let Some(name) = fields.next() else {
             return Err(LegacyProbeFailure::Malformed);
         };
@@ -4676,7 +4681,7 @@ fn parse_legacy_panes(output: &str) -> Result<Vec<LegacyPaneEvidence>, LegacyPro
         if line.is_empty() || panes.len() >= MAX_LEGACY_PANES {
             return Err(LegacyProbeFailure::Malformed);
         }
-        let fields: Vec<&str> = line.split('\t').collect();
+        let fields: Vec<&str> = line.split(TMUX_FIELD_SEPARATOR).collect();
         if fields.len() != 15 {
             return Err(LegacyProbeFailure::Malformed);
         }
@@ -4684,7 +4689,7 @@ fn parse_legacy_panes(output: &str) -> Result<Vec<LegacyPaneEvidence>, LegacyPro
             fields[0], fields[1], fields[2], fields[3], fields[4], fields[9], fields[10],
             fields[11], fields[12], fields[13], fields[14],
         ]
-        .join("\t");
+        .join(TMUX_FIELD_SEPARATOR_STR);
         let existing_panes = panes
             .iter()
             .map(|pane: &LegacyPaneEvidence| pane.pane.clone())
@@ -5321,7 +5326,7 @@ fn parse_topology_line(
     if line.is_empty() {
         return Err(PresentationError::InvalidTopology);
     }
-    let fields: Vec<&str> = line.split('\t').collect();
+    let fields: Vec<&str> = line.split(TMUX_FIELD_SEPARATOR).collect();
     if fields.len() != 10 {
         return Err(PresentationError::InvalidTopology);
     }
@@ -5407,7 +5412,7 @@ fn parse_legacy_topology_line(
     if line.is_empty() {
         return Err(PresentationError::InvalidTopology);
     }
-    let fields: Vec<&str> = line.split('\t').collect();
+    let fields: Vec<&str> = line.split(TMUX_FIELD_SEPARATOR).collect();
     if fields.len() != 11 {
         return Err(PresentationError::InvalidTopology);
     }
@@ -6813,21 +6818,21 @@ mod tests {
                 "-t",
                 &presentation_target,
                 "-F",
-                "#{pane_id}\t#{@wsnav_role}\t#{pane_width}\t#{pane_height}",
+                "#{pane_id}|#{@wsnav_role}|#{pane_width}|#{pane_height}",
             ]
             .as_slice(),
         );
         let provider = panes
             .lines()
             .find_map(|line| {
-                let mut fields = line.split('\t');
+                let mut fields = line.split(TMUX_FIELD_SEPARATOR);
                 let pane_id = fields.next()?;
                 let role = fields.next()?;
                 let columns = fields.next()?.parse::<u16>().ok()?;
                 let rows = fields.next()?.parse::<u16>().ok()?;
                 (role == "provider").then_some((pane_id.to_owned(), columns, rows))
             })
-            .expect("provider pane geometry");
+            .unwrap_or_else(|| panic!("provider pane geometry missing from {panes:?}"));
         assert!(provider.1 > 0 && provider.2 > 0);
 
         runtime
@@ -7416,15 +7421,15 @@ mod tests {
     #[test]
     fn topology_parser_rejects_dead_duplicate_and_unknown_roles() {
         let valid = concat!(
-            "%0\tnavigator\t\t0\t0\t0\t32\t24\t128\t24\n",
-            "%1\tprovider\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t0\t95\t24\t128\t24\n",
+            "%0|navigator||0|0|0|32|24|128|24\n",
+            "%1|provider|01234567-89ab-cdef-0123-456789abcdef|0|33|0|95|24|128|24\n",
         );
         assert!(parse_topology(valid).is_ok());
         assert!(matches!(
-            parse_topology(&valid.replace("\t0\t0\t0\t32", "\t1\t0\t0\t32")),
+            parse_topology(&valid.replace("|0|0|0|32", "|1|0|0|32")),
             Err(PresentationError::InvalidTopology)
         ));
-        let duplicate = valid.replace("%1\tprovider", "%0\tprovider");
+        let duplicate = valid.replace("%1|provider", "%0|provider");
         assert!(matches!(
             parse_topology(&duplicate),
             Err(PresentationError::InvalidTopology)
@@ -7434,10 +7439,7 @@ mod tests {
             parse_topology(&unknown),
             Err(PresentationError::InvalidTopology)
         ));
-        assert!(
-            parse_topology_with_dead(&valid.replace("\t0\t0\t0\t32", "\t1\t0\t0\t32"), true)
-                .is_ok()
-        );
+        assert!(parse_topology_with_dead(&valid.replace("|0|0|0|32", "|1|0|0|32"), true).is_ok());
     }
 
     #[test]
@@ -7452,28 +7454,22 @@ mod tests {
     #[test]
     fn topology_parser_rejects_unsupported_geometry() {
         let valid = concat!(
-            "%0\tnavigator\t\t0\t0\t0\t32\t24\t128\t24\n",
-            "%1\tprovider\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t0\t95\t24\t128\t24\n",
+            "%0|navigator||0|0|0|32|24|128|24\n",
+            "%1|provider|01234567-89ab-cdef-0123-456789abcdef|0|33|0|95|24|128|24\n",
         );
         assert!(parse_topology(valid).is_ok());
-        assert!(parse_topology(&valid.replace("\t33\t0\t95\t24", "\t34\t0\t94\t24")).is_err());
-        assert!(
-            parse_topology(&valid.replace("\t0\t0\t32\t24\t128", "\t1\t0\t32\t24\t128")).is_err()
-        );
-        assert!(parse_topology(&valid.replace("\t128\t24", "\t127\t24")).is_err());
+        assert!(parse_topology(&valid.replace("|33|0|95|24", "|34|0|94|24")).is_err());
+        assert!(parse_topology(&valid.replace("|0|0|32|24|128", "|1|0|32|24|128")).is_err());
+        assert!(parse_topology(&valid.replace("|128|24", "|127|24")).is_err());
 
         let three_pane = concat!(
-            "%0\tnavigator\t\t0\t0\t0\t32\t24\t128\t24\n",
-            "%1\tprovider\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t0\t95\t11\t128\t24\n",
-            "%2\tutility\t01234567-89ab-cdef-0123-456789abcdef\t0\t33\t12\t95\t12\t128\t24\n",
+            "%0|navigator||0|0|0|32|24|128|24\n",
+            "%1|provider|01234567-89ab-cdef-0123-456789abcdef|0|33|0|95|11|128|24\n",
+            "%2|utility|01234567-89ab-cdef-0123-456789abcdef|0|33|12|95|12|128|24\n",
         );
         assert!(parse_topology(three_pane).is_ok());
-        assert!(
-            parse_topology(&three_pane.replace("\t12\t95\t12\t128", "\t11\t95\t13\t128")).is_err()
-        );
-        assert!(
-            parse_topology(&three_pane.replace("\t33\t12\t95\t12", "\t34\t12\t94\t12")).is_err()
-        );
+        assert!(parse_topology(&three_pane.replace("|12|95|12|128", "|11|95|13|128")).is_err());
+        assert!(parse_topology(&three_pane.replace("|33|12|95|12", "|34|12|94|12")).is_err());
     }
 
     #[test]

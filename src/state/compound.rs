@@ -15,10 +15,11 @@ use super::models::{
     CreatedWorkstream, EXTERNAL_EFFECT_UNKNOWN_CODE, ForkPlan, ForkPreparation, HostRegistry,
     OPENCODE_SESSION_CREATION_CLEANUP_UNKNOWN_CODE, OPENCODE_SESSION_CREATION_PLAN_SCHEMA_VERSION,
     OPENCODE_SESSION_CREATION_UNKNOWN_CODE, OpenCodeSessionCreationOperation, OperationOverview,
-    PersistedForkPlan, PersistedOpenCodeSessionCreationPlan, ProviderBinding, StateError,
+    OperationOverviewPage, PersistedForkPlan, PersistedOpenCodeSessionCreationPlan,
+    ProviderBinding, StateError,
 };
 use super::runtime::load_binding;
-use super::schema::{MAX_NAVIGATOR_WORKSTREAM_QUERY, MAX_NAVIGATOR_WORKSTREAMS};
+use super::schema::MAX_NAVIGATOR_WORKSTREAMS;
 use super::utils::{
     operation_kind_from_text, operation_kind_text, operation_phase_from_text, operation_phase_text,
     provider_kind_from_text, to_from_sql_error, validate_provider_metadata, validate_registry_text,
@@ -670,6 +671,47 @@ impl HostRegistry {
     /// Returns an error when the bounded operation projection cannot be read
     /// or contains an invalid persisted identity, kind, phase, or revision.
     pub fn unresolved_operation_overviews(&self) -> Result<Vec<OperationOverview>, StateError> {
+        // Retain one SQLite snapshot across every bounded page so a concurrent
+        // operation transition cannot move a row across OFFSET boundaries.
+        let _read_snapshot = self
+            .connection
+            .is_autocommit()
+            .then(|| self.connection.unchecked_transaction())
+            .transpose()
+            .map_err(StateError::Sqlite)?;
+        let mut cursor = 0;
+        let mut operations = Vec::new();
+        loop {
+            let page =
+                self.unresolved_operation_overview_page(cursor, MAX_NAVIGATOR_WORKSTREAMS)?;
+            operations.extend(page.operations);
+            let Some(next_cursor) = page.next_cursor else {
+                return Ok(operations);
+            };
+            cursor = next_cursor;
+        }
+    }
+
+    /// Reads one deterministic bounded page of unresolved non-onboarding
+    /// operations.  The complete-list API above deliberately hides this
+    /// cursor from callers while retaining the database I/O bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid page size, cursor overflow, malformed
+    /// persisted operation state, or an unavailable registry.
+    pub fn unresolved_operation_overview_page(
+        &self,
+        cursor: u32,
+        page_size: usize,
+    ) -> Result<OperationOverviewPage, StateError> {
+        if page_size == 0 || page_size > MAX_NAVIGATOR_WORKSTREAMS {
+            return Err(StateError::InvalidNavigatorPageSize);
+        }
+        let query_limit =
+            i64::try_from(page_size).map_err(|_| StateError::InvalidNavigatorPageSize)?;
+        let cursor_step =
+            u32::try_from(page_size).map_err(|_| StateError::InvalidNavigatorPageSize)?;
         let mut statement = self
             .connection
             .prepare(
@@ -678,11 +720,11 @@ impl HostRegistry {
                  WHERE kind != 'onboard'
                    AND phase IN ('external_effect_started', 'awaiting_reconciliation', 'recovery_required')
                  ORDER BY operation_id
-                 LIMIT ?1",
+                 LIMIT ?1 OFFSET ?2",
             )
             .map_err(StateError::Sqlite)?;
-        let operations = statement
-            .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
+        let rows = statement
+            .query_map([query_limit + 1, i64::from(cursor)], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -694,11 +736,10 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(StateError::Sqlite)?;
-        if operations.len() > MAX_NAVIGATOR_WORKSTREAMS {
-            return Err(StateError::NavigatorSnapshotTooLarge);
-        }
-        operations
+        let has_more = rows.len() > page_size;
+        let operations = rows
             .into_iter()
+            .take(page_size)
             .map(|(operation_id, kind, phase, effect_watermark, revision)| {
                 let kind = operation_kind_from_text(&kind)?;
                 let provider = match kind {
@@ -733,7 +774,20 @@ impl HostRegistry {
                     revision: Revision::try_from(revision)?,
                 })
             })
-            .collect()
+            .collect::<Result<Vec<_>, StateError>>()?;
+        let next_cursor = if has_more {
+            Some(
+                cursor
+                    .checked_add(cursor_step)
+                    .ok_or(StateError::NavigatorCursorOverflow)?,
+            )
+        } else {
+            None
+        };
+        Ok(OperationOverviewPage {
+            operations,
+            next_cursor,
+        })
     }
 
     /// Loads the one host-private provider-fork plan owned by an explicit

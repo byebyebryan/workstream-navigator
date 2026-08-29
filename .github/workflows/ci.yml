@@ -27,7 +27,7 @@ jobs:
       - name: Install check dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install --yes jq ripgrep shellcheck
+          sudo apt-get install --yes bash git jq ripgrep shellcheck tmux util-linux zsh
           python -m pip install ruff==0.16.0
           cargo install cargo-deny --version 0.20.2 --locked
 
@@ -42,6 +42,11 @@ jobs:
 
       - name: Install declared MSRV
         uses: dtolnay/rust-toolchain@1.88.0
+
+      - name: Install test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bash git tmux util-linux zsh
 
       - name: Test declared MSRV
         run: cargo test --locked --all-targets --all-features

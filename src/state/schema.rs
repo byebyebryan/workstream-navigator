@@ -1,8 +1,8 @@
-/// The active production state boundary. Schema 12 remains available only as
-/// the exact fixture consumed by the explicit D16 cutover bridge.
-pub const HOST_SCHEMA_VERSION: i64 = 13;
+/// The active public production state boundary. Schema 13 remains available
+/// only as the explicit D17 migration source; schema 12 remains the exact
+/// fixture consumed by the D16 cutover bridge.
+pub const HOST_SCHEMA_VERSION: i64 = 14;
 pub(in crate::state) const MAX_NAVIGATOR_WORKSTREAMS: usize = 128;
-pub(in crate::state) const MAX_NAVIGATOR_WORKSTREAM_QUERY: i64 = 129;
 pub(in crate::state) const MAX_PROJECT_BROWSER_ROOT_BYTES: usize = 4096;
 pub(in crate::state) const MAX_PROJECT_BROWSER_RELATIVE_PATH_BYTES: usize = 1024;
 

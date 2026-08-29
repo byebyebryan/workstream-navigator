@@ -2,7 +2,7 @@
 
 Date: 2026-08-28
 
-Status: D0-D17 complete; source-installed operator beta. D17 shell-first
+Status: D0-D17.1 complete; source-installed operator beta. D17 shell-first
 managed-session onboarding is routed by the ordinary Navigator: fresh roots
 initialize directly at schema 14, idle schema-13 roots migrate transactionally
 only after a legacy presentation is absent, and interrupted schema-13 or
@@ -10,9 +10,50 @@ schema-14 restart resumes the same transition and stable provisional-lock
 installation. The Navigator starts the dedicated D17 pane, renders the pinned
 Shell card, and `n` creates a selected Workstream's same-provider/
 same-Location session. The public arbitrary-location `register` and
-provider-override `new-workstream` commands are removed. The post-cutover
-reconciliation gaps are closed; the repository gate and sanitized,
-operator-gated live Codex/OpenCode acceptance pass with complete disposable
+provider-override `new-workstream` commands are removed. The original
+post-cutover reconciliation and its sanitized, operator-gated Codex/OpenCode
+acceptance are complete. D17.1's repository and equivalent clean
+Ubuntu-24.04/Rust-1.88 gates pass, its release artifact is installed, and its
+separately authorized disposable Codex/OpenCode replay passes with complete
+cleanup.
+
+### 2026-08-28 D17.1 correctness and release reconciliation
+
+D17.1 closes the whole-repository review gaps without changing the D17 product
+surface:
+
+- Workstream, unresolved-operation, onboarding-operation, Runtime-inventory,
+  and provisional-marker pages expose at most 128 rows; each bounded query may
+  read one additional sentinel row to signal continuation. Complete in-process
+  aggregation stabilizes ordered base scans with SQLite read snapshots before
+  current binding and lifecycle hydration, exact request lookup uses its
+  primary key, and retained terminal history is not deleted or hidden by a
+  one-page cap;
+- schema 14 is the explicit active host-schema identity while the D16
+  migration source remains explicitly named schema 13;
+- Linux private-process-group cleanup reaps its direct child, waits a bounded
+  interval for descendants, ignores only exact zombie members after identity
+  validation, and continues to fail closed on live, malformed, unknown, or
+  mismatched evidence;
+- stable and pinned Rust 1.88 CI jobs install their complete runtime/toolchain
+  prerequisites. tmux multi-field queries use printable separators because
+  tmux 3.4 normalizes control separators; current and legacy parsers now share
+  that fail-closed boundary; and
+- the full repository gate passes 504 tests plus formatting, Clippy, package
+  verification, dependency license/advisory/source policy, shell/Python
+  checks, the disposable presentation harness, and the D17 source/CLI check.
+  An equivalent clean Ubuntu 24.04 environment with Rust 1.88 and tmux 3.4
+  also passes all 504 tests.
+
+The release executable SHA-256 is
+`de4894d2fbcc800ea71b6eaddd5a0cca88f0505482a133d9ab8e32b30742c3f0`;
+the installed `~/.local/bin/wsnav` is byte-identical. Broad module
+decomposition remains post-V1 maintainability work rather than being mixed
+into this behavioral correction. Explicitly authorized live acceptance passed
+Codex `0.150.0` and OpenCode `1.18.23` without a provider prompt or turn. Both
+preserved exact provisional identity through promotion, derived a fresh Shell,
+parked to `parked/stopped`, and received complete disposable process, socket,
+profile, presentation, provider-home, state-root, repository, and outer-server
 cleanup.
 
 ### 2026-08-28 D17 post-cutover reconciliation closure

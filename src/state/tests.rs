@@ -106,7 +106,7 @@ fn fresh_schema13_identity_is_stable_and_private() {
     let (temporary, registry, _registration) = registered_registry(ProviderKind::Codex);
     let identity = registry.identity().expect("identity");
     assert_ne!(identity.host_id.as_uuid(), Uuid::nil());
-    assert_eq!(registry.schema_version().unwrap(), HOST_SCHEMA_VERSION);
+    assert_eq!(registry.schema_version().unwrap(), D16_HOST_SCHEMA_VERSION);
     let database = temporary.path().join("state/host.sqlite");
     #[cfg(unix)]
     {
@@ -255,6 +255,97 @@ fn archive_and_restore_are_visibility_transitions_with_revision_guards() {
             .archived_at_millis
             .is_none()
     );
+}
+
+#[test]
+fn retained_workstream_and_operation_pages_are_complete() {
+    let (_temporary, mut registry, registration) = registered_registry(ProviderKind::Codex);
+    let source = registration.workstream.workstream_id;
+
+    for index in 0..130 {
+        let created = registry
+            .create_independent_workstream(
+                &format!("page-workstream-{index}"),
+                source,
+                Revision::INITIAL,
+                ProviderKind::OpenCode,
+            )
+            .expect("independent Workstream");
+        let runtime = registry
+            .reserve_runtime(created.workstream_id)
+            .expect("starting Runtime");
+        let prepared = registry
+            .prepare_opencode_session_creation(runtime.runtime_id, &runtime.tmux_generation)
+            .expect("prepared OpenCode operation");
+        registry
+            .begin_opencode_session_creation(&prepared)
+            .expect("unresolved OpenCode operation");
+    }
+    let archived = registry
+        .archive_workstream(source, Revision::INITIAL, 123)
+        .expect("archive source Workstream");
+    assert_eq!(archived, Revision::INITIAL.next());
+
+    let complete_workstreams = registry
+        .workstream_overviews()
+        .expect("complete Workstream overview");
+    assert_eq!(complete_workstreams.len(), 131);
+    assert!(
+        complete_workstreams
+            .iter()
+            .any(|workstream| workstream.archived_at_millis.is_some())
+    );
+    let mut cursor = 0;
+    let mut paged_workstreams = Vec::new();
+    loop {
+        let page = registry
+            .workstream_overview_page(cursor, 37)
+            .expect("Workstream page");
+        assert!(page.workstreams.len() <= 37);
+        paged_workstreams.extend(page.workstreams);
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        assert_eq!(next_cursor, cursor + 37);
+        cursor = next_cursor;
+    }
+    assert_eq!(paged_workstreams, complete_workstreams);
+    assert!(matches!(
+        registry.workstream_overview_page(0, 0),
+        Err(StateError::InvalidNavigatorPageSize)
+    ));
+    assert!(matches!(
+        registry.workstream_overview_page(0, 129),
+        Err(StateError::InvalidNavigatorPageSize)
+    ));
+
+    let complete_operations = registry
+        .unresolved_operation_overviews()
+        .expect("complete unresolved operation overview");
+    assert_eq!(complete_operations.len(), 130);
+    let mut cursor = 0;
+    let mut paged_operations = Vec::new();
+    loop {
+        let page = registry
+            .unresolved_operation_overview_page(cursor, 41)
+            .expect("operation page");
+        assert!(page.operations.len() <= 41);
+        paged_operations.extend(page.operations);
+        let Some(next_cursor) = page.next_cursor else {
+            break;
+        };
+        assert_eq!(next_cursor, cursor + 41);
+        cursor = next_cursor;
+    }
+    assert_eq!(paged_operations, complete_operations);
+    assert!(matches!(
+        registry.unresolved_operation_overview_page(0, 0),
+        Err(StateError::InvalidNavigatorPageSize)
+    ));
+    assert!(matches!(
+        registry.unresolved_operation_overview_page(0, 129),
+        Err(StateError::InvalidNavigatorPageSize)
+    ));
 }
 
 #[test]

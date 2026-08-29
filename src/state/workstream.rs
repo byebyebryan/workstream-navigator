@@ -5,7 +5,10 @@ use uuid::Uuid;
 
 use crate::domain::{DomainError, LocationId, ProviderKind, Revision, RuntimeStatus, WorkstreamId};
 
-use super::models::{HostRegistry, PersistedWorkstreamOverview, StateError, WorkstreamOverview};
+use super::models::{
+    HostRegistry, PersistedWorkstreamOverview, StateError, WorkstreamOverview,
+    WorkstreamOverviewPage,
+};
 use super::schema::MAX_NAVIGATOR_WORKSTREAMS;
 use super::utils::{provider_kind_from_text, workstream_lifecycle_from_text};
 
@@ -19,8 +22,68 @@ impl HostRegistry {
     /// Returns an error when a persisted identity, lifecycle, or revision is
     /// malformed, or when the registry cannot be queried.
     pub fn workstream_overviews(&self) -> Result<Vec<WorkstreamOverview>, StateError> {
-        let query_limit = i64::try_from(MAX_NAVIGATOR_WORKSTREAMS + 1)
-            .map_err(|_| StateError::NavigatorSnapshotTooLarge)?;
+        let bases = {
+            // Keep OFFSET pages on one SQLite read snapshot so concurrent
+            // lifecycle activity cannot reorder a row between page reads.
+            // Hydration follows after the read transaction because the
+            // existing binding readers own their own exact transactions.
+            let _read_snapshot = self
+                .connection
+                .is_autocommit()
+                .then(|| self.connection.unchecked_transaction())
+                .transpose()
+                .map_err(StateError::Sqlite)?;
+            let mut bases = Vec::new();
+            let mut cursor = 0;
+            loop {
+                let (page, next_cursor) =
+                    self.persisted_workstream_overview_page(cursor, MAX_NAVIGATOR_WORKSTREAMS)?;
+                bases.extend(page);
+                let Some(next_cursor) = next_cursor else {
+                    break bases;
+                };
+                cursor = next_cursor;
+            }
+        };
+        bases
+            .into_iter()
+            .map(|base| self.hydrate_workstream_overview(base))
+            .collect()
+    }
+
+    /// Returns one deterministic bounded Workstream page ordered by latest
+    /// activity, project root, and opaque Workstream identity.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid page size, cursor overflow, malformed
+    /// persisted state, or an unavailable registry.
+    pub fn workstream_overview_page(
+        &self,
+        cursor: u32,
+        page_size: usize,
+    ) -> Result<WorkstreamOverviewPage, StateError> {
+        let (bases, next_cursor) = self.persisted_workstream_overview_page(cursor, page_size)?;
+        let workstreams = bases
+            .into_iter()
+            .map(|base| self.hydrate_workstream_overview(base))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(WorkstreamOverviewPage {
+            workstreams,
+            next_cursor,
+        })
+    }
+
+    fn persisted_workstream_overview_page(
+        &self,
+        cursor: u32,
+        page_size: usize,
+    ) -> Result<(Vec<PersistedWorkstreamOverview>, Option<u32>), StateError> {
+        if page_size == 0 || page_size > MAX_NAVIGATOR_WORKSTREAMS {
+            return Err(StateError::InvalidNavigatorPageSize);
+        }
+        let query_limit =
+            i64::try_from(page_size + 1).map_err(|_| StateError::InvalidNavigatorPageSize)?;
         let mut statement = self
             .connection
             .prepare(
@@ -39,11 +102,11 @@ impl HostRegistry {
                    ON project_locations.location_id = workstreams.location_id
                  ORDER BY workstreams.last_activity_sequence DESC,
                           project_locations.repository_path, workstreams.workstream_id
-                 LIMIT ?1",
+                 LIMIT ?1 OFFSET ?2",
             )
             .map_err(StateError::Sqlite)?;
         let mut bases = statement
-            .query_map([query_limit], |row| {
+            .query_map(params![query_limit, i64::from(cursor)], |row| {
                 Ok(PersistedWorkstreamOverview {
                     workstream_id: row.get(0)?,
                     location_id: row.get(1)?,
@@ -62,13 +125,18 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(StateError::Sqlite)?;
-        if bases.len() > MAX_NAVIGATOR_WORKSTREAMS {
-            return Err(StateError::NavigatorSnapshotTooLarge);
-        }
-        bases
-            .drain(..)
-            .map(|base| self.hydrate_workstream_overview(base))
-            .collect()
+        let has_more = bases.len() > page_size;
+        bases.truncate(page_size);
+        let page_len =
+            u32::try_from(bases.len()).map_err(|_| StateError::NavigatorCursorOverflow)?;
+        let next_cursor = has_more
+            .then(|| {
+                cursor
+                    .checked_add(page_len)
+                    .ok_or(StateError::NavigatorCursorOverflow)
+            })
+            .transpose()?;
+        Ok((bases, next_cursor))
     }
 
     /// Hides one exact Workstream from the active navigator scope without

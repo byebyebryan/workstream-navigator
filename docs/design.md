@@ -3,21 +3,22 @@
 Date: 2026-08-28
 
 Status: D16 host-local simplification and D17 shell-first managed-session
-onboarding are complete. The current binary creates fresh state at schema 14,
-migrates idle schema-13 state without a wipe only after a legacy presentation
-is absent, and recovers interrupted schema-13/schema-14 transitions explicitly.
+onboarding are complete. The D17.1 correctness candidate creates fresh state
+at schema 14, migrates idle schema-13 state without a wipe only after a legacy
+presentation is absent, and recovers interrupted schema-13/schema-14
+transitions explicitly.
 Exact pre-provider shell/handoff recovery, schema-14 public-command routing,
 retired D16 application/UI/route removal, and fresh-state Codex observer
-readiness before broker reservation are implemented. The repository gate and
-sanitized, operator-gated live Codex/OpenCode acceptance pass with complete
-disposable cleanup. V1 remains a source-installed operator beta with no
-compatibility contract.
+readiness before broker reservation are implemented. D17.1 removes retained
+one-frame state-count ceilings, pins reproducible CI prerequisites, and hardens
+process and tmux topology observation. Its repository and Rust-1.88 gates pass,
+the exact release artifact is installed, and separately authorized disposable
+Codex/OpenCode acceptance passes with complete cleanup. V1 remains a
+source-installed operator beta with no compatibility contract.
 
-The final review-directory ownership correction is repository-gated after the
-recorded live run. It changes only exact ownership and non-recursive recovery
-of the empty native-review cwd; the acceptance record distinguishes the live
-artifact from the post-review source candidate and does not claim binary
-parity between them.
+The earlier D17 live record remains evidence for its recorded artifact only.
+The D17.1 acceptance record identifies the exact automated, installed, and
+live-accepted artifact rather than inferring binary parity.
 
 The design is the current product and architecture contract. Dated acceptance,
 spike, and study records preserve the evidence and limitations of the candidate
@@ -92,6 +93,13 @@ flicker remains the separate nested tmux redraw path repeatedly hiding, showing,
 and disturbing the cursor. An operator also reports a steady cursor in Claude,
 but Claude is outside the V1 provider surface and that observation is not
 independent WSNav evidence.
+
+WSNav asks tmux for multi-field control metadata using printable `|`
+separators. tmux 3.4 normalizes literal control separators in format strings;
+the printable delimiter preserves exact field boundaries across the supported
+matrix. All current fields are bounded identifiers or enums, and legacy
+free-form evidence containing the delimiter fails closed. This traffic never
+contains or captures provider-pane content.
 
 ## V1 tenets
 
@@ -2922,10 +2930,15 @@ Passing fixtures contain only provider/version fingerprints, assertion
 booleans, event relationships, timings, and cleanup proof. Assisted diagnostics
 cannot become passing fixtures.
 
-The in-process facade returns one deterministic, bounded host-local snapshot.
-The existing hard Workstream limit remains an explicit typed refusal rather
-than a cursor protocol; D16 removes snapshot cursors, page frames, replay
-tracking, and page-count machinery with the transport that required them.
+The in-process facade returns one deterministic host-local view while exposing
+pages of at most 128 retained rows; each bounded SQLite query may read one
+additional sentinel row to signal continuation. Complete Navigator aggregation
+is process-local, with ordered base scans held under a stable read snapshot
+before current binding and lifecycle hydration; it does not restore transport
+replay, public page keys, or page navigation. Retained Workstreams, operations,
+onboarding journals, and Runtime inventory are not limited to the first
+128-row page, and terminal journal rows are never compacted merely to fit a
+page. Numeric cursor overflow remains an explicit typed refusal.
 
 ## V1 delivery checkpoints
 

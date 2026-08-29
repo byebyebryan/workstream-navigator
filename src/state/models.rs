@@ -119,6 +119,10 @@ pub enum StateError {
     ForkBoundaryUnavailable,
     #[error("too many Workstreams for one bounded navigator snapshot")]
     NavigatorSnapshotTooLarge,
+    #[error("navigator Workstream page size is invalid")]
+    InvalidNavigatorPageSize,
+    #[error("navigator Workstream cursor overflowed")]
+    NavigatorCursorOverflow,
     #[error("project display name is invalid")]
     InvalidProjectDisplayName,
     #[error("repository fingerprint is invalid")]
@@ -639,6 +643,20 @@ pub struct WorkstreamOverview {
     pub runtime: Option<RuntimeRecord>,
     pub binding: Option<ProviderBinding>,
     pub attention: Option<AttentionState>,
+}
+
+/// One deterministic bounded page of navigator-safe host state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkstreamOverviewPage {
+    pub workstreams: Vec<WorkstreamOverview>,
+    pub next_cursor: Option<u32>,
+}
+
+/// One deterministic bounded page of unresolved navigator operations.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OperationOverviewPage {
+    pub operations: Vec<OperationOverview>,
+    pub next_cursor: Option<u32>,
 }
 
 pub(in crate::state) struct PersistedWorkstreamOverview {

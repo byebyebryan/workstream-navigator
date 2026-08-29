@@ -38,6 +38,7 @@ to make their old procedures appear current.
 - [D12 ephemeral Workstream shell](acceptance/d12-ephemeral-shell.md)
 - [D16 host-local simplification](acceptance/d16-host-local.md)
 - [D17 shell-first managed-session onboarding](acceptance/d17-shell-first.md)
+- [D17.1 correctness and release closure](acceptance/d17.1-correctness-closure.md)
 
 ## Design spikes
 

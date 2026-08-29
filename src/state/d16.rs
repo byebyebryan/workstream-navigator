@@ -53,7 +53,7 @@ use super::{
         ProviderBinding, RuntimeRecord,
     },
     runtime::{load_binding, load_current_binding, load_opencode_handle, row_to_runtime},
-    schema::{HOST_SCHEMA_SQL, MAX_NAVIGATOR_WORKSTREAM_QUERY, MAX_NAVIGATOR_WORKSTREAMS},
+    schema::{HOST_SCHEMA_SQL, MAX_NAVIGATOR_WORKSTREAMS},
     utils::{
         operation_phase_from_text, operation_phase_text, provider_kind_from_text,
         resolve_project_browser_root, runtime_status_from_text, validate_project_display_name,
@@ -735,6 +735,31 @@ pub(crate) struct D17OnboardingOperationInventory {
     pub(crate) phase: OnboardingPhase,
 }
 
+struct D17OnboardingOperationInventoryPage {
+    operations: Vec<D17OnboardingOperationInventory>,
+    workstream_ids: Vec<WorkstreamId>,
+    next_cursor: Option<u32>,
+}
+
+struct D17RuntimePathsPage {
+    paths: Vec<RuntimePaths>,
+    next_cursor: Option<u32>,
+}
+
+type D17OnboardingMarkerRow = (String, String, String);
+
+fn d17_page_parameters(page_size: usize) -> Result<(i64, u32), StateError> {
+    if page_size == 0 || page_size > MAX_NAVIGATOR_WORKSTREAMS {
+        return Err(StateError::InvalidNavigatorPageSize);
+    }
+    let query_limit = i64::try_from(page_size)
+        .map_err(|_| StateError::InvalidNavigatorPageSize)?
+        .checked_add(1)
+        .ok_or(StateError::InvalidNavigatorPageSize)?;
+    let cursor_step = u32::try_from(page_size).map_err(|_| StateError::InvalidNavigatorPageSize)?;
+    Ok((query_limit, cursor_step))
+}
+
 /// The bounded durable phase associated with one exact presentation marker.
 /// This read is intentionally smaller than the journal inventory: callers use
 /// it only to reconcile a marker crash window, never to build a snapshot.
@@ -1089,6 +1114,39 @@ impl D16State {
     ) -> Result<Vec<D17OnboardingOperationInventory>, StateError> {
         ensure_d17_current_mode(self.mode)?;
         validate_schema14(&self.connection)?;
+        let _read_snapshot = self
+            .connection
+            .unchecked_transaction()
+            .map_err(StateError::Sqlite)?;
+        let mut cursor = 0;
+        let mut seen_workstreams = BTreeSet::new();
+        let mut inventory = Vec::new();
+        loop {
+            let page =
+                self.d17_onboarding_operation_inventory_page(cursor, MAX_NAVIGATOR_WORKSTREAMS)?;
+            for workstream_id in page.workstream_ids {
+                if !seen_workstreams.insert(workstream_id) {
+                    return Err(StateError::MalformedHostSchema);
+                }
+            }
+            inventory.extend(page.operations);
+            let Some(next_cursor) = page.next_cursor else {
+                return Ok(inventory);
+            };
+            cursor = next_cursor;
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one page validates every retained onboarding phase and exact Runtime relationship together"
+    )]
+    fn d17_onboarding_operation_inventory_page(
+        &self,
+        cursor: u32,
+        page_size: usize,
+    ) -> Result<D17OnboardingOperationInventoryPage, StateError> {
+        let (query_limit, cursor_step) = d17_page_parameters(page_size)?;
         let mut statement = self
             .connection
             .prepare(
@@ -1096,11 +1154,11 @@ impl D16State {
                  FROM compound_operations
                  WHERE kind = 'onboard'
                  ORDER BY operation_id
-                 LIMIT ?1",
+                 LIMIT ?1 OFFSET ?2",
             )
             .map_err(StateError::Sqlite)?;
         let operations = statement
-            .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
+            .query_map([query_limit, i64::from(cursor)], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -1111,13 +1169,13 @@ impl D16State {
             .map_err(StateError::Sqlite)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(StateError::Sqlite)?;
-        if operations.len() > MAX_NAVIGATOR_WORKSTREAMS {
-            return Err(StateError::NavigatorSnapshotTooLarge);
-        }
-
-        let mut seen_workstreams = BTreeSet::new();
+        drop(statement);
+        let has_more = operations.len() > page_size;
         let mut inventory = Vec::with_capacity(operations.len());
-        for (operation_id, phase, encoded_intent, outcome_json) in operations {
+        let mut workstream_ids = Vec::with_capacity(operations.len());
+        for (operation_id, phase, encoded_intent, outcome_json) in
+            operations.into_iter().take(page_size)
+        {
             let operation_id = Uuid::parse_str(&operation_id)
                 .map(OperationId::from)
                 .map_err(StateError::InvalidPersistedUuid)?;
@@ -1125,9 +1183,10 @@ impl D16State {
                 operation_phase_from_text(&phase).map_err(|_| StateError::MalformedHostSchema)?;
             let intent: PersistedOnboardingIntent = serde_json::from_str(&encoded_intent)
                 .map_err(|_| StateError::MalformedHostSchema)?;
-            if intent.version != 1 || !seen_workstreams.insert(intent.workstream_id) {
+            if intent.version != 1 {
                 return Err(StateError::MalformedHostSchema);
             }
+            workstream_ids.push(intent.workstream_id);
             // A recovery-required Runtime may be explicitly parked. That
             // commits the onboarding journal without claiming its original
             // native exec was proven.  The exact, bounded outcome is durable
@@ -1196,7 +1255,60 @@ impl D16State {
                 phase,
             });
         }
-        Ok(inventory)
+        let next_cursor = if has_more {
+            Some(
+                cursor
+                    .checked_add(cursor_step)
+                    .ok_or(StateError::NavigatorCursorOverflow)?,
+            )
+        } else {
+            None
+        };
+        Ok(D17OnboardingOperationInventoryPage {
+            operations: inventory,
+            workstream_ids,
+            next_cursor,
+        })
+    }
+
+    fn d17_onboarding_marker_operation_page(
+        &self,
+        cursor: u32,
+        page_size: usize,
+    ) -> Result<(Vec<D17OnboardingMarkerRow>, Option<u32>), StateError> {
+        let (query_limit, cursor_step) = d17_page_parameters(page_size)?;
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT operation_id, phase, expected_revisions_json
+                 FROM compound_operations
+                 WHERE kind = 'onboard'
+                 ORDER BY operation_id
+                 LIMIT ?1 OFFSET ?2",
+            )
+            .map_err(StateError::Sqlite)?;
+        let rows = statement
+            .query_map([query_limit, i64::from(cursor)], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(StateError::Sqlite)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StateError::Sqlite)?;
+        let has_more = rows.len() > page_size;
+        let next_cursor = if has_more {
+            Some(
+                cursor
+                    .checked_add(cursor_step)
+                    .ok_or(StateError::NavigatorCursorOverflow)?,
+            )
+        } else {
+            None
+        };
+        Ok((rows.into_iter().take(page_size).collect(), next_cursor))
     }
 
     /// Lists the exact private path set for every retained Runtime. This is
@@ -1205,27 +1317,49 @@ impl D16State {
     pub(crate) fn d17_registered_runtime_paths(&self) -> Result<Vec<RuntimePaths>, StateError> {
         ensure_d17_current_mode(self.mode)?;
         validate_schema14(&self.connection)?;
+        let _read_snapshot = self
+            .connection
+            .unchecked_transaction()
+            .map_err(StateError::Sqlite)?;
+        let mut cursor = 0;
+        let mut paths = Vec::new();
+        loop {
+            let page = self.d17_registered_runtime_paths_page(cursor, MAX_NAVIGATOR_WORKSTREAMS)?;
+            paths.extend(page.paths);
+            let Some(next_cursor) = page.next_cursor else {
+                return Ok(paths);
+            };
+            cursor = next_cursor;
+        }
+    }
+
+    fn d17_registered_runtime_paths_page(
+        &self,
+        cursor: u32,
+        page_size: usize,
+    ) -> Result<D17RuntimePathsPage, StateError> {
+        let (query_limit, cursor_step) = d17_page_parameters(page_size)?;
         let mut statement = self
             .connection
             .prepare(
                 "SELECT runtime_id, tmux_session
                  FROM runtimes
                  ORDER BY runtime_id
-                 LIMIT ?1",
+                 LIMIT ?1 OFFSET ?2",
             )
             .map_err(StateError::Sqlite)?;
         let runtimes = statement
-            .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
+            .query_map([query_limit, i64::from(cursor)], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })
             .map_err(StateError::Sqlite)?
             .collect::<Result<Vec<_>, _>>()
             .map_err(StateError::Sqlite)?;
-        if runtimes.len() > MAX_NAVIGATOR_WORKSTREAMS {
-            return Err(StateError::NavigatorSnapshotTooLarge);
-        }
-        runtimes
+        drop(statement);
+        let has_more = runtimes.len() > page_size;
+        let paths = runtimes
             .into_iter()
+            .take(page_size)
             .map(|(runtime_id, session_name)| {
                 let runtime_id = Uuid::parse_str(&runtime_id)
                     .map(RuntimeId::from)
@@ -1233,7 +1367,17 @@ impl D16State {
                 RuntimePaths::for_record(&self.root, runtime_id, &session_name)
                     .map_err(|_| StateError::MalformedHostSchema)
             })
-            .collect()
+            .collect::<Result<Vec<_>, StateError>>()?;
+        let next_cursor = if has_more {
+            Some(
+                cursor
+                    .checked_add(cursor_step)
+                    .ok_or(StateError::NavigatorCursorOverflow)?,
+            )
+        } else {
+            None
+        };
+        Ok(D17RuntimePathsPage { paths, next_cursor })
     }
 
     /// Reads the retained owned Codex observer integration through the
@@ -2783,31 +2927,42 @@ impl D16State {
         ensure_d17_current_mode(self.mode)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
         validate_schema14(&self.connection)?;
-        let mut statement = self
-            .connection
-            .prepare(
-                "SELECT operation_id, phase, expected_revisions_json
-                 FROM compound_operations
-                 WHERE kind = 'onboard'
-                 ORDER BY operation_id
-                 LIMIT ?1",
-            )
-            .map_err(StateError::Sqlite)?;
-        let rows = statement
-            .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(StateError::Sqlite)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StateError::Sqlite)?;
-        drop(statement);
-        if rows.len() > MAX_NAVIGATOR_WORKSTREAMS {
-            return Err(StateError::NavigatorSnapshotTooLarge);
-        }
+        let rows = if let Some(handoff_request) = handoff_request {
+            self.connection
+                .query_row(
+                    "SELECT operation_id, phase, expected_revisions_json
+                     FROM compound_operations
+                     WHERE kind = 'onboard' AND operation_id = ?1",
+                    [handoff_request.to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(StateError::Sqlite)?
+                .into_iter()
+                .collect()
+        } else {
+            let _read_snapshot = self
+                .connection
+                .unchecked_transaction()
+                .map_err(StateError::Sqlite)?;
+            let mut cursor: u32 = 0;
+            let mut rows = Vec::new();
+            loop {
+                let (page, next_cursor) =
+                    self.d17_onboarding_marker_operation_page(cursor, MAX_NAVIGATOR_WORKSTREAMS)?;
+                rows.extend(page);
+                let Some(next_cursor) = next_cursor else {
+                    break rows;
+                };
+                cursor = next_cursor;
+            }
+        };
         let mut match_result = None;
         for (operation_id, phase, encoded_intent) in rows {
             let operation_id = operation_id
@@ -2897,40 +3052,96 @@ impl D16State {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
         provisional_lease.revalidate_for_mutation(&self.root)?;
-        let mut statement = transaction
-            .prepare(
-                "SELECT operation_id, phase, expected_revisions_json,
-                        launch_token_expiry_monotonic, effect_watermark, outcome_json,
-                        launch_token_id, launch_token_verifier,
-                        launch_claims_digest, revision
-                 FROM compound_operations
-                 WHERE kind = 'onboard'
-                 ORDER BY operation_id
-                 LIMIT ?1",
-            )
-            .map_err(StateError::Sqlite)?;
-        let rows = statement
-            .query_map([MAX_NAVIGATOR_WORKSTREAM_QUERY], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, i64>(9)?,
-                ))
-            })
-            .map_err(StateError::Sqlite)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(StateError::Sqlite)?;
-        drop(statement);
-        if rows.len() > MAX_NAVIGATOR_WORKSTREAMS {
-            return Err(StateError::NavigatorSnapshotTooLarge);
-        }
+        let rows = if let Some(handoff_request) = handoff_request {
+            transaction
+                .query_row(
+                    "SELECT operation_id, phase, expected_revisions_json,
+                            launch_token_expiry_monotonic, effect_watermark, outcome_json,
+                            launch_token_id, launch_token_verifier,
+                            launch_claims_digest, revision
+                     FROM compound_operations
+                     WHERE kind = 'onboard' AND operation_id = ?1",
+                    [handoff_request.to_string()],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                            row.get::<_, Option<String>>(6)?,
+                            row.get::<_, Option<String>>(7)?,
+                            row.get::<_, Option<String>>(8)?,
+                            row.get::<_, i64>(9)?,
+                        ))
+                    },
+                )
+                .optional()
+                .map_err(StateError::Sqlite)?
+                .into_iter()
+                .collect()
+        } else {
+            let mut cursor: u32 = 0;
+            let mut rows = Vec::new();
+            loop {
+                let (page, next_cursor) = {
+                    let mut statement = transaction
+                        .prepare(
+                            "SELECT operation_id, phase, expected_revisions_json,
+                                    launch_token_expiry_monotonic, effect_watermark, outcome_json,
+                                    launch_token_id, launch_token_verifier,
+                                    launch_claims_digest, revision
+                             FROM compound_operations
+                             WHERE kind = 'onboard'
+                             ORDER BY operation_id
+                             LIMIT ?1 OFFSET ?2",
+                        )
+                        .map_err(StateError::Sqlite)?;
+                    let (query_limit, cursor_step) =
+                        d17_page_parameters(MAX_NAVIGATOR_WORKSTREAMS)?;
+                    let page = statement
+                        .query_map([query_limit, i64::from(cursor)], |row| {
+                            Ok((
+                                row.get::<_, String>(0)?,
+                                row.get::<_, String>(1)?,
+                                row.get::<_, String>(2)?,
+                                row.get::<_, Option<i64>>(3)?,
+                                row.get::<_, Option<String>>(4)?,
+                                row.get::<_, Option<String>>(5)?,
+                                row.get::<_, Option<String>>(6)?,
+                                row.get::<_, Option<String>>(7)?,
+                                row.get::<_, Option<String>>(8)?,
+                                row.get::<_, i64>(9)?,
+                            ))
+                        })
+                        .map_err(StateError::Sqlite)?
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(StateError::Sqlite)?;
+                    let has_more = page.len() > MAX_NAVIGATOR_WORKSTREAMS;
+                    let next_cursor = if has_more {
+                        Some(
+                            cursor
+                                .checked_add(cursor_step)
+                                .ok_or(StateError::NavigatorCursorOverflow)?,
+                        )
+                    } else {
+                        None
+                    };
+                    (
+                        page.into_iter()
+                            .take(MAX_NAVIGATOR_WORKSTREAMS)
+                            .collect::<Vec<_>>(),
+                        next_cursor,
+                    )
+                };
+                rows.extend(page);
+                let Some(next_cursor) = next_cursor else {
+                    break rows;
+                };
+                cursor = next_cursor;
+            }
+        };
 
         let mut matched = None;
         for row in rows {
@@ -9682,8 +9893,176 @@ mod tests {
         }
     }
 
+    fn onboarding_prepare_request_for_index(
+        state_path: &Path,
+        candidate_runtime_id: RuntimeId,
+        index: usize,
+    ) -> OnboardingPrepareRequest {
+        let worktree_root = state_path.join(format!("worktree-{index}"));
+        fs::create_dir(&worktree_root).expect("worktree root");
+        let shell_cwd = worktree_root.join("nested");
+        fs::create_dir(&shell_cwd).expect("shell cwd");
+        let arguments = [OsString::from("--model"), OsString::from("gpt-5.6")];
+        let ShellCommandDecision::ManagedFresh(launch) =
+            classify_shell_command(ProviderKind::Codex, &arguments).expect("managed launch")
+        else {
+            panic!("fixture must be promotable");
+        };
+        let index_u128 = u128::try_from(index).expect("fixture index");
+        OnboardingPrepareRequest {
+            request_key: format!("d17-onboarding-request-{index}"),
+            presentation_id: Uuid::from_u128(700 + index_u128),
+            presentation_revision: Revision::INITIAL,
+            slot_generation: Uuid::from_u128(1_700 + index_u128),
+            candidate_runtime_id,
+            runtime_paths: RuntimePaths::for_runtime(state_path, candidate_runtime_id),
+            provider: ProviderKind::Codex,
+            repository: RepositoryRegistration {
+                project_root: worktree_root,
+                display_name: format!("worktree-{index}"),
+                remote_identity_fingerprint: Some(format!("git-remote-v1:{index:064x}")),
+                remote_identity_display: Some(format!("github.com/example/worktree-{index}")),
+            },
+            shell_cwd,
+            shell_pid: 710 + u32::try_from(index).expect("fixture pid"),
+            shell_birth: format!("birth-{}", 710 + index),
+            shell_process_group: 710 + u32::try_from(index).expect("fixture process group"),
+            shell_session: 710 + u32::try_from(index).expect("fixture session"),
+            argv_digest: launch.argv_digest().to_owned(),
+            boot_provenance: format!("d17-boot-v1:sha256:{index:064x}"),
+            now_monotonic_millis: 10,
+            expiry_monotonic_millis: 1_010,
+        }
+    }
+
     fn onboarding_executable_identity() -> OnboardingProviderExecutableIdentity {
         OnboardingProviderExecutableIdentity::new(31, 37).unwrap()
+    }
+
+    #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the high-cardinality fixture proves paging, exact lookup, and cancellation across one retained graph"
+    )]
+    fn d17_retained_journal_and_runtime_pages_are_complete() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let ids = SequenceIds::default();
+        let mut state = fresh_create_d17(&state_path, &ids).unwrap();
+        let provisional = state.acquire_d17_provisional_lease().unwrap();
+        let mut fixtures = Vec::new();
+        for index in 0..130 {
+            let candidate_runtime_id =
+                RuntimeId::from(Uuid::from_u128(10_000 + u128::try_from(index).unwrap()));
+            let request =
+                onboarding_prepare_request_for_index(&state_path, candidate_runtime_id, index);
+            let reservation = match state
+                .prepare_d17_onboarding_current(&provisional, &request, &ids)
+                .unwrap()
+            {
+                OnboardingPreparation::Issued(reservation) => reservation,
+                OnboardingPreparation::Existing(_) => panic!("unique request must issue"),
+            };
+            fixtures.push((request, reservation));
+        }
+
+        let (cancelled_request, cancelled_reservation) = &fixtures[0];
+        assert!(
+            state
+                .cancel_d17_onboarding_current(
+                    &provisional,
+                    cancelled_request.presentation_id,
+                    cancelled_request.presentation_revision,
+                    cancelled_request.slot_generation,
+                    cancelled_request.candidate_runtime_id,
+                    &cancelled_request.runtime_paths,
+                    Some(cancelled_reservation.operation_id),
+                )
+                .unwrap()
+        );
+
+        let inventory_page = state
+            .d17_onboarding_operation_inventory_page(0, MAX_NAVIGATOR_WORKSTREAMS)
+            .unwrap();
+        assert_eq!(inventory_page.operations.len(), MAX_NAVIGATOR_WORKSTREAMS);
+        assert_eq!(
+            inventory_page.workstream_ids.len(),
+            MAX_NAVIGATOR_WORKSTREAMS
+        );
+        assert_eq!(inventory_page.next_cursor, Some(128));
+        let inventory_page_two = state
+            .d17_onboarding_operation_inventory_page(128, MAX_NAVIGATOR_WORKSTREAMS)
+            .unwrap();
+        assert_eq!(inventory_page_two.operations.len(), 2);
+        assert_eq!(inventory_page_two.next_cursor, None);
+        let inventory = state.d17_onboarding_operation_inventory().unwrap();
+        assert_eq!(inventory.len(), 130);
+        assert_eq!(
+            inventory
+                .iter()
+                .map(|operation| operation.operation_id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            130
+        );
+
+        let target = &fixtures[129];
+        let marker = state
+            .d17_onboarding_marker_operation_current(
+                &provisional,
+                target.0.presentation_id,
+                target.0.presentation_revision,
+                target.0.slot_generation,
+                target.0.candidate_runtime_id,
+                None,
+            )
+            .unwrap()
+            .expect("marker target beyond first page");
+        assert_eq!(marker.operation_id, target.1.operation_id);
+        let exact_marker = state
+            .d17_onboarding_marker_operation_current(
+                &provisional,
+                target.0.presentation_id,
+                target.0.presentation_revision,
+                target.0.slot_generation,
+                target.0.candidate_runtime_id,
+                Some(target.1.operation_id),
+            )
+            .unwrap()
+            .expect("exact marker target");
+        assert_eq!(exact_marker, marker);
+
+        let runtime_page = state
+            .d17_registered_runtime_paths_page(0, MAX_NAVIGATOR_WORKSTREAMS)
+            .unwrap();
+        assert_eq!(runtime_page.paths.len(), MAX_NAVIGATOR_WORKSTREAMS);
+        assert_eq!(runtime_page.next_cursor, Some(128));
+        let runtime_page_two = state
+            .d17_registered_runtime_paths_page(128, MAX_NAVIGATOR_WORKSTREAMS)
+            .unwrap();
+        assert_eq!(runtime_page_two.paths.len(), 1);
+        assert_eq!(runtime_page_two.next_cursor, None);
+        assert_eq!(state.d17_registered_runtime_paths().unwrap().len(), 129);
+
+        let (target_request, _) = target;
+        assert!(
+            state
+                .cancel_d17_onboarding_current(
+                    &provisional,
+                    target_request.presentation_id,
+                    target_request.presentation_revision,
+                    target_request.slot_generation,
+                    target_request.candidate_runtime_id,
+                    &target_request.runtime_paths,
+                    None,
+                )
+                .unwrap()
+        );
+        assert_eq!(state.d17_registered_runtime_paths().unwrap().len(), 128);
+        assert_eq!(
+            state.d17_onboarding_operation_inventory().unwrap().len(),
+            130
+        );
     }
 
     fn issued_d17_onboarding_fixture(

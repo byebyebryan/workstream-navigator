@@ -627,7 +627,8 @@ mod tests {
         fs::create_dir_all(&paths.directory).unwrap();
         plan.bootstrap().prepare(&paths).unwrap();
         let launch = plan.launch();
-        let output = Command::new(&launch.program[0])
+        let mut command = Command::new(&launch.program[0]);
+        command
             .args(&launch.program[1..])
             .arg("-c")
             .arg("codex")
@@ -637,9 +638,8 @@ mod tests {
             .env("PATH", &bin)
             .env("TERM", "xterm-256color")
             .env("WSNAV_RC_COUNT", &count)
-            .env("WSNAV_PROBE_OUT", temporary.path().join("probe"))
-            .output()
-            .unwrap();
+            .env("WSNAV_PROBE_OUT", temporary.path().join("probe"));
+        let output = crate::process::output_bounded(&mut command, 16 * 1024, 16 * 1024).unwrap();
 
         assert!(
             output.status.success(),

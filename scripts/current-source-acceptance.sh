@@ -90,12 +90,7 @@ if rg -n '^//!  |#\[error\(" |ControlRefused\(" |unreachable!\(" ' \
     exit 1
 fi
 
-production_sources=(
-    src/app.rs src/app src/actions.rs src/actions src/navigator.rs src/navigator
-    src/presentation src/provisional.rs src/provider src/repository.rs
-    src/startup.rs src/state
-)
-if rg -n '\.output\(' "${production_sources[@]}" --glob '*.rs' >/dev/null; then
+if rg -n '\.output\(' src --glob '*.rs' >/dev/null; then
     printf 'error: direct Command::output remains in production source\n' >&2
     exit 1
 fi

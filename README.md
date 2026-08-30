@@ -5,14 +5,15 @@ coding-agent workstreams on the machine where it is running. It adds
 organization, attachment, status, and a few compound workstream actions
 around the provider's native terminal UI.
 
-> **D18 status:** current-only consolidation accepted.
-> The checkout and byte-identical installed binary use the direct schema-15
-> epoch and refuse older WSNav roots instead of migrating or adopting them. The
-> authorized destructive reset discarded the D17.1 WSNav catalog and Runtime
-> output; native provider history remains provider-owned. Native observer trust,
-> disposable Codex/OpenCode lifecycle acceptance, complete cleanup, and the full
-> repository gate pass. The checkpoint commit containing this record binds the
-> accepted source to the installed release artifact. See the
+> **D18 status:** accepted release with a verified source correction.
+> The D18 acceptance record binds checkpoint `c961c7e` to its byte-identical
+> installed artifact and direct schema-15 epoch, which refuses older WSNav
+> roots instead of migrating or adopting them. The current checkout adds correction
+> `ed0d883`, which closes a transient presentation-startup topology race and
+> adds direct Fork/recovery transaction coverage without changing the product
+> contract. Its full local gate and repeated Rust 1.88/tmux 3.3a matrix pass;
+> no remote-CI or accepted-release/live-provider claim is transferred to that
+> correction. Per-host installation must be verified separately. See the
 > [roadmap](docs/roadmap.md#completed-checkpoint-d18-current-only-consolidation).
 
 ## Host-local by design
@@ -127,9 +128,11 @@ migration, state rollback, automatic downgrade, or compatibility launcher.
 
 ## Build, install, and CLI
 
-WSNav remains source-installed. This checkout is the installed D18 release;
-build and validate any replacement before atomically installing its exact
-release artifact:
+WSNav remains source-installed. The D18 acceptance record identifies the exact
+artifact installed during release acceptance; a development host may run that
+artifact or a newer explicitly installed candidate. This checkout contains the
+verified source correction described above. Build and validate any replacement
+before atomically installing its exact release artifact:
 
 ```console
 cargo build --locked --release
@@ -145,7 +148,9 @@ repository gate from the checkout as shown above.
 operations remain optional scripting, diagnostics, and break-glass parity;
 ordinary work happens in the Navigator/provider presentation. The destructive
 reset, exact-artifact installation, native observer trust, and disposable
-live-provider release acceptance are complete for D18.
+live-provider release acceptance are complete for the accepted D18 artifact.
+They are historical evidence, not accepted-release or live-provider evidence
+for a newer source candidate.
 
 ## See it
 

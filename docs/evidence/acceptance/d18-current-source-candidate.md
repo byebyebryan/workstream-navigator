@@ -2,13 +2,15 @@
 
 Date: 2026-08-29
 
-Status: accepted in the checkpoint commit containing this record. Repository
-checks, the authorized destructive reset, direct ordinary schema-15 bootstrap,
-installed parity, an 80-column shell-first launch, Rust 1.88 and Ubuntu 24.04
-clean-host matrices, explicit native observer trust, disposable Codex/OpenCode
-lifecycle acceptance, and complete cleanup passed. A later current-source
-correction and its local verification are recorded below without changing the
-historical live-provider acceptance boundary.
+Status: accepted release checkpoint `c961c7e`. Repository checks, the
+authorized destructive reset, direct ordinary schema-15 bootstrap, installed
+parity, an 80-column shell-first launch, Rust 1.88 and Ubuntu 24.04 clean-host
+matrices, explicit native observer trust, disposable Codex/OpenCode lifecycle
+acceptance, and complete cleanup passed for that artifact. Later
+test/documentation traceability commit `08f9265` exposed a startup race in CI;
+correction `ed0d883` and its local verification are recorded below without
+transferring the historical installation or live-provider claims to the newer
+source.
 
 ## Candidate boundary
 
@@ -73,6 +75,13 @@ fail immediately and persistent incomplete topology still refuses. Three
 deterministic tests prove transient recovery, persistent refusal, and immediate
 unrelated-error refusal.
 
+The missing startup coverage was later reproduced by both jobs in
+[CI run 33292725378](https://github.com/byebyebryan/workstream-navigator/actions/runs/33292725378)
+for traceability commit `08f9265`, including the accepted Rust
+1.88/tmux 3.3a matrix. That falsification triggered correction `ed0d883`; it
+does not retroactively turn the original controller-only retry into passing
+evidence.
+
 The post-acceptance correction also drives the production Fork/recovery action
 and transactional state paths through deterministic provider-effect seams for
 both providers. Those tests prove that the attempt marker precedes the provider
@@ -86,8 +95,10 @@ presentation integration tests together with formatting, strict Clippy,
 packaging, dependency policy, semantic acceptance, and documentation checks. A
 fresh Rust 1.88.0/Debian/tmux 3.3a container copied the read-only source mount
 to container-local storage, deleted the copied build output, and passed the
-full locked all-targets/all-features suite five consecutive times. Remote CI is
-intentionally not claimed before the correction is committed and pushed.
+full locked all-targets/all-features suite five consecutive times. The
+correction is implemented in `ed0d883`; no remote-CI or
+accepted-release/live-provider result is claimed for it in this record.
+Per-host development installation is separate operational evidence.
 
 ## Clean-break correction
 
@@ -199,6 +210,6 @@ copies, presentations, Runtime directories, helpers, observers, endpoints, and
 private tmux servers were deleted after exact shutdown checks. The ordinary
 WSNav state retained its pre-acceptance aggregate parked/stopped state and ready
 Codex integration, with no presentation or Runtime server. The user's default
-tmux server contained no WSNav session. The checkpoint commit containing this
-record binds the accepted source and evidence to installed SHA-256
+tmux server contained no WSNav session. Accepted checkpoint `c961c7e` binds the
+accepted source and evidence to installed SHA-256
 `f732e2b16344b038cd05996501ce77be42302f7403de9720d156dbf24777d124`.

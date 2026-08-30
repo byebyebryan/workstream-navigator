@@ -45,7 +45,8 @@ to make their old procedures appear current.
 - [D16 host-local simplification](acceptance/d16-host-local.md)
 - [D17 shell-first managed-session onboarding](acceptance/d17-shell-first.md)
 - [D17.1 correctness and release closure](acceptance/d17.1-correctness-closure.md)
-- [D18 current-only consolidation](acceptance/d18-current-source-candidate.md)
+- [D18 current-only consolidation and post-acceptance source
+  correction](acceptance/d18-current-source-candidate.md)
 
 ## Design spikes
 

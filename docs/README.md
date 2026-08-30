@@ -4,13 +4,15 @@
 
 D0-D18 are complete. D18 preserves the shell-first managed-session product on
 one direct schema-15 epoch while deleting the old transition and compatibility
-plane. The corrected release artifact is
-installed byte-for-byte, the authorized destructive reset and ordinary
-schema-15 bootstrap are complete, and a real 80-column shell-first launch
-passes. Rust 1.88 and Ubuntu 24.04 clean-environment matrices, explicit native
-observer trust, disposable Codex/OpenCode lifecycle acceptance, complete
-cleanup, and the full repository gate pass. The checkpoint commit containing
-this record binds the accepted source to the installed release artifact.
+plane. The acceptance record binds checkpoint `c961c7e` to the byte-identical
+artifact installed during release acceptance; its destructive reset, ordinary
+schema-15 bootstrap, native observer trust, disposable Codex/OpenCode lifecycle
+acceptance, and complete cleanup remain historical release evidence. The current checkout
+adds post-acceptance correction `ed0d883` for bounded presentation startup and
+direct Fork/recovery transaction coverage. Its full local gate and repeated
+Rust 1.88/tmux 3.3a matrix pass, but no remote-CI or
+accepted-release/live-provider evidence is transferred to the correction.
+Per-host development installation is verified separately.
 
 - [Product and architecture design](design.md) is the V1 contract.
 - [Delivery roadmap](roadmap.md) owns delivery order, checkpoint status, and
@@ -23,11 +25,12 @@ this record binds the accepted source to the installed release artifact.
 ## D18 accepted current-only release
 
 [D18 current-only consolidation](design.md#current-schema-15-consolidation-boundary)
-is implemented in the installed release. It preserves the current
+is implemented in the accepted installed release. It preserves the current
 Shell-first product while replacing the accumulated D16/D17 transition plane
 with one direct schema-15 bootstrap and semantic current modules. It is an
 intentional reset epoch: D18 refuses rather than migrates or adopts schema-12
-through schema-14 roots. The
+through schema-14 roots. The current source correction preserves that product
+and state contract. The
 [roadmap](roadmap.md#completed-checkpoint-d18-current-only-consolidation) records
 the completed disposable-provider, native-trust, cleanup, and commit gates. The
 rejected coherent-backup design remains historical
@@ -328,9 +331,12 @@ and complete disposable cleanup.
 ## Build and command references
 
 The project is a source-installed operator beta. The installed D18 release
-opens only schema 15 and its `wsnav --help` is the installed CLI reference. Run
-`cargo build --locked --release` and `scripts/check` before any replacement.
-The destructive reset, exact installation, native observer trust, and
-live-provider acceptance are complete; there is no state rollback. The normal
-workflow remains the Navigator beside either the provisional account shell or
-the native provider TUI.
+opens only schema 15 and its `wsnav --help` is the installed CLI reference. The
+current checkout contains a newer source correction. A host must not be
+described as running it until a replacement artifact is built, checked,
+atomically installed, and checksum-verified there. Run
+`cargo build --locked --release` and `scripts/check` before any
+replacement. The destructive reset, exact installation, native observer trust,
+and live-provider acceptance are complete for the accepted artifact; there is
+no state rollback. The normal workflow remains the Navigator beside either the
+provisional account shell or the native provider TUI.

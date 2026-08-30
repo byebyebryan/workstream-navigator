@@ -3,11 +3,13 @@
 Date: 2026-08-29
 
 Status: D0-D18 are complete. D18 uses a direct schema-15 epoch and an explicit
-destructive reset with no migration or state rollback. The reset, ordinary
-schema-15 bootstrap, exact installation, explicit native observer trust,
-disposable Codex/OpenCode lifecycle acceptance, complete cleanup, and full
-repository gate pass. The checkpoint commit containing this record binds the
-accepted source to the installed artifact.
+destructive reset with no migration or state rollback. Accepted checkpoint
+`c961c7e` binds the reset, ordinary schema-15 bootstrap, exact installation,
+explicit native observer trust, disposable Codex/OpenCode lifecycle
+acceptance, complete cleanup, and installed artifact. Post-acceptance source
+correction `ed0d883` is locally verified, but no remote-CI or
+accepted-release/live-provider evidence is transferred to it; it does not
+reopen the product contract or create a compatibility checkpoint.
 
 `docs/design.md` is the product and architecture contract. This file owns
 delivery order, implementation status, and exit gates. The complete prior
@@ -111,8 +113,7 @@ Exit evidence:
 
 ### D18.3 — Reconciliation, release gates, and explicit reset
 
-Implementation status: complete in the checkpoint commit containing this
-record.
+Implementation status: complete in accepted checkpoint `c961c7e`.
 
 Completed repository work:
 
@@ -127,8 +128,9 @@ Completed repository work:
   staged/unstaged diff checks;
 - `docs/design.md` retains the current product and architecture contract while
   historical transition narratives link to preserved evidence; and
-- clean-host matrices pass 350 unit and 7 presentation tests on both Rust
-  1.88/Debian/tmux 3.3a and Ubuntu 24.04/Rust 1.88/tmux 3.4. The Ubuntu
+- accepted-checkpoint clean-host matrices pass 350 unit and 7 presentation
+  tests on both Rust 1.88/Debian/tmux 3.3a and Ubuntu 24.04/Rust 1.88/tmux
+  3.4. The Ubuntu
   preflight found and closed the detached 80-column tmux startup race by
   establishing the exact 129-by-24 initial two-pane geometry before the
   provider split; and
@@ -139,7 +141,7 @@ Completed repository work:
 
 Completed exit gate:
 
-- the checkpoint commit containing this record binds the exact accepted source
+- accepted checkpoint `c961c7e` binds the exact accepted source
   and evidence to the installed SHA-256
   `f732e2b16344b038cd05996501ce77be42302f7403de9720d156dbf24777d124`.
 
@@ -177,6 +179,40 @@ historical reason not to claim a race-free arbitrary-holder proof for an online
 backup/rollback design. That stronger proof is unnecessary for discarded state
 and no longer blocks D18.3.
 
+### Post-acceptance D18 correction
+
+Implementation status: implemented in `ed0d883` and locally verified; no
+remote-CI or accepted-release/live-provider claim is recorded for this source.
+Per-host development installation is separate operational evidence.
+
+Trigger and scope:
+
+- traceability commit `08f9265` exposed an intermittent
+  `InvalidTopology` refusal during the one-shot default-width step in
+  presentation startup on both stable and MSRV CI jobs;
+- startup and post-attach restoration now share one 100-millisecond bounded
+  retry that retries only `InvalidTopology`, fails unrelated errors
+  immediately, and keeps persistent ambiguity fail-closed;
+- direct disposable tests now drive the current Codex/OpenCode Fork and
+  managed-operation recovery action/state paths, proving the durable attempt
+  marker precedes the provider effect, commit precedes Runtime start, request
+  replay is idempotent, Codex lost results reconcile without retry, and
+  OpenCode unknown effects become terminal; and
+- the obsolete test-only `prepare_fork` state seam is removed.
+
+Local exit evidence:
+
+- `scripts/check` passes 357 library tests, 7 presentation integration tests,
+  formatting, strict Clippy, packaging, dependency policy, semantic acceptance,
+  and documentation checks; and
+- a fresh Rust 1.88.0/Debian/tmux 3.3a container passes the full locked
+  all-targets/all-features suite five consecutive times using only
+  container-local build and state paths.
+
+The accepted installed artifact and its authorized live-provider evidence stay
+historical facts about `c961c7e`; they are not silently transferred to the
+newer correction.
+
 ## Completed checkpoint index
 
 Detailed scope, procedures, test counts, and version-specific observations are
@@ -191,7 +227,7 @@ historical evidence rather than current delivery authority.
 | D16 | Host-local clean break | [D16 acceptance](evidence/acceptance/d16-host-local.md) |
 | D17 | Shell-first managed-session onboarding | [D17 acceptance](evidence/acceptance/d17-shell-first.md) |
 | D17.1 | Correctness and release closure | [D17.1 acceptance](evidence/acceptance/d17.1-correctness-closure.md) |
-| D18 | Current-only consolidation and release acceptance complete | [Acceptance evidence](evidence/acceptance/d18-current-source-candidate.md) |
+| D18 | Current-only consolidation and release acceptance complete; source correction locally verified | [Acceptance evidence](evidence/acceptance/d18-current-source-candidate.md) |
 
 ## Deferred product decisions
 

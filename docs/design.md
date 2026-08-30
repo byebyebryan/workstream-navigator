@@ -2,16 +2,19 @@
 
 Date: 2026-08-29
 
-Status: D18 implements the shell-first product on a direct,
-current-only schema-15 epoch with semantic modules and no old-root migration or
-adoption. The local repository gate and a disposable Ubuntu 24.04/Rust
-1.88/tmux 3.4 source-tree preflight pass. D18 uses an explicit destructive
-reset rather than preserving D17.1 as a rollback epoch. The authorized reset,
-direct ordinary schema-15 bootstrap, corrected 80-column first launch, and
-installed-artifact parity pass. Explicit native observer trust and disposable
-Codex/OpenCode lifecycle acceptance pass with complete cleanup. The checkpoint
-commit containing this record binds the accepted source and installed artifact;
-D18 is complete.
+Status: D18 implements the shell-first product on a direct, current-only
+schema-15 epoch with semantic modules and no old-root migration or adoption.
+Accepted checkpoint `c961c7e` and installed artifact
+`f732e2b16344b038cd05996501ce77be42302f7403de9720d156dbf24777d124`
+passed the authorized destructive reset, direct ordinary bootstrap, explicit
+native observer trust, disposable Codex/OpenCode lifecycle acceptance, and
+complete cleanup. Post-acceptance source correction `ed0d883` shares a bounded
+fail-closed topology retry across presentation startup and attach restoration
+and directly tests current Fork/recovery transaction ordering. Its local full
+gate and repeated Rust 1.88/tmux 3.3a matrix pass; no remote-CI or
+accepted-release/live-provider evidence is transferred to the correction.
+Per-host development installation is a separate operational fact. The product
+and state contract is unchanged, and D18 remains complete.
 
 The design is the current product and architecture contract. Dated acceptance,
 spike, and study records preserve the evidence and limitations of the candidate

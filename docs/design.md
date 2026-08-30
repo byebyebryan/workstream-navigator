@@ -1,24 +1,17 @@
 # Workstream Navigator V1 Design
 
-Date: 2026-08-28
+Date: 2026-08-29
 
-Status: D16 host-local simplification and D17 shell-first managed-session
-onboarding are complete. The D17.1 correctness candidate creates fresh state
-at schema 14, migrates idle schema-13 state without a wipe only after a legacy
-presentation is absent, and recovers interrupted schema-13/schema-14
-transitions explicitly.
-Exact pre-provider shell/handoff recovery, schema-14 public-command routing,
-retired D16 application/UI/route removal, and fresh-state Codex observer
-readiness before broker reservation are implemented. D17.1 removes retained
-one-frame state-count ceilings, pins reproducible CI prerequisites, and hardens
-process and tmux topology observation. Its repository and Rust-1.88 gates pass,
-the exact release artifact is installed, and separately authorized disposable
-Codex/OpenCode acceptance passes with complete cleanup. V1 remains a
-source-installed operator beta with no compatibility contract.
-
-The earlier D17 live record remains evidence for its recorded artifact only.
-The D17.1 acceptance record identifies the exact automated, installed, and
-live-accepted artifact rather than inferring binary parity.
+Status: D18 implements the shell-first product on a direct,
+current-only schema-15 epoch with semantic modules and no old-root migration or
+adoption. The local repository gate and a disposable Ubuntu 24.04/Rust
+1.88/tmux 3.4 source-tree preflight pass. D18 uses an explicit destructive
+reset rather than preserving D17.1 as a rollback epoch. The authorized reset,
+direct ordinary schema-15 bootstrap, corrected 80-column first launch, and
+installed-artifact parity pass. Explicit native observer trust and disposable
+Codex/OpenCode lifecycle acceptance pass with complete cleanup. The checkpoint
+commit containing this record binds the accepted source and installed artifact;
+D18 is complete.
 
 The design is the current product and architecture contract. Dated acceptance,
 spike, and study records preserve the evidence and limitations of the candidate
@@ -64,7 +57,7 @@ therefore keeps its best-available private-server configuration and defers a
 change until a candidate upstream fix passes the recorded A/B instrument. The
 instrument, ruled-out workarounds, and decision gates are recorded in
 [Spike 0014](evidence/spikes/0014-terminal-fidelity-a-b.md) and the
-[roadmap](roadmap.md#2026-08-04-terminal-fidelity-root-cause-is-upstream-tmux).
+[archived roadmap](roadmap-through-d18-design.md#2026-08-04-terminal-fidelity-root-cause-is-upstream-tmux).
 
 A provider launched manually in one ordinary tmux pane does not use the same
 rendering path. Its output crosses one tmux renderer. WSNav keeps each provider
@@ -339,7 +332,7 @@ and removes the then-empty directory; it never recursively deletes a presentatio
 tree. A missing, changed, symlinked, foreign, malformed, or newly added artifact
 fails closed and remains untouched.
 
-For D17, that allowlist admits one presentation-private provisional marker. It
+That allowlist admits one presentation-private provisional marker. It
 records only the candidate RuntimeId, exact final-form `RuntimePaths` fields
 (directory, socket, configuration, and session), seed cwd, presentation/slot
 identity, fresh `slot_generation`, and bounded shell/server/process ownership
@@ -432,12 +425,10 @@ terminal widget rendered by Rust; it is a real tmux attachment to the host-owned
 provider runtime. This retains direct keyboard, mouse, resize, color, and native
 TUI behavior without building a PTY server or terminal emulator.
 
-The D17 provisional account shell supersedes the D12 below-provider utility
-shell as the sole account-shell surface. D12 remains historical implementation
-and acceptance evidence, but its split/focus/close controls are no longer part
-of V1. Reattachment strips those retired bindings from an older live
-presentation. An already-running proven utility pane is not killed merely by
-upgrade or reconnect; it may exit naturally and cannot be recreated.
+The provisional account shell is the sole account-shell surface. The retired
+below-provider utility shell remains historical evidence only; its
+split/focus/close controls and compatibility cleanup are not part of the
+current product.
 
 When this presentation is itself running inside an ordinary operator SSH
 session, an outer disconnect may end or detach the disposable presentation and
@@ -544,7 +535,7 @@ The lifecycle therefore has these observable rules:
   duplicate provisional creation until that exact evidence is resolved. It
   never stops, parks, rotates, or cleans a managed Runtime.
 
-D17.0 must race close and presentation loss against lazy materialization,
+Disposable acceptance must race close and presentation loss against lazy materialization,
 prepare and token issuance, helper consumption, OpenCode preparation and
 `POST /session`, and provider `exec`; it must also race passive snapshot,
 new attachment, Park/Resume/Fork/contextual `n`/archive/
@@ -554,36 +545,21 @@ evidence must show one deterministic lease winner, no managed kill, no helper
 adoption, no premature signal or action, no stuck operation, no blind rollback,
 no duplicate ownership, no duplicate shell, and no second OpenCode POST.
 
-### D17 provisional lock and singleton reconciliation
+### Provisional lock and singleton reconciliation
 
-D17's serialized presentation/slot handoff uses one stable host-private
-`provisional.lock` artifact, distinct from D16's schema-cutover `transition.lock`.
-It is operational state, not a Runtime, card, Workstream, or presentation-private
-row. Schema-14 host-operational lease metadata stores only a planned
-`lease_generation`, install phase `pending` or `ready`, and the expected lock
-device/inode once ready; it is not a card, Runtime, Workstream, or
-presentation-private row. The schema/HostId transaction commits schema-14
-ownership and this pending metadata first; schema-13 code and path never create
-or recognize `provisional.lock`.
+The serialized presentation/slot handoff uses one stable host-private
+`provisional.lock`. Direct schema-15 bootstrap precommits its generation and
+installs the exact mode-`0600`, current-owner, create-new/no-follow inode
+before the bootstrap becomes `ready`. Host operational metadata records the
+generation and expected device/inode; `bootstrap.lock`, the database, and the
+provisional file must agree before current state opens.
 
-Only after that database commit is durable may schema-14 startup reconcile the
-stable lock artifact. In `pending`, an absent artifact is created lazily as a
-mode-`0600` current-owner regular file with create-new/no-follow semantics;
-startup writes bounded file contents, fsyncs the file, then fsyncs the containing
-state-root directory, and transactionally
-finalizes the metadata as `ready` with its expected device/inode. An exact file
-left by a crash after file creation may instead be validated and locked, then
-finalized the same way. Pending foreign or mismatched evidence fails closed. In
-`ready`, a missing, replaced, or device/inode-mismatched artifact fails closed
-and is never recreated. The file contains only a bounded format version, HostId,
-and `lease_generation`; it contains no cwd, command, argv, provider/user
-content, or provider payload. Malformed, symlinked, foreign, replaced, or
-locked evidence fails closed. Normal D17 operation never unlinks or recreates
-it; resetting/removing the state root is outside this flow. A lock artifact
-observed before schema-14 ownership is unexpected/ambiguous evidence: WSNav
-leaves it untouched, neither adopting nor deleting it. A crash between the
-database commit and file creation is retried safely in `pending`; no
-cross-store atomicity is claimed.
+The file contains only a bounded format version, HostId, and lease generation.
+It contains no cwd, command, argv, provider/user content, or provider payload.
+A missing, malformed, symlinked, foreign, replaced, mismatched, or busy ready
+lock fails closed and is never recreated or adopted. Current operation never
+unlinks it, and old roots cannot introduce it through migration.
+
 
 Every materializer, prepare broker, launch helper, confirmed close/loss cleanup,
 and singleton reconciler opens `provisional.lock` with no-follow/CLOEXEC,
@@ -626,7 +602,7 @@ left unchanged; if none exists, the ordinary derived singleton card is enough
 and remains unmaterialized until selected. Recovery is revision- and
 slot-generation-guarded and idempotent across restart.
 
-### D17 post-commit launch fence and reconciliation
+### Post-commit launch fence and reconciliation
 
 The helper's successful claim revalidation and atomic capability
 compare-and-consume commit durable Runtime ownership and revoke presentation
@@ -693,7 +669,7 @@ enters the exact recovery/resume state if final TUI exec fails; it is never
 rolled back and never issues a second POST. A possible POST effect remains
 `recovery-required`.
 
-For OpenCode, executable proof alone is not the final D17 activation proof.
+For OpenCode, executable proof alone is not final activation proof.
 Before the final native exec, the helper persists the exact loopback
 endpoint/version/session handle that the already-fenced blank-session creation
 returned; that handle is not observer authority while the pane still contains
@@ -709,13 +685,13 @@ unknown, exits before Ready, or cannot establish the exact endpoint/session
 leaves the Workstream action-fenced for explicit recovery; it never permits a
 blind attach, a second session POST, or an inferred observer replacement. The
 helper does not try to start this long-lived observer after `execve` from the
-provider pane: the D17 presentation/controller owns the staged post-exec
+provider pane: the presentation/controller owns the staged post-exec
 handoff and must clean an observer-start failure without signalling the native
 provider.
 
 ### Account-shell bootstrap and broker handshake
 
-D17 supports Bash and Zsh interactive non-login shells only. The launcher
+WSNav supports Bash and Zsh interactive non-login shells only. The launcher
 rejects login-shell mode before it starts either shell: interactive login Bash
 does not load a supplied `--rcfile`, so a Bash wrapper cannot be the enforcement
 point. A later nested login shell bypasses the controlled function and remains
@@ -786,8 +762,7 @@ binding may roll back the graph. An exact `execve` error alone proves only
 absence of the final provider TUI exec; any possible post-effect result remains
 a visible recovery-required operation and cannot become a blind clean retry.
 
-This two-phase prepare-token-helper variant was the approved D17 candidate and
-is now routed by the current binary.
+This two-phase prepare-token-helper variant is routed by the current binary.
 [Spike 0021](evidence/spikes/0021-d17-two-phase-handshake.md) validates its
 narrow synthetic mechanical boundary across Bash/Zsh and both provider routes:
 direct prepare child, one-shot verifier-backed capability, exact claim
@@ -795,12 +770,12 @@ comparison, shell identity preservation, and lease-FD noninheritance. Those
 spikes remain historical model evidence rather than proof of the production
 composition. The routed implementation and disposable tests now cover
 conclusive pre-provider shell/handoff recovery and the required cross-actor
-race matrix. Formal live provider acceptance is recorded in the D17 evidence.
+race matrix. Historical live provider acceptance is recorded in the D17 evidence.
 [Spike
 0022](evidence/spikes/0022-d17-account-shell-wrapper.md) validates the
 non-login account wrapper and Bash login preflight, while [Spike
 0023](evidence/spikes/0023-d17-provisional-lock.md) validates the isolated
-schema-14 stable-lock lifecycle.
+historical provisional-lock lifecycle.
 
 The command grammar is closed and provider-specific. Broker-owned or
 identity-changing cwd, profile, resume, session, attach, server, host, port,
@@ -813,7 +788,7 @@ shapes refuse with bounded guidance to use an ordinary terminal or an explicit
 bypass. Any secret-bearing argument or value is outside the promotable
 grammar. Safe native model, effort, permission, and similar
 options are admitted only when the adapter's version/contract validation and
-tests prove them compatible; D17 does not invent a fixed live-version flag
+tests prove them compatible; WSNav does not invent a fixed live-version flag
 list.
 
 User redefinition of a controlled function, `command`, an absolute provider
@@ -826,7 +801,7 @@ recovery-required, and completed provider output stays visible until the user
 acts.
 
 Only account shells whose exact wrapper, function, token handoff, signal, and
-`exec` behavior passes the Bash and Zsh D17.0 and implementation tests are
+`exec` behavior passes the current Bash, Zsh, and implementation tests are
 eligible for managed onboarding. Unsupported or ambiguous shells leave the
 card visible but unavailable with bounded guidance. This does not authorize
 ordinary RC parsing, provider-command aliases, passive provider detection, or
@@ -912,7 +887,7 @@ Each stateful action introduces its own bounded text entry, confirmation, and
 progress state with the authority that consumes it; the navigator does not keep
 an unconnected generic modal that could imply an action is available before its
 host contract exists. There is no Project browser, browser-root setting,
-repository-registration form, or manual metadata-refresh action in D17.
+repository-registration form, or manual metadata-refresh action.
 ProjectLocation registration is a bounded host operation inside successful
 brokered promotion, and the shell remains the user's familiar path-selection
 surface.
@@ -1018,13 +993,13 @@ AwaitRuntime serializes the Start operation; for an already-managed Runtime it
 does not require the durable lifecycle to leave `Starting` before native
 attachment. Once the exact owned private Runtime record and live process
 identity exist, the navigator may attach while its status is `Starting`, but
-only when no D17 onboarding operation remains unfinished and
-`provider_exec_proven` has committed. A D17 Runtime still in
+only when no onboarding operation remains unfinished and
+`provider_exec_proven` has committed. A Runtime still in
 `runtime_owned_launching`, provider preparation/external effect, or
 `provider_exec_started` is not attachable merely from its record/process
 identity: only the originating presentation may retain its existing pane, which
 is not a new attachment. The provider's later native SessionStart observation
-confirms lifecycle progress; it is not a prerequisite after that D17 proof for
+confirms lifecycle progress; it is not a prerequisite after that proof for
 giving the provider its terminal client. `Stopped`, `Unknown`, missing, or
 identity-changed Runtime evidence still refuses or waits without retargeting.
 Because that native lifecycle observation can advance the Runtime and
@@ -1202,9 +1177,9 @@ selected current registry.
 
 The facade is a Rust call boundary, not a generic `HostClient`, `LocalEndpoint`,
 framed JSON protocol, hidden local control endpoint, or public control ABI.
-D16 deletes those abstractions together with remote-only JSON, SSH transport,
-release/capability handshakes, polling, and cache machinery rather than
-retaining compatibility behavior. Subprocesses remain only where the owned
+The current source omits those abstractions together with remote-only JSON, SSH
+transport, release/capability handshakes, polling, and cache machinery.
+Subprocesses remain only where the owned
 operation is inherently external: tmux, Git, provider helpers, hooks and
 observer processes, launch barriers, and direct terminal attachment. Their
 bounded DTOs exclude paths from public projections, prompts, responses,
@@ -1605,275 +1580,22 @@ database from the retired worktree-managed design fails closed and requires an
 explicit state reset and project re-registration. WSNav never silently deletes
 or mutates that state.
 
-### D16 breaking state boundary
+### Historical state transitions
 
-D16 removes the client catalog from the active architecture. There is no
-`ClientCatalog`, client schema, host-registration table, generic preferences
-table, importer, client-state compatibility reader, dual write, or rollback
-adapter in the target product. The one current-host registry owns both
-authoritative runtime state and the narrowly bounded host-local presentation
-records needed by the navigator.
+The schema-12 through schema-14 client-catalog, host-local cutover, and
+onboarding migrations are retired evidence. Current source never opens,
+migrates, adopts, drains, or cleans those roots. Their complete contracts and
+release results remain in the [D16 acceptance](evidence/acceptance/d16-host-local.md),
+[D17 acceptance](evidence/acceptance/d17-shell-first.md), and
+[D17.1 closure](evidence/acceptance/d17.1-correctness-closure.md).
 
-Host schema 13 is the explicit D16 boundary. Its migration from host schema 12
-is transactional and reads only `host.sqlite`; it never reads `client.sqlite`.
-It preserves every existing `HostIdentity`, integration, ProjectLocation,
-`ProjectBrowserSettings`, Workstream including provider and activity fields,
-independent-creation request, Runtime generation, OpenCode Runtime handle,
-provider binding, AttentionState, and CompoundOperation. It creates fresh
-host-local Project records from the preserved ProjectLocations and creates no
-persisted page/view preference or host-label state. Client-only hidden state
-has no schema-13 replacement.
 
-Production schema support is deliberately narrow: current-only open accepts
-exact schema 13, confirmed cutover accepts exact schema 12, and
-observer-transition accepts only schema 12 or 13. Host schemas 0 through 11,
-missing or malformed schema evidence, and all other versions return typed
-state-recovery/reset-required without mutation; versions newer than 13 fail
-closed as unsupported future state. D16 removes the production incremental
-pre-12 migration code and its behavioral tests, retaining only an exact
-schema-12 fixture for the 12-to-13 migration tests. Fresh-create writes schema
-13 directly.
+### Current onboarding state boundary
 
-Project reconstruction is deterministic apart from the deliberately fresh
-opaque Project IDs. Locations with one exact credential-free origin
-fingerprint share a Project on this host. Missing, ambiguous, or local-path
-identities each create a separate Project. Reconstruction orders grouped
-locations by opaque LocationId, stores the first as `label_location_id`, and
-takes that location's bounded repository display name as the primary Project
-label. The safe origin display stays separate secondary `↗` context. Identical
-fingerprints on separate wsnav hosts still create independent Projects because
-no state crosses the host boundary.
-
-After cutover, Project IDs and associations persist in schema 13. A newly
-registered location joins an existing Project only on one exact fingerprint;
-otherwise it creates a fresh Project. At most one Project on this host may own
-each non-empty exact fingerprint. Missing, ambiguous, and local-path identities
-are stored without a grouping fingerprint and never collide through an empty
-sentinel.
-
-Membership changes use one deterministic state machine. The Project already
-owning a matching fingerprint survives a merge and retains its existing label
-source. An unmatched changed fingerprint updates the same Project when the
-location is its sole member, or creates a fresh Project and splits that
-location from a multi-location Project. A new split Project selects the lowest
-moved LocationId as its label source. A source Project retains its label source
-while that location remains a member; only departure of that exact location
-selects the lowest remaining LocationId. An emptied source Project is deleted.
-An accepted display-name change updates the Project label only when it belongs
-to the recorded label source. A missing, foreign, or non-member label source is
-invalid persisted state and fails closed. Joins therefore cannot randomly
-rename a Project merely because a new opaque LocationId sorts earlier. The
-matching member's safe origin display remains separate secondary `↗` context.
-Missing or ambiguous later evidence may update bounded location display
-metadata but never dissolves an existing association or clears the Project's
-last positive fingerprint.
-
-Changed repository evidence is never gathered during ordinary navigation,
-snapshot, redraw, attachment, or Workstream switching. Initial registration
-inspects only the broker cwd and stores the containing worktree root. D17 has no
-later reassociation or refresh action: existing bounded grouping metadata stays
-as recorded. A future revision-checked reinspection feature would require a
-separate approved contract and could change presentation only; it could never
-retarget a Workstream's exact ProjectLocation.
-
-The retired client files are exactly `client.sqlite`, `client.sqlite-wal`, and
-`client.sqlite-shm` under the selected state root. Their contents—including
-remote registrations, cross-host Project associations, old Project IDs,
-hidden state, aliases, cached capabilities, executable paths, and preferences—
-are discarded without inspection or import. D16 does not create a backup. An
-operator who wants downgrade insurance must first park or stop managed
-Runtimes, exit WSNav, and create a verified offline copy of the complete state
-root before accepting cutover. That procedure is outside D16; restoring the
-complete external copy before launching an old binary is the only rollback
-path.
-
-Only an ordinary interactive `wsnav` launch may authorize an existing state
-root's D16 cutover. It detects the boundary before opening current host state
-or reusing a presentation, then presents one launcher-owned,
-pre-presentation terminal confirmation. The confirmation names the discarded
-client/presentation data, the preserved host/runtime data, and any exact
-legacy presentation that will be retired. It never renders in or writes to a
-provider pane. Declining exits without mutation. Hooks, observer sidecars,
-hidden helpers, and direct scripting commands never confirm or start the
-transition; they drain or fail closed with bounded guidance to run interactive
-`wsnav`.
-
-Opening host state does not implicitly cross this boundary. The state layer has
-separate current-only, observer-transition, fresh-create, and
-confirmed-cutover entrypoints. Current-only accepts schema 13 only when no
-exact legacy client file exists and never creates, removes, or migrates;
-Navigator snapshots, actions, helpers, and scripts use it.
-Fresh-create may create schema 13 only when the selected state root was absent,
-or when an existing private directory is empty or contains exactly one private
-unlocked `transition.lock` regular file owned by the current user. It then
-acquires that exact lease, repeats the complete allowlist check while holding
-it, and holds it through database creation. Any host SQLite main, WAL, or SHM
-file; any legacy client file; `run/`; `presentation/`; either exact D16 observer
-handover journal path; a locked, malformed, foreign, or non-regular transition
-lease; or any unknown entry returns typed `state recovery required`.
-Fresh-create never scans, adopts, signals, cleans, or overwrites those
-artifacts. This prevents both a time-of-check race and a missing database from
-minting a new HostIdentity beside an orphaned live Runtime or presentation.
-
-Seeing schema 12 or any legacy client file returns a typed `cutover required`
-outcome. Only the confirmed interactive transition entrypoint may invoke
-client-file reset and, for schema 12, the explicit 12-to-13 transaction. A
-schema-13 root contaminated later by any exact legacy client file therefore
-requires confirmation again, removes only those files, and performs no schema
-migration. A missing host database beside any non-fresh artifact is recovery,
-not cutover or fresh creation.
-
-Observer-transition is the one narrow upgrade bridge. Codex hooks and new
-generation-bound OpenCode observer sidecars may open exactly host schema 12 or
-13 without creating, migrating, or reading any client file. That handle
-exposes only the unchanged Runtime, ProviderBinding, AttentionState, and
-observer-lifecycle reads and writes required to accept already-authorized
-provider evidence; Project, presentation, navigation, and user-action methods
-are unavailable through its type.
-
-Observer-transition has an explicit contention contract rather than relying on
-SQLite's default immediate `BUSY` result. The unchanged native Codex profile
-retains its three-second hook timeout. D16 limits its end-to-end hook work to
-2.75 seconds: payload, provenance, and App Server work finish within the first
-1.75 seconds; the next 750 milliseconds are reserved for the host transaction;
-and the last 250 milliseconds are reserved for bounded failure recording. Only
-`SQLITE_BUSY` and `SQLITE_LOCKED` are retried, with monotonic bounded backoff
-until the database deadline; every other database error leaves that retry loop
-immediately. The final 250 milliseconds before the native timeout remain an
-outer scheduling and exit margin.
-
-Once an event has passed exact managed-Runtime authority, failure to commit it
-by the database deadline atomically creates or retains one private
-`run/<RuntimeId>/observer-degraded/<sha256-generation>` regular file. The
-full lowercase digest makes concurrent or stale Runtime generations distinct;
-snapshot and action paths derive only the current generation's exact filename
-and never discover markers by scanning. Its versioned bounded body contains
-only the RuntimeId, Runtime generation, and a closed failure-reason enum; it
-contains no session event, turn/message ID, provider payload, or diagnostic
-text. A matching marker makes snapshots render that Runtime `unknown` and
-makes observer-dependent actions unavailable. A later unrelated event never
-clears it: only exact provider reconciliation or deliberate Runtime retirement
-may do so. Marker failure itself returns a bounded hook error, emits no pane
-output, and grants no mutation authority. OpenCode observer-transition writes
-use the same retry and degraded-marker contract. The schema migration
-constructs and validates its complete Project plan before client-file deletion
-or writer acquisition, revalidates the plan inside the transaction, and limits
-writer acquisition plus transactional work to 500 milliseconds. Reaching that
-deadline rolls back and leaves schema 12 for an ordinary retry. The strict
-500-before-750 database budget makes a racing D16 observer commit wholly before
-or after migration or leave explicit degraded evidence instead of being
-silently discarded.
-
-An already-running pre-D16 OpenCode observer lacks that contention contract and
-does not remain the writer across migration. After confirmation but before any
-client-file deletion, D16 enumerates every live OpenCode Runtime in opaque
-RuntimeId order and corroborates its recorded helper PID/birth, executable
-identity, generation, endpoint, and observer status. An exact D16 observer is
-revalidated in place; a pre-D16 observer enters the handover below. Ambiguous
-or mixed identity refuses before signaling. For each required handover, D16
-starts one observer-transition sidecar in standby and waits until it has proved
-endpoint ownership and opened a live SSE stream. Standby parses into a bounded
-in-memory event buffer but has no host-state mutation authority.
-
-Before the first sidecar signal, the launcher durably writes an exact private
-`d16-observer-handover.json` journal through its one recognized
-`d16-observer-handover.json.tmp` replacement path and syncs the state
-directory. The journal contains only bounded Runtime and generation IDs, old
-and standby PID/birth/executable identities, the expected observer-handle
-revision, and a handover phase; it contains no provider payload. With the
-transition lease still held, the launcher sends `SIGSTOP` only to the
-corroborated old sidecar, proves that it is stopped and the old handle is
-unchanged, then compare-and-swaps the observer handle to the standby PID/birth.
-The standby becomes authoritative only after observing that committed
-assignment and then reconciles and drains its parsed buffer. It durably records
-an exact private `d16-observer-handover.ack` through the sole recognized
-`d16-observer-handover.ack.tmp` path only after replay completes; the bounded
-proof contains Runtime/generation, standby PID/birth/executable, and assigned
-handle revision, never provider payload. The launcher requires that exact
-post-activation acknowledgement and rechecks the process before terminating
-only the frozen old PID/birth. The acknowledgement lets a newly confirmed
-launcher finish post-swap cleanup even when the original readiness pipe was
-lost.
-Repeated non-terminal status is idempotent, and settled evidence is
-deduplicated by exact generation, native session, and provider message ID.
-
-The handover journal is restartable under a newly confirmed cutover and the
-same exclusive lease. A valid pre-swap phase either restores the exact old
-observer and removes the standby or safely repeats the swap; a valid post-swap
-phase completes exact old-sidecar cleanup and proves the assigned D16 sidecar
-ready. Missing, changed, malformed, or internally inconsistent process,
-handle, journal, or activation acknowledgement signals nothing and returns
-typed transition recovery required. Current-only refuses while any exact
-journal or acknowledgement path exists, and all are removed with a synced
-directory only after every recorded handover is complete. Failure to establish
-all replacements refuses before client-file deletion. The provider process,
-Runtime generation, native session, terminal, and completed output remain
-unchanged. A failed later migration leaves the new sidecars operating against
-intact schema 12. This bounded observer handover and the schema-12/13 handle
-are host-state transition support, not a client-catalog reader or remote
-compatibility path.
-
-The interactive launcher proves and retires legacy presentation ownership
-before touching durable state. It enumerates only the selected state root's
-owned presentation directories and exact private tmux sockets, and verifies
-the session, pane roles, navigator PID, process birth, executable identity,
-client count, and auxiliary-pane state. Multiple, malformed, inaccessible, or
-foreign presentations fail closed. An attached client, live utility shell, or
-native observer-review surface also blocks mutation; the launcher may attach
-the exact legacy presentation in a drain-only path without opening host state
-so the operator can finish or exit that ephemeral work and quit the old
-presentation, then rerun cutover. The drain path starts no D16 state action and
-never touches a Runtime server.
-
-After confirmation, the launcher takes one exclusive state-root transition
-lease before any presentation or durable mutation. Current-only,
-fresh-create, confirmed-cutover, and D16 control paths honor that lease;
-observer-transition deliberately does not and continues to serialize its
-narrow writes through SQLite. With the lease held, the launcher repeats
-presentation discovery and the exact client-file-holder proof. One detached,
-ordinary two-pane legacy presentation may then be retired by killing only its
-exact presentation tmux server. Cutover waits for the verified navigator
-PID/birth to disappear and for the presentation socket and directory to be
-gone. Exact dead owned presentation artifacts may be removed under the same
-confirmed lease; malformed or foreign artifacts are never guessed or deleted.
-Cutover then repeats both proofs and holds the lease through reset and
-migration. Provider Runtime tmux servers, provider processes, completed output,
-and provider sessions are not signaled or restarted; only the exact confirmed
-OpenCode observer handover above may replace a sidecar. Any ambiguity or
-concurrent D16 owner refuses before mutation.
-
-With that proof held, D16 removes only the three exact legacy client paths,
-syncs the private state directory, then transactionally migrates host schema 12
-to 13. Removal and migration are restartable: absence of any retired client
-file is success, a partial removal is retried, and a failed host transaction
-leaves `host.sqlite` at schema 12. Observer-transition remains available while
-ordinary navigation stays blocked. No Start, Resume, Park, provider signal,
-Runtime rotation, provider-input action, utility-shell termination, or
-observer-review termination is part of the durable transition. The confirmed
-OpenCode observer handover is complete before this reset phase and never
-changes provider lifecycle.
-
-Downgrade after cutover is unsupported. A pre-D16 binary sees future host
-schema 13 and fails closed. D16-only Project IDs and label-source state are not
-reverse-synchronized. This is an intentional clean break, not a
-migration-preservation promise.
-
-The current-host display label is derived, not durable state. The operating-
-system hostname is used only when its trimmed value passes the bounded
-single-line, no-control-or-format-character, 64-scalar validator; otherwise
-the stable fallback is `host-` plus the first eight lowercase hexadecimal
-digits of `HostId`. Labels are rendered with bounded-width truncation and are
-never identity or command input.
-
-### D17 onboarding state boundary
-
-D17 migrates host schema 13 transactionally to schema 14. It removes only the
-obsolete `ProjectBrowserSettings` row and preserves Projects,
-ProjectLocations, Workstreams, Runtime generations, provider bindings,
-attention, integrations, and unfinished operations. This change requires no
-state wipe: the removed browser root has no launch, provider, filesystem, or
-recovery authority. As everywhere else in V1, an unsupported, malformed, or
-future schema fails closed rather than being guessed.
+Schema 15 stores the current onboarding journal directly. It contains no
+browser setting or migration-only metadata, and it never opens or transforms a
+schema-12 through schema-14 root. Unsupported, malformed, future, foreign, or
+mixed evidence fails closed before mutation.
 
 The provisional shell itself has no durable registry row. At lazy materialization
 the presentation marker owns one fresh opaque `slot_generation`, one opaque
@@ -2111,6 +1833,319 @@ starting | onboarding | idle | working | attention | stopped | unknown
 
 `unknown` is an observation boundary, not proof that a runtime stopped.
 
+### Current schema-15 consolidation boundary
+
+D18 is a behavior-preserving consolidation of the D17.1 product, not a new
+user workflow. Its purpose is to make the implemented architecture match the
+current contract after the D16 and D17 clean breaks: one current schema, one
+current startup path, one current presentation, and semantically named current
+modules and internal commands. The Shell-first Workstreams/Archived navigator,
+provider-native terminal ownership, brokered Codex/OpenCode launch, managed
+session lifecycle actions, and all recovery boundaries remain unchanged.
+
+D18 intentionally does not migrate, import, adopt, drain, or clean a D16 or
+D17 root. Schema 15 is the only accepted current host schema. An absent state
+root, or an exact current-user-owned private empty root, may be bootstrapped
+directly at schema 15; an exact schema-15 root may be opened or recovered
+through the current-format bootstrap protocol below.
+Schemas 12, 13, and 14, `client.sqlite` artifacts, D16 transition artifacts,
+legacy presentations, and any other retired state cause a typed refusal before
+mutation. Unsupported future, malformed, foreign-owned, replaced, or
+ambiguous evidence continues to fail closed.
+
+The refusal classifier may perform only bounded no-follow metadata reads of the
+selected root and its top-level names, plus a bounded raw read of the
+`host.sqlite` header needed to classify its SQLite magic, fixed WSNav
+application ID, and schema identity. Direct schema-15 bootstrap sets and
+checkpoints that exact application-ID/user-version pair into the main database
+file before publication, and no later current operation changes it, so classification does
+not need to open SQLite, recover a journal/WAL, read old tables, or inspect a
+legacy tmux/process topology. Only after the raw identity is exact schema 15 may
+the current validator open the database and hand current `run/` and
+`presentation/` namespaces to their own exact validators. A schema-12 through
+schema-14 root is refused from its schema identity alone; a presentation name
+beside it is not parsed as legacy evidence.
+
+The classifier must not read or import the retired client catalog, inspect old
+rows in order to adopt Workstreams or Runtimes, signal an old tmux server or
+provider process, remove an old file, or rewrite an old database. D18 does not
+contain a schema-14-to-15 migration, legacy presentation classifier, or
+compatibility launcher. Provider-owned native history remains available in the
+provider's ordinary native tooling outside WSNav's managed onboarding path;
+the provisional Shell continues to refuse resume/session arguments, and the
+old WSNav catalog and Runtime ownership are not carried into the new epoch.
+
+The accepted startup matrix is:
+
+| Root evidence | D18 result |
+| --- | --- |
+| State root absent, or exact private empty root | Create a direct schema-15 root through the current bootstrap protocol. |
+| Exact schema 15, ready current bootstrap metadata, exact current lock artifacts | Open normally. |
+| Exact, unambiguous interrupted current-format bootstrap | Resume only that bootstrap to a ready schema-15 root. |
+| Schema 12, 13, or 14; retired client catalog; D16 transition or legacy-shaped top-level artifact | Refuse from bounded metadata/schema identity without mutation and show bounded offboard/reset guidance. |
+| Future schema, malformed or missing identity, foreign ownership, replacement, or mixed evidence | Refuse without mutation; never guess, repair, adopt, or delete. |
+
+#### Direct schema-15 bootstrap
+
+Fresh creation from an absent or exact private empty root uses one
+authoritative schema-15 definition. It does not build schema 12 and apply
+schema-13/schema-14 fragments. The direct schema omits retired browser settings
+and uses semantic current names, including
+`onboarding_exec_targets` rather than a delivery-checkpoint-qualified table.
+One current schema constant and validator define the entire accepted durable
+shape. An exact fixed SQLite `application_id` plus `user_version = 15` is the
+raw main-file identity. The application ID is `0x57534e56` (ASCII `WSNV`);
+neither value is inferred from filenames or tables.
+
+A stable host-private `bootstrap.lock` is the sole cross-process authority for
+creation and current-format bootstrap recovery. Its bounded checksummed record
+contains a format version, exact current schema identity, HostId, bootstrap
+generation, canonical root device/inode, phase, and only the optional
+database/provisional-lock identities defined for that phase. It is opened
+without following links; is owned by the current user with mode `0600`; and is
+validated against the held root and lock path/device/inode before every effect.
+The exact inode remains stable after
+bootstrap rather than being unlinked or replaced. A phase update rewrites only
+that held inode, syncs it, and syncs the root before the next external effect;
+a torn, oversized, malformed, or uncertain update refuses. Actors take a
+nonblocking exclusive FD lock only while classifying, creating, or finishing
+the root, and never pass that descriptor to provider processes.
+
+Classification never creates or adopts `bootstrap.lock` in a non-empty root.
+For an absent root, D18 first creates and binds the exact private directory; for
+an exact private empty root, it binds the existing directory; only then may it
+create-new the initial lock. For a non-empty root, an exact current-format lock
+must already exist and be acquired before any schema-15 database read/open. A
+missing, busy, malformed, foreign, or replaced lock refuses without creating a
+substitute. A non-empty root without a current lock may receive only the raw
+header/top-level refusal classification above, never a bootstrap mutation.
+
+The current bootstrap graph is deliberately closed:
+
+| Durable phase | Exact allowed bootstrap evidence | Authorized next action or recovery |
+| --- | --- | --- |
+| `root_reserved` | Private root plus the exact held `bootstrap.lock`; no database candidate or provisional lock | Reserve one opaque staging-database name in the lock record. |
+| `database_create_reserved` | The same evidence plus the precommitted staging name, but no recorded staging inode | Create-new one private regular staging file. If a file is present after restart before its identity was durably recorded, creation is effect-unknown and the whole root is refused without cleanup. |
+| `database_owned` | The lock record binds the staging path/device/inode; `host.sqlite` and `provisional.lock` are absent | Initialize one transactionally complete direct schema-15 database using bootstrap-local rollback journaling. An exact empty owned staging inode may be initialized; a valid complete matching database with no staging sidecar may advance; partial, changed, malformed, or sidecar-bearing content refuses rather than being opened/recovered or rebuilt. |
+| `database_ready` | The exact staging database validates schema 15, HostId, bootstrap generation, and `provisional_pending`; the destination and every staging sidecar are absent | Sync/close the staging database, then rename that exact inode to `host.sqlite` and sync the root. Restart accepts the inode at either the staging or final name, never both. |
+| `provisional_pending` | Exact published `host.sqlite` with matching pending metadata; no provisional file, or one exact private file whose bounded contents match the precommitted HostId and lease generation | Create-new or reacquire that one stable provisional-lock candidate, record its device/inode transactionally, commit/sync database `ready` first, then advance/sync the bootstrap record. Restart may advance an exact database-ready/bootstrap-pending pair; the inverse pair is impossible and refuses. A mismatched or replacement file refuses. |
+| `ready` | Exact matching root, stable bootstrap lock, schema-15 database, and ready `provisional.lock`; no staging database | Open current state. Current SQLite sidecars and the `run/` and `presentation/` namespaces are delegated to their current owners; a transition/client/legacy-only top-level name remains refusal evidence. |
+
+Every phase transition durably precommits the identity or opaque name needed to
+classify its next effect. A crash after an effect but before its exact identity
+commit is deliberately effect-unknown and refuses; D18 never converts an
+unknown artifact into owned state merely because it has a plausible name or
+shape. Recovery mutates only an artifact already bound by the last durable
+phase and repeats all root/lock/path/inode/contents checks. There is no generic
+"repair fresh root" or partial cleanup command; an operator may move an
+unrecoverable never-used root aside as a whole and start again.
+
+The schema-15 database records the same HostId, bootstrap generation, and
+`provisional_pending | ready` phase. The lock record and database must agree
+before either can authorize progress. Direct creation uses an explicit
+rollback-journal completion/sync/close boundary with no staging sidecar before
+`host.sqlite` publication, ensuring the raw main-file schema identity used by
+the refusal classifier is authoritative.
+`transition.lock` is not a current artifact and no current code recognizes it
+as mutation authority.
+
+#### Explicit D17.1 destructive reset
+
+D18 is a clean state break, not a migration or rollback mechanism. The reset
+discards the WSNav catalog, attention/archive state, operation records,
+Runtime ownership, private tmux servers, and any retained terminal output.
+Codex and OpenCode native history remains provider-owned and is not deleted.
+D18 never reads, imports, restores, or adopts the discarded root.
+
+Before ordinary-state mutation, the exact D18 candidate passes repository and
+clean-host gates and its hash is recorded; installed parity is proved only
+after the installed file matches it. Separately authorized disposable Codex/
+OpenCode acceptance uses disposable state roots, repositories, provider homes,
+and private tmux sockets. It must pass before D18 release completion, but an
+operator who explicitly elects to discard the old WSNav state may execute the
+destructive reset while that isolated provider gate remains pending.
+
+The operator-controlled reset is deliberately short:
+
+1. Show the exact selected state root and installed executable, summarize the
+   owned Workstream/Runtime/observer inventory without provider content, and
+   require explicit confirmation that the WSNav state and private Runtime
+   output will be discarded.
+2. Keep the installed D17.1 executable and old root in place while closing the
+   exact owned presentation and stopping every exact WSNav-owned private
+   Runtime and observer process. Unknown or changed ownership is never
+   signalled or deleted; if owned-process absence cannot be established, reboot
+   and perform the reset before starting WSNav again.
+3. Run the installed D17.1 `remove-observer` flow while its schema-14 ownership
+   record still exists. An unchanged owned declaration is removed. A modified
+   or foreign declaration remains untouched and stops the reset. If exact
+   removal preserves provider-owned settings at the dedicated profile path,
+   move that complete settings-only file to an operator-owned inactive path;
+   D18 does not adopt it.
+4. Require no process executing the installed WSNav binary and no live exact
+   WSNav-owned private tmux server. This is an owned-process shutdown boundary,
+   not a claim that an unprivileged scan can prove zero arbitrary filesystem
+   holders.
+5. Atomically rename the exact private old root to a fresh sibling quarantine
+   path and sync the parent. The quarantine is discarded state and never
+   rollback or compatibility input. It may be deleted after D18 acceptance.
+   No copy, merge, partial move, schema edit, or recursive traversal is part of
+   the cutover.
+6. Install the already accepted D18 artifact, verify byte identity, and start
+   WSNav against the now-absent original root. It directly bootstraps schema 15.
+   Re-establish Codex observer readiness only through normal explicit consent
+   and native trust.
+
+There is no symmetric state rollback. Downgrading requires another explicit
+destructive reset and a fresh root for the selected older binary. A quarantined
+schema-14 or schema-15 root is operator-owned archival data only; no WSNav
+version may treat it as an import source.
+
+[Spike 0027](evidence/spikes/0027-d18-root-move-falsification.md) remains useful
+historical evidence for rejecting the stronger coherent-backup/online-rollback
+design. Its impossible zero-arbitrary-holder proof is not required by this
+destructive reset.
+
+#### Compatibility deletion and semantic structure
+
+D18 removes the inactive transition plane before moving current code. The
+deletion boundary includes:
+
+- schema-12/schema-13 creation, full historical schema fixtures, validators,
+  migrations, recovery, and schema-14 migration support. Minimal inert raw-
+  header samples generated only to prove non-mutating old-schema refusal remain
+  test evidence, not open/import fixtures;
+- the D16 cutover/startup orchestrator, client-catalog deletion, legacy
+  presentation classifier/drain/retirement, and observer handover paths;
+- D16 OpenCode observer standby/handover routes and journals;
+- short-Runtime-ID path parsing and all other retired path compatibility;
+- Codex observer-profile schema-1 upgrade compatibility; only the exact
+  current profile schema is accepted, while other records are foreign or
+  unsupported and remain untouched;
+- retired Projects-page/browser root, refresh, arbitrary registration, DTO,
+  error, schema, filesystem, and test surfaces, plus repository inspection used
+  only by that workflow. The deletion does not include the one private
+  onboarding transaction that creates or reuses the Git-discovered
+  Project/Location and atomically creates its promoted Workstream/Runtime graph,
+  nor contextual `n` reuse of an existing exact Location; and
+- stale aliases, public exports, error variants, fixtures, and test harnesses
+  whose only purpose is a retired checkpoint.
+
+After those deletions, active code must not use `d16` or `d17` as the semantic
+name of a module, function, type, error, hidden command, environment variable,
+artifact, or durable table. Current internal routes use role names such as
+`_navigator`, `_provider_attach`, `_provisional_shell`, and
+`_opencode_observer`; exact spellings may follow the CLI structure, but no
+checkpoint suffix is part of their contract. Provider protocol and marker
+format versions such as `wsnav-launch-claims-v1`, the schema number, and native
+provider version fingerprints remain versioned because they validate external
+or durable evidence; they are not compatibility shims. Historical documents
+and evidence retain their truthful D16/D17 names.
+
+Deletion precedes broad source movement so obsolete code cannot become the
+shape of the current modules. The resulting structure separates:
+
+- current schema definition/validation from bootstrap ownership and recovery;
+- registry transactions from onboarding journal and observer ownership;
+- read-only Project/Location projection from Git root discovery;
+- presentation ownership/topology from control, attachment, provisional-shell
+  lifecycle, and cleanup; and
+- provider-neutral lifecycle contracts from concrete Codex and OpenCode
+  adapters.
+
+The CLI remains a thin dispatcher, internal helpers receive only bounded typed
+claims, and public exports are narrowed to actual cross-module contracts.
+Module size is an outcome signal rather than an acceptance gate: D18 does not
+trade clear ownership for arbitrary line-count limits or speculative generic
+abstractions.
+
+The documentation authority follows the same current-only boundary. At D18
+closure, `design.md` retains the present product, architecture, invariants,
+current schema/bootstrap/recovery contracts, and only a concise checkpoint
+index. `roadmap.md` retains the active checkpoint, delivery order, exit gates,
+and concise completed-status index. Detailed D0-D17 transition narratives,
+version-bound test counts, and release procedures move out of present-tense
+authority into dated evidence records when they are not already recorded
+there. Historical evidence is preserved verbatim or with an explicit
+provenance-preserving move; it is never rewritten as current behavior merely to
+shorten the authority documents. `docs/README.md` and the installed CLI remain
+the concise current operator entrypoints.
+
+#### Retained invariants and non-goals
+
+D18 retains every current safety and product invariant: provider output and
+completed results stay in the native pane; management traffic never enters
+that pane; every Runtime uses its own private tmux server; bounded metadata is
+the only persisted provider information; hooks/process/tmux observations are
+evidence rather than mutation authority; and ambiguous identity, ownership,
+revision, or effects fail closed. Provisional-shell lease/capability recovery,
+post-commit provider-effect fencing, direct-CLI parity, exact lifecycle
+actions, and current presentation cleanup remain first-class current behavior,
+not transition code to delete.
+
+D18 adds no provider, UI page, session adoption, hard deletion, worktree or
+branch management, transcript feature, daemon, automatic observer mutation, or
+compatibility with the frozen Python prototype. It does not rename provider-
+owned sessions, move native history, or infer a new Workstream from an
+unmanaged provider process.
+
+#### D18 acceptance contract
+
+D18 is complete only when one coherent current-only acceptance matrix proves:
+
+- absent/private-empty-root direct creation and exact schema-15 reopen/recovery,
+  including every `bootstrap.lock` phase and failure injection around each
+  reserve, create, identity commit, transaction, checkpoint, sync, rename,
+  provisional-lock, ready, and reopen boundary. Tests prove the exact allowed
+  artifacts and mutation authority for every resulting phase; effect-unknown
+  gaps refuse without cleanup;
+- byte/inode/hash evidence that schemas 12-14, client-catalog artifacts,
+  `transition.lock`, legacy-shaped top-level artifacts, mixed roots, malformed
+  roots, and future roots are refused without mutation, SQLite open/recovery,
+  or legacy presentation/process inspection;
+- the fresh schema contains no browser-setting table, checkpoint-qualified
+  onboarding table, or migration-only column/metadata, and its checkpointed
+  fixed application-ID/schema-version pair is exact;
+- only full UUID Runtime paths are accepted and legacy short paths are refused
+  without cleanup or adoption;
+- exact current Codex profile ownership is accepted, profile schema 1 is not
+  upgraded, and a post-reset profile without current ownership is treated as
+  foreign until the explicit setup/removal contract resolves it. Reset
+  fixtures cover both complete profile removal and an explicitly quarantined
+  provider-settings-only remainder without automatic adoption;
+- both providers pass the disposable Shell promotion, attach, `n`, Fork,
+  Park/Resume, archive/restore, observer/recovery, presentation restart, and
+  complete-cleanup matrix without prompts, transcripts, or ordinary user
+  state;
+- active current implementation identifiers, CLI help, internal routes,
+  artifacts, and schemas no longer expose D16/D17 compatibility names.
+  Explicit old-schema refusal tests, D17.1 release tooling, and historical
+  evidence retain truthful historical/schema names but cannot compile a
+  compatibility entrypoint;
+- the current test gate no longer executes a historical D12 presentation
+  harness or a checkpoint-named D17 source check, and instead exercises the
+  current source/CLI/presentation contract;
+- the authoritative design and roadmap contain the current contract and
+  concise checkpoint/status indexes rather than duplicated D0-D17 transition
+  narratives; every removed historical detail remains reachable as dated
+  evidence with preserved provenance;
+- `scripts/check`, the declared MSRV, dependency policy, packaging, and clean
+  Ubuntu validation pass for the exact artifact; and
+- only after separate operator authorization, the exact candidate passes
+  disposable live Codex/OpenCode acceptance with complete cleanup; the
+  installed D17.1 hash, exact owned-process shutdown, observer removal, atomic
+  sibling quarantine as discarded state, exact D18 install, fresh ordinary-
+  root bootstrap/trust, installed checksum parity, and separated disposable
+  post-install cleanup are each recorded. Explicit authorization to discard the
+  old epoch permits reset/install before the isolated provider gate, but D18 is
+  not complete until every gate passes.
+
+Deletion is expected to reduce raw source and test counts, so D18 has no
+minimum test-count or line-count gate. Coverage of the retained failure,
+ownership, lifecycle, and privacy matrix is the gate. A contradiction in any
+retained invariant falsifies the consolidation; it does not justify weakening
+the product boundary to finish the refactor.
+
 ## Git project-root policy
 
 At presentation creation, WSNav captures the invocation cwd as a
@@ -2135,7 +2170,7 @@ arbitrary cwd history in the host registry.
 
 The returned top-level path is the registered `ProjectLocation` and provider
 launch cwd. It is the root of the worktree containing the shell cwd, including
-a linked worktree's own root; D17 never normalizes it to the repository's main
+a linked worktree's own root; WSNav never normalizes it to the repository's main
 or primary worktree. Two linked worktrees may therefore be distinct Locations,
 while optional future read-only common-directory evidence may improve their
 display grouping without changing action authority.
@@ -2149,7 +2184,7 @@ associates locations owned by separate wsnav hosts and never authorizes a
 filesystem, Git, provider, or Runtime action. Repositories without a safe
 origin identity remain valid and receive a host-local Project group.
 
-There is no passive or user-triggered metadata refresh in the ordinary D17
+There is no passive or user-triggered metadata refresh in the current
 product. Snapshot, redraw, attachment, switching, resume, and provider cwd
 changes perform no Git subprocess and never retarget a Workstream. Same-location
 `n`, Resume, and Fork use the exact stored root. Later positive grouping
@@ -2463,14 +2498,14 @@ remain hidden. A recovered destination opens directly in the native provider
 pane.
 
 Projects remain durable presentation groups behind Workstream and Archived
-rows, but D17 provides no Projects page or Project-level action surface.
+rows, but WSNav provides no Projects page or Project-level action surface.
 Registration resolves the provisional shell cwd locally for Git inspection;
 no path is written into provider panes or public Workstream snapshots.
 Credential-free origin matching may preserve same-host grouping, but manual
 refresh, cross-host merge/split, permanent Project deletion, and repository
 cleanup remain outside the product.
 
-There is no Project-level hide, forget, remove, or `x` action in D16. Workstream
+There is no Project-level hide, forget, remove, or `x` action. Workstream
 archive/restore is the one reversible visibility mechanism, so an archived
 Workstream never becomes unreachable from the ordinary TUI behind a second
 hidden layer. Project and ProjectLocation deletion, repository cleanup, and Git
@@ -2512,8 +2547,8 @@ while using the same host/runtime contracts.
 | Reconciler proves provider exec | Under the exact operation/revision, RuntimeId/generation and exact `RuntimePaths` fields (directory, socket, configuration, and session), tmux pane/session, PID/birth/PGID/session, and expected executable proof, atomically commit `provider_exec_proven` and activate ordinary attachment/action authority; Codex may remain `starting` and unbound until `SessionStart` |
 | OpenCode has known blank-session binding but final TUI exec fails | Retain the same Runtime, Workstream, and binding for exact recovery/resume; never roll them back or issue a second POST. A possible POST effect remains `recovery-required` |
 | `provisional.lock` is missing, malformed, symlinked, foreign, replaced, locked, or busy in `ready` | Fail closed with bounded onboarding guidance; never create a second lock, proceed unlocked, unlink/recreate the stable artifact, or mutate the marker/journal |
-| Schema-14 provisional lease is `pending` | An absent artifact is created with create-new/no-follow, bounded file contents are written, the file is fsynced, then the containing state-root directory is fsynced before metadata is finalized `ready` with expected device/inode; an exact file from the crash window may be validated/locked and finalized. Foreign or mismatched evidence fails closed |
-| `provisional.lock` holder crashes or the host restarts | The kernel lock releases without changing the mode-`0600` file; `pending` retries installation or finalization, while `ready` reacquires only the same expected artifact and reconciles marker/journal under its `lease_generation` |
+| Schema-15 bootstrap reaches `provisional_pending` | Create-new or reacquire only the precommitted private provisional inode, commit/sync database `ready`, then advance/sync `bootstrap.lock`; mismatched or replacement evidence fails closed |
+| `provisional.lock` holder crashes or the host restarts | The kernel lock releases without changing the mode-`0600` file; a ready root reacquires only the same database- and bootstrap-bound inode and reconciles marker/journal under its lease generation |
 | Singleton marker/journal/path/process evidence is missing, changed, multiple, unknown, or ambiguous | Block all fresh materialization and leave every artifact untouched; do not evade ambiguity with a new UUID or adopt/delete an unknown `run/runtime-*` artifact |
 | Stale onboarding rollback races fresh-card selection/materialization | Reconcile only the old operation, Runtime, and `slot_generation`; leave a newer marker/card unchanged and derive at most one unmaterialized singleton card |
 | Ambiguous presentation ownership or loss | Leave every artifact untouched, fail closed with bounded unavailable guidance, and block a duplicate provisional shell until exact ownership is resolved; preserve every managed Runtime |
@@ -2538,12 +2573,6 @@ while using the same host/runtime contracts.
 | Provider changes directory or creates, enters, or removes a worktree | Leave Git and cwd state entirely to the provider or user; keep the Workstream pinned to its launch-time ProjectLocation and perform no passive Git inspection |
 | Host registry identity or generation evidence is ambiguous | Reject the affected mutation and require explicit local diagnosis or recovery |
 | Host database is absent beside any state-root artifact | Return typed `state recovery required`; never mint a HostIdentity, adopt or signal a Runtime, remove a presentation, or clean an unknown artifact |
-| A pre-D16 presentation/controller exists at cutover | Before confirmation, allow only an exact no-state-open drain attachment; after confirmation and the transition lease, retire one verified detached ordinary presentation, but refuse ambiguous, foreign, attached, utility, or observer-review state before durable mutation |
-| Confirmed D16 reset is interrupted after client-file removal | Retry exact cleanup and the transactional schema 12-to-13 migration; never infer rollback or mutate provider lifecycle |
-| A D16 observer meets a concurrent host writer | Retry only SQLite `BUSY`/`LOCKED` within the reserved database deadline; if an exact authorized event still cannot commit, write the bounded generation-scoped degraded marker so snapshots show `unknown` and observer-dependent actions remain unavailable |
-| D16 is installed while a schema-12 Codex Runtime remains live | New hooks use only the observer-transition handle so accepted lifecycle and attention evidence continues before confirmation; keep every action and Navigator open behind cutover-required |
-| A pre-D16 OpenCode observer remains live at cutover | Before reset, journal exact identities, establish a mutation-inert D16 standby stream, freeze the proven old helper, compare-and-swap the observer handle, activate the standby, and terminate only the frozen old sidecar |
-| OpenCode observer handover is interrupted | Under a newly confirmed cutover and the transition lease, replay only a valid exact journal phase; restore the old observer before the swap or complete new authority and old-helper cleanup after it, otherwise signal nothing and require transition recovery |
 | `wsnav-observer` is absent or awaiting trust | Preserve existing Runtime attachment. Before a provisional Codex broker reservation, ask consent in the shell and complete native review; for a managed action capture the exact pending intent. Continue either path only after exact readiness and revision revalidation |
 | `wsnav-observer` is foreign, modified, disabled, or ambiguous | Preserve it and existing Runtime attachment; refuse the observer-dependent request with exact contextual diagnosis and retry guidance |
 | Profile update or exceptional removal is requested while a managed Runtime is live | Refuse the integration change until all WSNav-managed Codex Runtimes on that host are parked or stopped; do not block attachment |
@@ -2619,9 +2648,9 @@ creation effect before a destination Workstream can safely exist.
   provider output is persisted. Secret-bearing argv cannot enter this path.
 - The stable host-private `provisional.lock` serializes provisional materialization,
   close/loss cleanup, broker preparation, helper consume, singleton reconciliation,
-  and marker cleanup; it is distinct from D16's `transition.lock`, operational
-  rather than presentation-private state, and contains only its bounded format,
-  HostId, and `lease_generation`. Every actor opens it no-follow/CLOEXEC,
+  and marker cleanup. It is bootstrap-bound operational rather than
+  presentation-private state and contains only its bounded format, HostId, and
+  lease generation. Every actor opens it no-follow/CLOEXEC,
   retains one nonblocking exclusive kernel-lock FD, and revalidates canonical
   root, pathname, and FD device/inode identity before mutation. A prepared
   reservation alone does not revoke cleanup; before the successful helper
@@ -2660,907 +2689,108 @@ creation effect before a destination Workstream can safely exist.
   every later Git decision stays inside the native provider session or
   ordinary user tooling.
 
-## Proposed Rust structure
+## Current Rust structure
 
 ```text
 src/
-├── main.rs               CLI entrypoint
-├── app/
-│   └── local.rs          typed in-process snapshot/apply/attach facade
-├── domain/               pure IDs, entities, statuses, invariants
-├── state/                SQLite schema, revisions, and onboarding/Fork recovery
-├── runtime/
-│   ├── tmux.rs           dedicated server/session ownership and probes
-│   └── attach.rs         safe host-local native attachment helpers
+├── main.rs, app/             thin CLI parsing and dispatch
+├── domain/                  typed IDs, lifecycle, operations, invariants
+├── state/
+│   ├── current/             schema/bootstrap, registry, onboarding,
+│   │                        observer, and Project/Location projection
+│   └── ...                  retained compound/lifecycle/runtime primitives
+├── navigator/
+│   ├── view.rs              Shell-first Workstreams/Archived Ratatui model
+│   └── controller.rs        action, attachment, review, reconciliation loop
+├── presentation/
+│   ├── ownership.rs         exact private presentation identity
+│   ├── topology.rs          two-pane role and geometry validation
+│   ├── control.rs           bounded tmux control
+│   ├── attachment.rs        shell/provider surface attachment
+│   ├── provisional.rs       marker-backed provisional lifecycle
+│   └── cleanup.rs           exact presentation teardown
 ├── provider/
-│   ├── mod.rs            capability-driven provider interface
-│   ├── codex/            native runtime, profile, App Server, hooks
-│   └── opencode/         native runtime, HTTP metadata, SSE observer
-├── repository.rs         read-only host-local project-root discovery
-├── tui/                  minimal navigator state, rendering, input, mouse
-└── internal/             hook/observer and launch-barrier entrypoints only
+│   ├── lifecycle.rs         narrow provider-neutral observation contract
+│   ├── grammar.rs           closed fresh native-TUI invocation grammar
+│   ├── codex/               profile, hooks, and ephemeral App Server
+│   └── opencode/            Runtime HTTP/SSE and observer guardian
+├── account_shell.rs         controlled Bash/Zsh account-shell bootstrap
+├── onboarding_broker.rs    promotion preparation and capability issuance
+├── onboarding_helper.rs    exact capability consume and provider exec
+├── provider_reconcile.rs   post-effect provider-specific reconciliation
+├── provisional.rs          presentation marker and singleton recovery
+├── runtime/                private tmux/process ownership
+├── repository.rs           bounded promotion-time Git-root discovery
+└── snapshot.rs             bounded current navigator projection
 ```
 
-Generic host clients, local/remote endpoints, framed protocols, control ABIs,
-SSH adapters, release handshakes, and cross-host catalog plumbing are not
-target modules. D16 removes them with their compatibility dimensions; it must
-not preserve dead surfaces merely to keep the retired protocol working.
+Generic host clients, remote endpoints, framed control protocols, SSH
+adapters, client catalogs, transition openers, and checkpoint-qualified
+modules are absent. The provider-neutral lifecycle types carry only the
+bounded observations shared by the concrete adapters; they do not form a
+speculative provider framework.
+
+## Validation and acceptance contract
+
+Repository acceptance combines:
+
+- direct schema-15 bootstrap failure injection and raw old/future/malformed
+  refusal evidence;
+- typed lifecycle, onboarding, observer, operation, and revision tests;
+- disposable private-tmux presentation/topology/cleanup tests;
+- provider grammar, bounded I/O, process identity, and exact recovery tests;
+- generated public-help and semantic source/module inventory;
+- formatting, strict Clippy, packaging, dependency license/advisory/source
+  policy, and staged/unstaged diff checks; and
+- the declared MSRV and equivalent clean Ubuntu jobs for an exact committed
+  candidate.
+
+Tests use disposable state roots, repositories, provider homes, and private
+tmux sockets. Live Codex/OpenCode acceptance, observer trust, installation,
+and ordinary-root destructive reset require separate operator authorization.
+Passing evidence is sanitized to versions, checksums, closed assertion
+categories, timings, and cleanup relationships; it contains no native IDs,
+paths, prompts, results, pane capture, credentials, transcript, or raw
+provider payload.
+
+A narrow test passing does not prove a broader gate. D18 completion requires
+the coherent matrix in the active roadmap. The reset establishes absence for
+exact WSNav-owned processes and private servers before quarantining discarded
+state; it does not claim authority over arbitrary filesystem holders.
+
+
+## Checkpoint index
+
+Delivery history does not define current behavior. The active checkpoint and
+exit gates live in [`roadmap.md`](roadmap.md); the complete pre-slimming
+roadmap and version-specific decisions remain in
+[dated evidence](roadmap-through-d18-design.md).
+
+| Checkpoint family | Durable outcome | Evidence |
+| --- | --- | --- |
+| D0-D7 | Core state, native Codex Runtime, Navigator, recovery, and operator beta | [Acceptance index](evidence/README.md#acceptance-records) |
+| D8 | Concrete Codex/OpenCode provider contract | [D8.1](evidence/acceptance/d8.1-multi-provider.md), [D8.2](evidence/acceptance/d8.2-opencode-fork-recovery.md) |
+| D9-D15 | Reliability, presentation, interaction, and terminal refinements | [Archived roadmap](roadmap-through-d18-design.md) |
+| D16 | Host-local clean break | [D16 acceptance](evidence/acceptance/d16-host-local.md) |
+| D17-D17.1 | Shell-first onboarding and correctness closure | [D17](evidence/acceptance/d17-shell-first.md), [D17.1](evidence/acceptance/d17.1-correctness-closure.md) |
+| D18 | Current-only schema-15 consolidation | [Completed roadmap](roadmap.md#completed-checkpoint-d18-current-only-consolidation) |
+
+## Current concrete provider boundary
+
+`ProviderKind` is typed and persisted on every Workstream, Runtime, provider
+binding, and operation that needs it. Codex and OpenCode remain concrete
+adapters, not interchangeable protocol implementations. The provisional
+shell's native `codex` or `opencode` command selects the provider for a new
+Location; contextual `n` and Fork inherit the selected Workstream's exact
+provider and Location. There is no provider picker, default-provider setting,
+or fallback from one provider to another.
+
+Codex lifecycle identity comes from bounded passive hooks plus exact Runtime
+and App Server evidence. OpenCode uses its exact loopback Runtime handle and
+one generation-bound observer sidecar. Neither adapter persists prompts,
+responses, terminal content, raw payloads, or transcripts, and neither
+observer is mutation authority.
 
-The provider interface remains small and capability-based, with concrete Codex
-and OpenCode implementations. No speculative Claude abstractions or generic
-lowest-common-denominator behavior should shape either implementation.
-
-## Validation and acceptance evidence
-
-Historical spikes validate transport, native presentation, the shell-only
-per-Runtime tmux topology, and the automated local two-pane Codex presentation
-path. Terminal presentation is a settled design prerequisite: Spike 0005
-proves the selected retained-TMUX configuration, direct native attachment,
-keyboard submission, image attachment request, resize/focus, reconnect, and
-result-tip preservation. The frozen Python Phase 7F trial independently
-observed direct native-pane interaction, terminal color, and click-to-select
-mouse support in an equivalent private-tmux layout. That implementation is
-behavioral evidence only; it is not a Rust dependency or compatibility
-constraint.
-
-The D3 and later SSH acceptance records remain truthful historical evidence of
-the former WSNav-managed cross-host behavior. They are not current-contract
-acceptance. D16 replaces that path with host-local acceptance on the machine
-where wsnav runs; ordinary SSH used to enter another host is operator-created
-composition and is not a WSNav adapter or managed transport.
-
-Spikes 0006-0008 settled the remaining provider-facing prerequisites:
-
-- the selected observer profile layers over a disabled base, uses native trust,
-  leaves ordinary launches unobserved, drains large unmanaged input, and rejects
-  missing, stale, or forged authority;
-- one-shot stdio helpers can read and rename an exact managed thread without
-  disturbing its native TUI, while shared App Server transports and
-  `codex --remote` are excluded;
-- native and App Server rename converge on `thread.name`, missing/unavailable
-  fallback resolution is complete, and the installed rename contract has no
-  compare-and-set field; and
-- a running native source can be forked exactly through its last settled turn,
-  recovered after an unread response without retry, and resumed in an
-  same registered project root while both native Workstreams diverge.
-
-[Spike 0019](evidence/spikes/0019-brokered-onboarding-shell.md) validates only
-a single-phase controlled shell function that obtains broker authority before
-`exec` in a synthetic harness. [Spike
-0021](evidence/spikes/0021-d17-two-phase-handshake.md) then validates the
-narrow synthetic two-phase prepare-token-helper chain: direct prepare child,
-verifier-backed one-shot consume, bound-claim/replay/expiry refusal,
-shell PID/birth/process-group preservation, and lease-FD noninheritance across
-Bash/Zsh and both provider routes. Spikes 0022-0024 separately validate
-account-shell startup, the isolated schema-14 lock lifecycle, and pinned
-Codex/OpenCode fresh-TUI grammar; cross-actor integration and crash/cancel
-recovery remain D17.0 gates. A separate observer-ancestry revalidation passed
-on Codex `0.150.0`; real brokered Codex terminal/output behavior remains a D17
-acceptance gate. [Spike
-0020](evidence/spikes/0020-opencode-1.18.23-revalidation.md) reruns the bounded
-OpenCode fresh-session/provider lifecycle contract on `1.18.23`; it supports
-the provider adapter assumptions but is not, by itself, proof of the D17 broker
-implementation. [Spike
-0025](evidence/spikes/0025-d17-provisional-ownership.md) validates the
-serialized marker-backed ownership winner model and action fence, while leaving
-the concurrent state/journal/provider implementation as a D17.0 gate. Bash and
-Zsh controlled-function acceptance remains an exit gate for D17.
-[Spike 0026](evidence/spikes/0026-d17-provider-effect-journal.md) separately
-validates the synthetic provider-effect journal ordering, including the
-OpenCode known-binding versus ambiguous-POST recovery split; real provider and
-state integration remain implementation gates.
-
-The implemented checkpoints and their acceptance records corroborate the
-following behavior without widening the product:
-
-1. **Integration lifecycle:** another selected named profile is rejected
-   clearly, disabled-hook policy is visible, malformed/racing/unavailable hook
-   input remains fail-open to Codex, and exact update/removal preserves
-   unrelated state.
-2. **Status transactions and native transitions:** accepted startup/resume
-   hooks and the separately proven native `/clear` transition update binding,
-   settled-turn, and sticky attention atomically. Native `/new` is unsupported
-   in a managed Runtime because it lacks an exact changed-binding claim;
-   `/fork` and compact remain Codex-owned workflow. Missed events and races
-   fail closed.
-3. **Cold recovery:** loss of an exact private runtime followed by
-   `codex -C <project-root> resume <session-id>` restores the same native history
-   and creates one new runtime generation.
-4. **Project-root preservation:** brokered onboarding detects the containing
-   Git worktree root exactly once, and independent, resumed, and forked
-   Workstreams launch at their stored root. WSNav performs no Git lifecycle
-   mutation, normalizes no linked worktree to a primary checkout, and never
-   retargets a Workstream from later provider cwd changes.
-5. **Host-local operation:** the typed in-process application facade returns
-   bounded semantic results to navigator and public CLI, tolerates local
-   presentation loss, supports multiple same-user tmux attachments, and never
-   mutates an ordinary tmux server. Generic host clients, local endpoints,
-   framed JSON, and control ABIs have no active caller or compiled surface.
-6. **Composed-host acceptance:** run separate host-local wsnav instances on a
-   local machine and on a machine entered through ordinary operator SSH;
-   exercise each host's start, switch, fork, attention, reconnect, and runtime
-   recovery independently without a WSNav cross-host control path.
-7. **Clean-break state cutover:** detect schema 12 before current-state or
-   presentation open, confirm in the launcher, exercise exact legacy
-   presentation drain/refusal/retirement cases under the transition lease,
-   remove only the three exact client files, and migrate host schema 12 to 13
-   without reading client state or changing a Runtime/provider lifecycle.
-   Prove fresh creation accepts only an absent root or the exact private,
-   unlocked transition-lease artifact and returns state-recovery-required for
-   every database, Runtime, presentation, locked/malformed lease, and unknown
-   artifact. Interruption is retryable; downgrade without a complete external
-   state-root backup is unsupported. Prove schema 13 preserves the typed
-   Project-browser setting, Workstream provider/activity fields, independent-
-   creation requests, OpenCode handles, and all other enumerated host rows;
-   schema 0 through 11 and malformed or future state fail closed without an
-   incremental production migration path.
-8. **D16 host-local presentation evidence:** preserve deterministic same-host origin-based
-   Project grouping, exercise merge/update/split/orphan behavior, and prove
-   Project labels remain bound to their stable source across joins and merges,
-   update only from that source, and select the lowest remaining LocationId
-   only when the exact source leaves. Prove only the explicit revision-checked
-   Projects action reinspects Git, remove Project hide/forget/`x`, retain
-   Workstream archive/restore as the only visibility mechanism. Prove the only
-   ordinary pages are Project-grouped Workstreams, Projects, and Project-
-   grouped Archived; Recent, `ViewMode`, Hosts, and remote selectors are absent.
-   Verify an exact Projects Location can start a Workstream for a dormant
-   Project, empty active state routes to existing Location selection before
-   registration, restore returns selected-but-unstarted to Workstreams, and the
-   derived hostname/HostId display has no persistence or action authority.
-9. **Live-observer continuity:** replace the installed executable while an
-   exact schema-12 provider Runtime remains live and accept lifecycle/attention
-   evidence before confirmation through observer-transition. Hold a competing
-   writer lock to prove a D16 Codex hook retries `BUSY`/`LOCKED` within its
-   750-millisecond database reserve and that migration either commits within
-   its shorter 500-millisecond writer budget or rolls back at schema 12. Prove
-   an exact event that cannot commit creates only the bounded generation-scoped
-   degraded marker, renders `unknown`, blocks observer-dependent actions, and
-   emits no provider-pane output; malformed, unmanaged, or raw event data never
-   enters that marker. Race another exact event across schema 13 migration and
-   prove it commits wholly before or after, or leaves that explicit degraded
-   evidence, without binding rotation. For multiple pre-D16
-   OpenCode Runtimes, prove deterministic handover order, standby SSE readiness
-   and bounded parsed buffering without mutation authority, durable exact
-   journal phases, old-helper freeze before compare-and-swap, activation only
-   from the assigned handle, idempotent status and exact settled-message
-   deduplication, and exact old-PID/birth termination. Inject a process exit or
-   launcher interruption at every journal phase and prove exact restore or
-   completion; malformed or changed evidence signals nothing, and inability to
-   establish every replacement refuses before reset. The provider process,
-   terminal, Runtime generation, native session, and completed output remain
-   unchanged.
-10. **Contextual Codex readiness:** navigator startup and unrelated provider
-    use are read-only and non-blocking. Prove explicit consent precedes every
-    exact owned-profile creation/update; decline mutates nothing; native review
-    never grants trust; only exact readiness plus captured-revision
-    revalidation resumes the pending intent; and incomplete, stale, foreign,
-    modified, disabled, ambiguous, or live-Runtime-blocked cases fail closed
-    without disrupting existing attachment. No ordinary setup/settings page or
-    public setup/update command remains, while exceptional removal preserves
-    any state it cannot prove it owns exactly.
-11. **D17 shell-first onboarding:** first falsify or validate the two-phase
-    prepare-token-helper handshake and closed provider grammar with disposable
-    Bash/Zsh evidence. Exercise lazy materialization of one marker-backed
-    candidate RuntimeId using the final full-UUID `RuntimePaths` fields
-    (directory, socket, configuration, and session), exact promotion adoption
-    without rename/rehome/replacement, candidate collision/foreign-artifact
-    refusal, and exclusion from ordinary registry inventory, probe, park,
-    remove, and recovery paths until durable adoption. Exercise the serialized
-    stable host-private `provisional.lock` across materialization, close/loss,
-    prepare, issuance, helper consume, singleton reconciliation, and marker
-    cleanup. Prove the schema/HostId cutover commits schema-14 ownership and
-    `pending` lease metadata before lock creation/recognition, that schema-13
-    code/path does neither, and that pending-before-file, file-before-ready,
-    ready-steady-state, and crash/restart windows behave deterministically.
-    A crash after the database commit but before file creation retries safely;
-    a pre-schema-14 lock artifact is unexpected/ambiguous and remains untouched
-    rather than adopted or deleted; no cross-store atomicity is assumed. Then
-    prove schema-14 fresh-root recognition, create-new/no-follow, mode-`0600`
-    ownership, valid unlocked-leftover reuse, root/path/inode validation,
-    ready missing/replacement/device-inode mismatch refusal, holder crash/restart,
-    busy timeout, symlink/replacement and
-    unlink/recreate refusal, and CLOEXEC noninheritance. Race close/loss against
-    prepare and token issuance, helper consumption, OpenCode preparation and
-    `POST /session`, provider `exec`, snapshot/attachment, Park/Resume/Fork,
-    contextual `n`, archive/Rename/recovery/start retry,
-    helper exit, exec error, exec proof, immediate provider exit, and restart;
-    prove one deterministic winner, no managed kill, helper adoption,
-    premature signal/action, stuck operation, blind rollback, duplicate
-    ownership, duplicate shell, or second POST.
-    Exercise marker deletion with live and dead candidates, multiple or unknown
-    `run/runtime-*` artifacts, bounded namespace overflow, restart, and stale
-    rollback racing fresh-card selection/materialization. Race two presentations
-    selecting/materializing at once: the shared host lease permits at most one
-    unregistered candidate server, the other presentation recognizes the valid
-    marker/artifact as busy/owned (not unknown or adoptable), keeps its derived
-    card visible but unavailable, and creates no second server. After promotion
-    or conclusive cleanup, only a fresh slot generation may materialize there.
-    Prove the
-    revision/`slot_generation`-guarded reconciler is idempotent with
-    outcome-specific counts: ambiguous or unknown evidence leaves every
-    artifact untouched, blocks new materialization, and creates no new
-    provisional server or marker (the derived singleton card may remain
-    unavailable); conclusive clean/pre-effect rollback creates no duplicate
-    and leaves one derived unmaterialized card; successful ownership leaves the
-    adopted Runtime server plus one unmaterialized card; and a clean
-    pre-materialization state has zero provisional servers. Never normalize
-    unknown artifacts to a count of one or reset a newer marker. Prove
-    `runtime_owned_launching`, each
-    provider preparation/external-effect phase, `provider_exec_started`, exact
-    exec error, full exec proof, immediate provider exit, and restart keep
-    ordinary attachment/actions to that Runtime fenced until proof or terminal
-    reconciliation, while selection/materialization of the separate fresh
-    singleton remains lease-guarded and grants it no authority over the
-    unproven Runtime. Prove known-absent plus no-effect guarded rollback ends
-    onboarding, known-absent plus OpenCode binding ends it in stopped/recovery
-    with only binding-preserving Resume/recovery or Park, and no operation stays
-    fenced indefinitely or gains action authority directly from exec-error
-    evidence.
-    Exercise issuance-to-helper cancellation/crash, replay, expiry, duplicate
-    helper, and every request/operation, presentation/slot, provider,
-    candidate/path, cwd/root/Location, Runtime-generation, revision,
-    process-identity, and argv-digest mismatch before provider effect. Then
-    prove ownership—not provider success—controls card/server state: binding
-    may be absent, possible OpenCode effects remain visibly recovery-required
-    on the same Runtime-owned server, and recovery alone handles conclusive
-    pre-effect rollback after the exact helper commit. Prove one lazy provisional shell
-    survives normal detach/reattach and Workstream switching within its
-    presentation, captures a validated invocation seed cwd, starts every clean
-    shell there, preserves a live shell's actual cwd, and never falls back or
-    persists cwd history. Prove Bash/Zsh interactive non-login wrappers under
-    original `HOME`/Zsh `ZDOTDIR` match ordinary non-login baseline matrices
-    (system/user startup order, environment, options, aliases, functions,
-    prompt readiness), reproduce the ordinary non-login interactive startup
-    graph exactly once, and remove conflicting provider definitions. The
-    launcher rejects login mode before startup because Bash login mode ignores a
-    supplied `--rcfile`; a later nested login shell is unmanaged. The wrappers
-    fail closed on abort, replacement, or ambiguity.
-    Prove Git-root detection keeps linked-worktree roots exact, non-Git and
-    conflicting arguments fail before effects, shell exit and conclusive launch
-    failure leave no durable residue, post-effect ambiguity stays visibly
-    recoverable, ambiguous ownership leaves evidence untouched and blocks
-    duplicates, confirmed close/loss never targets managed Runtimes, the
-    promoted card remains selected while the UI derives a fresh unmaterialized
-    singleton card, and bypassed launches are never adopted. Prove Workstreams and
-    Archived are the only pages, contextual `n` uses the selected Workstream's
-    provider and exact Location, schema 13 migrates to 14 without a state wipe,
-    and every D12-D16 Runtime/output/privacy invariant remains green.
-
-Passing fixtures contain only provider/version fingerprints, assertion
-booleans, event relationships, timings, and cleanup proof. Assisted diagnostics
-cannot become passing fixtures.
-
-The in-process facade returns one deterministic host-local view while exposing
-pages of at most 128 retained rows; each bounded SQLite query may read one
-additional sentinel row to signal continuation. Complete Navigator aggregation
-is process-local, with ordered base scans held under a stable read snapshot
-before current binding and lifecycle hydration; it does not restore transport
-replay, public page keys, or page navigation. Retained Workstreams, operations,
-onboarding journals, and Runtime inventory are not limited to the first
-128-row page, and terminal journal rows are never compacted merely to fit a
-page. Numeric cursor overflow remains an explicit typed refusal.
-
-## V1 delivery checkpoints
-
-The checkpoint sequence and current implementation status are maintained in the
-[V1 roadmap](roadmap.md). The summaries below define the architectural boundary
-of each checkpoint.
-
-The D0-D15 summaries below preserve the implementation and acceptance evidence
-that was true when each checkpoint completed. D3 and later references to
-WSNav-managed SSH, remote hosts, cross-host grouping, or combined local/remote
-acceptance are historical surface descriptions, not current requirements;
-D16 retires those surfaces in favor of host-local wsnav instances composed by
-ordinary operator SSH.
-
-### D0 — Contract kernel
-
-- Domain types, IDs, statuses, invariants, and errors.
-- Fresh SQLite state with migrations only from V1 development schemas.
-- Start/Fork phase recovery, request deduplication, and failure-injection tests.
-- Versioned host protocol types.
-
-### D1 — Local Codex runtime
-
-- One private tmux server, session, window, and pane per live local Runtime.
-- Ephemeral App Server client for exact thread-name reads and writes.
-- Explicit `wsnav-observer` setup, ownership, native trust review, doctor, and
-  exact removal contracts.
-- Scoped observer hook plus normal user and trusted-project configuration
-  preservation.
-- Local project location, external initial project registration, start, attach, status,
-  tip naming, attention, park, and exact resume.
-- No TUI requirement yet; CLI acceptance first.
-
-### D2 — Minimal navigator
-
-- Dedicated local presentation tmux session.
-- Ratatui navigator pane plus directly interactive provider pane.
-- Keyboard/mouse selection, focus, switching, and attention.
-- Product-level terminal regression tests against the already selected
-  retained-TMUX substrate.
-
-### D3 — SSH hosts (historical; retired by D16)
-
-- Host registration, handshake, snapshot polling, apply, and attach.
-- Remote start, attach, reconnect, status, and cold resume.
-- Strict protocol and capability diagnostics.
-
-### D4 — Workstreams and forks
-
-- Independent Workstream action at the registered project root.
-- Exact-turn App Server conversation fork at that same project root, followed
-  by native TUI resume. Git branches and worktrees remain a native user/Codex
-  concern rather than a WSNav operation.
-
-### D5 — Recovery and V1 acceptance (historical; cross-host surface retired by D16)
-
-- Crash/failure reconciliation for Start and Fork.
-- Install, doctor, uninstall, and residue checks.
-- Combined local/remote workflow acceptance.
-- UX polish after behavior is complete.
-
-Each checkpoint should be reviewable, committed, and accepted separately. No
-checkpoint should install hooks, adopt existing sessions, or mutate ordinary
-tmux/provider state during automated tests.
-
-### D5.1 — Operational closure
-
-- Automatic normal-open recovery for independently started Workstreams and
-  source-scoped recovery for unresolved Fork operations after a client or
-  transport loss.
-- Stateless remote release/schema compatibility probe and manual-upgrade
-  diagnostics.
-- Streaming bounds for every local child-process output path.
-- Explicit empty-state registration guidance, exact private-runtime path
-  identity, and declared/tested MSRV.
-
-D5.1 is hardening within the approved V1 product boundary. It adds no daemon,
-automatic deployment, session adoption, provider mutation beyond the existing
-Fork action, or replacement provider UI.
-
-### D5.2 — Correctness closure
-
-- Locked-dependency-compatible MSRV and pinned CI.
-- Stable ProjectLocation labels for external and managed remote Workstreams.
-- Conclusive-only tmux-loss classification and time-bounded finite child
-  process groups.
-- Navigator-owned attachment outcome evidence and retry without provider-pane
-  diagnostics.
-- Scroll-aware mouse targeting and bounded cursor-paged snapshots.
-
-### D6 — Source-installed operator-beta closure
-
-- Present-tense product, architecture, and acceptance documentation.
-- Exact-candidate local and SSH operator smoke against matching builds.
-- Sanitized final isolation, cleanup, privacy, and release evidence.
-- Explicit source-installed `0.1.0` posture without an implied public release
-  channel.
-
-## Settled V1 design decisions
-
-The reconciled design settles these potentially expansive questions:
-
-- project grouping uses persisted host-registry Project rows and
-  credential-free origin evidence only within one execution host; D16 discards
-  the retired client catalog and rebuilds fresh presentation identity from
-  authoritative ProjectLocations;
-- each execution host runs its own installed wsnav; ordinary SSH is an
-  operator-established composition boundary, not a WSNav deployment or control
-  system;
-- multiple same-user tmux attachments are allowed without an input lease;
-  simultaneous typing is a user-coordination concern;
-- ambiguous host identity, registry generation, or ownership evidence fails
-  closed rather than authorizing adoption or mutation;
-- host-local status propagation uses bounded snapshots and observer evidence;
-  remote polling, cache, backoff, and unreachable-state machinery are retired;
-- durable compound-operation recovery covers Fork and brokered onboarding;
-  independent Workstream creation remains transactional before native launch;
-- V1 parks Workstreams but never operates on Git worktrees or branches;
-- managed Codex launches select the exactly owned `wsnav-observer` profile over
-  the normal user configuration while ordinary launches remain untouched;
-  composing another selected profile is deferred, and readiness preparation is
-  contextual to an observer-dependent request rather than a setup page;
-- Workstream display names come from the current Codex tip thread rather than a
-  shadow Workstream label, with context-specific computed fallbacks ending in
-  the stable Workstream short ID; and
-- live TUIs use dedicated process-owned runtimes while App Server access is
-  short-lived stdio only; each Runtime has its own bounded private tmux server.
-
-The D16 product boundary, clean-break state reset, same-host Project semantics,
-direct local facade, reduced pages, and derived current-host display are
-settled by the choices above.
-Future implementation or provider evidence that contradicts this contract
-must narrow or reopen the affected workflow; it does not authorize silently
-weakening isolation, trust, result-tip preservation, or the no-transcript
-boundary.
-
-## Multi-provider and multi-agent design
-
-This section is a forward contract for generalizing the single-Codex V1 into a
-multi-provider, multi-agent navigator. It is not implemented as a whole; the
-roadmap authorizes only its explicitly active delivery checkpoint. It is
-motivated by the [opencode feasibility spikes](evidence/spikes/0015-opencode-provider-feasibility.md),
-which establishes settled-prefix Fork exactness, absent Fork lineage, and
-probe-local database concurrency. The [native runtime contract](evidence/spikes/0016-opencode-runtime-contract.md)
-adds exact native TUI resume, probe-local observer wiring, and the per-Runtime
-server boundary. [Spike 0017](evidence/spikes/0017-opencode-fresh-session.md)
-now proves the selected blank-session precreation path, exact endpoint
-ownership, and per-Runtime observer sidecar lifecycle on OpenCode `1.18.11`.
-
-### Framing
-
-The current code uses a concrete provider-kind boundary rather than a generic
-plugin abstraction. `ProviderKind` and provider-neutral lifecycle, capability,
-name, session, state, and bounded DTOs cross the shared layers; one explicit
-dispatch at the action boundary selects the concrete Codex or OpenCode
-adapter. Provider-owned profile, App Server, HTTP, SSE, and process contracts
-remain inside their concrete adapters. The tmux runtime and host-local control
-layers remain provider-agnostic.
-
-The design treats this as a **provider-kind generalization**, not "add
-opencode". Codex and opencode become two instances of the same provider
-contract. A second agent kind is then a third instance later, not another
-one-off integration.
-
-### Provider is a first-class, typed, persisted concept
-
-- `ProviderKind` is an enum (`codex | opencode`) carried on:
-  - the **Workstream** (created as one kind and fixed for its lifetime;
-    a Workstream never switches provider);
-  - its **Runtime** (the live provider process in its private tmux server);
-  - each **ProviderBinding** (which provider produced this native session);
-  - and every typed provider-session identifier carried through state or bounded
-    action/result DTOs.
-- The current host exposes capability sets. It may run Codex and opencode work
-  concurrently, but each Workstream lane is single-provider.
-- Provider identity is never inferred from display text. `native_session_id`
-  is namespaced by `ProviderKind` (a `(ProviderKind, session_id)` pair), so
-  opaque identifiers stay unambiguous across providers.
-
-Pre-D8 Rust state migrates transactionally to `codex`: host schema 9 migrates
-to 10 by adding explicit provider kind to Workstream and ProviderBinding,
-validating the existing Runtime `provider` value, and rejecting any non-Codex
-or cross-record mismatch. Fresh-schema writes have no implicit provider
-default. Client schema 4 migrates to 5 by removing the old `codex`
-executable-presence bit from fixed host registration without losing host
-aliases or Project associations. D16 retires that client schema completely,
-imports none of its rows, and rebuilds fresh same-host Project presentation
-from authoritative host-registry locations. Historical D8 evidence recorded the provider-bearing
-wire-contract bump from protocol 16 to 17. D16 does not preserve that revision
-as a compatibility requirement; any surviving host-local boundary or DTO
-revision remains implementation-owned. No migration fabricates a model, role,
-agent, or provider session ID.
-
-### Provider capabilities and availability
-
-Provider availability is dynamic current-host state, not persisted Project or
-display identity. Each bounded host snapshot carries exactly one sorted,
-duplicate-free record
-for each known `ProviderKind`:
-
-```text
-ProviderCapability {
-  kind,
-  status: available | unavailable | unknown,
-  reason: none | adapter_unavailable | not_installed | unsupported_version |
-          observer_not_ready | runtime_prerequisite_missing | probe_failed,
-  fresh_launch,
-  exact_resume,
-  observe,
-  metadata_read,
-  rename,
-  fork,
-}
-```
-
-`unsupported_version` remains a reserved bounded capability reason; the
-OpenCode adapter does not use it as a release-number gate.
-
-The current-host state boundary verifies its host identity and registry
-generation as required by local authority, but does not persist or compare
-`ProviderCapability` as client registration identity. Installing, removing, or
-upgrading a provider therefore does not stale host-local setup.
-Provider records are scoped to the snapshot that supplied them; there is no
-remote-host cache or unreachable-host presentation. Snapshot pagination
-repeats the same provider set on every page and rejects inconsistent pages.
-
-A provider is eligible for New only when `status=available` and
-`fresh_launch`, `exact_resume`, and `observe` are all true. Exact resume is a
-creation prerequisite because every retained Workstream must survive a lost
-Runtime. Metadata read, navigator Rename, and Fork are independent optional
-capabilities and never make an otherwise recoverable provider eligible or
-ineligible for New. Unknown status, a missing record, a duplicate record, or
-an incomplete required surface fails closed.
-
-An available record has `reason=none`; unavailable and unknown records carry
-one bounded reason and expose no true operation flag that the host cannot
-currently honor. Capability records are advisory UI evidence only: every host
-action still validates the Workstream's fixed provider and the exact operation
-surface it needs.
-
-Discovery is read-only, bounded, and credential-free. It resolves a fixed
-adapter-owned executable name, requires a successful bounded `--version`
-probe, and verifies existing observer/runtime prerequisites; it never installs
-software, reads provider credentials, tests account access, or selects a model.
-The version output is discarded from public capability state and never gates
-eligibility. OpenCode actions instead validate the exact HTTP/SSE response
-shapes, session/root identity, endpoint/process ownership, and operation
-surface they consume. Malformed or missing contract evidence fails closed
-without fallback or adoption.
-
-The actual version reported by the owned `/global/health` endpoint is retained
-only as bounded host-private Runtime-generation evidence. Every later health
-check for that generation must report the same opaque value; an endpoint or
-version change makes the Runtime ambiguous. A recovery generation may record a
-new value when the upgraded provider still satisfies the adapter contract.
-The passing real acceptance used OpenCode `1.18.11`, but that observation does
-not create a production release allowlist. A bounded reason may be shown in
-diagnostics, while raw process output and executable paths never enter
-snapshots.
-
-### New Workstream provider choice
-
-Provider choice for a new location is the provider command the user types in
-the provisional shell. `codex` and `opencode` are explicit, familiar choices;
-there is no manager-owned provider chooser, remembered Project default, or
-silent first-provider selection.
-
-- The current host still computes the exact bounded capability predicate above
-  and revalidates the typed provider immediately before broker reservation. A
-  missing, stale, ineligible, or ambiguous provider refuses without launching
-  or substituting another provider.
-- An onboarding-capable but not-yet-ready Codex launch enters the same bounded
-  contextual observer guide before durable promotion or provider execution.
-  It continues only after explicit consent, native trust review, and captured
-  revision revalidation.
-- Provider authentication, account selection, model, effort, permissions,
-  role, agent, first prompt, and safe native launch options remain in the
-  provider's own command/configuration/TUI surfaces. WSNav supplies none of
-  them and persists none of their values.
-- Conclusive failure before the external-effect boundary removes state created
-  only by the attempted promotion. Failure after the boundary follows the
-  visible recovery-required operation contract; provider kind is fixed and
-  another provider is never substituted.
-- A provider invocation that bypasses the controlled shell function remains
-  unmanaged. Availability detection, process observation, hooks, and native
-  session inventory do not upgrade it into a Workstream.
-
-`n` is a separate contextual shortcut. From an existing managed Workstream it
-creates an independent empty conversation using that Workstream's exact fixed
-provider and ProjectLocation, without a chooser or shell. A different provider
-or location always begins through the provisional shell. Resume and Fork use
-the recorded provider without prompting, and cross-provider conversation
-transfer remains impossible.
-
-The provider selection is fixed on the created Workstream. Resume and Fork use
-that recorded provider without prompting. A different-provider Workstream at
-the same ProjectLocation is always another New action, never a Fork, migration,
-or handoff.
-
-Request deduplication includes provider kind. Reusing one request key with a
-different provider is an operation mismatch even when source Workstream and
-revision are unchanged.
-
-There is no public CLI creation command after cutover. Contextual `n` is the
-only same-provider/same-Location new-session path; a new provider or Location
-is created only by the brokered provisional shell. Hidden prepare/launch
-helpers are internal implementation boundaries, not public CLI commands and
-not passive adoption paths. WSNav never selects the first provider by catalog
-order or emulates shell adoption.
-
-The D17 product cutover removes the arbitrary-location
-`register <checkout> [--provider]` command (and any equivalent public
-`host register-checkout` form), as well as the provider-override
-`new-workstream` command. There is no public registration or creation command
-after cutover: the brokered provisional shell is the only new
-Location/provider authority, while contextual `n` is the exact
-same-provider/same-Location path.
-
-### Provider-scoped readiness
-
-Opening the navigator detects readiness read-only and must not mutate or block
-on any provider. Readiness guidance is scoped to the requested provider:
-
-- an unready Codex adapter cannot block the provisional shell, Archived,
-  existing Runtime attachment, or an eligible OpenCode action;
-- Codex remains `unavailable/observer_not_ready` as an immediate broker/action
-  capability until explicit consent and exact native trust review complete.
-  Exact `setup_required`, `update_required`, and `trust_review_required` states
-  are accepted as typed readiness requests: the provisional shell performs
-  review before reservation, while a managed action records process-local
-  pending intent;
-- the shell retries its exact in-memory argv, or the managed request resumes,
-  only after exact readiness and captured revision revalidation; and
-- OpenCode adds no installation, credential, trust, or provider-management
-  flow.
-
-This reuses the exact Codex ownership and trust contract without creating a
-setup page or generic onboarding system. No Workstream is created merely to
-perform provider setup.
-
-### Provider boundary with dispatch at the action boundary
-
-The production provider boundary covers five provider-specific surfaces, with
-capabilities describing which optional surfaces each adapter implements:
-
-1. **Launch program**: how to start a fresh or resumed native TUI
-   (Codex: `codex --profile wsnav-observer -C <root> [resume <id>]`;
-   OpenCode exact resume: `opencode <root> --hostname 127.0.0.1
-   --port <runtime-port> --session <id>` in the private tmux pane). Production
-   OpenCode never adds `--pure`, `--model`, `--agent`, or `--prompt`; the user
-   retains normal plugins, configuration, model choice, and native first
-   input. OpenCode fresh launch uses the evidence-selected, contract-validated
-   precreation path below. The runtime
-   launch barrier and process-birth authority remain generic.
-2. **Lifecycle observer**: how passive lifecycle evidence is obtained
-   (Codex: stdin JSON hook payload; OpenCode: one read-only SSE event stream
-   plus status polling per Runtime). The OpenCode helper binds events to the
-   observed session ID, keeps only bounded lifecycle metadata, discards event
-   content, and ignores child or unrelated sessions. Both providers adapt into
-   the same internal lifecycle events (`start`, `resume`, `working`, `settled`,
-   `stopped`).
-3. **Metadata operations**: read current tip name, rename when supported, list
-   recovery candidates when supported, and fork by exact settled boundary
-   when supported (Codex: ephemeral App Server
-   `thread/read|name/set|list|fork`; OpenCode evidence currently covers exact
-   session read and `POST /session/:id/fork`, not navigator Rename). OpenCode
-   Fork uses the exact settled `messageID` boundary and does not provide
-   structural lineage for recovery.
-4. **Fork reconciliation**: resolve a non-idempotent fork after a lost
-   response using provider structural lineage when available, else the
-   accepted degradation below.
-5. **Observer/trust setup**: how WSNav installs and verifies passive
-   observation (Codex: exactly owned `wsnav-observer` profile plus native
-   `/hooks` trust review; opencode: no profile or trust review is required,
-   since observation is read-only SSE).
-
-The provider contract reports prerequisites without requiring a generic
-provider-onboarding surface. Construction is dispatched once at the host
-action boundary from the Workstream's `ProviderKind`; provider kind is never
-accepted from display text or an untrusted hook/event.
-
-D8.0 deliberately establishes only the provider-neutral data kernel and Codex
-parity: typed provider identity, lifecycle/name DTOs used by shared state and
-presentation, dynamic capability records, schema and bounded-boundary DTO
-changes, and one Codex
-dispatch branch. It does not invent OpenCode behavior or require a speculative
-five-surface implementation. With the fresh-session and observer evidence gate
-passing on the contract observed with `1.18.11`, D8.1 may add the second
-adapter and make shared action/app/state/navigator call sites depend on the
-provider boundary
-rather than concrete Codex adapter types. Provider-specific profile, HTTP,
-SSE, and App Server code remains inside its adapter.
-
-### OpenCode fresh-session evidence gate
-
-Spike 0016 proves exact native resume of sessions that were created by earlier
-prompted `opencode run` commands. [Spike 0017](evidence/spikes/0017-opencode-fresh-session.md)
-proves the New contract through the selected provider-native candidate:
-pre-create a blank session through a short-lived server, stop that server, then
-launch the native TUI with the returned exact session ID. The probe also proves
-two same-root TUIs, production launch without `--pure`, exact endpoint
-ownership, and one replaceable observer sidecar per Runtime generation on
-OpenCode `1.18.11`. [Spike
-0020](evidence/spikes/0020-opencode-1.18.23-revalidation.md) revalidates those
-provider-facing assumptions on `1.18.23`; D17 still requires the broker to
-reserve the containing shell/Runtime authority before it performs this native
-session preparation and final `exec` launch.
-
-The selected path uses the production command shape without `--pure`,
-`--model`, `--agent`, or `--prompt`, runs two blank native TUIs at the same
-project root, keeps their first native prompts and events non-crossing,
-establishes exact session IDs without using transcript content, title/recency
-inference, or session-list ordering, resumes an exact session after Runtime
-restart, and cleans up all provider/tmux/observer state. The probe's disposable
-postcondition checks are discarded and never enter WSNav state. A candidate
-that relies on title text, database recency, or a WSNav-supplied first prompt
-is rejected.
-
-`POST /session` is non-idempotent because OpenCode chooses the native session
-ID. After the D17 helper has atomically transferred the exact candidate
-RuntimeId and full-UUID `RuntimePaths` fields (directory, socket, configuration,
-and session) to durable Runtime ownership, WSNav
-advances the same request-keyed onboarding operation into its provider-specific
-`Start` phase while it is still `prepared`; this is not a second launch
-authority. The short-lived server must pass health first; immediately before
-the one POST,
-WSNav durably advances that exact Runtime/generation operation to
-`external_effect_started`. The returned blank root-session ID and
-ProviderBinding commit atomically with the operation. A failure before the
-durable boundary is terminally known-absent and may be retried only through a
-new onboarding attempt after recovery. A lost or rejected response after the
-boundary atomically records terminal `external_effect_unknown` while moving
-the exact Runtime and Workstream to recovery-required; the same Runtime server
-remains owned even if no native TUI is left, and it can never issue a second
-blank-session request. Presentation close/retirement cannot signal that
-server; onboarding recovery alone classifies conclusive pre-effect failure and
-rolls back attempt-only graph state. No raw response or provider content enters
-the journal.
-
-The short-lived server is owned by a state-free WSNav guardian rather than the
-mutating action process. The guardian and server use separate private process
-groups, and an anonymous pipe held only by the action is their lifetime lease.
-A second state-free launch barrier blocks before provider execution while the
-guardian captures and proves the future server leader's PID, birth token,
-process group, and session; releasing the barrier `exec`s `opencode serve` in
-place so that authority cannot race an early provider fork. Before reporting
-readiness, the guardian proves that the selected loopback listener belongs to
-that exact process tree. The action revalidates guardian liveness, listener
-ownership, and the same process-group/session authority after health and again
-after journaling, immediately before `POST /session`.
-
-Normal completion closes the lease only after the provider request has
-returned; abrupt loss of the action closes it in the kernel. In either case the
-guardian performs bounded, revalidated process-group termination, reaps the
-leader, and corroborates that the private loopback endpoint is no longer
-occupied. A malformed handshake, early server exit, ambiguous identity,
-inconclusive cleanup, or surviving listener fails closed. A `prepared` Start
-operation abandoned by abrupt action loss is also unresolved because cleanup
-was not synchronously observed; unlike a normally returned and terminally
-known-absent failure, it cannot automatically retry. The guardian never opens
-the state registry or stores provider payloads; the durable `Start` operation
-remains the sole authority for whether the non-idempotent boundary may have
-been crossed. Independent loss of both the action and guardian is outside this
-V1 in-process ownership boundary and would require a stronger external
-supervisor or cgroup authority.
-
-OpenCode-native creation or switching to another session inside an already
-managed TUI is unsupported unless the same evidence proves an exact active-TUI
-changed-binding claim. Ordinary global `session.created` events are not enough.
-Because Spike 0017 does not prove an exact active-TUI changed-binding claim,
-WSNav retains the prior binding and instructs the user to use `n` for another
-Workstream, matching the fail-closed Codex native `/new` boundary.
-
-### OpenCode Runtime handle and observer sidecar
-
-An OpenCode Runtime keeps bounded host-private provider state scoped to one
-exact Runtime generation:
-
-```text
-OpenCodeRuntimeHandle {
-  loopback_endpoint,
-  observed_provider_version,
-  observer_pid?,
-  observer_process_birth?,
-  observer_status: starting | ready | unknown | stopped,
-}
-```
-
-This handle is stored only in the authoritative host registry. It never enters
-Project rows or public Workstream snapshots. A new Runtime generation
-gets a new handle; a stopped generation's endpoint or helper can never be
-reused or adopted.
-
-The host starts the native TUI in the Runtime's existing sole tmux
-server/session/window/pane, records the exact pane process birth, and validates
-that the loopback listener belongs to that exact process or a proven descendant
-before using the endpoint. `/global/health`, version, cwd, session identity,
-and process ancestry are corroborating checks; health plus `GET /session/:id`
-alone is insufficient because another OpenCode server may share the same
-provider database. Port selection is bounded, collision failure is explicit,
-and WSNav never searches for or adopts another listening endpoint.
-
-One separate host-owned `wsnav` observer sidecar runs per OpenCode Runtime. It
-is not a provider process, shared daemon, tmux pane/window, or client process.
-It starts with stdin/stdout/stderr disconnected from the provider pane, carries
-the exact Runtime ID/generation/endpoint, records its PID plus process birth,
-and reaches `ready` only after the exact SSE stream is established, before the
-provider pane can be attached for native input.
-On the current authoritative host it reads the one SSE stream,
-applies the strict session/root metadata allowlist, discards content and raw
-payloads before state adaptation, and writes only provider-neutral lifecycle
-metadata through revision-guarded host transactions.
-
-A completed assistant `message.updated` is retained as a candidate until exact
-idle corroboration. A trailing busy status does not erase that completed ID;
-only a new incomplete message update can invalidate the transient candidate.
-This preserves the last exact settled boundary without deriving an ID from
-polling or provider content.
-
-Spike 0017 validates this ownership model on the acceptance-tested release: the
-sidecar is independently replaceable, reconnects to the same endpoint and
-generation, survives a detached/reopened tmux attachment, and is removed with
-the disposable Runtime.
-
-The sidecar reconnects only to the same corroborated endpoint with bounded
-backoff. A missing helper, changed process birth, inconsistent endpoint, parse
-failure, or exhausted reconnect budget makes observation `unknown`, blocks
-Fork and other exact-boundary mutations, and never stops or rebinds the native
-TUI. Park validates and stops the exact sidecar before killing the private tmux
-server; recovery replaces both endpoint and helper under a new generation.
-Tests inject helper crash, stale PID, endpoint reuse, port collision, action
-failure between provider and helper start, detach/reopen, and complete cleanup.
-
-OpenCode lost-Runtime recovery is narrower than Codex recovery. It is available
-only when WSNav already holds an exact OpenCode root-session binding and the
-recorded private tmux Runtime is conclusively missing. Recovery validates and
-stops only the recorded observer and provider process by their respective PID
-plus process birth, removes only the matching prior-generation handle and
-private Runtime artifacts, reserves a new generation, allocates a new loopback
-endpoint and observer, and resumes that same bound session. The replacement is
-not launched until the exact prior provider identity is gone. A missing binding,
-live or ambiguous private Runtime, uncorroborated observer, provider-cleanup
-failure, or mismatched handle fails closed. WSNav never opens a native OpenCode
-picker, discovers another session, adopts an endpoint, or creates a blank
-replacement conversation during recovery.
-
-### Multi-agent model
-
-"Multi-agent" has two distinct meanings, and only one is WSNav-owned:
-
-- **WSNav lanes are independent single-provider Workstreams.** More agents =
-  more Workstreams, each one provider process in its own private tmux server.
-  This is unchanged from V1 and is validated by the concurrency spike.
-- **Provider-owned subagents stay provider-owned.** opencode subagents are
-  child sessions inside one opencode runtime (`session.parent_id`), not
-  WSNav Workstreams, not separate processes. WSNav treats them as provider
-  internal state: its observer discards child-session events and never creates,
-  names, rebinds, or manages a subagent as a Workstream.
-
-There is no cross-provider migration: a Codex Workstream never becomes an
-opencode Workstream, and a live conversation is never transferred between
-providers. Parallel Workstreams may share the same ProjectLocation and use
-different providers, but they begin as independent empty conversations. Files
-and user-authored notes in the shared project are the explicit context bridge;
-WSNav does not copy prompts, transcripts, summaries, or provider state between
-them.
-
-### Fork-recovery known limitation
-
-The [opencode fork-lineage spikes](evidence/spikes/0015-opencode-provider-feasibility.md)
-and [native runtime contract](evidence/spikes/0016-opencode-runtime-contract.md)
-prove that opencode creates a fork destination with no structural lineage
-(`parent_id` is null, the source children API is empty; the only marker is the
-title suffix `(fork #N)`). Codex exposes structural lineage and keeps the V1
-reconciliation contract. For a provider without structural lineage, the
-accepted degradation is:
-
-- the happy path is unchanged (the fork response carries the destination ID
-  and WSNav records it immediately);
-- a lost fork response is terminal `Failed` with
-  `external_effect_unknown`; the source returns to its pre-Fork visible state,
-  no destination Workstream is created, and the user sees an error explaining
-  that an unmanaged provider session may need inspection or cleanup in the
-  provider's native UI;
-- WSNav never re-forks, guesses from title text, automatically adopts a
-  destination, or shows a recovery picker; the same request key cannot replay
-  the provider Fork, while a new explicit Fork is a new request.
-
-A future provider release that populates fork lineage removes the limitation
-without a design change.
-
-### Navigator presentation
-
-- A quiet provider-kind marker and label on the Workstream row's context line
-  (styled like the existing muted project marker accent), never the thread
-  title, lifecycle state, or selection color. The complete `Codex` or
-  `OpenCode` label is reserved before variable age or thread context is
-  truncated, so provider identity remains visible at the supported 32-cell
-  navigator width and in bounded Workstream detail.
-- The first delivery adds no provider filter, grouping axis, role, preset, or
-  provider-management page. Those remain deferred unless use demonstrates a
-  need. Existing Codex observer management stays unchanged.
-- Hardcoded "Codex"/"native Codex UI" strings become provider-aware labels.
-
-### Unchanged invariants
-
-- Each live Runtime remains one provider process in its own private tmux
-  server; never a shared cross-Runtime daemon or provider `--remote`/
-  client-server topology. OpenCode's per-Runtime embedded loopback backend is
-  allowed only as a private provider implementation detail. Its one exact
-  host-owned observer sidecar is WSNav control-plane observation, not another
-  provider process, and never owns a terminal pane.
-- WSNav never writes status or management traffic into the provider pane.
-- WSNav never persists prompts, responses, tool output, transcripts, or raw
-  provider payloads from any provider. The no-transcript boundary applies to
-  opencode's event-sourced SQLite transcript store as much as Codex's history:
-  the opencode observer discards event content before state adaptation, and
-  WSNav scopes provider state per managed host without ingesting it.
-- The provider owns the conversation, composer, models, naming, resume,
-  history, and native workflow for each provider kind.
-- Fail-closed identity, revision-guarded transactions, and exact
-  single-candidate recovery remain provider-independent requirements.
 
 ## Evidence basis
 

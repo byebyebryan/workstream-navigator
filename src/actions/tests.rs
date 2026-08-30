@@ -39,24 +39,49 @@ fn private_existing_root(path: &Path) -> crate::state::StateRoot {
 fn registry() -> (tempfile::TempDir, crate::state::HostRegistry, WorkstreamId) {
     let temporary = tempfile::tempdir().unwrap();
     let root = private_existing_root(temporary.path());
-    let mut registry = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)
-        .unwrap()
-        .into_host_registry()
-        .unwrap();
-    let registered = registry
-        .register_project_root(
+    let mut state =
+        crate::state::create_current(root.base(), &crate::domain::RandomIdGenerator).unwrap();
+    let (_, workstream_id) = state
+        .seed_test_workstream(
             Path::new("/disposable/repository"),
+            "repository",
             crate::domain::ProviderKind::Codex,
+            &crate::domain::RandomIdGenerator,
         )
         .unwrap();
-    (temporary, registry, registered.workstream_id)
+    let registry = state.into_host_registry().unwrap();
+    (temporary, registry, workstream_id)
+}
+
+fn registry_for_provider(
+    provider: ProviderKind,
+) -> (
+    tempfile::TempDir,
+    crate::state::StateRoot,
+    crate::state::HostRegistry,
+    WorkstreamId,
+) {
+    let temporary = tempfile::tempdir().unwrap();
+    let root = crate::state::StateRoot::select(temporary.path().join("state"));
+    let mut state =
+        crate::state::create_current(root.base(), &crate::domain::RandomIdGenerator).unwrap();
+    let (_, workstream_id) = state
+        .seed_test_workstream(
+            Path::new("/disposable/repository"),
+            "repository",
+            provider,
+            &crate::domain::RandomIdGenerator,
+        )
+        .unwrap();
+    let registry = state.into_host_registry().unwrap();
+    (temporary, root, registry, workstream_id)
 }
 
 #[test]
 fn completed_native_review_promotes_pending_observer_before_a_managed_action() {
     let temporary = tempfile::tempdir().unwrap();
     let root = crate::state::StateRoot::select(temporary.path().join("state"));
-    let mut registry = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)
+    let mut registry = crate::state::create_current(root.base(), &crate::domain::RandomIdGenerator)
         .unwrap()
         .into_host_registry()
         .unwrap();
@@ -150,16 +175,9 @@ fn managed_codex_environment_has_only_the_explicit_utf8_locale() {
 
 #[test]
 fn opencode_helper_cleanup_failure_marks_pre_effect_creation_for_recovery() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = private_existing_root(temporary.path());
-    let mut registry = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)
-        .unwrap()
-        .into_host_registry()
-        .unwrap();
-    let registered = registry
-        .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
-        .unwrap();
-    let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+    let (_temporary, _root, mut registry, workstream_id) =
+        registry_for_provider(ProviderKind::OpenCode);
+    let runtime = registry.reserve_runtime(workstream_id).unwrap();
     let prepared = registry
         .prepare_opencode_session_creation(runtime.runtime_id, &runtime.tmux_generation)
         .unwrap();
@@ -170,7 +188,7 @@ fn opencode_helper_cleanup_failure_marks_pre_effect_creation_for_recovery() {
     ));
     assert_eq!(
         registry
-            .runtime_for_workstream(registered.workstream_id)
+            .runtime_for_workstream(workstream_id)
             .unwrap()
             .unwrap()
             .status,
@@ -180,29 +198,22 @@ fn opencode_helper_cleanup_failure_marks_pre_effect_creation_for_recovery() {
 
 #[test]
 fn abandoned_prepared_opencode_creation_on_missing_runtime_requires_recovery() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = private_existing_root(temporary.path());
-    let mut registry = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)
-        .unwrap()
-        .into_host_registry()
-        .unwrap();
-    let registered = registry
-        .register_project_root(Path::new("/disposable/repository"), ProviderKind::OpenCode)
-        .unwrap();
-    let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+    let (_temporary, root, mut registry, workstream_id) =
+        registry_for_provider(ProviderKind::OpenCode);
+    let runtime = registry.reserve_runtime(workstream_id).unwrap();
     let prepared = registry
         .prepare_opencode_session_creation(runtime.runtime_id, &runtime.tmux_generation)
         .unwrap();
 
     assert!(matches!(
-        inspect_opencode_prior_runtime(&root, &mut registry, registered.workstream_id),
+        inspect_opencode_prior_runtime(&root, &mut registry, workstream_id),
         Err(ActionError::ProviderRecoveryUnavailable(
             ProviderKind::OpenCode
         ))
     ));
 
     let current_runtime = registry
-        .runtime_for_workstream(registered.workstream_id)
+        .runtime_for_workstream(workstream_id)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -213,7 +224,7 @@ fn abandoned_prepared_opencode_creation_on_missing_runtime_requires_recovery() {
         .workstream_overviews()
         .unwrap()
         .into_iter()
-        .find(|overview| overview.workstream_id == registered.workstream_id)
+        .find(|overview| overview.workstream_id == workstream_id)
         .unwrap();
     assert_eq!(overview.lifecycle, WorkstreamLifecycle::RecoveryRequired);
 
@@ -230,12 +241,7 @@ fn abandoned_prepared_opencode_creation_on_missing_runtime_requires_recovery() {
     );
 
     assert!(matches!(
-        start(
-            &root,
-            &mut registry,
-            registered.workstream_id,
-            Some(overview.revision),
-        ),
+        start(&root, &mut registry, workstream_id, Some(overview.revision),),
         Err(ActionError::ProviderRecoveryUnavailable(
             ProviderKind::OpenCode
         ))
@@ -319,19 +325,9 @@ fn native_provider_is_wrapped_by_the_private_launch_barrier() {
 
 #[test]
 fn conclusive_private_runtime_loss_becomes_recovery_required_before_snapshot() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = private_existing_root(temporary.path());
-    let mut registry = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)
-        .unwrap()
-        .into_host_registry()
-        .unwrap();
-    let registered = registry
-        .register_project_root(
-            Path::new("/disposable/repository"),
-            crate::domain::ProviderKind::Codex,
-        )
-        .unwrap();
-    let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+    let (_temporary, root, mut registry, workstream_id) =
+        registry_for_provider(ProviderKind::Codex);
+    let runtime = registry.reserve_runtime(workstream_id).unwrap();
     registry
         .record_runtime_process_identity(runtime.runtime_id, runtime.revision, 42, "birth-a")
         .unwrap();
@@ -442,19 +438,9 @@ fn codex_attachment_requires_a_complete_recorded_process_identity() {
 
 #[test]
 fn exact_live_probe_backfills_a_missing_provider_pid() {
-    let temporary = tempfile::tempdir().unwrap();
-    let root = private_existing_root(temporary.path());
-    let mut registry = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)
-        .unwrap()
-        .into_host_registry()
-        .unwrap();
-    let registered = registry
-        .register_project_root(
-            Path::new("/disposable/repository"),
-            crate::domain::ProviderKind::Codex,
-        )
-        .unwrap();
-    let runtime = registry.reserve_runtime(registered.workstream_id).unwrap();
+    let (_temporary, root, mut registry, workstream_id) =
+        registry_for_provider(ProviderKind::Codex);
+    let runtime = registry.reserve_runtime(workstream_id).unwrap();
     drop(registry);
     let connection = rusqlite::Connection::open(root.host_database_path()).unwrap();
     connection
@@ -464,7 +450,7 @@ fn exact_live_probe_backfills_a_missing_provider_pid() {
         )
         .unwrap();
     drop(connection);
-    let mut registry = crate::state::open_current_only(&root)
+    let mut registry = crate::state::open_current(&root)
         .unwrap()
         .into_host_registry()
         .unwrap();
@@ -525,17 +511,21 @@ fn independent_creation_keeps_the_project_root_without_touching_files() {
     fs::write(repository.join("source-only.txt"), "do not copy\n").unwrap();
 
     let root = crate::state::StateRoot::select(temporary.path().join("state"));
-    let mut registry = crate::state::fresh_create(root.base(), &crate::domain::RandomIdGenerator)
-        .unwrap()
-        .into_host_registry()
+    let mut state =
+        crate::state::create_current(root.base(), &crate::domain::RandomIdGenerator).unwrap();
+    let (_, workstream_id) = state
+        .seed_test_workstream(
+            &repository,
+            "repository",
+            crate::domain::ProviderKind::Codex,
+            &crate::domain::RandomIdGenerator,
+        )
         .unwrap();
-    let registered = registry
-        .register_project_root(&repository, crate::domain::ProviderKind::Codex)
-        .unwrap();
+    let mut registry = state.into_host_registry().unwrap();
     let created = registry
         .create_independent_workstream(
             "independent-system-git",
-            registered.workstream_id,
+            workstream_id,
             Revision::INITIAL,
             crate::domain::ProviderKind::Codex,
         )

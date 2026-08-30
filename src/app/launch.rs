@@ -4,7 +4,6 @@ use super::{
     ProviderSessionId, Revision, RuntimeId, RuntimePaths, StateRoot, Stdio, await_launch_release,
 };
 use crate::presentation::{PresentationAction, PresentationError, PresentationPaneRole};
-use std::path::Path;
 
 pub(super) fn runtime_launch(
     root: &StateRoot,
@@ -33,7 +32,7 @@ pub(super) fn runtime_launch(
     }
 }
 
-/// Runs one fixed D17 presentation action. The helper receives only values
+/// Runs one fixed presentation action. The helper receives only values
 /// emitted by the private presentation key table; it never evaluates an
 /// arbitrary tmux command or shell fragment.
 pub(super) fn presentation_control(
@@ -59,7 +58,7 @@ pub(super) fn presentation_control(
 }
 
 /// Routes literal Ctrl-b to the exact nested Runtime only after proving the
-/// D17 provider attachment. A provider pane with missing, stale, or failed
+/// provider attachment. A provider pane with missing, stale, or failed
 /// attachment evidence is left untouched, so the nested provider prefix can
 /// never be consumed accidentally by the outer presentation server.
 fn send_presentation_literal_ctrl_b(
@@ -83,8 +82,8 @@ fn send_presentation_literal_ctrl_b(
         .into());
     }
     presentation.validate_provider_context(status.workstream_id)?;
-    let state = crate::state::open_d17_current_only(&StateRoot::select(root.base()))?;
-    let mut registry = state.into_d17_host_registry()?;
+    let state = crate::state::open_current(&StateRoot::select(root.base()))?;
+    let mut registry = state.into_host_registry()?;
     let runtime_record =
         crate::actions::preflight_attachment(root, &mut registry, status.workstream_id)?;
     let tmux = super::SystemTmux::default();
@@ -131,56 +130,20 @@ pub(super) fn opencode_observer(
         pane_pid: arguments.pane_pid,
         cwd: arguments.cwd,
         provider_birth: arguments.provider_birth,
-        provider_version: None,
         mode: arguments.mode,
     };
     crate::provider::opencode::run_observer(root, &context).map_err(AppError::OpenCodeObserver)
 }
 
-pub(super) struct OpenCodeObserverStandbyArguments {
-    pub(super) runtime_id: String,
-    pub(super) generation: String,
-    pub(super) port: u16,
-    pub(super) provider_version: String,
-    pub(super) session_id: String,
-    pub(super) pane_pid: u32,
-    pub(super) cwd: PathBuf,
-    pub(super) provider_birth: String,
-}
-
-pub(super) fn opencode_observer_standby(
-    root: &Path,
-    arguments: OpenCodeObserverStandbyArguments,
-) -> Result<(), AppError> {
-    let context = crate::provider::opencode::OpenCodeObserverContext {
-        runtime_id: RuntimeId::from_str(&arguments.runtime_id)
-            .map_err(AppError::InvalidRuntimeId)?,
-        generation: arguments.generation,
-        endpoint: crate::provider::opencode::OpenCodeEndpoint::loopback(arguments.port)
-            .map_err(AppError::OpenCode)?,
-        session: ProviderSessionId::new(
-            crate::domain::ProviderKind::OpenCode,
-            &arguments.session_id,
-        )
-        .map_err(AppError::Domain)?,
-        pane_pid: arguments.pane_pid,
-        cwd: arguments.cwd,
-        provider_birth: arguments.provider_birth,
-        provider_version: Some(arguments.provider_version),
-        mode: crate::provider::opencode::OpenCodeObserverMode::D16Standby,
-    };
-    crate::provider::opencode::run_standby(root, &context).map_err(AppError::OpenCodeObserver)
-}
-
-/// Runs a proven schema-14 attachment only inside the D17 presentation pane.
-/// It keeps the retired application facade out of the schema-14 route and
+/// Runs a proven schema-15 attachment only inside the presentation pane.
+/// It keeps the retired application facade out of the schema-15 route and
 /// repeats the workstream/runtime revisions immediately before private tmux
 /// attachment.
 #[allow(
     clippy::too_many_arguments,
-    reason = "the D17 pane helper receives only exact presentation and revision claims"
+    reason = "the pane helper receives only exact presentation and revision claims"
 )]
-pub(super) fn provider_attach_d17(
+pub(super) fn provider_attach(
     root: &StateRoot,
     workstream_id: &str,
     expected_workstream_revision: i64,
@@ -201,7 +164,7 @@ pub(super) fn provider_attach_d17(
         let expected_runtime_id =
             RuntimeId::from_str(expected_runtime_id).map_err(AppError::InvalidRuntimeId)?;
         let expected_runtime_revision = parse_revision(expected_runtime_revision)?;
-        attach_runtime_d17(
+        attach_runtime(
             root,
             workstream_id,
             expected_workstream_revision,
@@ -218,43 +181,43 @@ pub(super) fn provider_attach_d17(
     provider_wait()
 }
 
-/// Attaches only a D17 Runtime that is neither owned nor fenced by an
-/// unfinished onboarding operation. The D17 Navigator passes the same snapshot
+/// Attaches only a Runtime that is neither owned nor fenced by an
+/// unfinished onboarding operation. The Navigator passes the same snapshot
 /// revisions through the outer helper, so stale cards can never authorize an
 /// attachment after a different state transition.
-pub(super) fn attach_runtime_d17(
+pub(super) fn attach_runtime(
     root: &StateRoot,
     workstream_id: crate::domain::WorkstreamId,
     expected_workstream_revision: Revision,
     expected_runtime_id: RuntimeId,
     expected_runtime_revision: Revision,
 ) -> Result<(), AppError> {
-    let state = crate::state::open_d17_current_only(&StateRoot::select(root.base()))?;
+    let state = crate::state::open_current(&StateRoot::select(root.base()))?;
     if state
-        .d17_onboarding_workstream_projections()?
+        .onboarding_workstream_projections()?
         .iter()
         .any(|onboarding| onboarding.workstream_id == workstream_id)
     {
-        return Err(AppError::D17AttachmentUnavailable);
+        return Err(AppError::AttachmentUnavailable);
     }
-    let mut registry = state.into_d17_host_registry()?;
+    let mut registry = state.into_host_registry()?;
     let overview = registry
         .workstream_overviews()?
         .into_iter()
         .find(|overview| overview.workstream_id == workstream_id)
-        .ok_or(AppError::D17AttachmentUnavailable)?;
+        .ok_or(AppError::AttachmentUnavailable)?;
     let Some(runtime) = overview.runtime else {
-        return Err(AppError::D17AttachmentUnavailable);
+        return Err(AppError::AttachmentUnavailable);
     };
     if overview.revision != expected_workstream_revision
         || runtime.runtime_id != expected_runtime_id
         || runtime.revision != expected_runtime_revision
     {
-        return Err(AppError::D17AttachmentUnavailable);
+        return Err(AppError::AttachmentUnavailable);
     }
     let record = crate::actions::preflight_attachment(root, &mut registry, workstream_id)?;
     if record.runtime_id != expected_runtime_id || record.revision != expected_runtime_revision {
-        return Err(AppError::D17AttachmentUnavailable);
+        return Err(AppError::AttachmentUnavailable);
     }
     let tmux = super::SystemTmux::default();
     let process_probe = LinuxProcessProbe;

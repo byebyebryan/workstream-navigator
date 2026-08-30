@@ -13,12 +13,7 @@ pub enum NameState {
 pub enum NameContext<'a> {
     Normal,
     Starting,
-    Cutover {
-        prior_effective_name: Option<&'a str>,
-    },
-    Fork {
-        source_native_name: Option<&'a str>,
-    },
+    Fork { source_native_name: Option<&'a str> },
 }
 
 /// Derived display text and provenance; neither is a persisted user-authored label.
@@ -31,7 +26,6 @@ pub struct EffectiveName {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EffectiveNameSource {
     Native,
-    CutoverFallback,
     ForkFallback,
     CachedStale,
     Synthetic,
@@ -65,18 +59,6 @@ pub fn resolve_name(
         NameContext::Starting => EffectiveName {
             text: "starting".to_owned(),
             source: EffectiveNameSource::Synthetic,
-        },
-        NameContext::Cutover {
-            prior_effective_name: Some(prior),
-        } => EffectiveName {
-            text: format!("{prior} ↻ unnamed"),
-            source: EffectiveNameSource::CutoverFallback,
-        },
-        NameContext::Cutover {
-            prior_effective_name: None,
-        } => EffectiveName {
-            text: "untitled ↻".to_owned(),
-            source: EffectiveNameSource::CutoverFallback,
         },
         NameContext::Fork {
             source_native_name: Some(source),
@@ -118,19 +100,7 @@ mod tests {
     }
 
     #[test]
-    fn blank_cutover_and_fork_use_context_not_a_shadow_label() {
-        assert_eq!(
-            resolve_name(
-                NameState::KnownEmpty,
-                None,
-                None,
-                NameContext::Cutover {
-                    prior_effective_name: Some("Source")
-                },
-            )
-            .text,
-            "Source ↻ unnamed"
-        );
+    fn blank_fork_uses_context_not_a_shadow_label() {
         assert_eq!(
             resolve_name(
                 NameState::KnownEmpty,
@@ -166,18 +136,6 @@ mod tests {
         assert_eq!(
             resolve_name(NameState::KnownEmpty, None, None, NameContext::Starting).text,
             "starting"
-        );
-        assert_eq!(
-            resolve_name(
-                NameState::KnownEmpty,
-                None,
-                None,
-                NameContext::Cutover {
-                    prior_effective_name: None,
-                },
-            )
-            .text,
-            "untitled ↻"
         );
     }
 }

@@ -333,7 +333,7 @@ impl HostRegistry {
         Ok(runtime)
     }
 
-    /// D17 observer-only spelling for the already-open schema-14 registry.
+    /// observer-only spelling for the already-open schema-15 registry.
     /// It avoids granting the observer any root-opening authority.
     pub(crate) fn observer_runtime_by_id(
         &self,
@@ -572,8 +572,8 @@ impl HostRegistry {
         Ok(handle)
     }
 
-    /// D17 observer-only spelling for a handle read from an already-open
-    /// schema-14 registry.
+    /// observer-only spelling for a handle read from an already-open
+    /// schema-15 registry.
     pub(crate) fn observer_opencode_runtime_handle(
         &self,
         runtime_id: RuntimeId,

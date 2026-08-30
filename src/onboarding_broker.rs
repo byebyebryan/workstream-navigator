@@ -1,7 +1,7 @@
-//! D17 shell-promotion broker.
+//! shell-promotion broker.
 //!
 //! This crate-private seam joins the presentation marker, live private-shell
-//! proof, provider grammar, Git worktree inspection, and schema-14 state
+//! proof, provider grammar, Git worktree inspection, and schema-15 state
 //! reservation. It deliberately does not create a provider process, attach a
 //! terminal, or invoke a helper.
 
@@ -13,20 +13,20 @@ use crate::{
     domain::{IdGenerator, ProviderKind, Revision},
     onboarding::{LaunchCapability, ShellCommandDecision, classify_shell_command},
     provisional::{ProvisionalPhase, ProvisionalSlot, SlotError, read_marker, update_marker},
-    repository::{RepositoryError, RepositoryRegistration, inspect_containing_worktree},
+    repository::{RepositoryDiscovery, RepositoryError, discover_containing_worktree},
     runtime::{PrivateRuntime, ProcessGroupProbe},
-    state::d16::{OnboardingOwnership, OnboardingPreparation, OnboardingPrepareRequest},
-    state::{D16State, ProvisionalLease, StateError},
+    state::current::{OnboardingOwnership, OnboardingPreparation, OnboardingPrepareRequest},
+    state::{CurrentState, ProvisionalLease, StateError},
 };
 
 /// Read-only Git discovery used by the broker. Keeping this dependency narrow
 /// lets the complete authority handoff run against disposable fixtures without
 /// consulting an operator repository.
 pub(crate) trait WorktreeInspector {
-    fn inspect_containing_worktree(
+    fn discover_containing_worktree(
         &self,
         cwd: &Path,
-    ) -> Result<RepositoryRegistration, RepositoryError>;
+    ) -> Result<RepositoryDiscovery, RepositoryError>;
 }
 
 /// Exact presentation identity carried from the private ownership marker into
@@ -40,7 +40,7 @@ pub(crate) struct PresentationBinding {
 }
 
 impl PresentationBinding {
-    /// Builds a bounded binding recovered from a D17 presentation marker.
+    /// Builds a bounded binding recovered from a presentation marker.
     /// Callers cannot construct a nil or pre-initial presentation identity.
     pub(crate) fn new(
         presentation_id: uuid::Uuid,
@@ -73,11 +73,11 @@ impl PresentationBinding {
 pub(crate) struct SystemWorktreeInspector;
 
 impl WorktreeInspector for SystemWorktreeInspector {
-    fn inspect_containing_worktree(
+    fn discover_containing_worktree(
         &self,
         cwd: &Path,
-    ) -> Result<RepositoryRegistration, RepositoryError> {
-        inspect_containing_worktree(cwd)
+    ) -> Result<RepositoryDiscovery, RepositoryError> {
+        discover_containing_worktree(cwd)
     }
 }
 
@@ -139,29 +139,29 @@ pub(crate) enum BrokerError {
     Command,
     #[error("Git worktree inspection is unavailable")]
     Repository(#[from] RepositoryError),
-    #[error("D17 state reservation is unavailable")]
+    #[error("state reservation is unavailable")]
     State(#[from] StateError),
     #[error("provisional lease generation does not match the marker")]
     LeaseGenerationMismatch,
-    #[error("D17 presentation binding is invalid")]
+    #[error("presentation binding is invalid")]
     PresentationBindingInvalid,
-    #[error("D17 provisional slot does not match this presentation")]
+    #[error("provisional slot does not match this presentation")]
     PresentationBindingMismatch,
     #[error("an unresolved onboarding operation already owns this provisional slot")]
     ExistingOperation,
 }
 
-/// Prepares exactly one managed fresh-session launch under the stable D17
+/// Prepares exactly one managed fresh-session launch under the stable
 /// lease. The caller must still arrange a private helper handoff; this seam
 /// performs no provider effect.
 pub(crate) fn prepare(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
 ) -> Result<PreparedHandoff, BrokerError> {
     let (slot, request) = request_from_context(state, provisional_lease, context)?;
     let OnboardingPreparation::Issued(reservation) =
-        state.prepare_d17_onboarding_current(provisional_lease, &request, context.id_generator)?
+        state.prepare_onboarding_current(provisional_lease, &request, context.id_generator)?
     else {
         return Err(BrokerError::ExistingOperation);
     };
@@ -189,7 +189,7 @@ pub(crate) fn prepare(
 /// a marker-update failure after durable ownership is recovery evidence and
 /// leaves the provider launch fenced.
 pub(crate) fn consume(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
     token: &str,
@@ -199,7 +199,7 @@ pub(crate) fn consume(
     if slot.phase() != ProvisionalPhase::HandoffIssued {
         return Err(SlotError::HandoffUnavailable.into());
     }
-    let ownership = state.consume_d17_onboarding_current(
+    let ownership = state.consume_onboarding_current(
         provisional_lease,
         &request,
         token,
@@ -222,7 +222,7 @@ pub(crate) fn consume(
 /// worktree evidence. The helper repeats this before every post-consume phase
 /// transition so stale provider preparation cannot advance a changed slot.
 pub(crate) fn request_from_context(
-    state: &D16State,
+    state: &CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
 ) -> Result<(ProvisionalSlot, OnboardingPrepareRequest), BrokerError> {
@@ -241,7 +241,7 @@ pub(crate) fn request_from_context(
     };
     let repository = context
         .worktree_inspector
-        .inspect_containing_worktree(&shell.cwd)?;
+        .discover_containing_worktree(&shell.cwd)?;
     let request = OnboardingPrepareRequest {
         request_key: request_key(&slot),
         presentation_id: slot.presentation_id(),
@@ -266,7 +266,7 @@ pub(crate) fn request_from_context(
 
 fn request_key(slot: &ProvisionalSlot) -> String {
     format!(
-        "d17-slot-v1:{}:{}",
+        "wsnav-slot-v1:{}:{}",
         slot.presentation_id(),
         slot.slot_generation()
     )
@@ -278,7 +278,7 @@ mod tests {
         cell::RefCell,
         collections::BTreeMap,
         ffi::OsString,
-        fs::{self, OpenOptions},
+        fs,
         path::{Path, PathBuf},
         str::FromStr,
         sync::atomic::{AtomicU64, Ordering},
@@ -290,23 +290,20 @@ mod tests {
         BrokerError, PrepareContext, PresentationBinding, WorktreeInspector, consume, prepare,
     };
     use crate::{
-        d17_helper::{advance_codex_to_provider_exec_fence, begin_provider_preparation},
-        d17_reconcile::{ProviderExecutableProbe, ReconcileError, prove_provider_exec},
         domain::{IdGenerator, ProviderKind, Revision, RuntimeId},
+        onboarding_helper::{advance_codex_to_provider_exec_fence, begin_provider_preparation},
+        provider_reconcile::{ProviderExecutableProbe, ReconcileError, prove_provider_exec},
         provisional::{
             PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, SlotGeneration,
             materialize_private_shell, read_marker, retire_provider_exec_proven_marker,
         },
-        repository::{RepositoryError, RepositoryRegistration},
+        repository::{RepositoryDiscovery, RepositoryError},
         runtime::{
             NativeLaunch, PrivateRuntime, ProcessGroupInfo, ProcessGroupProbe, ProcessProbe,
             ProcessProbeError, RuntimeError, TmuxClient, TmuxInvocation, TmuxResponse,
         },
-        state::d16::OnboardingProviderExecutableIdentity,
-        state::{
-            StateRoot, TRANSITION_LOCK_FILE, acquire_transition_lease, fresh_create,
-            open_cutover_transition, open_d17_current_only,
-        },
+        state::current::OnboardingProviderExecutableIdentity,
+        state::{StateRoot, create_current, open_current},
     };
 
     #[derive(Default)]
@@ -397,7 +394,7 @@ mod tests {
     }
 
     struct FixtureWorktreeInspector {
-        registration: RepositoryRegistration,
+        registration: RepositoryDiscovery,
     }
 
     struct FixtureExecutableProbe {
@@ -425,10 +422,10 @@ mod tests {
     }
 
     impl WorktreeInspector for FixtureWorktreeInspector {
-        fn inspect_containing_worktree(
+        fn discover_containing_worktree(
             &self,
             cwd: &Path,
-        ) -> Result<RepositoryRegistration, RepositoryError> {
+        ) -> Result<RepositoryDiscovery, RepositoryError> {
             if cwd.starts_with(&self.registration.project_root) {
                 Ok(self.registration.clone())
             } else {
@@ -437,26 +434,10 @@ mod tests {
         }
     }
 
-    fn transition_lease(path: &Path) -> crate::state::TransitionLease {
-        let lock_path = path.join(TRANSITION_LOCK_FILE);
-        let lock = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&lock_path)
-            .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-        drop(lock);
-        acquire_transition_lease(path).unwrap()
-    }
-
     #[test]
     #[allow(
         clippy::too_many_lines,
-        reason = "the complete D17 authority handoff is one auditable fixture"
+        reason = "the complete authority handoff is one auditable fixture"
     )]
     fn broker_reserves_and_consumes_once_after_exact_marker_shell_and_grammar_proof() {
         let temporary = tempfile::tempdir().unwrap();
@@ -466,16 +447,10 @@ mod tests {
         fs::create_dir(&repository_root).unwrap();
         fs::create_dir(&shell_cwd).unwrap();
         let root = StateRoot::select(&state_path);
-        drop(fresh_create(&state_path, &SequenceIds::default()).unwrap());
-        let transition = transition_lease(&state_path);
-        let mut migrating = open_cutover_transition(&root, &transition).unwrap();
-        migrating.migrate_schema13_to14(&transition).unwrap();
-        drop(migrating);
-        drop(transition);
-        fs::remove_file(state_path.join(TRANSITION_LOCK_FILE)).unwrap();
+        drop(create_current(&state_path, &SequenceIds::default()).unwrap());
 
-        let mut state = open_d17_current_only(&root).unwrap();
-        let provisional_lease = state.acquire_d17_provisional_lease().unwrap();
+        let mut state = open_current(&root).unwrap();
+        let provisional_lease = state.acquire_provisional_lease().unwrap();
         let presentation = state_path.join("presentation");
         fs::create_dir(&presentation).unwrap();
         let slot = ProvisionalSlot::materializing(
@@ -509,7 +484,7 @@ mod tests {
         .unwrap();
 
         let inspector = FixtureWorktreeInspector {
-            registration: RepositoryRegistration {
+            registration: RepositoryDiscovery {
                 project_root: repository_root.canonicalize().unwrap(),
                 display_name: "worktree".to_owned(),
                 remote_identity_fingerprint: None,
@@ -534,7 +509,7 @@ mod tests {
             arguments: &[OsString::from("--model"), OsString::from("gpt-5.6")],
             now_monotonic_millis: 10,
             expiry_monotonic_millis: 1_010,
-            boot_provenance: "d17-boot-v1:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            boot_provenance: "wsnav-boot-v1:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             id_generator: &ids,
             worktree_inspector: &inspector,
         };
@@ -548,7 +523,7 @@ mod tests {
             arguments: &[OsString::from("--model"), OsString::from("gpt-5.6")],
             now_monotonic_millis: 10,
             expiry_monotonic_millis: 1_010,
-            boot_provenance: "d17-boot-v1:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            boot_provenance: "wsnav-boot-v1:sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
             id_generator: &ids,
             worktree_inspector: &inspector,
         };
@@ -578,7 +553,7 @@ mod tests {
             arguments: &[OsString::from("--model"), OsString::from("gpt-5.6")],
             now_monotonic_millis: 11,
             expiry_monotonic_millis: 1_011,
-            boot_provenance: "d17-boot-v1:sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            boot_provenance: "wsnav-boot-v1:sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
             id_generator: &ids,
             worktree_inspector: &inspector,
         };

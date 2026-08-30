@@ -1,14 +1,15 @@
-//! D17 schema-14 Navigator pane.
+//! schema-15 Navigator pane.
 //!
 //! This controller owns terminal setup, passive snapshots, shell-card
 //! materialization, and exact presentation attachment. It is reached solely
-//! from the hidden D17 presentation-pane command.
+//! from the hidden presentation-pane command.
 
 use std::{
     env,
     ffi::OsStr,
     io::{self, Stdout},
     path::{Component, Path, PathBuf},
+    thread,
     time::{Duration, Instant},
 };
 
@@ -21,62 +22,64 @@ use ratatui::{Terminal, backend::CrosstermBackend, layout::Rect};
 use thiserror::Error;
 
 use crate::{
+    account_shell::{AccountShellContext, AccountShellLaunch},
     app::observer::{
         ObserverActivation, ObserverReadiness, ObserverReadinessEvidence,
-        finalize_observer_trust_d17_under_lease, observer_readiness,
-        prepare_observer_activation_d17,
+        finalize_observer_trust_under_lease, observer_readiness, prepare_observer_activation,
     },
-    d17_account_shell::{AccountShellContext, AccountShellLaunch},
-    d17_reconcile::ExpectedProviderExecutable,
-    d17_review::D17ReviewDirectory,
-    d17_shell_control::reconcile_provider_exec_from_presentation,
-    d17_snapshot::{D17Snapshot, D17SnapshotError, read_snapshot},
     domain::{OperationId, ProviderKind, Revision, RuntimeId, WorkstreamId},
     presentation::{Presentation, PresentationError},
+    provider_reconcile::ExpectedProviderExecutable,
     provisional::{
         PreHandoffRecovery, ProvisionalPhase, ProvisionalSlot, SlotError, SlotGeneration,
         read_marker, reconcile_pre_handoff_under_lease,
     },
+    review::ReviewDirectory,
     runtime::{LinuxProcessProbe, PrivateRuntime, SystemTmux},
-    state::{StateRoot, open_d17_current_only},
+    shell_control::reconcile_provider_exec_from_presentation,
+    snapshot::{Snapshot, SnapshotError, read_snapshot},
+    state::{StateRoot, open_current},
 };
 
-use super::d17::{D17Command, D17Navigator, D17ObserverSetupKind, D17ShellLocation};
+use super::view::{Command, Navigator, ObserverSetupKind, ShellLocation};
 
-/// Errors that prevent the D17 pane from rendering its schema-14-only
+const NAVIGATOR_WIDTH_RETRY_ATTEMPTS: usize = 20;
+const NAVIGATOR_WIDTH_RETRY_INTERVAL: Duration = Duration::from_millis(5);
+
+/// Errors that prevent the pane from rendering its schema-15-only
 /// Workstreams view.
 #[derive(Debug, Error)]
-pub(crate) enum D17NavigatorError {
-    #[error("D17 navigator terminal setup failed: {0}")]
+pub(crate) enum NavigatorError {
+    #[error("navigator terminal setup failed: {0}")]
     Terminal(#[source] io::Error),
-    #[error("D17 navigator presentation setup failed: {0}")]
+    #[error("navigator presentation setup failed: {0}")]
     Presentation(#[from] PresentationError),
-    #[error("D17 navigator state is unavailable: {0}")]
-    Snapshot(#[from] D17SnapshotError),
-    #[error("D17 provisional shell is unavailable")]
+    #[error("navigator state is unavailable: {0}")]
+    Snapshot(#[from] SnapshotError),
+    #[error("provisional shell is unavailable")]
     ProvisionalShellUnavailable,
-    #[error("D17 same-location session creation is unavailable")]
+    #[error("same-location session creation is unavailable")]
     SameLocationSessionUnavailable,
-    #[error("D17 managed action is unavailable")]
+    #[error("managed action is unavailable")]
     ManagedActionUnavailable,
 }
 
-/// Runs the hidden schema-14 D17 Navigator pane. It validates the exact D17
+/// Runs the hidden schema-15 Navigator pane. It validates the exact
 /// presentation context before reading state. The provisional-shell command is
 /// a lease-held marker-first materialization followed by an outer-pane attach.
 #[allow(
     clippy::too_many_lines,
-    reason = "The D17 loop keeps shell, promotion, exact attachment, and focus ordering in one auditable owner."
+    reason = "The loop keeps shell, promotion, exact attachment, and focus ordering in one auditable owner."
 )]
-pub(crate) fn run_d17_navigator(
+pub(crate) fn run_navigator(
     root: &StateRoot,
     socket: PathBuf,
     session_name: String,
-) -> Result<(), D17NavigatorError> {
+) -> Result<(), NavigatorError> {
     let presentation = Presentation::from_control(root.base(), socket, session_name)?;
     let context =
-        Presentation::d17_context_from_directory(root.base(), &presentation.paths().directory)
-            .map_err(|_| PresentationError::D17ContextUnavailable)?;
+        Presentation::context_from_directory(root.base(), &presentation.paths().directory)
+            .map_err(|_| PresentationError::ContextUnavailable)?;
     let seed_cwd = context.seed_cwd().to_path_buf();
     let home = env::var_os("HOME").map(PathBuf::from);
     // Reconcile any interrupted pre-effect marker before taking the passive
@@ -84,7 +87,7 @@ pub(crate) fn run_d17_navigator(
     // become permission to allocate a replacement candidate.
     let startup_recovery = reconcile_pre_handoff_presentation(root, &presentation);
     let snapshot = read_snapshot(root)?;
-    let mut navigator = D17Navigator::new(snapshot);
+    let mut navigator = Navigator::new(snapshot);
     if startup_recovery.is_err() {
         navigator.set_guidance("Provisional shell recovery is unavailable; exact state required");
     }
@@ -97,7 +100,7 @@ pub(crate) fn run_d17_navigator(
         &mut observed_shell_cwd,
         &mut navigator,
     );
-    let mut terminal = TerminalSession::enter().map_err(D17NavigatorError::Terminal)?;
+    let mut terminal = TerminalSession::enter().map_err(NavigatorError::Terminal)?;
     let mut redraw = true;
     let mut last_refresh = Instant::now();
     let mut mouse_down = None;
@@ -109,14 +112,14 @@ pub(crate) fn run_d17_navigator(
             terminal
                 .terminal
                 .draw(|frame| navigator.render(frame, frame.area()))
-                .map_err(D17NavigatorError::Terminal)?;
+                .map_err(NavigatorError::Terminal)?;
             redraw = false;
         }
-        if event::poll(Duration::from_millis(100)).map_err(D17NavigatorError::Terminal)? {
-            match event::read().map_err(D17NavigatorError::Terminal)? {
+        if event::poll(Duration::from_millis(100)).map_err(NavigatorError::Terminal)? {
+            match event::read().map_err(NavigatorError::Terminal)? {
                 Event::Key(key) => {
                     let command = navigator.handle_key(key.code);
-                    if execute_d17_command(
+                    if execute_command(
                         command,
                         root,
                         &mut navigator,
@@ -139,10 +142,8 @@ pub(crate) fn run_d17_navigator(
                             None
                         }
                         MouseEventKind::Down(MouseButton::Left) => {
-                            let size = terminal
-                                .terminal
-                                .size()
-                                .map_err(D17NavigatorError::Terminal)?;
+                            let size =
+                                terminal.terminal.size().map_err(NavigatorError::Terminal)?;
                             mouse_down = navigator.row_at(
                                 Rect::new(0, 0, size.width, size.height),
                                 mouse.column,
@@ -151,10 +152,8 @@ pub(crate) fn run_d17_navigator(
                             None
                         }
                         MouseEventKind::Up(MouseButton::Left) => {
-                            let size = terminal
-                                .terminal
-                                .size()
-                                .map_err(D17NavigatorError::Terminal)?;
+                            let size =
+                                terminal.terminal.size().map_err(NavigatorError::Terminal)?;
                             let target = navigator.row_at(
                                 Rect::new(0, 0, size.width, size.height),
                                 mouse.column,
@@ -173,7 +172,7 @@ pub(crate) fn run_d17_navigator(
                         _ => None,
                     };
                     if let Some(command) = command
-                        && execute_d17_command(
+                        && execute_command(
                             command,
                             root,
                             &mut navigator,
@@ -187,7 +186,7 @@ pub(crate) fn run_d17_navigator(
                     redraw = true;
                 }
                 Event::Resize(_, _) => {
-                    if presentation.set_default_navigator_width().is_err() {
+                    if restore_default_navigator_width(&presentation).is_err() {
                         navigator.set_guidance(
                             "Navigator resize is unavailable; exact presentation evidence changed",
                         );
@@ -202,7 +201,7 @@ pub(crate) fn run_d17_navigator(
             &mut navigator,
             &presentation,
             &mut pending_observer,
-        ) && execute_d17_command(
+        ) && execute_command(
             command,
             root,
             &mut navigator,
@@ -252,9 +251,29 @@ pub(crate) fn run_d17_navigator(
     };
     drop(terminal);
     if quit {
-        presentation.stop_d17_session()?;
+        presentation.stop_session()?;
     }
     Ok(())
+}
+
+/// A tmux attach resize and its installed width hook can briefly overlap. The
+/// topology must still become exact within one small bounded interval; a
+/// persistent ownership or shape failure remains a visible refusal.
+fn restore_default_navigator_width(presentation: &Presentation) -> Result<(), PresentationError> {
+    retry_default_navigator_width(|| presentation.set_default_navigator_width())
+}
+
+fn retry_default_navigator_width(
+    mut resize: impl FnMut() -> Result<(), PresentationError>,
+) -> Result<(), PresentationError> {
+    for attempt in 0..NAVIGATOR_WIDTH_RETRY_ATTEMPTS {
+        match resize() {
+            Ok(()) => return Ok(()),
+            Err(error) if attempt + 1 == NAVIGATOR_WIDTH_RETRY_ATTEMPTS => return Err(error),
+            Err(_) => thread::sleep(NAVIGATOR_WIDTH_RETRY_INTERVAL),
+        }
+    }
+    unreachable!("navigator width retry loop has at least one attempt")
 }
 
 /// Refreshes only presentation-local shell context. The cwd is exact live
@@ -266,14 +285,14 @@ fn refresh_shell_location(
     seed_cwd: &Path,
     home: Option<&Path>,
     observed: &mut Option<PathBuf>,
-    navigator: &mut D17Navigator,
+    navigator: &mut Navigator,
 ) {
     let cwd = observe_shell_cwd(root, presentation, seed_cwd).ok();
     if cwd.as_ref() == observed.as_ref() {
         return;
     }
     let location = cwd.as_ref().map_or_else(
-        || D17ShellLocation::cwd("unavailable"),
+        || ShellLocation::cwd("unavailable"),
         |cwd| describe_shell_location(cwd, home),
     );
     navigator.set_shell_location(location);
@@ -284,11 +303,11 @@ fn observe_shell_cwd(
     root: &StateRoot,
     presentation: &Presentation,
     seed_cwd: &Path,
-) -> Result<PathBuf, D17NavigatorError> {
+) -> Result<PathBuf, NavigatorError> {
     let slot = match read_marker(root.base(), &presentation.paths().directory) {
         Ok(slot) => slot,
         Err(SlotError::MarkerUnavailable) => return Ok(seed_cwd.to_path_buf()),
-        Err(_) => return Err(D17NavigatorError::ProvisionalShellUnavailable),
+        Err(_) => return Err(NavigatorError::ProvisionalShellUnavailable),
     };
     if !matches!(
         slot.phase(),
@@ -301,10 +320,10 @@ fn observe_shell_cwd(
     let runtime = PrivateRuntime::new(&tmux, &process_probe, slot.runtime_paths().clone());
     slot.revalidate_live_shell(&runtime, &process_probe)
         .map(|shell| shell.cwd)
-        .map_err(|_| D17NavigatorError::ProvisionalShellUnavailable)
+        .map_err(|_| NavigatorError::ProvisionalShellUnavailable)
 }
 
-fn describe_shell_location(cwd: &Path, home: Option<&Path>) -> D17ShellLocation {
+fn describe_shell_location(cwd: &Path, home: Option<&Path>) -> ShellLocation {
     let cwd_label = home
         .and_then(|home| cwd.strip_prefix(home).ok())
         .and_then(|relative| {
@@ -316,7 +335,7 @@ fn describe_shell_location(cwd: &Path, home: Option<&Path>) -> D17ShellLocation 
         })
         .or_else(|| abbreviated_path(cwd))
         .unwrap_or_else(|| "unavailable".to_owned());
-    D17ShellLocation::cwd(&cwd_label)
+    ShellLocation::cwd(&cwd_label)
 }
 
 fn abbreviated_path(path: &Path) -> Option<String> {
@@ -391,14 +410,14 @@ enum PendingObserverIntent {
 }
 
 impl PendingObserverIntent {
-    fn into_command(self) -> D17Command {
+    fn into_command(self) -> Command {
         match self {
             Self::Managed(action) => match action {
                 ManagedAction::Start {
                     workstream_id,
                     expected_workstream_revision,
                     provider,
-                } => D17Command::Start {
+                } => Command::Start {
                     workstream_id,
                     expected_workstream_revision,
                     provider,
@@ -407,7 +426,7 @@ impl PendingObserverIntent {
                     workstream_id,
                     expected_workstream_revision,
                     provider,
-                } => D17Command::Recover {
+                } => Command::Recover {
                     workstream_id,
                     expected_workstream_revision,
                     provider,
@@ -416,7 +435,7 @@ impl PendingObserverIntent {
                     source_workstream_id,
                     expected_workstream_revision,
                     provider,
-                } => D17Command::Fork {
+                } => Command::Fork {
                     source_workstream_id,
                     expected_workstream_revision,
                     provider,
@@ -425,7 +444,7 @@ impl PendingObserverIntent {
                     operation_id,
                     expected_operation_revision,
                     provider,
-                } => D17Command::RecoverOperation {
+                } => Command::RecoverOperation {
                     operation_id,
                     expected_operation_revision,
                     provider,
@@ -433,28 +452,28 @@ impl PendingObserverIntent {
                 ManagedAction::Park {
                     workstream_id,
                     expected_workstream_revision,
-                } => D17Command::Park {
+                } => Command::Park {
                     workstream_id,
                     expected_workstream_revision,
                 },
                 ManagedAction::Archive {
                     workstream_id,
                     expected_workstream_revision,
-                } => D17Command::Archive {
+                } => Command::Archive {
                     workstream_id,
                     expected_workstream_revision,
                 },
                 ManagedAction::Restore {
                     workstream_id,
                     expected_workstream_revision,
-                } => D17Command::Restore {
+                } => Command::Restore {
                     workstream_id,
                     expected_workstream_revision,
                 },
                 ManagedAction::AcknowledgeResult {
                     workstream_id,
                     expected_attention_revision,
-                } => D17Command::AcknowledgeResult {
+                } => Command::AcknowledgeResult {
                     workstream_id,
                     expected_attention_revision,
                 },
@@ -462,7 +481,7 @@ impl PendingObserverIntent {
                     workstream_id,
                     expected_workstream_revision,
                     name,
-                } => D17Command::Rename {
+                } => Command::Rename {
                     workstream_id,
                     expected_workstream_revision,
                     name,
@@ -472,7 +491,7 @@ impl PendingObserverIntent {
                 source_workstream_id,
                 expected_workstream_revision,
                 provider,
-            } => D17Command::NewAtSameLocation {
+            } => Command::NewAtSameLocation {
                 source_workstream_id,
                 expected_workstream_revision,
                 provider,
@@ -483,32 +502,32 @@ impl PendingObserverIntent {
 
 struct PendingObserverSetup {
     intent: PendingObserverIntent,
-    kind: D17ObserverSetupKind,
+    kind: ObserverSetupKind,
     evidence: ObserverReadinessEvidence,
-    presentation_context: crate::presentation::D17PresentationContext,
+    presentation_context: crate::presentation::PresentationContext,
     marker: Option<ProvisionalSlot>,
     expected_integration: Option<crate::state::CodexIntegration>,
-    review_directory: Option<D17ReviewDirectory>,
+    review_directory: Option<ReviewDirectory>,
 }
 
-/// Executes one D17 model command while keeping keyboard- and mouse-originated
+/// Executes one model command while keeping keyboard- and mouse-originated
 /// focus policy explicit. Mouse activation switches the provider attachment
 /// but leaves keyboard focus in Navigator.
 #[allow(
     clippy::too_many_lines,
-    reason = "The small D17 command set keeps exact attachment and focus outcomes in one controller seam."
+    reason = "The small command set keeps exact attachment and focus outcomes in one controller seam."
 )]
-fn execute_d17_command(
-    command: D17Command,
+fn execute_command(
+    command: Command,
     root: &StateRoot,
-    navigator: &mut D17Navigator,
+    navigator: &mut Navigator,
     presentation: &Presentation,
     focus_after: FocusAfter,
     pending_observer: &mut Option<PendingObserverSetup>,
 ) -> bool {
     match command {
-        D17Command::Quit => true,
-        D17Command::MaterializeProvisionalShell => {
+        Command::Quit => true,
+        Command::MaterializeProvisionalShell => {
             if materialize_provisional_shell(root, presentation).is_ok() {
                 if focus_after == FocusAfter::Provider && presentation.focus_provider().is_err() {
                     navigator.set_guidance("Shell opened; provider-pane focus is unavailable");
@@ -518,14 +537,14 @@ fn execute_d17_command(
             }
             false
         }
-        D17Command::Attach {
+        Command::Attach {
             workstream_id,
             expected_workstream_revision,
             runtime_id,
             expected_runtime_revision,
         } => {
             if presentation
-                .attach_d17_workstream(
+                .attach_workstream(
                     workstream_id,
                     expected_workstream_revision,
                     runtime_id,
@@ -544,7 +563,7 @@ fn execute_d17_command(
             }
             false
         }
-        D17Command::NewAtSameLocation {
+        Command::NewAtSameLocation {
             source_workstream_id,
             expected_workstream_revision,
             provider,
@@ -567,7 +586,7 @@ fn execute_d17_command(
             else {
                 return false;
             };
-            match start_d17_same_location(
+            match start_same_location(
                 root,
                 source_workstream_id,
                 expected_workstream_revision,
@@ -577,7 +596,7 @@ fn execute_d17_command(
                     navigator.replace_snapshot(snapshot);
                     navigator.select_runtime(attachment.runtime_id);
                     if presentation
-                        .attach_d17_workstream(
+                        .attach_workstream(
                             attachment.workstream_id,
                             attachment.workstream_revision,
                             attachment.runtime_id,
@@ -604,7 +623,7 @@ fn execute_d17_command(
             }
             false
         }
-        D17Command::Start {
+        Command::Start {
             workstream_id,
             expected_workstream_revision,
             provider,
@@ -625,7 +644,7 @@ fn execute_d17_command(
             );
             false
         }
-        D17Command::Recover {
+        Command::Recover {
             workstream_id,
             expected_workstream_revision,
             provider,
@@ -646,7 +665,7 @@ fn execute_d17_command(
             );
             false
         }
-        D17Command::Park {
+        Command::Park {
             workstream_id,
             expected_workstream_revision,
         } => {
@@ -662,7 +681,7 @@ fn execute_d17_command(
             );
             false
         }
-        D17Command::Archive {
+        Command::Archive {
             workstream_id,
             expected_workstream_revision,
         } => {
@@ -678,7 +697,7 @@ fn execute_d17_command(
             );
             false
         }
-        D17Command::Restore {
+        Command::Restore {
             workstream_id,
             expected_workstream_revision,
         } => {
@@ -694,7 +713,7 @@ fn execute_d17_command(
             );
             false
         }
-        D17Command::AcknowledgeResult {
+        Command::AcknowledgeResult {
             workstream_id,
             expected_attention_revision,
         } => {
@@ -710,7 +729,7 @@ fn execute_d17_command(
             );
             false
         }
-        D17Command::Fork {
+        Command::Fork {
             source_workstream_id,
             expected_workstream_revision,
             provider,
@@ -731,7 +750,7 @@ fn execute_d17_command(
             );
             false
         }
-        D17Command::RecoverOperation {
+        Command::RecoverOperation {
             operation_id,
             expected_operation_revision,
             provider,
@@ -752,18 +771,18 @@ fn execute_d17_command(
             );
             false
         }
-        D17Command::AcceptObserverSetup { kind } => {
+        Command::AcceptObserverSetup { kind } => {
             accept_observer_setup(root, navigator, presentation, kind, pending_observer);
             false
         }
-        D17Command::CancelObserverSetup => {
+        Command::CancelObserverSetup => {
             pending_observer.take();
             navigator.set_guidance(
                 "Codex observer setup was declined; no profile or trust state was changed",
             );
             false
         }
-        D17Command::Rename {
+        Command::Rename {
             workstream_id,
             expected_workstream_revision,
             name,
@@ -781,17 +800,17 @@ fn execute_d17_command(
             );
             false
         }
-        D17Command::ShowGuidance(guidance) => {
+        Command::ShowGuidance(guidance) => {
             navigator.set_guidance(guidance);
             false
         }
-        D17Command::None => false,
+        Command::None => false,
     }
 }
 
-/// Schema-14-native managed lifecycle intent. This deliberately bypasses the
-/// retired schema-13 application facade: each variant carries only the exact
-/// durable IDs/revisions supplied by the passive D17 snapshot.
+/// Schema-15-native managed lifecycle intent. This deliberately bypasses the
+/// retired application facade: each variant carries only the exact
+/// durable IDs/revisions supplied by the passive snapshot.
 pub(crate) enum ManagedAction {
     Start {
         workstream_id: WorkstreamId,
@@ -848,7 +867,7 @@ pub(crate) enum ManagedAction {
 )]
 fn execute_managed_action_or_request(
     root: &StateRoot,
-    navigator: &mut D17Navigator,
+    navigator: &mut Navigator,
     presentation: &Presentation,
     focus_after: FocusAfter,
     _provider: ProviderKind,
@@ -867,7 +886,7 @@ fn execute_managed_action_or_request(
     execute_managed_action(root, navigator, presentation, focus_after, action);
 }
 
-/// Reads the exact schema-14 observer state without reserving onboarding
+/// Reads the exact schema-15 observer state without reserving onboarding
 /// capability or mutating profile/state. This preflight is deliberately
 /// repeated at the action boundary because the Navigator snapshot is passive.
 #[allow(
@@ -878,7 +897,7 @@ fn execute_managed_action_or_request(
 )]
 fn prepare_observer_or_request(
     root: &StateRoot,
-    navigator: &mut D17Navigator,
+    navigator: &mut Navigator,
     presentation: &Presentation,
     intent: PendingObserverIntent,
     pending_observer: &mut Option<PendingObserverSetup>,
@@ -900,11 +919,11 @@ fn prepare_observer_or_request(
     if provider != ProviderKind::Codex {
         return Some(intent);
     }
-    let state = match open_d17_current_only(root) {
+    let state = match open_current(root) {
         Ok(state) => state,
         Err(_) => {
             navigator.set_guidance(
-                "Codex observer readiness is unavailable; exact schema-14 state is required",
+                "Codex observer readiness is unavailable; exact schema-15 state is required",
             );
             return None;
         }
@@ -931,13 +950,13 @@ fn prepare_observer_or_request(
                 return None;
             }
             let kind = match evidence.readiness {
-                ObserverReadiness::SetupRequired => D17ObserverSetupKind::Create,
-                ObserverReadiness::UpdateRequired => D17ObserverSetupKind::Update,
+                ObserverReadiness::SetupRequired => ObserverSetupKind::Create,
+                ObserverReadiness::UpdateRequired => ObserverSetupKind::Update,
                 ObserverReadiness::TrustReviewRequired
-                | ObserverReadiness::TrustFinalizationRequired => D17ObserverSetupKind::TrustReview,
+                | ObserverReadiness::TrustFinalizationRequired => ObserverSetupKind::TrustReview,
                 _ => unreachable!("observer setup arm is exhaustive"),
             };
-            let presentation_context = match presentation.d17_context() {
+            let presentation_context = match presentation.context() {
                 Ok(context) => context,
                 Err(_) => {
                     navigator.set_guidance(
@@ -946,7 +965,7 @@ fn prepare_observer_or_request(
                     return None;
                 }
             };
-            let marker = match read_optional_d17_marker(root, presentation) {
+            let marker = match read_optional_marker(root, presentation) {
                 Ok(marker) => marker,
                 Err(()) => {
                     navigator.set_guidance(
@@ -992,7 +1011,7 @@ fn prepare_observer_or_request(
     }
 }
 
-fn read_optional_d17_marker(
+fn read_optional_marker(
     root: &StateRoot,
     presentation: &Presentation,
 ) -> Result<Option<ProvisionalSlot>, ()> {
@@ -1004,7 +1023,7 @@ fn read_optional_d17_marker(
 }
 
 /// Applies the Navigator's explicit observer consent to one retained typed
-/// action. Profile setup occurs under the exact D17 provisional lease; native
+/// action. Profile setup occurs under the exact provisional lease; native
 /// review then runs in the right-hand provider pane, and the action remains in
 /// process memory until its evidence is revalidated.
 #[allow(
@@ -1015,9 +1034,9 @@ fn read_optional_d17_marker(
 )]
 fn accept_observer_setup(
     root: &StateRoot,
-    navigator: &mut D17Navigator,
+    navigator: &mut Navigator,
     presentation: &Presentation,
-    kind: D17ObserverSetupKind,
+    kind: ObserverSetupKind,
     pending_observer: &mut Option<PendingObserverSetup>,
 ) {
     let Some(mut pending) = pending_observer.take() else {
@@ -1028,22 +1047,22 @@ fn accept_observer_setup(
         navigator.set_guidance("Codex observer setup changed; refresh exact state and retry");
         return;
     }
-    if presentation.d17_context().ok().as_ref() != Some(&pending.presentation_context)
-        || read_optional_d17_marker(root, presentation) != Ok(pending.marker.clone())
+    if presentation.context().ok().as_ref() != Some(&pending.presentation_context)
+        || read_optional_marker(root, presentation) != Ok(pending.marker.clone())
     {
         navigator.set_guidance(
             "Codex observer setup is unavailable; exact presentation or provisional evidence changed",
         );
         return;
     }
-    let mut state = match open_d17_current_only(root) {
+    let mut state = match open_current(root) {
         Ok(state) => state,
         Err(_) => {
             navigator.set_guidance("Codex observer setup is unavailable; exact state is required");
             return;
         }
     };
-    let provisional_lease = match state.acquire_d17_provisional_lease() {
+    let provisional_lease = match state.acquire_provisional_lease() {
         Ok(lease) => lease,
         Err(_) => {
             navigator.set_guidance("Codex observer setup is unavailable; exact lease is required");
@@ -1062,7 +1081,7 @@ fn accept_observer_setup(
         navigator.set_guidance("Codex observer setup changed; refresh exact state and retry");
         return;
     }
-    let activation = match prepare_observer_activation_d17(
+    let activation = match prepare_observer_activation(
         root,
         &mut state,
         &provisional_lease,
@@ -1076,8 +1095,8 @@ fn accept_observer_setup(
             return;
         }
     };
-    if presentation.d17_context().ok().as_ref() != Some(&pending.presentation_context)
-        || read_optional_d17_marker(root, presentation) != Ok(pending.marker.clone())
+    if presentation.context().ok().as_ref() != Some(&pending.presentation_context)
+        || read_optional_marker(root, presentation) != Ok(pending.marker.clone())
     {
         navigator.set_guidance(
             "Codex observer setup is unavailable; exact presentation or provisional evidence changed",
@@ -1088,7 +1107,7 @@ fn accept_observer_setup(
         let command = pending.intent.into_command();
         drop(provisional_lease);
         drop(state);
-        let _ = execute_d17_command(
+        let _ = execute_command(
             command,
             root,
             navigator,
@@ -1116,7 +1135,7 @@ fn accept_observer_setup(
         navigator.set_guidance("Codex observer review is unavailable; exact profile is required");
         return;
     };
-    let mut review_directory = match D17ReviewDirectory::create(
+    let mut review_directory = match ReviewDirectory::create(
         &presentation.paths().directory,
         pending.presentation_context.presentation_id(),
         pending.presentation_context.presentation_revision(),
@@ -1129,7 +1148,7 @@ fn accept_observer_setup(
             return;
         }
     };
-    let detached_workstream_id = match presentation.d17_observer_attachment_context() {
+    let detached_workstream_id = match presentation.observer_attachment_context() {
         Ok(workstream_id) => workstream_id,
         Err(_) => {
             let _ = review_directory.cleanup();
@@ -1142,7 +1161,7 @@ fn accept_observer_setup(
     drop(provisional_lease);
     drop(state);
     if presentation
-        .start_d17_observer_review(
+        .start_observer_review(
             executable.canonical_path(),
             codex_home,
             &review_directory.path(),
@@ -1172,7 +1191,7 @@ fn accept_observer_setup(
 
 /// Polls only the exact native review pane. Once it exits, native trust and
 /// presentation/marker evidence are revalidated before the retained action is
-/// reconstructed and dispatched through the ordinary D17 boundary.
+/// reconstructed and dispatched through the ordinary boundary.
 #[allow(
     clippy::manual_let_else,
     clippy::single_match_else,
@@ -1182,17 +1201,17 @@ fn accept_observer_setup(
 )]
 fn finish_pending_observer_review(
     root: &StateRoot,
-    navigator: &mut D17Navigator,
+    navigator: &mut Navigator,
     presentation: &Presentation,
     pending_observer: &mut Option<PendingObserverSetup>,
-) -> Option<D17Command> {
+) -> Option<Command> {
     let Some(pending) = pending_observer.as_ref() else {
         return None;
     };
     if pending.review_directory.is_none() {
         return None;
     }
-    let finished = match presentation.d17_observer_review_finished() {
+    let finished = match presentation.observer_review_finished() {
         Ok(finished) => finished,
         Err(_) => {
             let pending = pending_observer.take();
@@ -1221,8 +1240,8 @@ fn finish_pending_observer_review(
             .set_guidance("Codex observer review cleanup is unavailable; action remains stopped");
         return None;
     }
-    if presentation.d17_context().ok().as_ref() != Some(&pending.presentation_context)
-        || read_optional_d17_marker(root, presentation) != Ok(pending.marker.clone())
+    if presentation.context().ok().as_ref() != Some(&pending.presentation_context)
+        || read_optional_marker(root, presentation) != Ok(pending.marker.clone())
     {
         navigator.set_guidance(
             "Codex observer review evidence changed; the selected action was not resumed",
@@ -1233,7 +1252,7 @@ fn finish_pending_observer_review(
         navigator.set_guidance("Codex observer review evidence is unavailable; refresh and retry");
         return None;
     };
-    let mut state = match open_d17_current_only(root) {
+    let mut state = match open_current(root) {
         Ok(state) => state,
         Err(_) => {
             navigator.set_guidance(
@@ -1242,7 +1261,7 @@ fn finish_pending_observer_review(
             return None;
         }
     };
-    let lease = match state.acquire_d17_provisional_lease() {
+    let lease = match state.acquire_provisional_lease() {
         Ok(lease) => lease,
         Err(_) => {
             navigator.set_guidance(
@@ -1251,13 +1270,13 @@ fn finish_pending_observer_review(
             return None;
         }
     };
-    if finalize_observer_trust_d17_under_lease(root, state, &lease, &expected).is_err() {
+    if finalize_observer_trust_under_lease(root, state, &lease, &expected).is_err() {
         navigator.set_guidance(
             "Codex observer trust remains pending; the selected action was not resumed",
         );
         return None;
     }
-    let state = match open_d17_current_only(root) {
+    let state = match open_current(root) {
         Ok(state) => state,
         Err(_) => {
             navigator.set_guidance("Codex observer readiness is unavailable; refresh and retry");
@@ -1276,13 +1295,13 @@ fn finish_pending_observer_review(
     }
 }
 
-/// Runs exactly one D17 lifecycle action, refreshes the passive projection,
+/// Runs exactly one lifecycle action, refreshes the passive projection,
 /// and attaches only a freshly proved non-onboarding Runtime. Every failure
 /// remains bounded Navigator guidance; no management text reaches a provider
 /// pane.
 fn execute_managed_action(
     root: &StateRoot,
-    navigator: &mut D17Navigator,
+    navigator: &mut Navigator,
     presentation: &Presentation,
     focus_after: FocusAfter,
     action: ManagedAction,
@@ -1321,7 +1340,7 @@ fn execute_managed_action(
         return;
     };
     if presentation
-        .attach_d17_workstream(
+        .attach_workstream(
             workstream_id,
             workstream_revision,
             runtime_id,
@@ -1336,7 +1355,7 @@ fn execute_managed_action(
 }
 
 /// Re-reads only the bounded snapshot fields needed for an exact post-action
-/// attachment. D17 onboarding rows remain excluded even if the action result
+/// attachment.  onboarding rows remain excluded even if the action result
 /// is otherwise successful.
 fn navigator_attachment_for(
     root: &StateRoot,
@@ -1352,31 +1371,30 @@ fn navigator_attachment_for(
     Some((workstream.revision, runtime.runtime_id, runtime.revision))
 }
 
-/// Executes against the schema-14 registry only after the current D17
+/// Executes against the schema-15 registry only after the current
 /// snapshot has revalidated the exact action target. The short preflight is a
 /// fence against stale navigator commands; durable action routines repeat
 /// their own Workstream/attention revision checks before mutation.
 #[allow(
     clippy::too_many_lines,
-    reason = "one schema-14 action boundary keeps every lifecycle preflight and post-action attachment outcome auditable"
+    reason = "one schema-15 action boundary keeps every lifecycle preflight and post-action attachment outcome auditable"
 )]
 pub(crate) fn apply_managed_action(
     root: &StateRoot,
     action: ManagedAction,
-) -> Result<Option<WorkstreamId>, D17NavigatorError> {
+) -> Result<Option<WorkstreamId>, NavigatorError> {
     let snapshot = read_snapshot(root)?;
-    let state =
-        open_d17_current_only(root).map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+    let state = open_current(root).map_err(|_| NavigatorError::ManagedActionUnavailable)?;
     let mut registry = state
-        .into_d17_host_registry()
-        .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+        .into_host_registry()
+        .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
     match action {
         ManagedAction::Start {
             workstream_id,
             expected_workstream_revision,
             provider,
         } => {
-            require_active_d17_workstream(
+            require_active_workstream(
                 &snapshot,
                 workstream_id,
                 expected_workstream_revision,
@@ -1388,7 +1406,7 @@ pub(crate) fn apply_managed_action(
                 workstream_id,
                 Some(expected_workstream_revision),
             )
-            .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             Ok(Some(workstream_id))
         }
         ManagedAction::Recover {
@@ -1396,7 +1414,7 @@ pub(crate) fn apply_managed_action(
             expected_workstream_revision,
             provider,
         } => {
-            require_active_d17_workstream(
+            require_active_workstream(
                 &snapshot,
                 workstream_id,
                 expected_workstream_revision,
@@ -1408,22 +1426,18 @@ pub(crate) fn apply_managed_action(
                 workstream_id,
                 Some(expected_workstream_revision),
             )
-            .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             Ok(Some(workstream_id))
         }
         ManagedAction::Park {
             workstream_id,
             expected_workstream_revision,
         } => {
-            require_parkable_d17_workstream(
-                &snapshot,
-                workstream_id,
-                expected_workstream_revision,
-            )?;
+            require_parkable_workstream(&snapshot, workstream_id, expected_workstream_revision)?;
             let resolves_onboarding_recovery = snapshot.workstreams.iter().any(|workstream| {
                 workstream.workstream_id == workstream_id
                     && workstream.onboarding
-                        == Some(crate::d17_snapshot::D17OnboardingStatus::RecoveryRequired)
+                        == Some(crate::snapshot::OnboardingStatus::RecoveryRequired)
             });
             let parked_revision = crate::actions::park(
                 root,
@@ -1431,7 +1445,7 @@ pub(crate) fn apply_managed_action(
                 workstream_id,
                 Some(expected_workstream_revision),
             )
-            .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             drop(registry);
             if resolves_onboarding_recovery {
                 resolve_parked_onboarding_recovery(root, workstream_id, parked_revision)?;
@@ -1442,7 +1456,7 @@ pub(crate) fn apply_managed_action(
             workstream_id,
             expected_workstream_revision,
         } => {
-            require_active_d17_workstream(
+            require_active_workstream(
                 &snapshot,
                 workstream_id,
                 expected_workstream_revision,
@@ -1454,7 +1468,7 @@ pub(crate) fn apply_managed_action(
                 workstream_id,
                 expected_workstream_revision,
             )
-            .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             Ok(None)
         }
         ManagedAction::Restore {
@@ -1469,12 +1483,12 @@ pub(crate) fn apply_managed_action(
                         && workstream.archived
                         && workstream.revision == expected_workstream_revision
                 })
-                .ok_or(D17NavigatorError::ManagedActionUnavailable)?;
+                .ok_or(NavigatorError::ManagedActionUnavailable)?;
             if workstream.onboarding.is_some() {
-                return Err(D17NavigatorError::ManagedActionUnavailable);
+                return Err(NavigatorError::ManagedActionUnavailable);
             }
             crate::actions::restore(&mut registry, workstream_id, expected_workstream_revision)
-                .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+                .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             Ok(None)
         }
         ManagedAction::AcknowledgeResult {
@@ -1490,10 +1504,10 @@ pub(crate) fn apply_managed_action(
                         && workstream.result_unseen
                         && workstream.attention_revision == expected_attention_revision
                 })
-                .ok_or(D17NavigatorError::ManagedActionUnavailable)?;
+                .ok_or(NavigatorError::ManagedActionUnavailable)?;
             registry
                 .acknowledge_result_attention(workstream_id, expected_attention_revision)
-                .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+                .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             Ok(None)
         }
         ManagedAction::Fork {
@@ -1501,7 +1515,7 @@ pub(crate) fn apply_managed_action(
             expected_workstream_revision,
             provider,
         } => {
-            require_active_d17_workstream(
+            require_active_workstream(
                 &snapshot,
                 source_workstream_id,
                 expected_workstream_revision,
@@ -1515,7 +1529,7 @@ pub(crate) fn apply_managed_action(
                 Some(expected_workstream_revision),
                 request_key,
             )
-            .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             Ok(Some(workstream_id))
         }
         ManagedAction::RecoverOperation {
@@ -1532,14 +1546,14 @@ pub(crate) fn apply_managed_action(
                         && operation.provider == provider
                         && operation.kind == crate::domain::OperationKind::Fork
                 })
-                .ok_or(D17NavigatorError::ManagedActionUnavailable)?;
+                .ok_or(NavigatorError::ManagedActionUnavailable)?;
             let workstream_id = crate::actions::recover_managed_operation(
                 root,
                 &mut registry,
                 operation_id,
                 Some(expected_operation_revision),
             )
-            .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             Ok(Some(workstream_id))
         }
         ManagedAction::Rename {
@@ -1547,14 +1561,14 @@ pub(crate) fn apply_managed_action(
             expected_workstream_revision,
             name,
         } => {
-            require_active_d17_workstream(
+            require_active_workstream(
                 &snapshot,
                 workstream_id,
                 expected_workstream_revision,
                 Some(ProviderKind::Codex),
             )?;
             if name.trim().is_empty() {
-                return Err(D17NavigatorError::ManagedActionUnavailable);
+                return Err(NavigatorError::ManagedActionUnavailable);
             }
             crate::actions::rename(
                 &mut registry,
@@ -1562,7 +1576,7 @@ pub(crate) fn apply_managed_action(
                 expected_workstream_revision,
                 &name,
             )
-            .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+            .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             Ok(None)
         }
     }
@@ -1575,27 +1589,26 @@ fn resolve_parked_onboarding_recovery(
     root: &StateRoot,
     workstream_id: WorkstreamId,
     expected_workstream_revision: Revision,
-) -> Result<(), D17NavigatorError> {
-    let mut state =
-        open_d17_current_only(root).map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+) -> Result<(), NavigatorError> {
+    let mut state = open_current(root).map_err(|_| NavigatorError::ManagedActionUnavailable)?;
     let provisional_lease = state
-        .acquire_d17_provisional_lease()
-        .map_err(|_| D17NavigatorError::ManagedActionUnavailable)?;
+        .acquire_provisional_lease()
+        .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
     state
-        .resolve_d17_parked_recovery_current(
+        .resolve_parked_recovery_current(
             &provisional_lease,
             workstream_id,
             expected_workstream_revision,
         )
-        .map_err(|_| D17NavigatorError::ManagedActionUnavailable)
+        .map_err(|_| NavigatorError::ManagedActionUnavailable)
 }
 
-fn require_active_d17_workstream(
-    snapshot: &D17Snapshot,
+fn require_active_workstream(
+    snapshot: &Snapshot,
     workstream_id: WorkstreamId,
     expected_revision: Revision,
     expected_provider: Option<ProviderKind>,
-) -> Result<(), D17NavigatorError> {
+) -> Result<(), NavigatorError> {
     let workstream = snapshot
         .workstreams
         .iter()
@@ -1605,20 +1618,20 @@ fn require_active_d17_workstream(
                 && workstream.revision == expected_revision
                 && expected_provider.is_none_or(|provider| workstream.provider == provider)
         })
-        .ok_or(D17NavigatorError::ManagedActionUnavailable)?;
+        .ok_or(NavigatorError::ManagedActionUnavailable)?;
     if workstream.onboarding.is_some() {
-        return Err(D17NavigatorError::ManagedActionUnavailable);
+        return Err(NavigatorError::ManagedActionUnavailable);
     }
     Ok(())
 }
 
 /// The terminal onboarding-recovery state exposes only explicit Park. The
 /// `ActionFenced` state permits no lifecycle mutation at all.
-fn require_parkable_d17_workstream(
-    snapshot: &D17Snapshot,
+fn require_parkable_workstream(
+    snapshot: &Snapshot,
     workstream_id: WorkstreamId,
     expected_revision: Revision,
-) -> Result<(), D17NavigatorError> {
+) -> Result<(), NavigatorError> {
     let workstream = snapshot
         .workstreams
         .iter()
@@ -1627,15 +1640,15 @@ fn require_parkable_d17_workstream(
                 && !workstream.archived
                 && workstream.revision == expected_revision
         })
-        .ok_or(D17NavigatorError::ManagedActionUnavailable)?;
-    if workstream.onboarding == Some(crate::d17_snapshot::D17OnboardingStatus::ActionFenced) {
-        return Err(D17NavigatorError::ManagedActionUnavailable);
+        .ok_or(NavigatorError::ManagedActionUnavailable)?;
+    if workstream.onboarding == Some(crate::snapshot::OnboardingStatus::ActionFenced) {
+        return Err(NavigatorError::ManagedActionUnavailable);
     }
     Ok(())
 }
 
 /// One exact post-start attachment claim for a session created from a selected
-/// D17 Workstream. No project path, provider option, or shell cwd crosses this
+/// Workstream. No project path, provider option, or shell cwd crosses this
 /// boundary: the retained source Location and provider are the authority.
 struct SameLocationAttachment {
     workstream_id: crate::domain::WorkstreamId,
@@ -1646,38 +1659,37 @@ struct SameLocationAttachment {
 
 /// Creates an independent native session using only a selected unfenced source
 /// Workstream's stored provider and Location, then returns the fresh passive
-/// snapshot plus exact attachment revisions. The retired application and
-/// Project-browser paths are intentionally never opened here.
-fn start_d17_same_location(
+/// snapshot plus exact attachment revisions. Retired application paths are
+/// intentionally never opened here.
+fn start_same_location(
     root: &StateRoot,
     source_workstream_id: crate::domain::WorkstreamId,
     expected_workstream_revision: crate::domain::Revision,
     provider: crate::domain::ProviderKind,
-) -> Result<(D17Snapshot, SameLocationAttachment), D17NavigatorError> {
-    let state = open_d17_current_only(root)
-        .map_err(|_| D17NavigatorError::SameLocationSessionUnavailable)?;
+) -> Result<(Snapshot, SameLocationAttachment), NavigatorError> {
+    let state = open_current(root).map_err(|_| NavigatorError::SameLocationSessionUnavailable)?;
     if state
-        .d17_onboarding_workstream_projections()
-        .map_err(|_| D17NavigatorError::SameLocationSessionUnavailable)?
+        .onboarding_workstream_projections()
+        .map_err(|_| NavigatorError::SameLocationSessionUnavailable)?
         .iter()
         .any(|onboarding| onboarding.workstream_id == source_workstream_id)
     {
-        return Err(D17NavigatorError::SameLocationSessionUnavailable);
+        return Err(NavigatorError::SameLocationSessionUnavailable);
     }
     let mut registry = state
-        .into_d17_host_registry()
-        .map_err(|_| D17NavigatorError::SameLocationSessionUnavailable)?;
+        .into_host_registry()
+        .map_err(|_| NavigatorError::SameLocationSessionUnavailable)?;
     let source = registry
         .workstream_overviews()
-        .map_err(|_| D17NavigatorError::SameLocationSessionUnavailable)?
+        .map_err(|_| NavigatorError::SameLocationSessionUnavailable)?
         .into_iter()
         .find(|workstream| workstream.workstream_id == source_workstream_id)
-        .ok_or(D17NavigatorError::SameLocationSessionUnavailable)?;
+        .ok_or(NavigatorError::SameLocationSessionUnavailable)?;
     if source.revision != expected_workstream_revision
         || source.provider != provider
         || source.archived_at_millis.is_some()
     {
-        return Err(D17NavigatorError::SameLocationSessionUnavailable);
+        return Err(NavigatorError::SameLocationSessionUnavailable);
     }
     let request_key = uuid::Uuid::new_v4().simple().to_string();
     let workstream_id = crate::actions::start_independent_workstream(
@@ -1688,7 +1700,7 @@ fn start_d17_same_location(
         &request_key,
         provider,
     )
-    .map_err(|_| D17NavigatorError::SameLocationSessionUnavailable)?;
+    .map_err(|_| NavigatorError::SameLocationSessionUnavailable)?;
     drop(registry);
 
     let snapshot = read_snapshot(root)?;
@@ -1696,12 +1708,12 @@ fn start_d17_same_location(
         .workstreams
         .iter()
         .find(|workstream| workstream.workstream_id == workstream_id)
-        .ok_or(D17NavigatorError::SameLocationSessionUnavailable)?;
+        .ok_or(NavigatorError::SameLocationSessionUnavailable)?;
     let runtime = workstream
         .runtime
-        .ok_or(D17NavigatorError::SameLocationSessionUnavailable)?;
+        .ok_or(NavigatorError::SameLocationSessionUnavailable)?;
     if workstream.provider != provider || workstream.onboarding.is_some() {
-        return Err(D17NavigatorError::SameLocationSessionUnavailable);
+        return Err(NavigatorError::SameLocationSessionUnavailable);
     }
     let attachment = SameLocationAttachment {
         workstream_id,
@@ -1756,14 +1768,14 @@ fn refresh_provider_exec(root: &StateRoot, presentation: &Presentation) -> Provi
     }
 }
 
-/// Composes the D17 shell card with the marker-first materializer.
+/// Composes the shell card with the marker-first materializer.
 /// The retained provisional lease spans candidate allocation, account-shell
 /// startup/evidence, and outer-pane replacement; no provider command is
 /// constructed or launched here.
 fn materialize_provisional_shell(
     root: &StateRoot,
     presentation: &Presentation,
-) -> Result<(), D17NavigatorError> {
+) -> Result<(), NavigatorError> {
     let recovery = reconcile_pre_handoff_presentation(root, presentation)?;
     if recovery == PreHandoffRecovery::RuntimeOwned {
         return Ok(());
@@ -1784,11 +1796,11 @@ fn materialize_provisional_shell(
 fn reconcile_pre_handoff_presentation(
     root: &StateRoot,
     presentation: &Presentation,
-) -> Result<PreHandoffRecovery, D17NavigatorError> {
-    let unavailable = || D17NavigatorError::ProvisionalShellUnavailable;
-    let mut state = open_d17_current_only(root).map_err(|_| unavailable())?;
+) -> Result<PreHandoffRecovery, NavigatorError> {
+    let unavailable = || NavigatorError::ProvisionalShellUnavailable;
+    let mut state = open_current(root).map_err(|_| unavailable())?;
     let provisional_lease = state
-        .acquire_d17_provisional_lease()
+        .acquire_provisional_lease()
         .map_err(|_| unavailable())?;
     reconcile_pre_handoff_under_lease(
         &mut state,
@@ -1798,14 +1810,14 @@ fn reconcile_pre_handoff_presentation(
     .map_err(|_| unavailable())
 }
 
-/// Opens the initially selected provisional shell only after fresh D17
+/// Opens the initially selected provisional shell only after fresh
 /// presentation startup has finished creating and proving both owned panes.
 /// This uses the same marker/lease/materialization path as explicit Shell-card
 /// activation and never creates provider or registry authority.
 pub(crate) fn materialize_initial_provisional_shell(
     root: &StateRoot,
     presentation: &Presentation,
-) -> Result<(), D17NavigatorError> {
+) -> Result<(), NavigatorError> {
     materialize_provisional_shell(root, presentation)
 }
 
@@ -1816,11 +1828,11 @@ pub(crate) fn materialize_initial_provisional_shell(
 fn reattach_materialized_provisional_shell(
     root: &StateRoot,
     presentation: &Presentation,
-) -> Result<bool, D17NavigatorError> {
-    let unavailable = || D17NavigatorError::ProvisionalShellUnavailable;
-    let mut state = open_d17_current_only(root).map_err(|_| unavailable())?;
+) -> Result<bool, NavigatorError> {
+    let unavailable = || NavigatorError::ProvisionalShellUnavailable;
+    let mut state = open_current(root).map_err(|_| unavailable())?;
     let provisional_lease = state
-        .acquire_d17_provisional_lease()
+        .acquire_provisional_lease()
         .map_err(|_| unavailable())?;
     let slot = match read_marker(state.root(), &presentation.paths().directory) {
         Ok(slot) => slot,
@@ -1836,7 +1848,7 @@ fn reattach_materialized_provisional_shell(
     slot.revalidate_live_shell(&runtime, &process_probe)
         .map_err(|_| unavailable())?;
     presentation
-        .attach_d17_provisional_shell(&state, &provisional_lease, &slot)
+        .attach_provisional_shell(&state, &provisional_lease, &slot)
         .map_err(|_| unavailable())?;
     Ok(true)
 }
@@ -1851,8 +1863,8 @@ struct AccountShellInputs {
     executable: PathBuf,
 }
 
-fn account_shell_inputs_from_environment() -> Result<AccountShellInputs, D17NavigatorError> {
-    let unavailable = || D17NavigatorError::ProvisionalShellUnavailable;
+fn account_shell_inputs_from_environment() -> Result<AccountShellInputs, NavigatorError> {
+    let unavailable = || NavigatorError::ProvisionalShellUnavailable;
     Ok(AccountShellInputs {
         shell: env::var_os("SHELL")
             .map(PathBuf::from)
@@ -1869,14 +1881,14 @@ fn materialize_provisional_shell_with_inputs(
     root: &StateRoot,
     presentation: &Presentation,
     account_shell: &AccountShellInputs,
-) -> Result<(), D17NavigatorError> {
-    let unavailable = || D17NavigatorError::ProvisionalShellUnavailable;
+) -> Result<(), NavigatorError> {
+    let unavailable = || NavigatorError::ProvisionalShellUnavailable;
     let context =
-        Presentation::d17_context_from_directory(root.base(), &presentation.paths().directory)
+        Presentation::context_from_directory(root.base(), &presentation.paths().directory)
             .map_err(|_| unavailable())?;
-    let mut state = open_d17_current_only(root).map_err(|_| unavailable())?;
+    let mut state = open_current(root).map_err(|_| unavailable())?;
     let provisional_lease = state
-        .acquire_d17_provisional_lease()
+        .acquire_provisional_lease()
         .map_err(|_| unavailable())?;
     let slot = ProvisionalSlot::materializing(
         state.root(),
@@ -1917,7 +1929,7 @@ fn materialize_provisional_shell_with_inputs(
         .revalidate_live_shell(&runtime, &process_probe)
         .map_err(|_| unavailable())?;
     presentation
-        .attach_d17_provisional_shell(&state, &provisional_lease, &materialized)
+        .attach_provisional_shell(&state, &provisional_lease, &materialized)
         .map_err(|_| unavailable())
 }
 
@@ -1956,7 +1968,8 @@ impl Drop for TerminalSession {
 #[cfg(test)]
 mod tests {
     use std::{
-        fs::{self, OpenOptions},
+        cell::Cell,
+        fs,
         path::{Path, PathBuf},
         process::Command,
         thread,
@@ -1966,27 +1979,23 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AccountShellInputs, ManagedAction, ProviderExecRefresh, apply_managed_action,
-        describe_shell_location, materialize_provisional_shell_with_inputs, observe_shell_cwd,
-        reattach_materialized_provisional_shell, refresh_provider_exec,
-        require_active_d17_workstream, require_parkable_d17_workstream, start_d17_same_location,
+        AccountShellInputs, ManagedAction, NAVIGATOR_WIDTH_RETRY_ATTEMPTS, ProviderExecRefresh,
+        apply_managed_action, describe_shell_location, materialize_provisional_shell_with_inputs,
+        observe_shell_cwd, reattach_materialized_provisional_shell, refresh_provider_exec,
+        require_active_workstream, require_parkable_workstream, retry_default_navigator_width,
+        start_same_location,
     };
     use crate::{
-        d17_snapshot::{
-            D17OnboardingStatus, D17ProjectSnapshot, D17Snapshot, D17WorkstreamSnapshot,
-        },
         domain::{
             LocationId, ProjectId, ProviderKind, ProviderSessionId, RandomIdGenerator, Revision,
             WorkstreamId, WorkstreamLifecycle,
         },
-        navigator::d17::D17ShellLocation,
-        presentation::Presentation,
+        navigator::view::ShellLocation,
+        presentation::{Presentation, PresentationError},
         process::output_bounded,
         provisional::{ProvisionalPhase, read_marker},
-        state::{
-            StateRoot, TRANSITION_LOCK_FILE, acquire_transition_lease, fresh_create,
-            open_cutover_transition, open_d17_current_only,
-        },
+        snapshot::{OnboardingStatus, ProjectSnapshot, Snapshot, WorkstreamSnapshot},
+        state::{StateRoot, create_current, open_current},
     };
 
     struct DisposableTmuxServerGuard(PathBuf);
@@ -2012,45 +2021,53 @@ mod tests {
         }
     }
 
-    fn migrate_to_schema14(state_path: &Path) {
-        drop(fresh_create(state_path, &RandomIdGenerator).unwrap());
-        migrate_existing_to_schema14(state_path);
+    fn create_current_state(state_path: &Path) {
+        drop(create_current(state_path, &RandomIdGenerator).unwrap());
     }
 
-    fn migrate_existing_to_schema14(state_path: &Path) {
-        let root = StateRoot::select(state_path);
-        let transition_lock = state_path.join(TRANSITION_LOCK_FILE);
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&transition_lock)
-            .unwrap();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn navigator_width_retry_absorbs_a_transient_attach_topology() {
+        let attempts = Cell::new(0_usize);
 
-            fs::set_permissions(&transition_lock, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-        let transition = acquire_transition_lease(state_path).unwrap();
-        let mut state = open_cutover_transition(&root, &transition).unwrap();
-        state.migrate_schema13_to14(&transition).unwrap();
-        drop(state);
-        drop(transition);
-        fs::remove_file(transition_lock).unwrap();
+        retry_default_navigator_width(|| {
+            attempts.set(attempts.get() + 1);
+            if attempts.get() < 3 {
+                Err(PresentationError::InvalidTopology)
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap();
+
+        assert_eq!(attempts.get(), 3);
     }
 
-    fn managed_snapshot(onboarding: Option<D17OnboardingStatus>) -> (D17Snapshot, WorkstreamId) {
+    #[test]
+    fn navigator_width_retry_keeps_a_persistent_topology_failure_closed() {
+        let attempts = Cell::new(0_usize);
+
+        assert!(matches!(
+            retry_default_navigator_width(|| {
+                attempts.set(attempts.get() + 1);
+                Err(PresentationError::InvalidTopology)
+            }),
+            Err(PresentationError::InvalidTopology)
+        ));
+        assert_eq!(attempts.get(), NAVIGATOR_WIDTH_RETRY_ATTEMPTS);
+    }
+
+    fn managed_snapshot(onboarding: Option<OnboardingStatus>) -> (Snapshot, WorkstreamId) {
         let project_id = ProjectId::from(Uuid::from_u128(801));
         let location_id = LocationId::from(Uuid::from_u128(802));
         let workstream_id = WorkstreamId::from(Uuid::from_u128(803));
         (
-            D17Snapshot {
-                projects: vec![D17ProjectSnapshot {
+            Snapshot {
+                projects: vec![ProjectSnapshot {
                     project_id,
                     display_name: "checkout".to_owned(),
                     locations: vec![],
                 }],
-                workstreams: vec![D17WorkstreamSnapshot {
+                workstreams: vec![WorkstreamSnapshot {
                     project_id,
                     location_id,
                     workstream_id,
@@ -2072,10 +2089,10 @@ mod tests {
     }
 
     #[test]
-    fn schema14_action_preflight_keeps_onboarding_fences_out_of_lifecycle_actions() {
-        let (fenced, workstream_id) = managed_snapshot(Some(D17OnboardingStatus::ActionFenced));
+    fn current_action_preflight_keeps_onboarding_fences_out_of_lifecycle_actions() {
+        let (fenced, workstream_id) = managed_snapshot(Some(OnboardingStatus::ActionFenced));
         assert!(
-            require_active_d17_workstream(
+            require_active_workstream(
                 &fenced,
                 workstream_id,
                 Revision::INITIAL,
@@ -2083,14 +2100,11 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
-            require_parkable_d17_workstream(&fenced, workstream_id, Revision::INITIAL).is_err()
-        );
+        assert!(require_parkable_workstream(&fenced, workstream_id, Revision::INITIAL).is_err());
 
-        let (recovery, workstream_id) =
-            managed_snapshot(Some(D17OnboardingStatus::RecoveryRequired));
+        let (recovery, workstream_id) = managed_snapshot(Some(OnboardingStatus::RecoveryRequired));
         assert!(
-            require_active_d17_workstream(
+            require_active_workstream(
                 &recovery,
                 workstream_id,
                 Revision::INITIAL,
@@ -2098,13 +2112,11 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
-            require_parkable_d17_workstream(&recovery, workstream_id, Revision::INITIAL).is_ok()
-        );
+        assert!(require_parkable_workstream(&recovery, workstream_id, Revision::INITIAL).is_ok());
 
         let (ordinary, workstream_id) = managed_snapshot(None);
         assert!(
-            require_active_d17_workstream(
+            require_active_workstream(
                 &ordinary,
                 workstream_id,
                 Revision::INITIAL,
@@ -2115,33 +2127,29 @@ mod tests {
     }
 
     #[test]
-    fn schema14_restore_and_acknowledge_use_only_exact_durable_revisions() {
+    fn current_restore_and_acknowledge_use_only_exact_durable_revisions() {
         let temporary = tempfile::tempdir().unwrap();
         let state_path = temporary.path().join("state");
         let checkout = temporary.path().join("checkout");
         fs::create_dir(&checkout).unwrap();
-        let mut state = fresh_create(&state_path, &RandomIdGenerator).unwrap();
-        let registered = state
-            .register_project_location_with_initial_workstream(
+        let mut state = create_current(&state_path, &RandomIdGenerator).unwrap();
+        let (_, workstream_id) = state
+            .seed_test_workstream(
                 &checkout,
                 "checkout",
-                None,
-                None,
                 ProviderKind::OpenCode,
                 &RandomIdGenerator,
             )
             .unwrap();
         drop(state);
-        migrate_existing_to_schema14(&state_path);
-
         let root = StateRoot::select(&state_path);
-        let state = open_d17_current_only(&root).unwrap();
-        let mut registry = state.into_d17_host_registry().unwrap();
+        let state = open_current(&root).unwrap();
+        let mut registry = state.into_host_registry().unwrap();
         let overview = registry
             .workstream_overviews()
             .unwrap()
             .into_iter()
-            .find(|overview| overview.workstream_id == registered.workstream.workstream_id)
+            .find(|overview| overview.workstream_id == workstream_id)
             .unwrap();
         let archived_revision = registry
             .archive_workstream(overview.workstream_id, overview.revision, 1)
@@ -2152,21 +2160,21 @@ mod tests {
             apply_managed_action(
                 &root,
                 ManagedAction::Restore {
-                    workstream_id: registered.workstream.workstream_id,
+                    workstream_id,
                     expected_workstream_revision: archived_revision,
                 },
             )
             .unwrap(),
             None
         );
-        let restored = crate::d17_snapshot::read_snapshot(&root).unwrap();
+        let restored = crate::snapshot::read_snapshot(&root).unwrap();
         assert!(!restored.workstreams[0].archived);
 
-        let state = open_d17_current_only(&root).unwrap();
-        let mut registry = state.into_d17_host_registry().unwrap();
+        let state = open_current(&root).unwrap();
+        let mut registry = state.into_host_registry().unwrap();
         let attention = registry
             .mark_result_attention(
-                registered.workstream.workstream_id,
+                workstream_id,
                 ProviderSessionId::new(ProviderKind::OpenCode, "session-a").unwrap(),
                 "turn-a".to_owned(),
             )
@@ -2176,14 +2184,14 @@ mod tests {
             apply_managed_action(
                 &root,
                 ManagedAction::AcknowledgeResult {
-                    workstream_id: registered.workstream.workstream_id,
+                    workstream_id,
                     expected_attention_revision: attention.revision,
                 },
             )
             .unwrap(),
             None
         );
-        let acknowledged = crate::d17_snapshot::read_snapshot(&root).unwrap();
+        let acknowledged = crate::snapshot::read_snapshot(&root).unwrap();
         assert!(!acknowledged.workstreams[0].result_unseen);
     }
 
@@ -2205,25 +2213,25 @@ mod tests {
     }
 
     #[test]
-    fn materialized_d17_shell_stays_unregistered_and_attaches_only_its_private_runtime() {
+    fn materialized_shell_stays_unregistered_and_attaches_only_its_private_runtime() {
         let temporary = tempfile::tempdir().unwrap();
         let state_path = temporary.path().join("state");
         let seed = temporary.path().join("seed");
         let home = temporary.path().join("home");
         fs::create_dir(&seed).unwrap();
         fs::create_dir(&home).unwrap();
-        migrate_to_schema14(&state_path);
+        create_current_state(&state_path);
 
         let navigator = temporary.path().join("navigator-fixture");
         make_executable(&navigator, "#!/bin/sh\nexec sleep 60\n");
         let presentation = Presentation::fresh_with_executable(&state_path, navigator);
-        presentation.start_d17(Uuid::from_u128(91), &seed).unwrap();
+        presentation.start(Uuid::from_u128(91), &seed).unwrap();
         let _presentation_guard = DisposableTmuxServerGuard(presentation.paths().socket.clone());
 
         let shell = [PathBuf::from("/usr/bin/bash"), PathBuf::from("/bin/bash")]
             .into_iter()
             .find(|candidate| candidate.is_file())
-            .expect("a supported Bash account shell is required for D17 acceptance");
+            .expect("a supported Bash account shell is required for acceptance");
         let inputs = AccountShellInputs {
             shell,
             home,
@@ -2253,11 +2261,11 @@ mod tests {
             marker
         );
 
-        let state = open_d17_current_only(&root).unwrap();
-        assert!(state.d17_registered_runtime_paths().unwrap().is_empty());
+        let state = open_current(&root).unwrap();
+        assert!(state.registered_runtime_paths().unwrap().is_empty());
         drop(state);
 
-        presentation.close_d17().unwrap();
+        presentation.close().unwrap();
         assert!(!presentation.paths().directory.exists());
         assert!(!marker.runtime_paths().directory.exists());
     }
@@ -2273,26 +2281,26 @@ mod tests {
 
         assert_eq!(
             describe_shell_location(&nested, Some(&home)),
-            D17ShellLocation::cwd("~/c/nested")
+            ShellLocation::cwd("~/c/nested")
         );
         assert_eq!(
             describe_shell_location(&notes, Some(&home)),
-            D17ShellLocation::cwd("~/notes")
+            ShellLocation::cwd("~/notes")
         );
     }
 
     #[test]
-    fn idle_d17_presentation_does_not_open_a_provider_reconciler() {
+    fn idle_presentation_does_not_open_a_provider_reconciler() {
         let temporary = tempfile::tempdir().unwrap();
         let state_path = temporary.path().join("state");
         let seed = temporary.path().join("seed");
         fs::create_dir(&seed).unwrap();
-        migrate_to_schema14(&state_path);
+        create_current_state(&state_path);
 
         let navigator = temporary.path().join("navigator-fixture");
         make_executable(&navigator, "#!/bin/sh\nexec sleep 60\n");
         let presentation = Presentation::fresh_with_executable(&state_path, navigator);
-        presentation.start_d17(Uuid::from_u128(92), &seed).unwrap();
+        presentation.start(Uuid::from_u128(92), &seed).unwrap();
         let _presentation_guard = DisposableTmuxServerGuard(presentation.paths().socket.clone());
 
         assert_eq!(
@@ -2314,45 +2322,41 @@ mod tests {
         let state_path = temporary.path().join("state");
         let checkout = temporary.path().join("checkout");
         fs::create_dir(&checkout).unwrap();
-        let mut state = fresh_create(&state_path, &RandomIdGenerator).unwrap();
-        let source = state
-            .register_project_location_with_initial_workstream(
+        let mut state = create_current(&state_path, &RandomIdGenerator).unwrap();
+        let (_, source_workstream_id) = state
+            .seed_test_workstream(
                 &checkout,
                 "checkout",
-                None,
-                None,
                 ProviderKind::Codex,
                 &RandomIdGenerator,
             )
             .unwrap();
         drop(state);
-        migrate_existing_to_schema14(&state_path);
-
         let root = StateRoot::select(&state_path);
-        let state = open_d17_current_only(&root).unwrap();
-        let mut registry = state.into_d17_host_registry().unwrap();
+        let state = open_current(&root).unwrap();
+        let mut registry = state.into_host_registry().unwrap();
         let source_overview = registry
             .workstream_overviews()
             .unwrap()
             .into_iter()
-            .find(|workstream| workstream.workstream_id == source.workstream.workstream_id)
+            .find(|workstream| workstream.workstream_id == source_workstream_id)
             .unwrap();
         let archived_revision = registry
-            .archive_workstream(source.workstream.workstream_id, source_overview.revision, 1)
+            .archive_workstream(source_workstream_id, source_overview.revision, 1)
             .unwrap();
         drop(registry);
 
         assert!(
-            start_d17_same_location(
+            start_same_location(
                 &root,
-                source.workstream.workstream_id,
+                source_workstream_id,
                 archived_revision,
                 ProviderKind::Codex,
             )
             .is_err()
         );
         assert_eq!(
-            crate::d17_snapshot::read_snapshot(&root)
+            crate::snapshot::read_snapshot(&root)
                 .unwrap()
                 .workstreams
                 .len(),

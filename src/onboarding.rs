@@ -1,4 +1,4 @@
-//! Pure D17 onboarding preparation boundaries.
+//! Pure onboarding preparation boundaries.
 //!
 //! This module does not create state, a shell, or a provider process. It
 //! reduces the bounded argv observed by the account-shell function to
@@ -16,14 +16,14 @@ use uuid::Uuid;
 
 use crate::{
     domain::{IdGenerator, LocationId, OperationId, ProviderKind, Revision, RuntimeId},
-    provider::d17_grammar::{Classification, classify},
+    provider::grammar::{Classification, classify},
     runtime::RuntimePaths,
 };
 
-const ARGUMENT_DIGEST_VERSION: &str = "d17-fresh-argv-v1";
-const CLAIM_DIGEST_VERSION: &str = "d17-launch-claims-v1";
-const TOKEN_VERIFIER_VERSION: &str = "d17-launch-verifier-v1";
-const BOOT_PROVENANCE_VERSION: &str = "d17-boot-v1";
+const ARGUMENT_DIGEST_VERSION: &str = "wsnav-fresh-argv-v1";
+const CLAIM_DIGEST_VERSION: &str = "wsnav-launch-claims-v1";
+const TOKEN_VERIFIER_VERSION: &str = "wsnav-launch-verifier-v1";
+const BOOT_PROVENANCE_VERSION: &str = "wsnav-boot-v1";
 const MAX_CAPABILITY_LIFETIME_MILLIS: i64 = 60_000;
 const MAX_CAPABILITY_TEXT_BYTES: usize = 256;
 
@@ -75,7 +75,7 @@ impl FreshProviderLaunch {
     }
 }
 
-/// The complete in-memory claim set for one D17 brokered launch capability.
+/// The complete in-memory claim set for one brokered launch capability.
 ///
 /// Paths and provider arguments exist only while the broker and hidden helper
 /// revalidate the launch. Durable state receives [`Self::digest`] and the
@@ -622,7 +622,7 @@ mod tests {
     }
 
     fn claims(provider: ProviderKind, shell_birth: &str) -> LaunchCapabilityClaims {
-        let state_root = Path::new("/tmp/wsnav-d17-state");
+        let state_root = Path::new("/tmp/wsnav-current-state");
         LaunchCapabilityClaims::new(
             OperationId::from(Uuid::from_u128(11)),
             Uuid::from_u128(12),
@@ -632,8 +632,8 @@ mod tests {
             RuntimeId::from(Uuid::from_u128(14)),
             RuntimePaths::for_runtime(state_root, RuntimeId::from(Uuid::from_u128(14))),
             provider,
-            PathBuf::from("/tmp/wsnav-d17-state/worktree/nested"),
-            PathBuf::from("/tmp/wsnav-d17-state/worktree"),
+            PathBuf::from("/tmp/wsnav-current-state/worktree/nested"),
+            PathBuf::from("/tmp/wsnav-current-state/worktree"),
             LocationId::from(Uuid::from_u128(15)),
             "runtime-generation-16".to_owned(),
             "registry-generation-17".to_owned(),
@@ -644,7 +644,7 @@ mod tests {
             managed(provider, &["--model", "gpt-5.6"])
                 .argv_digest()
                 .to_owned(),
-            format!("d17-boot-v1:sha256:{}", "c".repeat(64)),
+            format!("wsnav-boot-v1:sha256:{}", "c".repeat(64)),
         )
         .unwrap()
     }
@@ -660,7 +660,7 @@ mod tests {
             launch.arguments(),
             ["--model", "openai/gpt-5.6", "--agent", "build", "--mini"]
         );
-        assert!(launch.argv_digest().starts_with("d17-fresh-argv-v1:"));
+        assert!(launch.argv_digest().starts_with("wsnav-fresh-argv-v1:"));
         assert_eq!(
             launch.native_program(),
             arguments(&[
@@ -726,12 +726,12 @@ mod tests {
         assert!(
             metadata
                 .verifier()
-                .starts_with("d17-launch-verifier-v1:sha256:")
+                .starts_with("wsnav-launch-verifier-v1:sha256:")
         );
         assert!(
             metadata
                 .claims_digest()
-                .starts_with("d17-launch-claims-v1:sha256:")
+                .starts_with("wsnav-launch-claims-v1:sha256:")
         );
         assert_eq!(metadata.expiry_monotonic_millis(), 1_010);
         verify_launch_capability(capability.token(), &metadata, &capability_claims, 11).unwrap();
@@ -808,14 +808,15 @@ mod tests {
         changed.candidate_runtime_id = RuntimeId::from(Uuid::from_u128(100));
         assert_ne!(changed.digest(), digest);
         changed = claims.clone();
-        changed.runtime_paths.directory = PathBuf::from("/tmp/wsnav-d17-state/other-runtime");
+        changed.runtime_paths.directory = PathBuf::from("/tmp/wsnav-current-state/other-runtime");
         assert_ne!(changed.digest(), digest);
         changed = claims.clone();
-        changed.runtime_paths.socket = PathBuf::from("/tmp/wsnav-d17-state/other-runtime/socket");
+        changed.runtime_paths.socket =
+            PathBuf::from("/tmp/wsnav-current-state/other-runtime/socket");
         assert_ne!(changed.digest(), digest);
         changed = claims.clone();
         changed.runtime_paths.config =
-            PathBuf::from("/tmp/wsnav-d17-state/other-runtime/tmux.conf");
+            PathBuf::from("/tmp/wsnav-current-state/other-runtime/tmux.conf");
         assert_ne!(changed.digest(), digest);
         changed = claims.clone();
         changed.runtime_paths.session_name = "wsnav-other".to_owned();
@@ -824,10 +825,10 @@ mod tests {
         changed.provider = ProviderKind::OpenCode;
         assert_ne!(changed.digest(), digest);
         changed = claims.clone();
-        changed.shell_cwd = PathBuf::from("/tmp/wsnav-d17-state/worktree/other");
+        changed.shell_cwd = PathBuf::from("/tmp/wsnav-current-state/worktree/other");
         assert_ne!(changed.digest(), digest);
         changed = claims.clone();
-        changed.worktree_root = PathBuf::from("/tmp/wsnav-d17-state/other-worktree");
+        changed.worktree_root = PathBuf::from("/tmp/wsnav-current-state/other-worktree");
         assert_ne!(changed.digest(), digest);
         changed = claims.clone();
         changed.location_id = LocationId::from(Uuid::from_u128(101));
@@ -856,7 +857,7 @@ mod tests {
             .to_owned();
         assert_ne!(changed.digest(), digest);
         changed = claims.clone();
-        changed.boot_provenance = format!("d17-boot-v1:sha256:{}", "d".repeat(64));
+        changed.boot_provenance = format!("wsnav-boot-v1:sha256:{}", "d".repeat(64));
         assert_ne!(changed.digest(), digest);
     }
 }

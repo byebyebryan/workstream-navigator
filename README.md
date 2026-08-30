@@ -5,15 +5,15 @@ coding-agent workstreams on the machine where it is running. It adds
 organization, attachment, status, and a few compound workstream actions
 around the provider's native terminal UI.
 
-> **D17.1 status:** complete.
-> The shell-first Navigator and brokered
-> Codex/OpenCode promotion path are active. Exact pre-provider recovery,
-> schema-14 public-command routing, retired-D16 cleanup, and fresh-state Codex
-> observer readiness are implemented. Retained state is read in bounded frames
-> without a one-frame total ceiling, and the deterministic stable/Rust-1.88 gates
-> pass. The exact D17.1 artifact is installed, and its separately authorized
-> disposable Codex/OpenCode replay passes with complete cleanup. See the
-> [roadmap](docs/roadmap.md#2026-08-28-d171-correctness-and-release-reconciliation).
+> **D18 status:** current-only consolidation accepted.
+> The checkout and byte-identical installed binary use the direct schema-15
+> epoch and refuse older WSNav roots instead of migrating or adopting them. The
+> authorized destructive reset discarded the D17.1 WSNav catalog and Runtime
+> output; native provider history remains provider-owned. Native observer trust,
+> disposable Codex/OpenCode lifecycle acceptance, complete cleanup, and the full
+> repository gate pass. The checkpoint commit containing this record binds the
+> accepted source to the installed release artifact. See the
+> [roadmap](docs/roadmap.md#completed-checkpoint-d18-current-only-consolidation).
 
 ## Host-local by design
 
@@ -54,7 +54,7 @@ below a provider.
 
 ## The shell-first navigator
 
-D17 has two direct pages. Page selection is process-local and is not persisted;
+The Navigator has two direct pages. Page selection is process-local and is not persisted;
 `Left` and `Right` do not cycle views.
 
 | Page | Purpose and direct controls |
@@ -105,77 +105,53 @@ bounded process and filesystem identity checks. Cleanup is non-recursive;
 interrupted cleanup is completed by presentation teardown after possible users
 have stopped, while changed or non-empty paths are preserved.
 
-## The D16 state boundary
+## Current state boundary
 
-D16 is a clean break from the former client catalog. On an existing state root,
-only an ordinary interactive launch may show the pre-presentation confirmation.
-It names what is discarded and what is preserved; declining performs no
-mutation. The exact legacy files are:
+The accepted implementation has one state epoch: schema 15. An absent state
+root, or an exact private empty root, is created directly through the stable
+`bootstrap.lock` protocol. An exact ready schema-15 root reopens normally, and
+only unambiguous interrupted current-format bootstrap phases may resume.
 
-```text
-client.sqlite
-client.sqlite-wal
-client.sqlite-shm
-```
+Schemas 12 through 14, the retired client catalog, transition artifacts,
+legacy presentation evidence, future schemas, and malformed or mixed roots are
+refused before mutation. The implementation does not migrate, import, adopt,
+drain, or partially clean an older WSNav root. Provider-owned native history
+remains available through each provider's own tooling; old WSNav Runtime
+ownership is not carried into the new epoch.
 
-Those files are deleted without being opened, read, imported, renamed, or
-backed up. D16 performs no importer, dual write, automatic backup, downgrade,
-or rollback migration. An optional offline backup is an operator procedure:
-park or stop managed Runtimes, exit WSNav, and create and verify a copy of the
-complete state root before confirming cutover. Restoring that external copy is
-the only downgrade path.
-
-The preserved host state includes HostIdentity, integrations, ProjectLocations
-and browser root, Workstream provider/activity/lifecycle fields, Runtime
-generations, OpenCode handles, provider bindings, attention, compound
-operations, private tmux servers, native provider sessions/history, and
-completed output. D16 migrates schema 12 transactionally to schema 13 using
-`host.sqlite` only; D17 then migrates an idle schema-13 root to schema 14 after
-legacy presentation absence is proven. Fresh current state is created directly
-at schema 14. Projects and label-source Locations are rebuilt deterministically
-from current-host ProjectLocations. Partial cleanup is retryable; a failed D16
-host migration leaves schema 12 intact and blocks ordinary navigation until the
-confirmed transition completes.
-
-Before deletion, D16 proves ownership of any legacy presentation. An attached
-client, utility shell, or native observer-review surface blocks mutation. The
-launcher may offer a drain-only attachment that opens no host state, so the
-operator can finish and quit that old presentation. Only one exact detached
-ordinary presentation may then be retired under the transition lease. Runtime
-tmux servers, provider processes, native sessions, and provider output are
-never targeted by presentation retirement. Ambiguous or foreign artifacts fail
-closed.
+The authorized whole-product destructive reset parked the exact D17.1
+Runtimes, removed its owned observer declaration, and quarantined the complete
+schema-14 root as discarded state before installing and directly bootstrapping
+schema 15. The exact quarantine was deleted after acceptance. There is no
+migration, state rollback, automatic downgrade, or compatibility launcher.
 
 ## Build, install, and CLI
 
-WSNav is currently source-installed. The high-level local workflow is:
+WSNav remains source-installed. This checkout is the installed D18 release;
+build and validate any replacement before atomically installing its exact
+release artifact:
 
 ```console
 cargo build --locked --release
-install -m 755 target/release/wsnav ~/.local/bin/wsnav
-wsnav
+scripts/check
 ```
 
 Runtime prerequisites are Git, tmux, Bash or Zsh, and the util-linux `script`
 command. Development additionally requires Rust 1.88 or newer, Python 3,
 Cargo Deny 0.20.x, `jq`, Ruff 0.16.x, Ripgrep, and ShellCheck. Run the
-repository gate from the checkout:
-
-```console
-scripts/check
-```
+repository gate from the checkout as shown above.
 
 `wsnav --help` is the high-level reference for the installed CLI. Direct CLI
 operations remain optional scripting, diagnostics, and break-glass parity;
-ordinary work happens in the Navigator/provider presentation. D16 cutover is
-an interactive startup transition, not a separate public command: only the
-ordinary `wsnav` launch may present and accept its exact confirmation.
+ordinary work happens in the Navigator/provider presentation. The destructive
+reset, exact-artifact installation, native observer trust, and disposable
+live-provider release acceptance are complete for D18.
 
 ## See it
 
-The [historical product captures](docs/media/README.md) show the pre-D16
-two-pane baseline with privacy-safe fixture data. They are retained design
-history, not current D16 UI or acceptance evidence.
+The [historical product captures](docs/media/README.md) show a retired two-pane
+baseline with privacy-safe fixture data. They are retained design history, not
+current UI or acceptance evidence.
 
 ## Documentation
 

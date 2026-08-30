@@ -1,10 +1,9 @@
-//! Bounded, read-only Git repository registration metadata.
+//! Bounded, read-only Git repository discovery metadata.
 //!
-//! The historical D16 registration path normalized a supplied Git path to its
-//! primary project root. D17 preserves the exact containing worktree root.
-//! Remote URLs are normalized in memory and
-//! discarded; only a versioned SHA-256 fingerprint and credential-free
-//! canonical display label are returned to callers.
+//! Current onboarding preserves the exact containing worktree root. Remote
+//! URLs are normalized in memory and discarded; only a versioned SHA-256
+//! fingerprint and credential-free canonical display label are returned to
+//! callers.
 
 use std::{
     collections::BTreeSet,
@@ -24,11 +23,11 @@ const MAX_REMOTE_URL_BYTES: usize = 4096;
 const MAX_REMOTE_DISPLAY_BYTES: usize = 256;
 const FINGERPRINT_VERSION: &str = "git-remote-v1";
 
-/// Exact host-private metadata for one project-root registration.
+/// Exact host-private metadata discovered for one onboarding Location.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RepositoryRegistration {
-    /// Canonical primary Git worktree used as the project root for every
-    /// Navigator-launched Codex session.
+pub struct RepositoryDiscovery {
+    /// Canonical containing Git worktree used as the project root for every
+    /// Navigator-launched provider session.
     pub project_root: PathBuf,
     /// Bounded label derived from the project-root basename.
     pub display_name: String,
@@ -41,9 +40,8 @@ pub struct RepositoryRegistration {
 /// Resolves the exact non-bare worktree containing a shell's current
 /// directory without registering it or contacting a remote.
 ///
-/// This is deliberately distinct from [`inspect`]: D16 registration groups a
-/// linked worktree under its primary repository, whereas D17 promotion must
-/// retain the linked worktree as its own immutable launch Location.
+/// Current promotion retains the linked worktree as its own immutable launch
+/// Location; no worktree is created, removed, or adopted here.
 ///
 /// # Errors
 ///
@@ -51,9 +49,9 @@ pub struct RepositoryRegistration {
 /// canonical non-bare worktree. The command environment is stripped of the
 /// Git path overrides that could otherwise redirect discovery away from the
 /// shell's actual directory.
-pub fn inspect_containing_worktree(
+pub fn discover_containing_worktree(
     checkout: &Path,
-) -> Result<RepositoryRegistration, RepositoryError> {
+) -> Result<RepositoryDiscovery, RepositoryError> {
     let checkout = checkout
         .canonicalize()
         .map_err(RepositoryError::Canonicalize)?;
@@ -81,63 +79,7 @@ pub fn inspect_containing_worktree(
         .take(64)
         .collect::<String>();
     let remote_identity = discover_remote_identity(&project_root)?;
-    Ok(RepositoryRegistration {
-        project_root,
-        display_name,
-        remote_identity_fingerprint: remote_identity
-            .as_ref()
-            .map(|identity| identity.fingerprint.clone()),
-        remote_identity_display: remote_identity.map(|identity| identity.display),
-    })
-}
-
-/// Inspects a local non-bare Git checkout without contacting a network.
-///
-/// `checkout` may name a worktree root or any directory below it. The first
-/// non-bare entry from `git worktree list --porcelain` becomes the project root
-/// for Navigator sessions. This is registration discovery only: Navigator
-/// never creates, removes, or otherwise manages Git worktrees.
-///
-/// # Errors
-///
-/// Returns an error when Git cannot provide bounded, unambiguous local
-/// metadata or the selected checkout is not a usable non-bare worktree.
-pub fn inspect(checkout: &Path) -> Result<RepositoryRegistration, RepositoryError> {
-    let checkout = checkout
-        .canonicalize()
-        .map_err(RepositoryError::Canonicalize)?;
-    let selected_worktree = PathBuf::from(git_single_line(
-        &checkout,
-        ["rev-parse", "--path-format=absolute", "--show-toplevel"],
-    )?);
-    let selected_worktree = selected_worktree
-        .canonicalize()
-        .map_err(RepositoryError::Canonicalize)?;
-    let worktrees = run_git(
-        &selected_worktree,
-        [
-            OsString::from("worktree"),
-            OsString::from("list"),
-            OsString::from("--porcelain"),
-        ],
-    )?;
-    if !worktrees.status.success() {
-        return Err(RepositoryError::GitRejected);
-    }
-    let project_root = primary_worktree(&worktrees.stdout)?
-        .canonicalize()
-        .map_err(RepositoryError::Canonicalize)?;
-    let display_name = project_root
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.trim().is_empty())
-        .ok_or(RepositoryError::InvalidGitOutput)?
-        .chars()
-        .take(64)
-        .collect::<String>();
-    let remote_identity = discover_remote_identity(&project_root)?;
-
-    Ok(RepositoryRegistration {
+    Ok(RepositoryDiscovery {
         project_root,
         display_name,
         remote_identity_fingerprint: remote_identity
@@ -332,38 +274,6 @@ fn normalize_authority(authority: &str, scheme: &str) -> Option<String> {
     })
 }
 
-fn primary_worktree(output: &[u8]) -> Result<PathBuf, RepositoryError> {
-    let output = std::str::from_utf8(output).map_err(|_| RepositoryError::InvalidGitOutput)?;
-    let first = output
-        .split("\n\n")
-        .find(|record| !record.trim().is_empty())
-        .ok_or(RepositoryError::InvalidGitOutput)?;
-    if first.lines().any(|line| line == "bare") {
-        return Err(RepositoryError::BareRepository);
-    }
-    let path = first
-        .lines()
-        .find_map(|line| line.strip_prefix("worktree "))
-        .filter(|path| !path.is_empty() && !path.contains(['\0', '\n', '\r']))
-        .ok_or(RepositoryError::InvalidGitOutput)?;
-    Ok(PathBuf::from(path))
-}
-
-fn git_single_line(
-    repository: &Path,
-    arguments: impl IntoIterator<Item = &'static str>,
-) -> Result<String, RepositoryError> {
-    let output = run_git(repository, arguments.into_iter().map(OsString::from))?;
-    if !output.status.success() {
-        return Err(RepositoryError::GitRejected);
-    }
-    let lines = bounded_lines(&output.stdout)?;
-    if lines.len() != 1 {
-        return Err(RepositoryError::InvalidGitOutput);
-    }
-    Ok(lines[0].to_owned())
-}
-
 fn git_single_line_isolated(
     repository: &Path,
     arguments: impl IntoIterator<Item = &'static str>,
@@ -452,7 +362,7 @@ pub enum RepositoryError {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, process::Command};
+    use std::process::Command;
 
     use super::*;
 
@@ -522,60 +432,6 @@ mod tests {
     }
 
     #[test]
-    fn linked_worktree_registration_normalizes_to_the_primary_project_root() {
-        let temporary = tempfile::tempdir().unwrap();
-        let repository = temporary.path().join("cubey");
-        let linked = temporary.path().join("cubey-worktree1");
-        fs::create_dir(&repository).unwrap();
-        run(&repository, ["init", "-q"]);
-        run(&repository, ["config", "user.name", "WSNav Test"]);
-        run(
-            &repository,
-            ["config", "user.email", "wsnav@example.invalid"],
-        );
-        fs::write(repository.join("README.md"), "fixture\n").unwrap();
-        run(&repository, ["add", "README.md"]);
-        run(&repository, ["commit", "-qm", "fixture"]);
-        run(
-            &repository,
-            ["remote", "add", "origin", "git@github.com:owner/cubey.git"],
-        );
-        run(
-            &repository,
-            [
-                "worktree",
-                "add",
-                "-qb",
-                "fixture-linked",
-                linked.to_str().unwrap(),
-            ],
-        );
-        fs::create_dir(linked.join("nested")).unwrap();
-
-        let registration = inspect(&linked.join("nested")).unwrap();
-
-        assert_eq!(
-            registration.project_root,
-            repository.canonicalize().unwrap()
-        );
-        assert_eq!(registration.display_name, "cubey");
-        assert!(registration.remote_identity_fingerprint.is_some());
-        assert_eq!(
-            registration.remote_identity_display.as_deref(),
-            Some("github.com/owner/cubey")
-        );
-
-        let onboarding = inspect_containing_worktree(&linked.join("nested")).unwrap();
-        assert_eq!(onboarding.project_root, linked.canonicalize().unwrap());
-        assert_eq!(onboarding.display_name, "cubey-worktree1");
-        assert!(onboarding.remote_identity_fingerprint.is_some());
-        assert_eq!(
-            onboarding.remote_identity_display.as_deref(),
-            Some("github.com/owner/cubey")
-        );
-    }
-
-    #[test]
     fn containing_worktree_rejects_a_bare_repository_without_registration() {
         let temporary = tempfile::tempdir().unwrap();
         let bare = temporary.path().join("bare.git");
@@ -587,18 +443,8 @@ mod tests {
         assert!(status.success());
 
         assert!(matches!(
-            inspect_containing_worktree(&bare),
+            discover_containing_worktree(&bare),
             Err(RepositoryError::BareRepository)
         ));
-    }
-
-    fn run<'a>(repository: &Path, arguments: impl IntoIterator<Item = &'a str>) {
-        let status = Command::new("git")
-            .arg("-C")
-            .arg(repository)
-            .args(arguments)
-            .status()
-            .unwrap();
-        assert!(status.success());
     }
 }

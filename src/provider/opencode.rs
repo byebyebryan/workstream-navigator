@@ -24,8 +24,8 @@ use std::process::{Child, Stdio};
 
 mod observer;
 pub use observer::{
-    OpenCodeObserverContext, OpenCodeObserverError, OpenCodeObserverMode, StandbyEventBuffer,
-    mark_unknown_handle, run_observer, run_standby,
+    OpenCodeObserverContext, OpenCodeObserverError, OpenCodeObserverMode, mark_unknown_handle,
+    run_observer,
 };
 mod guardian;
 pub use guardian::{run as run_guardian, run_barrier};
@@ -1452,13 +1452,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn blank_session_callback_runs_after_health_before_non_idempotent_post() {
-        use std::os::unix::fs::PermissionsExt;
         use std::sync::{Arc, Mutex};
 
         let temporary = tempfile::tempdir().unwrap();
-        let executable = temporary.path().join("serve.sh");
-        std::fs::write(&executable, "#!/bin/sh\nsleep 30\n").unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let executable = Path::new("/bin/sh");
+        std::fs::write(temporary.path().join("serve"), "sleep 30\n").unwrap();
         let listener = TcpListener::bind((LOOPBACK_HOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let events = Arc::new(Mutex::new(Vec::<String>::new()));
@@ -1509,7 +1507,7 @@ mod tests {
         let callback_events = Arc::clone(&events);
         let endpoint = OpenCodeEndpoint::loopback(port).unwrap();
         let session = create_blank_session_with_lease(
-            &executable,
+            executable,
             temporary.path(),
             endpoint,
             move || {
@@ -1535,21 +1533,19 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn blank_session_callback_failure_still_reaps_the_private_process_group() {
-        use std::os::unix::fs::PermissionsExt;
         use std::sync::{Arc, Mutex};
 
         let temporary = tempfile::tempdir().unwrap();
         let pid_path = temporary.path().join("serve.pid");
-        let executable = temporary.path().join("serve.sh");
+        let executable = Path::new("/bin/sh");
         std::fs::write(
-            &executable,
+            temporary.path().join("serve"),
             format!(
-                "#!/bin/sh\nprintf '%s' \"$$\" > \"{}\"\nsleep 30\n",
+                "printf '%s' \"$$\" > \"{}\"\nsleep 30\n",
                 pid_path.display()
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
         let listener = TcpListener::bind((LOOPBACK_HOST, 0)).unwrap();
         let port = listener.local_addr().unwrap().port();
         let observed_identity = Arc::new(Mutex::new(None));
@@ -1571,7 +1567,7 @@ mod tests {
         });
         let callback_identity = Arc::clone(&observed_identity);
         let result: Result<OpenCodeCreatedSession, OpenCodeError> = create_blank_session_with_lease(
-            &executable,
+            executable,
             temporary.path(),
             OpenCodeEndpoint::loopback(port).unwrap(),
             move || {

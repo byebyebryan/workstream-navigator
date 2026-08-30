@@ -138,7 +138,7 @@ impl HostRegistry {
         Ok(created)
     }
 
-    /// Creates an independent Workstream at one exact schema-13 Location.
+    /// Creates an independent Workstream at one exact schema-15 Location.
     ///
     /// Registration creates exactly one external Workstream for a Location;
     /// that retained row is the stable source anchor even after it is

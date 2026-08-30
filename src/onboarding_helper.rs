@@ -1,4 +1,4 @@
-//! D17 launch-helper state boundary.
+//! launch-helper state boundary.
 //!
 //! This seam owns the state transitions used by the hidden helper after it
 //! replaces the controlled provisional shell. Provider-specific execution and
@@ -7,10 +7,10 @@
 use thiserror::Error;
 
 use crate::{
-    d17_broker::{BrokerError, PrepareContext, consume, request_from_context},
     domain::ProviderKind,
-    state::d16::{OnboardingOwnership, OnboardingProviderExecutableIdentity},
-    state::{D16State, ProvisionalLease, StateError},
+    onboarding_broker::{BrokerError, PrepareContext, consume, request_from_context},
+    state::current::{OnboardingOwnership, OnboardingProviderExecutableIdentity},
+    state::{CurrentState, ProvisionalLease, StateError},
 };
 
 /// The exact provider-specific preparation ownership transferred from a
@@ -38,7 +38,7 @@ impl ProviderPreparation {
     }
 }
 
-/// The only D17 result that is eligible to cross the helper's final native
+/// The only result that is eligible to cross the helper's final native
 /// exec fence. It does not prove that a provider was ever executed.
 pub(crate) struct ProviderExecFence {
     ownership: OnboardingOwnership,
@@ -138,11 +138,11 @@ impl ProviderExecFence {
 /// command, token, process data, or private path.
 #[derive(Debug, Error)]
 pub(crate) enum HelperError {
-    #[error("D17 shell handoff is unavailable")]
+    #[error("shell handoff is unavailable")]
     Broker(#[from] BrokerError),
-    #[error("D17 provider launch state is unavailable")]
+    #[error("provider launch state is unavailable")]
     State(#[from] StateError),
-    #[error("only OpenCode may enter the D17 external-effect phase")]
+    #[error("only OpenCode may enter the external-effect phase")]
     ExternalEffectProviderMismatch,
     #[error("only Codex may move directly from preparation to native exec")]
     CodexPreparationProviderMismatch,
@@ -152,7 +152,7 @@ pub(crate) enum HelperError {
 /// and commits the durable provider-preparation fence. No provider is
 /// inspected, started, attached, signalled, or executed here.
 pub(crate) fn begin_provider_preparation(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
     token: &str,
@@ -167,7 +167,7 @@ pub(crate) fn begin_provider_preparation(
         now_monotonic_millis,
     )?;
     let (_, request) = request_from_context(state, provisional_lease, context)?;
-    let ownership = state.record_d17_provider_preparation_current(
+    let ownership = state.record_provider_preparation_current(
         provisional_lease,
         &request,
         ownership,
@@ -183,7 +183,7 @@ pub(crate) fn begin_provider_preparation(
 /// adapter could attempt its blank-session POST. This method has no HTTP or
 /// provider side effect.
 pub(crate) fn record_opencode_external_effect_started(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
     preparation: ProviderPreparation,
@@ -196,7 +196,7 @@ pub(crate) fn record_opencode_external_effect_started(
         return Err(HelperError::ExternalEffectProviderMismatch);
     }
     let (_, request) = request_from_context(state, provisional_lease, context)?;
-    let ownership = state.record_d17_provider_external_effect_started_current(
+    let ownership = state.record_provider_external_effect_started_current(
         provisional_lease,
         &request,
         *ownership,
@@ -210,14 +210,14 @@ pub(crate) fn record_opencode_external_effect_started(
 /// returned. An error after the POST must be reconciled as a possible external
 /// effect; this method never retries or creates another session.
 pub(crate) fn record_opencode_created_session(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
     effect_fence: &OpenCodeExternalEffectFence,
     session: crate::domain::ProviderSessionId,
 ) -> Result<OpenCodeSessionFence, HelperError> {
     let (_, request) = request_from_context(state, provisional_lease, context)?;
-    let ownership = state.record_d17_opencode_created_session_current(
+    let ownership = state.record_opencode_created_session_current(
         provisional_lease,
         &request,
         effect_fence.ownership(),
@@ -232,7 +232,7 @@ pub(crate) fn record_opencode_created_session(
 /// Persists the exact temporary-server endpoint fingerprint before the final
 /// native `OpenCode` exec.  It performs no observer or provider I/O.
 pub(crate) fn record_opencode_runtime_handle(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
     session_fence: &OpenCodeSessionFence,
@@ -240,7 +240,7 @@ pub(crate) fn record_opencode_runtime_handle(
     version: &str,
 ) -> Result<OpenCodeHandleFence, HelperError> {
     let (_, request) = request_from_context(state, provisional_lease, context)?;
-    state.record_d17_opencode_runtime_handle_current(
+    state.record_opencode_runtime_handle_current(
         provisional_lease,
         &request,
         *session_fence.ownership,
@@ -257,7 +257,7 @@ pub(crate) fn record_opencode_runtime_handle(
 /// Records Codex's final native-exec fence. Returning successfully still
 /// proves no provider execution.
 pub(crate) fn record_codex_provider_exec_started(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
     preparation: ProviderPreparation,
@@ -271,7 +271,7 @@ pub(crate) fn record_codex_provider_exec_started(
     }
     let (_, request) = request_from_context(state, provisional_lease, context)?;
     let ownership =
-        state.record_d17_provider_exec_started_current(provisional_lease, &request, *ownership)?;
+        state.record_provider_exec_started_current(provisional_lease, &request, *ownership)?;
     Ok(ProviderExecFence {
         ownership,
         provider,
@@ -282,13 +282,13 @@ pub(crate) fn record_codex_provider_exec_started(
 /// external-effect boundary. Returning successfully still proves no provider
 /// execution.
 pub(crate) fn record_opencode_provider_exec_started(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
     handle_fence: &OpenCodeHandleFence,
 ) -> Result<ProviderExecFence, HelperError> {
     let (_, request) = request_from_context(state, provisional_lease, context)?;
-    let ownership = state.record_d17_provider_exec_started_current(
+    let ownership = state.record_provider_exec_started_current(
         provisional_lease,
         &request,
         *handle_fence.ownership,
@@ -302,13 +302,13 @@ pub(crate) fn record_opencode_provider_exec_started(
 /// Marks an `OpenCode` attempt recovery-required after its POST boundary has
 /// been crossed but the returned session could not be durably bound.
 pub(crate) fn record_opencode_effect_recovery_required(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
     effect_fence: &OpenCodeExternalEffectFence,
 ) -> Result<(), HelperError> {
     let (_, request) = request_from_context(state, provisional_lease, context)?;
-    state.record_d17_recovery_required_current(
+    state.record_recovery_required_current(
         provisional_lease,
         &request,
         effect_fence.ownership(),
@@ -317,30 +317,30 @@ pub(crate) fn record_opencode_effect_recovery_required(
 }
 
 /// Marks a post-capability but pre-POST provider-preparation failure for
-/// recovery. The helper deliberately stays conservative here: a later D17
+/// recovery. The helper deliberately stays conservative here: a later
 /// reconciler may prove known absence and roll back, but this boundary never
 /// guesses from a failed temporary-server operation.
 pub(crate) fn record_provider_preparation_recovery_required(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
     ownership: OnboardingOwnership,
 ) -> Result<(), HelperError> {
     let (_, request) = request_from_context(state, provisional_lease, context)?;
-    state.record_d17_recovery_required_current(provisional_lease, &request, ownership)?;
+    state.record_recovery_required_current(provisional_lease, &request, ownership)?;
     Ok(())
 }
 
 /// Marks an `OpenCode` attempt recovery-required after a durable native
 /// session binding cannot reach the final exec boundary.
 pub(crate) fn record_opencode_session_recovery_required(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
     session_fence: &OpenCodeSessionFence,
 ) -> Result<(), HelperError> {
     let (_, request) = request_from_context(state, provisional_lease, context)?;
-    state.record_d17_recovery_required_current(
+    state.record_recovery_required_current(
         provisional_lease,
         &request,
         *session_fence.ownership,
@@ -356,7 +356,7 @@ pub(crate) fn record_opencode_session_recovery_required(
     reason = "moving the opaque exec fence prevents a caller from reusing its final-exec authority"
 )]
 pub(crate) fn record_opencode_exec_recovery_required(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
     exec_fence: ProviderExecFence,
@@ -369,7 +369,7 @@ pub(crate) fn record_opencode_exec_recovery_required(
         return Err(HelperError::ExternalEffectProviderMismatch);
     }
     let (_, request) = request_from_context(state, provisional_lease, context)?;
-    state.record_d17_recovery_required_current(provisional_lease, &request, ownership)?;
+    state.record_recovery_required_current(provisional_lease, &request, ownership)?;
     Ok(())
 }
 
@@ -378,7 +378,7 @@ pub(crate) fn record_opencode_exec_recovery_required(
 /// it must bind the blank session returned after its separately fenced POST
 /// before it may record the final native-exec boundary.
 pub(crate) fn advance_codex_to_provider_exec_fence(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
     token: &str,
@@ -407,7 +407,7 @@ pub(crate) fn advance_codex_to_provider_exec_fence(
     reason = "moving the opaque fence prevents a caller from reusing the pre-exec authority"
 )]
 pub(crate) fn record_codex_exec_failed_known_absent(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     context: &PrepareContext<'_, '_>,
     exec_fence: ProviderExecFence,
@@ -420,10 +420,6 @@ pub(crate) fn record_codex_exec_failed_known_absent(
         return Err(HelperError::CodexPreparationProviderMismatch);
     }
     let (_, request) = request_from_context(state, provisional_lease, context)?;
-    state.record_d17_codex_exec_failed_known_absent_current(
-        provisional_lease,
-        &request,
-        ownership,
-    )?;
+    state.record_codex_exec_failed_known_absent_current(provisional_lease, &request, ownership)?;
     Ok(())
 }

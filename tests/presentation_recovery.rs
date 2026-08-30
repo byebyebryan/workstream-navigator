@@ -32,8 +32,7 @@ fn current_state_root() -> tempfile::TempDir {
             .expect("private state root");
     }
     drop(
-        state::fresh_create_d17(root.path(), &RandomIdGenerator)
-            .expect("fresh schema-14 state root"),
+        state::create_current(root.path(), &RandomIdGenerator).expect("fresh schema-15 state root"),
     );
     root
 }
@@ -68,7 +67,7 @@ fn navigator_stop_leaves_cleanup_to_the_outer_owner() {
         socket: paths.socket.clone(),
     };
     presentation
-        .start_d17(uuid::Uuid::from_u128(0x1701), state_root.path())
+        .start(uuid::Uuid::from_u128(0x1701), state_root.path())
         .unwrap();
 
     let mut client = attach_tmux_client(&paths);
@@ -104,7 +103,7 @@ fn navigator_stop_leaves_cleanup_to_the_outer_owner() {
     assert!(session_exists(&paths.socket, &paths.session_name));
     assert!(paths.directory.exists());
 
-    presentation.close_d17().unwrap();
+    presentation.close().unwrap();
     assert!(!paths.directory.exists());
 }
 
@@ -143,7 +142,7 @@ fn private_presentation_restores_navigator_width_when_the_window_resizes() {
     assert!(status.success());
     let ordinary_before = tmux_output(&ordinary_socket, ["list-keys", "-T", "root"]);
     presentation
-        .start_d17(uuid::Uuid::from_u128(0x1702), state_root.path())
+        .start(uuid::Uuid::from_u128(0x1702), state_root.path())
         .unwrap();
     let ordinary_after = tmux_output(&ordinary_socket, ["list-keys", "-T", "root"]);
     assert_eq!(ordinary_before, ordinary_after);
@@ -183,7 +182,7 @@ fn private_presentation_has_only_owned_roles_and_bounded_key_tables() {
         socket: paths.socket.clone(),
     };
     presentation
-        .start_d17(uuid::Uuid::from_u128(0x1703), state_root.path())
+        .start(uuid::Uuid::from_u128(0x1703), state_root.path())
         .unwrap();
 
     let panes = tmux_output(
@@ -250,7 +249,7 @@ fn mutated_private_geometry_fails_closed_without_rearranging_panes() {
         socket: paths.socket.clone(),
     };
     presentation
-        .start_d17(uuid::Uuid::from_u128(0x1704), state_root.path())
+        .start(uuid::Uuid::from_u128(0x1704), state_root.path())
         .unwrap();
     let output = tmux_command(&paths.socket)
         .args(["split-window", "-v", "-d", "-P", "-F", "#{pane_id}", "-t"])
@@ -279,7 +278,7 @@ fn tmux_control_bindings_are_parseable_active_helpers_only() {
     }
     let fixture_root = tempfile::tempdir().unwrap();
     let executable = fixture_root.path().join("wsnav-fixture");
-    let script = "#!/bin/sh\nif [ \"$3\" = \"_navigator_d17\" ] || [ \"$3\" = \"_provider_wait\" ]; then exec sleep 60; fi\n";
+    let script = "#!/bin/sh\nif [ \"$3\" = \"_navigator\" ] || [ \"$3\" = \"_provider_wait\" ]; then exec sleep 60; fi\n";
     fs::write(&executable, script).unwrap();
     make_executable(&executable);
     let state_root = current_state_root();
@@ -290,7 +289,7 @@ fn tmux_control_bindings_are_parseable_active_helpers_only() {
         socket: paths.socket.clone(),
     };
     presentation
-        .start_d17(uuid::Uuid::from_u128(0x1705), state_root.path())
+        .start(uuid::Uuid::from_u128(0x1705), state_root.path())
         .unwrap();
 
     let prefix = tmux_output(&paths.socket, ["list-keys", "-T", "prefix"]);
@@ -326,7 +325,7 @@ fn outer_presentation_protects_nested_provider_literal_prefix() {
         socket: paths.socket.clone(),
     };
     presentation
-        .start_d17(uuid::Uuid::from_u128(0x1707), state_root.path())
+        .start(uuid::Uuid::from_u128(0x1707), state_root.path())
         .unwrap();
     let provider = tmux_output(
         &paths.socket,
@@ -343,7 +342,7 @@ fn outer_presentation_protects_nested_provider_literal_prefix() {
         let (pane, role) = line.split_once('|')?;
         (role == "provider").then_some(pane.to_owned())
     })
-    .expect("D17 provider pane");
+    .expect(" provider pane");
 
     assert!(matches!(
         presentation.control(PresentationAction::LiteralCtrlB, &provider),

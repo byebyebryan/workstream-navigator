@@ -4,18 +4,20 @@ use super::{
     is_direct_provider_hook,
 };
 use crate::provider::codex::hooks::drain_stdin_and_parse_until;
-use crate::state::{ObserverDatabaseDeadline, open_observer_transition};
+use crate::state::{ObserverDatabaseDeadline, open_current};
 use std::time::{Duration, Instant};
 
 const CODEX_HOOK_PREPARATION_BUDGET: Duration = Duration::from_millis(1_750);
 const CODEX_HOOK_DATABASE_BUDGET: Duration = Duration::from_millis(750);
 
-pub(super) fn observer_profile(root: &StateRoot) -> Result<ObserverProfile, super::AppError> {
+pub(super) fn observer_profile(
+    root: &StateRoot,
+) -> Result<ObserverProfile, super::model::AppError> {
     let codex_home = env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .or_else(|| env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
-        .ok_or(super::AppError::CodexHomeUnavailable)?;
-    let executable = env::current_exe().map_err(super::AppError::Io)?;
+        .ok_or(super::model::AppError::CodexHomeUnavailable)?;
+    let executable = env::current_exe().map_err(super::model::AppError::Io)?;
     Ok(ObserverProfile::new(codex_home, executable, root.base()))
 }
 
@@ -31,13 +33,13 @@ pub(super) fn observe_hook(state_root: Option<PathBuf>) {
         return;
     };
     // Hooks are passive evidence. Select the already-existing root and open
-    // only the schema-12/13 observer-transition authority; never create,
-    // migrate, or open the ordinary HostRegistry on this path.
+    // only the exact current schema-15 authority; never create or migrate
+    // state on this path.
     let root = StateRoot::select(state_root);
     if Instant::now() >= preparation_deadline {
         return;
     }
-    let Ok(mut state) = open_observer_transition(&root) else {
+    let Ok(mut state) = open_current(&root) else {
         return;
     };
     if Instant::now() >= preparation_deadline {

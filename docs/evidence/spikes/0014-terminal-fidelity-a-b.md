@@ -100,7 +100,7 @@ instrument; none changed the `civis`/`cnorm` emission:
 
 The artifact is therefore version-bound and not config-fixable by WSNav. The
 instrument remains the objective confirmation gate for an upstream fix. See
-the [roadmap](../../roadmap.md#2026-08-04-terminal-fidelity-root-cause-is-upstream-tmux)
+the [archived roadmap](../../roadmap-through-d18-design.md#2026-08-04-terminal-fidelity-root-cause-is-upstream-tmux)
 for the deferred-fix decision.
 
 ## Application cursor state is separate from redraw flicker

@@ -1,4 +1,4 @@
-//! Boot-scoped monotonic time for D17 one-shot handoffs.
+//! Boot-scoped monotonic time for one-shot handoffs.
 //!
 //! A capability is valid only within the same Linux boot.  The broker persists
 //! a digest of the boot identifier in its claims, while the helper recomputes
@@ -8,19 +8,19 @@
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-const BOOT_PROVENANCE_VERSION: &str = "d17-boot-v1";
+const BOOT_PROVENANCE_VERSION: &str = "wsnav-boot-v1";
 
 /// Clock readings share a single boot-scoped provenance.
-pub(crate) trait D17Clock {
+pub(crate) trait Clock {
     fn now_monotonic_millis(&self) -> Result<i64, ClockError>;
     fn boot_provenance(&self) -> Result<String, ClockError>;
 }
 
 /// The Linux `CLOCK_BOOTTIME` clock and kernel boot identifier.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct SystemD17Clock;
+pub(crate) struct SystemClock;
 
-impl D17Clock for SystemD17Clock {
+impl Clock for SystemClock {
     fn now_monotonic_millis(&self) -> Result<i64, ClockError> {
         system_monotonic_millis()
     }
@@ -70,24 +70,24 @@ fn system_boot_provenance() -> Result<String, ClockError> {
 /// Bounded clock/provenance failure that carries no host identifier.
 #[derive(Debug, Error)]
 pub(crate) enum ClockError {
-    #[error("the D17 boot-scoped clock is unavailable")]
+    #[error("the boot-scoped clock is unavailable")]
     Unavailable,
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{D17Clock, SystemD17Clock};
+    use super::{Clock, SystemClock};
 
     #[test]
     #[cfg(target_os = "linux")]
     fn system_clock_has_a_nonnegative_reading_and_private_boot_provenance() {
-        let clock = SystemD17Clock;
+        let clock = SystemClock;
         assert!(clock.now_monotonic_millis().unwrap() >= 0);
         assert!(
             clock
                 .boot_provenance()
                 .unwrap()
-                .starts_with("d17-boot-v1:sha256:")
+                .starts_with("wsnav-boot-v1:sha256:")
         );
     }
 }

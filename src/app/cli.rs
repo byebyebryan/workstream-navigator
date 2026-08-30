@@ -57,18 +57,18 @@ pub(super) enum Commands {
         workstream_id: String,
         attention_revision: i64,
     },
-    /// Internal schema-14 Ratatui process run inside a D17 presentation pane.
-    #[command(name = "_navigator_d17", hide = true)]
-    NavigatorPaneD17 {
+    /// Internal schema-15 Ratatui process run inside a presentation pane.
+    #[command(name = "_navigator", hide = true)]
+    NavigatorPane {
         #[arg(long)]
         presentation_socket: PathBuf,
         #[arg(long)]
         presentation_session: String,
     },
-    /// Internal D17 account-shell broker gate. Its successful stdout is one
+    /// Internal account-shell broker gate. Its successful stdout is one
     /// opaque capability consumed only by the adjacent shell wrapper.
-    #[command(name = "_d17_shell_gate", hide = true)]
-    D17ShellGate {
+    #[command(name = "_shell_gate", hide = true)]
+    ShellGate {
         #[arg(long)]
         provider: String,
         #[arg(long)]
@@ -76,10 +76,10 @@ pub(super) enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         arguments: Vec<std::ffi::OsString>,
     },
-    /// Internal D17 account-shell launch helper. It consumes one opaque
+    /// Internal account-shell launch helper. It consumes one opaque
     /// capability and replaces itself with the approved native provider.
-    #[command(name = "_d17_launch_helper", hide = true)]
-    D17LaunchHelper {
+    #[command(name = "_launch_helper", hide = true)]
+    LaunchHelper {
         #[arg(long)]
         capability: String,
         #[arg(long)]
@@ -87,16 +87,16 @@ pub(super) enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         arguments: Vec<std::ffi::OsString>,
     },
-    /// Internal interactive D17 Codex observer setup from an exact provisional
+    /// Internal interactive Codex observer setup from an exact provisional
     /// account shell. It is not a public setup or trust command.
-    #[command(name = "_d17_observer_setup", hide = true)]
-    D17ObserverSetup {
+    #[command(name = "_observer_setup", hide = true)]
+    ObserverSetup {
         #[arg(long)]
         shell_leader_pid: u32,
         #[arg(long)]
         consent: bool,
     },
-    /// Internal fixed D17 two-pane presentation control helper.
+    /// Internal fixed two-pane presentation control helper.
     #[command(name = "_presentation_control", hide = true)]
     PresentationControl {
         #[arg(long)]
@@ -113,9 +113,9 @@ pub(super) enum Commands {
     /// Internal blank provider-pane placeholder before an exact attachment is selected.
     #[command(name = "_provider_wait", hide = true)]
     ProviderWait,
-    /// Internal schema-14 provider attachment helper for a proven D17 Runtime.
-    #[command(name = "_provider_attach_d17", hide = true)]
-    ProviderAttachD17 {
+    /// Internal schema-15 provider attachment helper for a proven Runtime.
+    #[command(name = "_provider_attach", hide = true)]
+    ProviderAttach {
         workstream_id: String,
         #[arg(long)]
         expected_workstream_revision: i64,
@@ -140,35 +140,12 @@ pub(super) enum Commands {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         program: Vec<std::ffi::OsString>,
     },
-    /// Internal D16 generation-bound `OpenCode` lifecycle observer.
-    #[command(name = "_opencode_observer_d16", hide = true)]
-    OpenCodeObserverD16 {
+    /// Internal generation-bound `OpenCode` lifecycle observer.
+    #[command(name = "_opencode_observer", hide = true)]
+    OpenCodeObserver {
         runtime_id: String,
         generation: String,
         port: u16,
-        session_id: String,
-        pane_pid: u32,
-        cwd: PathBuf,
-        provider_birth: String,
-    },
-    /// Internal D17 generation-bound `OpenCode` lifecycle observer.
-    #[command(name = "_opencode_observer_d17", hide = true)]
-    OpenCodeObserverD17 {
-        runtime_id: String,
-        generation: String,
-        port: u16,
-        session_id: String,
-        pane_pid: u32,
-        cwd: PathBuf,
-        provider_birth: String,
-    },
-    /// Internal state-free D16 standby observer.
-    #[command(name = "_opencode_observer_standby", hide = true)]
-    OpenCodeObserverStandby {
-        runtime_id: String,
-        generation: String,
-        port: u16,
-        provider_version: String,
         session_id: String,
         pane_pid: u32,
         cwd: PathBuf,
@@ -195,31 +172,24 @@ pub(super) const fn is_provider_pane_command(command: Option<&Commands>) -> bool
         command,
         Some(
             Commands::PresentationControl { .. }
-                | Commands::ProviderAttachD17 { .. }
+                | Commands::ProviderAttach { .. }
                 | Commands::RuntimeLaunch { .. }
         )
     )
 }
 
 pub(super) const fn is_observer_command(command: Option<&Commands>) -> bool {
-    matches!(
-        command,
-        Some(
-            Commands::OpenCodeObserverD16 { .. }
-                | Commands::OpenCodeObserverD17 { .. }
-                | Commands::OpenCodeObserverStandby { .. }
-        )
-    )
+    matches!(command, Some(Commands::OpenCodeObserver { .. }))
 }
 
-pub(super) const fn is_d17_shell_gate_command(command: Option<&Commands>) -> bool {
-    matches!(command, Some(Commands::D17ShellGate { .. }))
+pub(super) const fn is_shell_gate_command(command: Option<&Commands>) -> bool {
+    matches!(command, Some(Commands::ShellGate { .. }))
 }
 
-pub(super) const fn is_d17_shell_launch_helper_command(command: Option<&Commands>) -> bool {
-    matches!(command, Some(Commands::D17LaunchHelper { .. }))
+pub(super) const fn is_shell_launch_helper_command(command: Option<&Commands>) -> bool {
+    matches!(command, Some(Commands::LaunchHelper { .. }))
 }
 
-pub(super) const fn is_d17_observer_setup_command(command: Option<&Commands>) -> bool {
-    matches!(command, Some(Commands::D17ObserverSetup { .. }))
+pub(super) const fn is_observer_setup_command(command: Option<&Commands>) -> bool {
+    matches!(command, Some(Commands::ObserverSetup { .. }))
 }

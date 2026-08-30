@@ -1,4 +1,4 @@
-//! D17 controlled account-shell bootstrap.
+//! controlled account-shell bootstrap.
 //!
 //! This module constructs only fixed private startup files and direct shell
 //! argv for a provisional Runtime. It does not render a card, create durable
@@ -23,24 +23,24 @@ use crate::{
     runtime::{
         NativeLaunch, PrivateRuntime, ProcessGroupProbe, RuntimeError, RuntimePaths, RuntimeStartup,
     },
-    state::{D16State, ProvisionalLease},
+    state::{CurrentState, ProvisionalLease},
 };
 
-const BASH_WRAPPER_FILE: &str = ".wsnav-d17-bashrc";
+const BASH_WRAPPER_FILE: &str = ".wsnav-provisional-bashrc";
 const ZSH_WRAPPER_FILE: &str = ".zshrc";
 const HOME_ENV: &str = "HOME";
-const STATE_ROOT_ENV: &str = "WSNAV_D17_STATE_ROOT";
-const PRESENTATION_DIRECTORY_ENV: &str = "WSNAV_D17_PRESENTATION_DIRECTORY";
-const ORIGINAL_HOME_ENV: &str = "WSNAV_D17_ORIGINAL_HOME";
-const ORIGINAL_ZDOTDIR_ENV: &str = "WSNAV_D17_ORIGINAL_ZDOTDIR";
-const EXECUTABLE_ENV: &str = "WSNAV_D17_EXECUTABLE";
+const STATE_ROOT_ENV: &str = "WSNAV_STATE_ROOT";
+const PRESENTATION_DIRECTORY_ENV: &str = "WSNAV_PRESENTATION_DIRECTORY";
+const ORIGINAL_HOME_ENV: &str = "WSNAV_ORIGINAL_HOME";
+const ORIGINAL_ZDOTDIR_ENV: &str = "WSNAV_ORIGINAL_ZDOTDIR";
+const EXECUTABLE_ENV: &str = "WSNAV_EXECUTABLE";
 
 const BASH_WRAPPER: &str = r#"if shopt -q login_shell; then
-    printf '%s\n' 'WSNav D17 onboarding requires a non-login shell' >&2
+    printf '%s\n' 'WSNav onboarding requires a non-login shell' >&2
     return 64
 fi
-if [[ -f "${WSNAV_D17_ORIGINAL_HOME:?}/.bashrc" ]] && ! source "${WSNAV_D17_ORIGINAL_HOME}/.bashrc"; then
-    printf '%s\n' 'WSNav D17 account-shell startup was refused' >&2
+if [[ -f "${WSNAV_ORIGINAL_HOME:?}/.bashrc" ]] && ! source "${WSNAV_ORIGINAL_HOME}/.bashrc"; then
+    printf '%s\n' 'WSNav account-shell startup was refused' >&2
     return 64
 fi
 unalias codex opencode 2>/dev/null || true
@@ -48,11 +48,11 @@ unset -f codex opencode 2>/dev/null || true
 codex() {
     local wsnav_capability wsnav_status wsnav_consent wsnav_setup_status
     while :; do
-    wsnav_capability="$("${WSNAV_D17_EXECUTABLE:?}" _d17_shell_gate --provider codex --shell-leader-pid "$$" -- "$@")"
+    wsnav_capability="$("${WSNAV_EXECUTABLE:?}" _shell_gate --provider codex --shell-leader-pid "$$" -- "$@")"
     wsnav_status=$?
     if [[ "$wsnav_status" -eq 0 && -n "$wsnav_capability" && ${#wsnav_capability} -le 512 && "$wsnav_capability" != *$'\n'* && "$wsnav_capability" != *$'\r'* ]]; then
-        exec "${WSNAV_D17_EXECUTABLE}" _d17_launch_helper --capability "$wsnav_capability" --provider codex -- "$@"
-        printf '%s\n' 'WSNav D17 onboarding command is unavailable' >&2
+        exec "${WSNAV_EXECUTABLE}" _launch_helper --capability "$wsnav_capability" --provider codex -- "$@"
+        printf '%s\n' 'WSNav onboarding command is unavailable' >&2
         return 64
     fi
     if [[ "$wsnav_status" -eq 10 ]]; then
@@ -63,44 +63,44 @@ codex() {
         printf '%s' 'WSNav Codex observer setup is required. Allow exact profile setup and native /hooks review? [y/N] ' >&2
         IFS= read -r wsnav_consent || wsnav_consent=''
         if [[ "$wsnav_consent" == [yY] || "$wsnav_consent" == [yY][eE][sS] ]]; then
-            "${WSNAV_D17_EXECUTABLE}" _d17_observer_setup --shell-leader-pid "$$" --consent
+            "${WSNAV_EXECUTABLE}" _observer_setup --shell-leader-pid "$$" --consent
             wsnav_setup_status=$?
             if [[ "$wsnav_setup_status" -eq 0 ]]; then
                 continue
             fi
         else
-            printf '%s\n' 'WSNav D17 Codex observer setup was declined' >&2
+            printf '%s\n' 'WSNav Codex observer setup was declined' >&2
         fi
     fi
-    printf '%s\n' 'WSNav D17 onboarding command is unavailable' >&2
+    printf '%s\n' 'WSNav onboarding command is unavailable' >&2
     return 64
     done
 }
 opencode() {
     local wsnav_capability
-    wsnav_capability="$("${WSNAV_D17_EXECUTABLE:?}" _d17_shell_gate --provider opencode --shell-leader-pid "$$" -- "$@")"
+    wsnav_capability="$("${WSNAV_EXECUTABLE:?}" _shell_gate --provider opencode --shell-leader-pid "$$" -- "$@")"
     local wsnav_status=$?
     if [[ "$wsnav_status" -eq 0 && -n "$wsnav_capability" && ${#wsnav_capability} -le 512 && "$wsnav_capability" != *$'\n'* && "$wsnav_capability" != *$'\r'* ]]; then
-        exec "${WSNAV_D17_EXECUTABLE}" _d17_launch_helper --capability "$wsnav_capability" --provider opencode -- "$@"
-        printf '%s\n' 'WSNav D17 onboarding command is unavailable' >&2
+        exec "${WSNAV_EXECUTABLE}" _launch_helper --capability "$wsnav_capability" --provider opencode -- "$@"
+        printf '%s\n' 'WSNav onboarding command is unavailable' >&2
         return 64
     fi
     if [[ "$wsnav_status" -eq 10 ]]; then
         command opencode "$@"
         return
     fi
-    printf '%s\n' 'WSNav D17 onboarding command is unavailable' >&2
+    printf '%s\n' 'WSNav onboarding command is unavailable' >&2
     return 64
 }
 "#;
 
 const ZSH_WRAPPER: &str = r#"if [[ -o login ]]; then
-    print -r -- 'WSNav D17 onboarding requires a non-login shell' >&2
+    print -r -- 'WSNav onboarding requires a non-login shell' >&2
     return 64
 fi
-export ZDOTDIR="${WSNAV_D17_ORIGINAL_ZDOTDIR:?}"
+export ZDOTDIR="${WSNAV_ORIGINAL_ZDOTDIR:?}"
 if [[ -f "${ZDOTDIR}/.zshrc" ]] && ! source "${ZDOTDIR}/.zshrc"; then
-    print -r -- 'WSNav D17 account-shell startup was refused' >&2
+    print -r -- 'WSNav account-shell startup was refused' >&2
     return 64
 fi
 if (( $+aliases[codex] )); then unalias codex || return 64; fi
@@ -110,11 +110,11 @@ if (( $+functions[opencode] )); then unfunction opencode || return 64; fi
 codex() {
     local wsnav_capability wsnav_status wsnav_consent wsnav_setup_status
     while :; do
-    wsnav_capability="$("${WSNAV_D17_EXECUTABLE:?}" _d17_shell_gate --provider codex --shell-leader-pid "$$" -- "$@")"
+    wsnav_capability="$("${WSNAV_EXECUTABLE:?}" _shell_gate --provider codex --shell-leader-pid "$$" -- "$@")"
     wsnav_status=$?
     if [[ "$wsnav_status" -eq 0 && -n "$wsnav_capability" && ${#wsnav_capability} -le 512 && "$wsnav_capability" != *$'\n'* && "$wsnav_capability" != *$'\r'* ]]; then
-        exec "${WSNAV_D17_EXECUTABLE}" _d17_launch_helper --capability "$wsnav_capability" --provider codex -- "$@"
-        print -r -- 'WSNav D17 onboarding command is unavailable' >&2
+        exec "${WSNAV_EXECUTABLE}" _launch_helper --capability "$wsnav_capability" --provider codex -- "$@"
+        print -r -- 'WSNav onboarding command is unavailable' >&2
         return 64
     fi
     if [[ "$wsnav_status" -eq 10 ]]; then
@@ -125,33 +125,33 @@ codex() {
         print -n -- 'WSNav Codex observer setup is required. Allow exact profile setup and native /hooks review? [y/N] ' >&2
         read -r wsnav_consent || wsnav_consent=''
         if [[ "$wsnav_consent" == [yY] || "$wsnav_consent" == [yY][eE][sS] ]]; then
-            "${WSNAV_D17_EXECUTABLE}" _d17_observer_setup --shell-leader-pid "$$" --consent
+            "${WSNAV_EXECUTABLE}" _observer_setup --shell-leader-pid "$$" --consent
             wsnav_setup_status=$?
             if [[ "$wsnav_setup_status" -eq 0 ]]; then
                 continue
             fi
         else
-            print -r -- 'WSNav D17 Codex observer setup was declined' >&2
+            print -r -- 'WSNav Codex observer setup was declined' >&2
         fi
     fi
-    print -r -- 'WSNav D17 onboarding command is unavailable' >&2
+    print -r -- 'WSNav onboarding command is unavailable' >&2
     return 64
     done
 }
 opencode() {
     local wsnav_capability
-    wsnav_capability="$("${WSNAV_D17_EXECUTABLE:?}" _d17_shell_gate --provider opencode --shell-leader-pid "$$" -- "$@")"
+    wsnav_capability="$("${WSNAV_EXECUTABLE:?}" _shell_gate --provider opencode --shell-leader-pid "$$" -- "$@")"
     local wsnav_status=$?
     if [[ "$wsnav_status" -eq 0 && -n "$wsnav_capability" && ${#wsnav_capability} -le 512 && "$wsnav_capability" != *$'\n'* && "$wsnav_capability" != *$'\r'* ]]; then
-        exec "${WSNAV_D17_EXECUTABLE}" _d17_launch_helper --capability "$wsnav_capability" --provider opencode -- "$@"
-        print -r -- 'WSNav D17 onboarding command is unavailable' >&2
+        exec "${WSNAV_EXECUTABLE}" _launch_helper --capability "$wsnav_capability" --provider opencode -- "$@"
+        print -r -- 'WSNav onboarding command is unavailable' >&2
         return 64
     fi
     if [[ "$wsnav_status" -eq 10 ]]; then
         command opencode "$@"
         return
     fi
-    print -r -- 'WSNav D17 onboarding command is unavailable' >&2
+    print -r -- 'WSNav onboarding command is unavailable' >&2
     return 64
 }
 "#;
@@ -190,7 +190,7 @@ impl AccountShellKind {
 
 /// Non-authoritative discovery paths inherited by a provisional shell's hidden
 /// children. Each child must reopen and revalidate the marker, Runtime, and
-/// schema-14 lease; this context alone can never grant ownership.
+/// schema-15 lease; this context alone can never grant ownership.
 #[derive(Clone)]
 pub(crate) struct AccountShellContext {
     state_root: PathBuf,
@@ -367,11 +367,11 @@ impl AccountShellLaunch {
     }
 
     /// Materializes this exact account shell through the marker-first
-    /// provisional seam. The atomic D17 cutover is the only future caller;
-    /// this method does not add a D16 launch route.
+    /// provisional seam. The atomic startup boundary is the only caller;
+    /// this method does not add a current launch route.
     pub(crate) fn materialize_under_lease(
         &self,
-        state: &D16State,
+        state: &CurrentState,
         provisional_lease: &ProvisionalLease,
         presentation_directory: &Path,
         slot: &ProvisionalSlot,
@@ -410,13 +410,13 @@ impl RuntimeStartup for AccountShellBootstrap {
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
 pub(crate) enum AccountShellError {
-    #[error("the D17 account shell is unavailable")]
+    #[error("the account shell is unavailable")]
     ShellUnavailable,
-    #[error("D17 supports only Bash and Zsh interactive account shells")]
+    #[error("the account shell supports only Bash and Zsh interactive shells")]
     UnsupportedShell,
     #[error("the presentation seed cwd is unavailable")]
     SeedCwdUnavailable,
-    #[error("the D17 account-shell context is unavailable")]
+    #[error("the account-shell context is unavailable")]
     ContextUnavailable,
     #[error("the original account home is unavailable")]
     HomeUnavailable,
@@ -424,7 +424,7 @@ pub(crate) enum AccountShellError {
     ZdotdirUnavailable,
     #[error("the WSNav executable is unavailable")]
     ExecutableUnavailable,
-    #[error("the D17 account-shell environment is unsafe")]
+    #[error("the account-shell environment is unsafe")]
     UnsafeEnvironment,
 }
 
@@ -441,7 +441,7 @@ fn canonical_directory(
 }
 
 /// Context paths originate outside the process through the private shell
-/// environment. Refuse symlinks before canonicalization so a later D17
+/// environment. Refuse symlinks before canonicalization so a later
 /// presentation proof can compare the exact on-disk location rather than an
 /// attacker-selected alias.
 fn canonical_context_directory(path: &Path) -> Result<PathBuf, AccountShellError> {
@@ -563,7 +563,7 @@ mod tests {
             .map(|directory| directory.join(name))
             .find(|candidate| candidate.is_file())
             .and_then(|candidate| fs::canonicalize(candidate).ok())
-            .expect("the D17-supported account shell must be installed for its contract test")
+            .expect("the -supported account shell must be installed for its contract test")
     }
 
     fn run_controlled_shell(shell_name: &str, gate_status: i32, expected_probe: &str) {
@@ -584,7 +584,7 @@ mod tests {
         fs::write(
             &wsnav,
             format!(
-                "#!/bin/sh\nif [ \"$1\" = _d17_shell_gate ]; then [ \"$2\" = --provider ] && [ \"$3\" = codex ] && [ \"$4\" = --shell-leader-pid ] && [ \"$6\" = -- ] || exit 64; [ {gate_status} -eq 0 ] && printf opaque-capability; exit {gate_status}; fi\nif [ \"$1\" = _d17_launch_helper ]; then [ \"$2\" = --capability ] && [ \"$3\" = opaque-capability ] && [ \"$4\" = --provider ] && [ \"$5\" = codex ] && [ \"$6\" = -- ] || exit 64; printf '%s\\n' managed > \"${{WSNAV_PROBE_OUT:?}}\"; exit 0; fi\nexit 64\n"
+                "#!/bin/sh\nif [ \"$1\" = _shell_gate ]; then [ \"$2\" = --provider ] && [ \"$3\" = codex ] && [ \"$4\" = --shell-leader-pid ] && [ \"$6\" = -- ] || exit 64; [ {gate_status} -eq 0 ] && printf opaque-capability; exit {gate_status}; fi\nif [ \"$1\" = _launch_helper ]; then [ \"$2\" = --capability ] && [ \"$3\" = opaque-capability ] && [ \"$4\" = --provider ] && [ \"$5\" = codex ] && [ \"$6\" = -- ] || exit 64; printf '%s\\n' managed > \"${{WSNAV_PROBE_OUT:?}}\"; exit 0; fi\nexit 64\n"
             ),
         )
         .unwrap();
@@ -1068,15 +1068,13 @@ mod tests {
 
     #[test]
     fn zsh_wrapper_body_is_the_only_startup_file_that_restores_zdotdir() {
-        assert!(ZSH_WRAPPER.contains("export ZDOTDIR=\"${WSNAV_D17_ORIGINAL_ZDOTDIR:?}\""));
+        assert!(ZSH_WRAPPER.contains("export ZDOTDIR=\"${WSNAV_ORIGINAL_ZDOTDIR:?}\""));
         assert!(
-            ZSH_WRAPPER
-                .contains("_d17_shell_gate --provider opencode --shell-leader-pid \"$$\" --")
+            ZSH_WRAPPER.contains("_shell_gate --provider opencode --shell-leader-pid \"$$\" --")
         );
         assert!(
-            BASH_WRAPPER.contains(
-                "_d17_launch_helper --capability \"$wsnav_capability\" --provider codex --"
-            )
+            BASH_WRAPPER
+                .contains("_launch_helper --capability \"$wsnav_capability\" --provider codex --")
         );
         assert_eq!(ZSH_WRAPPER_FILE, ".zshrc");
     }

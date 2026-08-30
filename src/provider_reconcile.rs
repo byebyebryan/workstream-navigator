@@ -1,4 +1,4 @@
-//! D17 post-exec reconciliation boundary.
+//! post-exec reconciliation boundary.
 //!
 //! The reconciler can only record exact native exec evidence. Codex may then
 //! finish its provider-exec proof directly, while `OpenCode` remains action
@@ -19,8 +19,8 @@ use crate::{
     provisional::{ProvisionalPhase, ProvisionalSlot, SlotError, read_marker, update_marker},
     runtime::{PrivateRuntime, ProcessGroupProbe, ProcessProbe},
     state::{
-        D16State, OpenCodeObserverStatus, OpenCodeRuntimeHandle, ProvisionalLease, StateError,
-        d16::{
+        CurrentState, OpenCodeObserverStatus, OpenCodeRuntimeHandle, ProvisionalLease, StateError,
+        current::{
             OnboardingProviderExecEvidence, OnboardingProviderExecTarget,
             OnboardingProviderExecutableIdentity,
         },
@@ -146,9 +146,9 @@ impl ProviderExecutableProbe for LinuxProviderExecutableProbe {
 /// paths, command lines, shell state, tokens, or provider output.
 #[derive(Debug, Error)]
 pub(crate) enum ReconcileError {
-    #[error("D17 provisional slot evidence is unavailable")]
+    #[error("provisional slot evidence is unavailable")]
     Slot(#[from] SlotError),
-    #[error("D17 provider-exec state is unavailable")]
+    #[error("provider-exec state is unavailable")]
     State(#[from] StateError),
     #[error("the expected native provider executable is unavailable")]
     ExecutableUnavailable,
@@ -156,13 +156,13 @@ pub(crate) enum ReconcileError {
     SlotNotReady,
     #[error("the provisional handoff identity is unavailable")]
     HandoffIdentityUnavailable,
-    #[error("the provider identity does not match the reserved D17 Runtime")]
+    #[error("the provider identity does not match the reserved Runtime")]
     ProviderIdentityMismatch,
-    #[error("the native provider cwd does not match its registered D17 worktree root")]
+    #[error("the native provider cwd does not match its registered worktree root")]
     ProviderCwdMismatch,
     #[error("the provider executable does not match the expected native executable")]
     ProviderExecutableMismatch,
-    #[error("the exact D17 OpenCode observer is unavailable")]
+    #[error("the exact OpenCode observer is unavailable")]
     OpenCodeObserverUnavailable,
 }
 
@@ -174,7 +174,7 @@ pub(crate) enum ReconcileError {
 /// marker-write failure; `OpenCode` records only its exact process identity and
 /// deliberately remains action-fenced for its detached observer controller.
 pub(crate) fn prove_provider_exec(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     presentation_directory: &Path,
     runtime: &PrivateRuntime<'_>,
@@ -189,14 +189,14 @@ pub(crate) fn prove_provider_exec(
         .ok_or(ReconcileError::HandoffIdentityUnavailable)?;
     if slot.phase() == ProvisionalPhase::ProviderExecProven {
         let target =
-            state.d17_onboarding_exec_proven_target_current(provisional_lease, operation_id)?;
+            state.onboarding_exec_proven_target_current(provisional_lease, operation_id)?;
         validate_slot_target(&slot, &target)?;
         return Ok(());
     }
     if slot.phase() != ProvisionalPhase::RuntimeOwnedLaunching {
         return Err(ReconcileError::SlotNotReady);
     }
-    match state.d17_onboarding_exec_proven_target_current(provisional_lease, operation_id) {
+    match state.onboarding_exec_proven_target_current(provisional_lease, operation_id) {
         Ok(target) => {
             validate_slot_target(&slot, &target)?;
             return complete_proven_marker(state, provisional_lease, presentation_directory, &slot);
@@ -205,7 +205,7 @@ pub(crate) fn prove_provider_exec(
         Err(error) => return Err(error.into()),
     }
     let live = slot.revalidate_live_shell(runtime, process_group_probe)?;
-    let target = state.d17_onboarding_exec_proof_target_current(provisional_lease, operation_id)?;
+    let target = state.onboarding_exec_proof_target_current(provisional_lease, operation_id)?;
     validate_slot_target(&slot, &target)?;
     if target.project_root() != live.cwd {
         return Err(ReconcileError::ProviderCwdMismatch);
@@ -218,18 +218,14 @@ pub(crate) fn prove_provider_exec(
     }
     let evidence = OnboardingProviderExecEvidence::new(live.shell_pid, live.shell_birth)?;
     if target.provider() == ProviderKind::OpenCode {
-        state.record_d17_provider_exec_observed_current(
+        state.record_provider_exec_observed_current(
             provisional_lease,
             target.ownership(),
             &evidence,
         )?;
         return Ok(());
     }
-    state.record_d17_provider_exec_proven_current(
-        provisional_lease,
-        target.ownership(),
-        &evidence,
-    )?;
+    state.record_provider_exec_proven_current(provisional_lease, target.ownership(), &evidence)?;
     complete_proven_marker(state, provisional_lease, presentation_directory, &slot)
 }
 
@@ -238,7 +234,7 @@ pub(crate) fn prove_provider_exec(
 /// marker, runtime, process-group, cwd, provider, and PID/birth checks but
 /// performs no provider I/O or process control.
 pub(crate) fn finalize_opencode_observer_ready(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     presentation_directory: &Path,
     runtime: &PrivateRuntime<'_>,
@@ -254,7 +250,7 @@ pub(crate) fn finalize_opencode_observer_ready(
         .handoff_request()
         .map(OperationId::from)
         .ok_or(ReconcileError::HandoffIdentityUnavailable)?;
-    let target = state.d17_onboarding_exec_proof_target_current(provisional_lease, operation_id)?;
+    let target = state.onboarding_exec_proof_target_current(provisional_lease, operation_id)?;
     if target.provider() != ProviderKind::OpenCode {
         return Err(ReconcileError::ProviderIdentityMismatch);
     }
@@ -263,15 +259,10 @@ pub(crate) fn finalize_opencode_observer_ready(
     if live.cwd != target.project_root() {
         return Err(ReconcileError::ProviderCwdMismatch);
     }
-    let observer =
-        state.d17_opencode_observer_ready_current(provisional_lease, target.ownership())?;
+    let observer = state.opencode_observer_ready_current(provisional_lease, target.ownership())?;
     validate_live_opencode_observer(&observer, observer_process_probe)?;
     let evidence = OnboardingProviderExecEvidence::new(live.shell_pid, live.shell_birth)?;
-    state.record_d17_provider_exec_proven_current(
-        provisional_lease,
-        target.ownership(),
-        &evidence,
-    )?;
+    state.record_provider_exec_proven_current(provisional_lease, target.ownership(), &evidence)?;
     complete_proven_marker(state, provisional_lease, presentation_directory, &slot)
 }
 
@@ -324,7 +315,7 @@ fn identity_from_metadata(
 }
 
 fn complete_proven_marker(
-    state: &D16State,
+    state: &CurrentState,
     provisional_lease: &ProvisionalLease,
     presentation_directory: &Path,
     slot: &ProvisionalSlot,

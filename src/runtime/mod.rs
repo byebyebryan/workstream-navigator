@@ -56,14 +56,21 @@ impl RuntimePaths {
     /// for an ownership boundary because two valid UUIDs can share it.
     #[must_use]
     pub fn for_runtime(state_root: &Path, runtime_id: RuntimeId) -> Self {
-        Self::for_identifier(state_root, runtime_id.to_string())
+        let identifier = runtime_id.to_string();
+        let directory = state_root
+            .join(RUNTIME_DIRECTORY)
+            .join(format!("runtime-{identifier}"));
+        Self {
+            socket: directory.join("tmux.sock"),
+            config: directory.join("tmux.conf"),
+            session_name: format!("wsnav-{identifier}"),
+            directory,
+        }
     }
 
     /// Reconstructs the exact private paths for one persisted runtime record.
     ///
-    /// Only the current full-ID session format and the former short-ID format
-    /// are accepted. The latter is read-only compatibility for an existing
-    /// runtime; every newly reserved runtime uses [`Self::for_runtime`].
+    /// Only the current full-ID session format is accepted.
     ///
     /// # Errors
     ///
@@ -78,24 +85,7 @@ impl RuntimePaths {
         if recorded_session == current.session_name {
             return Ok(current);
         }
-        let legacy = Self::for_identifier(state_root, runtime_id.short());
-        if recorded_session == legacy.session_name {
-            return Ok(legacy);
-        }
         Err(RuntimeError::RuntimeSessionMismatch)
-    }
-
-    fn for_identifier(state_root: &Path, identifier: impl AsRef<str>) -> Self {
-        let identifier = identifier.as_ref();
-        let directory = state_root
-            .join(RUNTIME_DIRECTORY)
-            .join(format!("runtime-{identifier}"));
-        Self {
-            socket: directory.join("tmux.sock"),
-            config: directory.join("tmux.conf"),
-            session_name: format!("wsnav-{identifier}"),
-            directory,
-        }
     }
 
     pub(crate) fn launch_barrier(&self) -> PathBuf {
@@ -2891,21 +2881,14 @@ mod tests {
     }
 
     #[test]
-    fn persisted_legacy_session_selects_only_the_legacy_private_path() {
+    fn persisted_short_runtime_session_is_rejected() {
         let temporary = tempfile::tempdir().unwrap();
         let runtime_id =
             RuntimeId::from(uuid::Uuid::parse_str("01234567-0000-0000-0000-000000000001").unwrap());
-        let paths = RuntimePaths::for_record(
-            temporary.path(),
-            runtime_id,
-            &format!("wsnav-{}", runtime_id.short()),
-        )
-        .unwrap();
+        let short_session = format!("wsnav-{}", runtime_id.short());
 
-        assert_eq!(paths.session_name, "wsnav-01234567");
-        assert!(paths.directory.ends_with("runtime-01234567"));
         assert!(matches!(
-            RuntimePaths::for_record(temporary.path(), runtime_id, "wsnav-foreign"),
+            RuntimePaths::for_record(temporary.path(), runtime_id, &short_session),
             Err(RuntimeError::RuntimeSessionMismatch)
         ));
     }

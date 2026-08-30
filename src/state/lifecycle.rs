@@ -10,7 +10,6 @@ use crate::provider::lifecycle::{LifecycleEvent, LifecycleHint, LifecycleObserva
 use super::attention::{
     clear_recovery_attention_in_transaction, mark_result_attention_in_transaction,
 };
-use super::d16::{D16_HOST_SCHEMA_VERSION, D16_SCHEMA_12_VERSION};
 use super::models::{
     HostRegistry, OpenCodeLifecycleObservation, OpenCodeObserverStatus, ProviderBinding, StateError,
 };
@@ -277,11 +276,10 @@ pub(in crate::state) fn apply_opencode_lifecycle_transition(
 }
 
 /// Persists one exact `OpenCode` settled-message identity before applying its
-/// lifecycle effects. Schema 13 records the complete retained identity set,
+/// lifecycle effects. The current schema records the complete retained identity set,
 /// so reconnect/retry delivery remains idempotent for the lifetime of the
-/// Runtime generation/session. Exact schema 12 has no durable identity table;
-/// its existing binding value still makes a repeated latest settled event a
-/// safe no-op without querying a schema-13-only table.
+/// Runtime generation/session. This table is the current idempotency boundary;
+/// a repeated latest settled event remains a safe no-op.
 fn record_opencode_settled_message(
     transaction: &rusqlite::Transaction<'_>,
     runtime_id: RuntimeId,
@@ -291,10 +289,7 @@ fn record_opencode_settled_message(
     let schema_version: i64 = transaction
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .map_err(StateError::Sqlite)?;
-    if !matches!(
-        schema_version,
-        D16_SCHEMA_12_VERSION | D16_HOST_SCHEMA_VERSION
-    ) {
+    if schema_version != super::schema::HOST_SCHEMA_VERSION {
         return Err(StateError::MalformedHostSchema);
     }
     let previous = transaction
@@ -316,10 +311,6 @@ fn record_opencode_settled_message(
     if previous.as_deref() == Some(message_id) {
         return Ok(false);
     }
-    if schema_version == D16_SCHEMA_12_VERSION {
-        return Ok(true);
-    }
-
     let changed = transaction
         .execute(
             "INSERT OR IGNORE INTO opencode_settled_messages (

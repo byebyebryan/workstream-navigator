@@ -7,7 +7,7 @@ use crate::{
     domain::{ProviderKind, Revision},
     provider::codex::profile::{ObserverProfile, ProfileInspection},
     state::{
-        CodexIntegration, D16State, IntegrationLifecycle, ProvisionalLease, RuntimeRecord,
+        CodexIntegration, CurrentState, IntegrationLifecycle, ProvisionalLease, RuntimeRecord,
         StateError,
     },
 };
@@ -69,15 +69,15 @@ pub(crate) enum ObserverActivation {
 
 #[derive(Debug, Error)]
 pub(crate) enum ObserverActivationError {
-    #[error("D17 observer state is unavailable")]
+    #[error("observer state is unavailable")]
     State(#[from] StateError),
-    #[error("D17 observer profile is unavailable")]
+    #[error("observer profile is unavailable")]
     Profile(#[from] crate::provider::codex::profile::ProfileError),
-    #[error("D17 observer profile mutation is blocked by a live runtime")]
+    #[error("observer profile mutation is blocked by a live runtime")]
     LiveRuntime,
-    #[error("D17 observer readiness changed before activation")]
+    #[error("observer readiness changed before activation")]
     EvidenceChanged,
-    #[error("D17 observer readiness does not permit interactive activation")]
+    #[error("observer readiness does not permit interactive activation")]
     NotReady,
 }
 
@@ -141,7 +141,7 @@ where
     Ok(())
 }
 
-/// Reads the observer contract through the schema-14 D17 state boundary.
+/// Reads the observer contract through the schema-15 state boundary.
 ///
 /// This is the only readiness classification used by a Codex launch request.
 /// It intentionally treats missing ownership, foreign files, changed files,
@@ -149,9 +149,9 @@ where
 /// attempting a best-effort repair.
 pub(crate) fn observer_readiness(
     root: &StateRoot,
-    state: &D16State,
+    state: &CurrentState,
 ) -> Result<ObserverReadinessEvidence, ObserverActivationError> {
-    let integration = state.d17_codex_integration()?;
+    let integration = state.codex_integration()?;
     let manager = match integration.as_ref() {
         Some(integration) => Some(observer_profile_for(root, Some(integration))?),
         None => Some(observer_profile(root).map_err(|_| ObserverActivationError::NotReady)?),
@@ -164,10 +164,10 @@ pub(crate) fn observer_readiness(
 /// injected manager is still read-only; no profile setup or trust mutation can
 /// happen through this boundary.
 pub(crate) fn observer_readiness_with_profile(
-    state: &D16State,
+    state: &CurrentState,
     manager: &ObserverProfile,
 ) -> Result<ObserverReadinessEvidence, ObserverActivationError> {
-    let integration = state.d17_codex_integration()?;
+    let integration = state.codex_integration()?;
     classify_observer_readiness(integration, Some(manager))
 }
 
@@ -255,28 +255,28 @@ fn observer_profile_for(
 /// interactive consent surface.  Trust is never written here: Codex's native
 /// `/hooks` review remains the sole authority for trust, and the returned row
 /// stays `trust_pending` until finalization.
-pub(crate) fn prepare_observer_activation_d17(
+pub(crate) fn prepare_observer_activation(
     root: &StateRoot,
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     evidence: &ObserverReadinessEvidence,
 ) -> Result<ObserverActivation, ObserverActivationError> {
     let manager = observer_profile_for(root, evidence.integration.as_ref())?;
-    prepare_observer_activation_d17_with_profile(root, state, provisional_lease, evidence, &manager)
+    prepare_observer_activation_with_profile(root, state, provisional_lease, evidence, &manager)
 }
 
 /// Lease-held activation seam with an explicitly selected profile manager.
-/// Production callers use [`prepare_observer_activation_d17`], while
+/// Production callers use [`prepare_observer_activation`], while
 /// disposable tests can keep their Codex home out of ambient environment.
-pub(crate) fn prepare_observer_activation_d17_with_profile(
+pub(crate) fn prepare_observer_activation_with_profile(
     root: &StateRoot,
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     evidence: &ObserverReadinessEvidence,
     manager: &ObserverProfile,
 ) -> Result<ObserverActivation, ObserverActivationError> {
     provisional_lease.revalidate_for_mutation(state.root())?;
-    let current = state.d17_codex_integration()?;
+    let current = state.codex_integration()?;
     if current != evidence.integration {
         return Err(ObserverActivationError::EvidenceChanged);
     }
@@ -297,14 +297,14 @@ pub(crate) fn prepare_observer_activation_d17_with_profile(
     }
 
     let mut registry = {
-        // Keep the lease and the D17 state handle alive while the exact
+        // Keep the lease and the state handle alive while the exact
         // profile mutation is performed.  The registry conversion consumes
         // only the SQLite handle, not the independent provisional lease.
         let state_for_registry = std::mem::replace(
             state,
-            crate::state::open_d17_current_only(root).map_err(ObserverActivationError::State)?,
+            crate::state::open_current(root).map_err(ObserverActivationError::State)?,
         );
-        state_for_registry.into_d17_host_registry()?
+        state_for_registry.into_host_registry()?
     };
     require_no_live_runtime(root, &registry, AppError::LiveRuntimePreventsRemoval)
         .map_err(|_| ObserverActivationError::LiveRuntime)?;
@@ -338,10 +338,10 @@ pub(crate) fn prepare_observer_activation_d17_with_profile(
                 .ok_or(ObserverActivationError::EvidenceChanged)?;
             manager.verify_native_trust(&expected.ownership)?;
             provisional_lease.revalidate_for_mutation(root.base())?;
-            let replacement = crate::state::open_d17_current_only(root)
-                .map_err(ObserverActivationError::State)?;
+            let replacement =
+                crate::state::open_current(root).map_err(ObserverActivationError::State)?;
             let state_for_registry = std::mem::replace(state, replacement);
-            let mut registry = state_for_registry.into_d17_host_registry()?;
+            let mut registry = state_for_registry.into_host_registry()?;
             let ready =
                 registry.set_codex_integration_lifecycle(expected, IntegrationLifecycle::Ready)?;
             return Ok(ObserverActivation::Ready(ready));
@@ -355,15 +355,15 @@ pub(crate) fn prepare_observer_activation_d17_with_profile(
 /// Lease-held native-trust finalization. Callers that already
 /// proved the presentation marker can use this form to keep that proof and
 /// the lifecycle revision fence in one linear transaction boundary.
-pub(crate) fn finalize_observer_trust_d17_under_lease(
+pub(crate) fn finalize_observer_trust_under_lease(
     root: &StateRoot,
-    state: D16State,
+    state: CurrentState,
     lease: &ProvisionalLease,
     expected: &CodexIntegration,
 ) -> Result<CodexIntegration, ObserverActivationError> {
     lease.revalidate_for_mutation(root.base())?;
     let current = state
-        .d17_codex_integration()?
+        .codex_integration()?
         .ok_or(ObserverActivationError::EvidenceChanged)?;
     if current != *expected {
         return Err(ObserverActivationError::EvidenceChanged);
@@ -371,7 +371,7 @@ pub(crate) fn finalize_observer_trust_d17_under_lease(
     let manager = observer_profile_for(root, Some(&current))?;
     manager.verify_native_trust(&current.ownership)?;
     lease.revalidate_for_mutation(root.base())?;
-    let mut registry = state.into_d17_host_registry()?;
+    let mut registry = state.into_host_registry()?;
     registry
         .set_codex_integration_lifecycle(&current, IntegrationLifecycle::Ready)
         .map_err(ObserverActivationError::State)
@@ -443,23 +443,16 @@ pub(crate) fn remove_observer_exact(
 mod tests {
     use std::{fmt::Write as _, fs, path::Path, path::PathBuf};
 
-    use sha2::{Digest, Sha256};
-
     use super::{
         ObserverActivation, ObserverReadiness, observer_readiness_with_profile,
-        prepare_observer_activation_d17_with_profile, require_no_live_runtime_with_probe,
+        prepare_observer_activation_with_profile, require_no_live_runtime_with_probe,
     };
     use crate::{
         app::AppError,
         domain::RandomIdGenerator,
-        provider::codex::profile::{
-            OBSERVER_PROFILE_NAME, ObserverProfile, ProfileInspection, ProfileOwnership,
-        },
+        provider::codex::profile::{OBSERVER_PROFILE_NAME, ObserverProfile, ProfileInspection},
         runtime::RuntimeProbe,
-        state::{
-            IntegrationLifecycle, StateRoot, fresh_create, fresh_create_d17,
-            migrate_current_to_d17, open_d17_current_only,
-        },
+        state::{IntegrationLifecycle, StateRoot, create_current, open_current},
     };
 
     fn fixture() -> (
@@ -472,7 +465,7 @@ mod tests {
         let codex_home = temporary.path().join("codex");
         fs::create_dir(&codex_home).unwrap();
         let executable = std::env::current_exe().unwrap();
-        drop(fresh_create_d17(&state_path, &RandomIdGenerator).unwrap());
+        drop(create_current(&state_path, &RandomIdGenerator).unwrap());
         let root = StateRoot::select(&state_path);
         let manager = ObserverProfile::new(codex_home, executable, state_path);
         (temporary, root, manager)
@@ -496,27 +489,23 @@ mod tests {
         tempfile::TempDir,
         StateRoot,
         crate::state::HostRegistry,
-        crate::state::ProjectLocationWorkstreamRegistration,
+        crate::domain::WorkstreamId,
     ) {
         let temporary = tempfile::tempdir().unwrap();
         let state_path = temporary.path().join("state");
-        let mut state = fresh_create(&state_path, &RandomIdGenerator).unwrap();
-        let registration = state
-            .register_project_location_with_initial_workstream(
+        let mut state = create_current(&state_path, &RandomIdGenerator).unwrap();
+        let (_, workstream_id) = state
+            .seed_test_workstream(
                 Path::new("/fixture/project"),
                 "fixture project",
-                None,
-                None,
                 crate::domain::ProviderKind::Codex,
                 &RandomIdGenerator,
             )
             .unwrap();
-        drop(state);
         let root = StateRoot::select(&state_path);
-        migrate_current_to_d17(&root).unwrap();
-        let state = open_d17_current_only(&root).unwrap();
-        let registry = state.into_d17_host_registry().unwrap();
-        (temporary, root, registry, registration)
+        let state = open_current(&root).unwrap();
+        let registry = state.into_host_registry().unwrap();
+        (temporary, root, registry, workstream_id)
     }
 
     fn live_probe() -> RuntimeProbe {
@@ -530,11 +519,11 @@ mod tests {
 
     #[test]
     fn live_opencode_runtime_does_not_block_codex_observer_mutation_fence() {
-        let (_temporary, root, mut registry, registration) = registered_codex_runtime_fixture();
+        let (_temporary, root, mut registry, workstream_id) = registered_codex_runtime_fixture();
         let open_code = registry
             .create_independent_workstream(
                 "opencode-runtime",
-                registration.workstream.workstream_id,
+                workstream_id,
                 crate::domain::Revision::INITIAL,
                 crate::domain::ProviderKind::OpenCode,
             )
@@ -563,10 +552,8 @@ mod tests {
 
     #[test]
     fn live_codex_runtime_blocks_observer_mutation_fence() {
-        let (_temporary, root, mut registry, registration) = registered_codex_runtime_fixture();
-        registry
-            .reserve_runtime(registration.workstream.workstream_id)
-            .unwrap();
+        let (_temporary, root, mut registry, workstream_id) = registered_codex_runtime_fixture();
+        registry.reserve_runtime(workstream_id).unwrap();
 
         let result = require_no_live_runtime_with_probe(
             &root,
@@ -583,10 +570,8 @@ mod tests {
 
     #[test]
     fn ambiguous_codex_runtime_blocks_observer_mutation_fence() {
-        let (_temporary, root, mut registry, registration) = registered_codex_runtime_fixture();
-        registry
-            .reserve_runtime(registration.workstream.workstream_id)
-            .unwrap();
+        let (_temporary, root, mut registry, workstream_id) = registered_codex_runtime_fixture();
+        registry.reserve_runtime(workstream_id).unwrap();
 
         let result = require_no_live_runtime_with_probe(
             &root,
@@ -606,41 +591,41 @@ mod tests {
     #[test]
     fn fresh_readiness_preflight_is_read_only_before_any_handoff_reservation() {
         let (_temporary, root, manager) = fixture();
-        let state = open_d17_current_only(&root).unwrap();
+        let state = open_current(&root).unwrap();
 
         let evidence = observer_readiness_with_profile(&state, &manager).unwrap();
         assert_eq!(evidence.readiness, ObserverReadiness::SetupRequired);
         assert!(evidence.integration.is_none());
         assert!(
             state
-                .d17_onboarding_workstream_projections()
+                .onboarding_workstream_projections()
                 .unwrap()
                 .is_empty()
         );
 
-        // Reopening the same schema-14 root proves classification did not
+        // Reopening the same schema-15 root proves classification did not
         // create a capability, candidate Runtime, or observer row.
         drop(state);
-        let state = open_d17_current_only(&root).unwrap();
-        assert!(state.d17_codex_integration().unwrap().is_none());
+        let state = open_current(&root).unwrap();
+        assert!(state.codex_integration().unwrap().is_none());
         assert!(
             state
-                .d17_onboarding_workstream_projections()
+                .onboarding_workstream_projections()
                 .unwrap()
                 .is_empty()
         );
     }
 
     #[test]
-    fn fresh_schema14_missing_observer_requires_consent_then_records_trust_pending() {
+    fn fresh_missing_observer_requires_consent_then_records_trust_pending() {
         let (_temporary, root, manager) = fixture();
-        let mut state = open_d17_current_only(&root).unwrap();
-        let lease = state.acquire_d17_provisional_lease().unwrap();
+        let mut state = open_current(&root).unwrap();
+        let lease = state.acquire_provisional_lease().unwrap();
         let evidence = observer_readiness_with_profile(&state, &manager).unwrap();
         assert_eq!(evidence.readiness, ObserverReadiness::SetupRequired);
         assert!(evidence.integration.is_none());
 
-        let activation = prepare_observer_activation_d17_with_profile(
+        let activation = prepare_observer_activation_with_profile(
             &root, &mut state, &lease, &evidence, &manager,
         )
         .unwrap();
@@ -655,7 +640,7 @@ mod tests {
             manager.inspect(Some(&integration.ownership)).unwrap(),
             ProfileInspection::TrustPending
         );
-        assert_eq!(state.d17_codex_integration().unwrap(), Some(integration));
+        assert_eq!(state.codex_integration().unwrap(), Some(integration));
         assert!(
             manager
                 .path()
@@ -667,12 +652,12 @@ mod tests {
     fn foreign_fresh_profile_is_refused_without_profile_or_registry_mutation() {
         let (_temporary, root, manager) = fixture();
         fs::write(manager.path(), b"[model]\nname = 'foreign'\n").unwrap();
-        let mut state = open_d17_current_only(&root).unwrap();
-        let lease = state.acquire_d17_provisional_lease().unwrap();
+        let mut state = open_current(&root).unwrap();
+        let lease = state.acquire_provisional_lease().unwrap();
         let evidence = observer_readiness_with_profile(&state, &manager).unwrap();
         assert_eq!(evidence.readiness, ObserverReadiness::Foreign);
         assert!(
-            prepare_observer_activation_d17_with_profile(
+            prepare_observer_activation_with_profile(
                 &root, &mut state, &lease, &evidence, &manager,
             )
             .is_err()
@@ -681,17 +666,17 @@ mod tests {
             fs::read(manager.path()).unwrap(),
             b"[model]\nname = 'foreign'\n"
         );
-        assert!(state.d17_codex_integration().unwrap().is_none());
+        assert!(state.codex_integration().unwrap().is_none());
     }
 
     #[test]
     fn activation_reclassification_after_install_is_trust_review_required() {
         let (_temporary, root, manager) = fixture();
-        let mut state = open_d17_current_only(&root).unwrap();
-        let lease = state.acquire_d17_provisional_lease().unwrap();
+        let mut state = open_current(&root).unwrap();
+        let lease = state.acquire_provisional_lease().unwrap();
         let evidence = observer_readiness_with_profile(&state, &manager).unwrap();
         let ObserverActivation::ReviewRequired(integration) =
-            prepare_observer_activation_d17_with_profile(
+            prepare_observer_activation_with_profile(
                 &root, &mut state, &lease, &evidence, &manager,
             )
             .unwrap()
@@ -704,64 +689,13 @@ mod tests {
     }
 
     #[test]
-    fn exact_owned_update_required_profile_is_replaced_and_returns_to_trust_pending() {
-        let (temporary, root, manager) = fixture();
-        let old_executable = temporary.path().join("old-wsnav");
-        let old_manager = ObserverProfile::new(
-            manager.path().parent().unwrap(),
-            &old_executable,
-            root.base(),
-        );
-        let legacy = old_manager
-            .rendered()
-            .replace(&format!(" --state-root '{}'", root.base().display()), "");
-        fs::write(manager.path(), &legacy).unwrap();
-        let ownership = ProfileOwnership {
-            canonical_path: manager.path(),
-            owner_id: "owner".to_owned(),
-            profile_schema_version: 1,
-            hook_executable: old_executable,
-            content_hash: format!("{:x}", Sha256::digest(legacy.as_bytes())),
-        };
-        let mut state = open_d17_current_only(&root).unwrap();
-        let lease = state.acquire_d17_provisional_lease().unwrap();
-        let mut registry = {
-            let replacement = open_d17_current_only(&root).unwrap();
-            std::mem::replace(&mut state, replacement)
-                .into_d17_host_registry()
-                .unwrap()
-        };
-        registry
-            .record_codex_integration(ownership, IntegrationLifecycle::TrustPending)
-            .unwrap();
-        drop(registry);
-
-        let evidence = observer_readiness_with_profile(&state, &manager).unwrap();
-        assert_eq!(evidence.readiness, ObserverReadiness::UpdateRequired);
-        let ObserverActivation::ReviewRequired(updated) =
-            prepare_observer_activation_d17_with_profile(
-                &root, &mut state, &lease, &evidence, &manager,
-            )
-            .unwrap()
-        else {
-            panic!("an exact old declaration must require native review after update");
-        };
-        assert_eq!(updated.lifecycle, IntegrationLifecycle::TrustPending);
-        assert_eq!(updated.ownership.profile_schema_version, 2);
-        assert_eq!(
-            manager.inspect(Some(&updated.ownership)).unwrap(),
-            ProfileInspection::TrustPending
-        );
-    }
-
-    #[test]
     fn modified_owned_profile_is_refused_without_mutation() {
         let (_temporary, root, manager) = fixture();
-        let mut state = open_d17_current_only(&root).unwrap();
-        let lease = state.acquire_d17_provisional_lease().unwrap();
+        let mut state = open_current(&root).unwrap();
+        let lease = state.acquire_provisional_lease().unwrap();
         let evidence = observer_readiness_with_profile(&state, &manager).unwrap();
         let ObserverActivation::ReviewRequired(integration) =
-            prepare_observer_activation_d17_with_profile(
+            prepare_observer_activation_with_profile(
                 &root, &mut state, &lease, &evidence, &manager,
             )
             .unwrap()
@@ -772,7 +706,7 @@ mod tests {
         let changed = observer_readiness_with_profile(&state, &manager).unwrap();
         assert_eq!(changed.readiness, ObserverReadiness::Modified);
         assert!(
-            prepare_observer_activation_d17_with_profile(
+            prepare_observer_activation_with_profile(
                 &root, &mut state, &lease, &changed, &manager,
             )
             .is_err()
@@ -782,7 +716,7 @@ mod tests {
             b"modified by another owner\n"
         );
         assert_eq!(
-            state.d17_codex_integration().unwrap().unwrap().ownership,
+            state.codex_integration().unwrap().unwrap().ownership,
             integration.ownership
         );
     }
@@ -790,14 +724,12 @@ mod tests {
     #[test]
     fn completed_native_review_finalizes_trust_pending_without_second_review() {
         let (_temporary, root, manager) = fixture();
-        let mut state = open_d17_current_only(&root).unwrap();
-        let lease = state.acquire_d17_provisional_lease().unwrap();
+        let mut state = open_current(&root).unwrap();
+        let lease = state.acquire_provisional_lease().unwrap();
         let missing = observer_readiness_with_profile(&state, &manager).unwrap();
         let ObserverActivation::ReviewRequired(integration) =
-            prepare_observer_activation_d17_with_profile(
-                &root, &mut state, &lease, &missing, &manager,
-            )
-            .unwrap()
+            prepare_observer_activation_with_profile(&root, &mut state, &lease, &missing, &manager)
+                .unwrap()
         else {
             panic!("fresh profile setup must require review");
         };
@@ -815,14 +747,14 @@ mod tests {
             pending.readiness,
             ObserverReadiness::TrustFinalizationRequired
         );
-        let ObserverActivation::Ready(ready) = prepare_observer_activation_d17_with_profile(
-            &root, &mut state, &lease, &pending, &manager,
-        )
-        .unwrap() else {
+        let ObserverActivation::Ready(ready) =
+            prepare_observer_activation_with_profile(&root, &mut state, &lease, &pending, &manager)
+                .unwrap()
+        else {
             panic!("exact native trust must finalize without another review");
         };
         assert_eq!(ready.lifecycle, IntegrationLifecycle::Ready);
-        assert_eq!(state.d17_codex_integration().unwrap(), Some(ready.clone()));
+        assert_eq!(state.codex_integration().unwrap(), Some(ready.clone()));
         assert_eq!(
             observer_readiness_with_profile(&state, &manager)
                 .unwrap()

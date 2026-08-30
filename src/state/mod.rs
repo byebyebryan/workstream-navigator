@@ -1,6 +1,6 @@
 mod attention;
 mod compound;
-pub mod d16;
+pub(crate) mod current;
 mod host;
 mod lifecycle;
 mod models;
@@ -10,38 +10,21 @@ mod utils;
 mod workstream;
 
 #[cfg(test)]
-mod tests;
+mod current_state_tests;
 
-pub use d16::{
-    CurrentObserverHandleProof, D16_HOST_SCHEMA_VERSION, D16_SCHEMA_12_VERSION, D16OpenMode,
-    D16State, D17_HOST_SCHEMA_VERSION, FreshRootClassification, FreshRootRejection, HandoverPhase,
-    HandoverRestartAction, LEGACY_CLIENT_DATABASE_FILE, LEGACY_CLIENT_DATABASE_SHM_FILE,
-    LEGACY_CLIENT_DATABASE_WAL_FILE, OBSERVER_HANDOVER_ACTIVATION_ACK_FILE,
-    OBSERVER_HANDOVER_ACTIVATION_ACK_TEMP_FILE, OBSERVER_HANDOVER_JOURNAL_FILE,
-    OBSERVER_HANDOVER_JOURNAL_TEMP_FILE, ObserverDatabaseDeadline, ObserverDatabaseError,
-    ObserverDegradedReason, ObserverHandoverActivationAck, ObserverHandoverJournal,
-    ObserverProcessIdentity, OpenCodeObserverProjection, PROVISIONAL_LOCK_FILE,
-    ProjectBrowserRootRevision, ProjectLocationProjection, ProjectLocationRegistration,
-    ProjectLocationWorkstreamRegistration, ProjectProjection, ProjectRecord, ProjectRefreshInput,
-    ProjectRefreshMember, ProjectRefreshObservation, ProjectRefreshOutcome, ProvisionalLease,
-    StateRecoveryReason, TRANSITION_LOCK_FILE, TransitionLease, acquire_transition_lease,
-    classify_fresh_root, clear_observer_degraded_marker, exact_schema_12_fixture_sql, fresh_create,
-    fresh_create_d17, migrate_current_to_d17, observer_degraded_marker_path,
-    observer_handover_activation_ack_path, observer_handover_activation_ack_temp_path,
-    observer_handover_journal_path, observer_handover_journal_temp_path, open_confirmed_cutover,
-    open_current_only, open_cutover_transition, open_d17_current_only, open_observer_transition,
-    read_observer_degraded_marker, read_observer_handover_activation_ack,
-    read_observer_handover_journal, recover_observer_handover_journal,
+pub use current::{
+    BOOTSTRAP_LOCK_FILE, BootstrapPhase, CurrentState, FreshRootClassification, FreshRootRejection,
+    ObserverDatabaseDeadline, ObserverDatabaseError, ObserverDegradedReason, PROVISIONAL_LOCK_FILE,
+    ProjectLocationProjection, ProjectProjection, ProjectRecord, ProvisionalLease, StateMode,
+    StateRecoveryReason, clear_observer_degraded_marker, create_current,
+    observer_degraded_marker_path, open_current, read_observer_degraded_marker,
     run_observer_write_with_degraded_marker, write_observer_degraded_marker,
-    write_observer_handover_activation_ack, write_observer_handover_journal,
 };
-pub use models::MAX_PROJECT_BROWSER_ENTRIES;
 pub use models::{
-    CodexIntegration, CreatedWorkstream, EXTERNAL_EFFECT_UNKNOWN_CODE, ExternalWorkstream,
-    ForkPlan, ForkPreparation, HostIdentity, HostRegistry, IntegrationLifecycle,
-    OpenCodeLifecycleObservation, OpenCodeObserverStatus, OpenCodeRuntimeHandle,
-    OpenCodeSessionCreationOperation, OperationOverview, OperationOverviewPage,
-    ProjectDirectoriesResponse, ProjectDirectoryEntry, ProviderBinding, RuntimeRecord, StateError,
+    CodexIntegration, CreatedWorkstream, EXTERNAL_EFFECT_UNKNOWN_CODE, ForkPlan, ForkPreparation,
+    HostIdentity, HostRegistry, IntegrationLifecycle, OpenCodeLifecycleObservation,
+    OpenCodeObserverStatus, OpenCodeRuntimeHandle, OpenCodeSessionCreationOperation,
+    OperationOverview, OperationOverviewPage, ProviderBinding, RuntimeRecord, StateError,
     StateRoot, WorkstreamOverview, WorkstreamOverviewPage,
 };
-pub use schema::HOST_SCHEMA_VERSION;
+pub use schema::{HOST_APPLICATION_ID, HOST_SCHEMA_VERSION};

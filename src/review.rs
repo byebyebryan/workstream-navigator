@@ -1,10 +1,10 @@
 //! Exact ownership for the disposable cwd used by native Codex hook review.
 //!
-//! The review directory lives beneath one already-owned D17 presentation.  A
+//! The review directory lives beneath one already-owned presentation.  A
 //! bounded sibling marker records the presentation, owner process, and final
 //! directory inode.  Cleanup never recurses: it quarantines and revalidates
 //! the exact empty directory before removing it, then does the same for the
-//! marker.  A later review never adopts an interrupted owner: only the D17
+//! marker.  A later review never adopts an interrupted owner: only the
 //! presentation lifecycle may finish cleanup, after it has stopped every pane
 //! and provisional Runtime that could still be using the cwd.
 
@@ -24,10 +24,10 @@ use crate::{
     runtime::{LinuxProcessProbe, ProcessProbe},
 };
 
-const REVIEW_MARKER_FILE: &str = "d17-codex-review.json";
-const REVIEW_DIRECTORY_PREFIX: &str = "d17-codex-review-";
-const RETIRING_DIRECTORY_PREFIX: &str = ".d17-codex-review-retiring-";
-const RETIRING_MARKER_PREFIX: &str = ".d17-codex-review-retiring-";
+const REVIEW_MARKER_FILE: &str = "wsnav-codex-review.json";
+const REVIEW_DIRECTORY_PREFIX: &str = "wsnav-codex-review-";
+const RETIRING_DIRECTORY_PREFIX: &str = ".wsnav-codex-review-retiring-";
+const RETIRING_MARKER_PREFIX: &str = ".wsnav-codex-review-retiring-";
 const RETIRING_MARKER_SUFFIX: &str = ".json";
 const REVIEW_RECORD_VERSION: u8 = 1;
 const MAX_REVIEW_RECORD_BYTES: usize = 4 * 1024;
@@ -35,12 +35,12 @@ const MAX_OWNER_BIRTH_BYTES: usize = 256;
 const MAX_REVIEW_ARTIFACTS: usize = 8;
 
 #[derive(Debug, Error)]
-pub(crate) enum D17ReviewError {
-    #[error("D17 review ownership is unavailable")]
+pub(crate) enum ReviewError {
+    #[error("review ownership is unavailable")]
     Unavailable,
-    #[error("D17 review ownership is ambiguous")]
+    #[error("review ownership is ambiguous")]
     Ambiguous,
-    #[error("D17 review is already active")]
+    #[error("review is already active")]
     Active,
 }
 
@@ -64,7 +64,7 @@ impl ReviewRecord {
         &self,
         presentation_id: Uuid,
         presentation_revision: Revision,
-    ) -> Result<(), D17ReviewError> {
+    ) -> Result<(), ReviewError> {
         if self.version != REVIEW_RECORD_VERSION
             || self.owner_id.is_nil()
             || self.owner_pid == 0
@@ -75,7 +75,7 @@ impl ReviewRecord {
             || self.presentation_inode == 0
             || self.directory_inode == 0
         {
-            return Err(D17ReviewError::Ambiguous);
+            return Err(ReviewError::Ambiguous);
         }
         Ok(())
     }
@@ -134,14 +134,14 @@ struct MarkerProof {
 }
 
 /// Process-local owner of one exact native-review cwd.
-pub(crate) struct D17ReviewDirectory {
+pub(crate) struct ReviewDirectory {
     presentation_directory: PathBuf,
     record: ReviewRecord,
     marker_identity: FileIdentity,
     cleaned: bool,
 }
 
-impl D17ReviewDirectory {
+impl ReviewDirectory {
     /// Creates one fresh marker-bound empty directory for the current process.
     /// Any prior review artifact remains presentation-recovery work; a new
     /// review never assumes that an absent parent also proves its native child
@@ -150,7 +150,7 @@ impl D17ReviewDirectory {
         presentation_directory: &Path,
         presentation_id: Uuid,
         presentation_revision: Revision,
-    ) -> Result<Self, D17ReviewError> {
+    ) -> Result<Self, ReviewError> {
         recover_for_creation_with_probe(
             presentation_directory,
             presentation_id,
@@ -160,19 +160,19 @@ impl D17ReviewDirectory {
         let owner_pid = process::id();
         let owner_birth = LinuxProcessProbe
             .process_birth_checked(owner_pid)
-            .map_err(|_| D17ReviewError::Unavailable)?
-            .ok_or(D17ReviewError::Unavailable)?;
+            .map_err(|_| ReviewError::Unavailable)?
+            .ok_or(ReviewError::Unavailable)?;
         if owner_birth.is_empty() || owner_birth.len() > MAX_OWNER_BIRTH_BYTES {
-            return Err(D17ReviewError::Unavailable);
+            return Err(ReviewError::Unavailable);
         }
-        let presentation_metadata = fs::symlink_metadata(presentation_directory)
-            .map_err(|_| D17ReviewError::Unavailable)?;
+        let presentation_metadata =
+            fs::symlink_metadata(presentation_directory).map_err(|_| ReviewError::Unavailable)?;
         if !presentation_directory.is_absolute() || !private_directory(&presentation_metadata) {
-            return Err(D17ReviewError::Ambiguous);
+            return Err(ReviewError::Ambiguous);
         }
         let presentation_identity = FileIdentity::from_metadata(&presentation_metadata);
         if presentation_identity.inode == 0 {
-            return Err(D17ReviewError::Unavailable);
+            return Err(ReviewError::Unavailable);
         }
 
         let owner_token = Uuid::new_v4();
@@ -180,15 +180,15 @@ impl D17ReviewDirectory {
             presentation_directory.join(format!("{REVIEW_DIRECTORY_PREFIX}{owner_token}"));
         create_private_directory(&directory)?;
         let directory_metadata =
-            fs::symlink_metadata(&directory).map_err(|_| D17ReviewError::Unavailable)?;
+            fs::symlink_metadata(&directory).map_err(|_| ReviewError::Unavailable)?;
         if !private_directory(&directory_metadata) || !directory_is_empty(&directory)? {
             let _ = fs::remove_dir(&directory);
-            return Err(D17ReviewError::Ambiguous);
+            return Err(ReviewError::Ambiguous);
         }
         let directory_identity = FileIdentity::from_metadata(&directory_metadata);
         if directory_identity.inode == 0 {
             let _ = fs::remove_dir(&directory);
-            return Err(D17ReviewError::Unavailable);
+            return Err(ReviewError::Unavailable);
         }
         let record = ReviewRecord {
             version: REVIEW_RECORD_VERSION,
@@ -231,7 +231,7 @@ impl D17ReviewDirectory {
     }
 
     /// Removes only this owner's exact empty directory and marker.
-    pub(crate) fn cleanup(&mut self) -> Result<(), D17ReviewError> {
+    pub(crate) fn cleanup(&mut self) -> Result<(), ReviewError> {
         if self.cleaned {
             return Ok(());
         }
@@ -245,7 +245,7 @@ impl D17ReviewDirectory {
     }
 }
 
-impl Drop for D17ReviewDirectory {
+impl Drop for ReviewDirectory {
     fn drop(&mut self) {
         let _ = self.cleanup();
     }
@@ -258,10 +258,10 @@ pub(crate) fn validate_artifacts(
     presentation_directory: &Path,
     presentation_id: Uuid,
     presentation_revision: Revision,
-) -> Result<(), D17ReviewError> {
+) -> Result<(), ReviewError> {
     let inventory = review_inventory(presentation_directory)?;
     if inventory.len() > MAX_REVIEW_ARTIFACTS {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     let markers = marker_proofs(
         presentation_directory,
@@ -270,7 +270,7 @@ pub(crate) fn validate_artifacts(
         &inventory,
     )?;
     if markers.len() > 1 {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     if let Some(marker) = markers.first() {
         validate_record_directories(presentation_directory, &marker.record, &inventory)?;
@@ -286,7 +286,7 @@ pub(crate) fn recover_after_presentation_stop(
     presentation_directory: &Path,
     presentation_id: Uuid,
     presentation_revision: Revision,
-) -> Result<(), D17ReviewError> {
+) -> Result<(), ReviewError> {
     recover_without_liveness(
         presentation_directory,
         presentation_id,
@@ -299,7 +299,7 @@ fn recover_for_creation_with_probe(
     presentation_id: Uuid,
     presentation_revision: Revision,
     process_probe: &dyn ProcessProbe,
-) -> Result<(), D17ReviewError> {
+) -> Result<(), ReviewError> {
     let inventory = review_inventory(presentation_directory)?;
     let markers = marker_proofs(
         presentation_directory,
@@ -308,20 +308,20 @@ fn recover_for_creation_with_probe(
         &inventory,
     )?;
     if markers.len() > 1 {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     if let Some(marker) = markers.first() {
         match process_probe
             .process_birth_checked(marker.record.owner_pid)
-            .map_err(|_| D17ReviewError::Unavailable)?
+            .map_err(|_| ReviewError::Unavailable)?
         {
             Some(birth) if birth == marker.record.owner_birth => {
-                return Err(D17ReviewError::Active);
+                return Err(ReviewError::Active);
             }
-            Some(_) | None => return Err(D17ReviewError::Ambiguous),
+            Some(_) | None => return Err(ReviewError::Ambiguous),
         }
     } else if !inventory.is_empty() {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     validate_no_review_artifacts(presentation_directory)
 }
@@ -330,7 +330,7 @@ fn recover_without_liveness(
     presentation_directory: &Path,
     presentation_id: Uuid,
     presentation_revision: Revision,
-) -> Result<(), D17ReviewError> {
+) -> Result<(), ReviewError> {
     let inventory = review_inventory(presentation_directory)?;
     let markers = marker_proofs(
         presentation_directory,
@@ -339,7 +339,7 @@ fn recover_without_liveness(
         &inventory,
     )?;
     if markers.len() > 1 {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     if let Some(marker) = markers.first() {
         cleanup_expected(
@@ -357,7 +357,7 @@ fn cleanup_expected(
     presentation_directory: &Path,
     expected: &ReviewRecord,
     expected_marker_identity: Option<FileIdentity>,
-) -> Result<(), D17ReviewError> {
+) -> Result<(), ReviewError> {
     validate_presentation_identity(presentation_directory, expected)?;
     let inventory = review_inventory(presentation_directory)?;
     let marker = locate_expected_marker(presentation_directory, expected, &inventory)?;
@@ -367,7 +367,7 @@ fn cleanup_expected(
     if marker.record != *expected
         || expected_marker_identity.is_some_and(|identity| identity != marker.identity)
     {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     let marker = quarantine_marker(presentation_directory, &marker)?;
     quarantine_and_remove_directory(presentation_directory, expected)?;
@@ -379,7 +379,7 @@ fn cleanup_orphan_for_record(
     presentation_directory: &Path,
     expected: &ReviewRecord,
     inventory: &[ReviewArtifact],
-) -> Result<(), D17ReviewError> {
+) -> Result<(), ReviewError> {
     let names = [
         expected.active_directory_name(),
         expected.retiring_directory_name(),
@@ -388,7 +388,7 @@ fn cleanup_orphan_for_record(
         .iter()
         .any(|artifact| !names.iter().any(|name| name == &artifact.name))
     {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     quarantine_and_remove_directory(presentation_directory, expected)
 }
@@ -396,13 +396,13 @@ fn cleanup_orphan_for_record(
 fn quarantine_marker(
     presentation_directory: &Path,
     marker: &MarkerProof,
-) -> Result<MarkerProof, D17ReviewError> {
+) -> Result<MarkerProof, ReviewError> {
     let retiring = presentation_directory.join(marker.record.retiring_marker_name());
     if marker.path != retiring {
         if fs::symlink_metadata(&retiring).is_ok() {
-            return Err(D17ReviewError::Ambiguous);
+            return Err(ReviewError::Ambiguous);
         }
-        fs::rename(&marker.path, &retiring).map_err(|_| D17ReviewError::Unavailable)?;
+        fs::rename(&marker.path, &retiring).map_err(|_| ReviewError::Unavailable)?;
     }
     let proof = read_marker_at(
         &retiring,
@@ -410,7 +410,7 @@ fn quarantine_marker(
         marker.record.presentation_revision,
     )?;
     if proof.record != marker.record || proof.identity != marker.identity {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     Ok(proof)
 }
@@ -418,13 +418,13 @@ fn quarantine_marker(
 fn quarantine_and_remove_directory(
     presentation_directory: &Path,
     record: &ReviewRecord,
-) -> Result<(), D17ReviewError> {
+) -> Result<(), ReviewError> {
     let active = presentation_directory.join(record.active_directory_name());
     let retiring = presentation_directory.join(record.retiring_directory_name());
     let active_metadata = path_metadata(&active)?;
     let retiring_metadata = path_metadata(&retiring)?;
     if active_metadata.is_some() && retiring_metadata.is_some() {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     let expected = FileIdentity {
         device: record.directory_device,
@@ -432,7 +432,7 @@ fn quarantine_and_remove_directory(
     };
     let source = if let Some(metadata) = active_metadata {
         validate_review_directory(&active, &metadata, expected)?;
-        fs::rename(&active, &retiring).map_err(|_| D17ReviewError::Unavailable)?;
+        fs::rename(&active, &retiring).map_err(|_| ReviewError::Unavailable)?;
         retiring.as_path()
     } else if let Some(metadata) = retiring_metadata {
         validate_review_directory(&retiring, &metadata, expected)?;
@@ -440,53 +440,53 @@ fn quarantine_and_remove_directory(
     } else {
         return Ok(());
     };
-    let after = fs::symlink_metadata(source).map_err(|_| D17ReviewError::Ambiguous)?;
+    let after = fs::symlink_metadata(source).map_err(|_| ReviewError::Ambiguous)?;
     validate_review_directory(source, &after, expected)?;
-    fs::remove_dir(source).map_err(|_| D17ReviewError::Unavailable)
+    fs::remove_dir(source).map_err(|_| ReviewError::Unavailable)
 }
 
-fn remove_quarantined_marker(marker: &MarkerProof) -> Result<(), D17ReviewError> {
+fn remove_quarantined_marker(marker: &MarkerProof) -> Result<(), ReviewError> {
     let current = read_marker_at(
         &marker.path,
         marker.record.presentation_id,
         marker.record.presentation_revision,
     )?;
     if current.record != marker.record || current.identity != marker.identity {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
-    fs::remove_file(&marker.path).map_err(|_| D17ReviewError::Unavailable)
+    fs::remove_file(&marker.path).map_err(|_| ReviewError::Unavailable)
 }
 
 fn cleanup_orphan_directories(
     presentation_directory: &Path,
     inventory: &[ReviewArtifact],
-) -> Result<(), D17ReviewError> {
+) -> Result<(), ReviewError> {
     validate_orphan_directories(presentation_directory, inventory)?;
     for artifact in inventory {
         if artifact.kind != ReviewArtifactKind::Directory {
-            return Err(D17ReviewError::Ambiguous);
+            return Err(ReviewError::Ambiguous);
         }
         let source = presentation_directory.join(&artifact.name);
-        let owner_id = review_directory_owner(&artifact.name).ok_or(D17ReviewError::Ambiguous)?;
+        let owner_id = review_directory_owner(&artifact.name).ok_or(ReviewError::Ambiguous)?;
         let retiring =
             presentation_directory.join(format!("{RETIRING_DIRECTORY_PREFIX}{owner_id}"));
         let target = if artifact.name.starts_with(RETIRING_DIRECTORY_PREFIX) {
             source.clone()
         } else {
             if fs::symlink_metadata(&retiring).is_ok() {
-                return Err(D17ReviewError::Ambiguous);
+                return Err(ReviewError::Ambiguous);
             }
-            fs::rename(&source, &retiring).map_err(|_| D17ReviewError::Unavailable)?;
+            fs::rename(&source, &retiring).map_err(|_| ReviewError::Unavailable)?;
             retiring
         };
-        let after = fs::symlink_metadata(&target).map_err(|_| D17ReviewError::Ambiguous)?;
+        let after = fs::symlink_metadata(&target).map_err(|_| ReviewError::Ambiguous)?;
         if !artifact.identity.matches(&after)
             || !private_directory(&after)
             || !directory_is_empty(&target)?
         {
-            return Err(D17ReviewError::Ambiguous);
+            return Err(ReviewError::Ambiguous);
         }
-        fs::remove_dir(&target).map_err(|_| D17ReviewError::Unavailable)?;
+        fs::remove_dir(&target).map_err(|_| ReviewError::Unavailable)?;
     }
     sync_directory(presentation_directory)
 }
@@ -495,7 +495,7 @@ fn validate_record_directories(
     presentation_directory: &Path,
     record: &ReviewRecord,
     inventory: &[ReviewArtifact],
-) -> Result<(), D17ReviewError> {
+) -> Result<(), ReviewError> {
     let allowed = [
         REVIEW_MARKER_FILE.to_owned(),
         record.retiring_marker_name(),
@@ -506,7 +506,7 @@ fn validate_record_directories(
         .iter()
         .any(|artifact| !allowed.iter().any(|name| name == &artifact.name))
     {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     let active = inventory
         .iter()
@@ -515,7 +515,7 @@ fn validate_record_directories(
         .iter()
         .find(|artifact| artifact.name == record.retiring_directory_name());
     if active.is_some() && retiring.is_some() {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     if let Some(directory) = active.or(retiring) {
         let path = presentation_directory.join(&directory.name);
@@ -534,9 +534,9 @@ fn validate_record_directories(
 fn validate_orphan_directories(
     presentation_directory: &Path,
     inventory: &[ReviewArtifact],
-) -> Result<(), D17ReviewError> {
+) -> Result<(), ReviewError> {
     if inventory.len() > 1 {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     for artifact in inventory {
         if artifact.kind != ReviewArtifactKind::Directory
@@ -544,7 +544,7 @@ fn validate_orphan_directories(
             || !private_directory(&artifact.metadata)
             || !directory_is_empty(&presentation_directory.join(&artifact.name))?
         {
-            return Err(D17ReviewError::Ambiguous);
+            return Err(ReviewError::Ambiguous);
         }
     }
     Ok(())
@@ -554,9 +554,9 @@ fn validate_review_directory(
     path: &Path,
     metadata: &fs::Metadata,
     expected: FileIdentity,
-) -> Result<(), D17ReviewError> {
+) -> Result<(), ReviewError> {
     if !private_directory(metadata) || !expected.matches(metadata) || !directory_is_empty(path)? {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     Ok(())
 }
@@ -565,7 +565,7 @@ fn locate_expected_marker(
     presentation_directory: &Path,
     expected: &ReviewRecord,
     inventory: &[ReviewArtifact],
-) -> Result<Option<MarkerProof>, D17ReviewError> {
+) -> Result<Option<MarkerProof>, ReviewError> {
     let candidates = [
         REVIEW_MARKER_FILE.to_owned(),
         expected.retiring_marker_name(),
@@ -582,7 +582,7 @@ fn locate_expected_marker(
             expected.presentation_revision,
         )
         .map(Some),
-        _ => Err(D17ReviewError::Ambiguous),
+        _ => Err(ReviewError::Ambiguous),
     }
 }
 
@@ -591,7 +591,7 @@ fn marker_proofs(
     presentation_id: Uuid,
     presentation_revision: Revision,
     inventory: &[ReviewArtifact],
-) -> Result<Vec<MarkerProof>, D17ReviewError> {
+) -> Result<Vec<MarkerProof>, ReviewError> {
     inventory
         .iter()
         .filter(|artifact| artifact.kind == ReviewArtifactKind::Marker)
@@ -609,35 +609,35 @@ fn read_marker_at(
     path: &Path,
     presentation_id: Uuid,
     presentation_revision: Revision,
-) -> Result<MarkerProof, D17ReviewError> {
-    let before = fs::symlink_metadata(path).map_err(|_| D17ReviewError::Unavailable)?;
+) -> Result<MarkerProof, ReviewError> {
+    let before = fs::symlink_metadata(path).map_err(|_| ReviewError::Unavailable)?;
     if !private_file(&before)
         || usize::try_from(before.len()).unwrap_or(usize::MAX) > MAX_REVIEW_RECORD_BYTES
     {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
-    let mut file = File::open(path).map_err(|_| D17ReviewError::Unavailable)?;
-    let opened = file.metadata().map_err(|_| D17ReviewError::Unavailable)?;
+    let mut file = File::open(path).map_err(|_| ReviewError::Unavailable)?;
+    let opened = file.metadata().map_err(|_| ReviewError::Unavailable)?;
     let identity = FileIdentity::from_metadata(&opened);
     if !private_file(&opened) || !identity.matches(&before) {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     let mut bytes = Vec::new();
     Read::by_ref(&mut file)
         .take(u64::try_from(MAX_REVIEW_RECORD_BYTES + 1).unwrap_or(u64::MAX))
         .read_to_end(&mut bytes)
-        .map_err(|_| D17ReviewError::Unavailable)?;
+        .map_err(|_| ReviewError::Unavailable)?;
     if bytes.len() > MAX_REVIEW_RECORD_BYTES {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
-    let after = fs::symlink_metadata(path).map_err(|_| D17ReviewError::Unavailable)?;
+    let after = fs::symlink_metadata(path).map_err(|_| ReviewError::Unavailable)?;
     if !identity.matches(&after) || !private_file(&after) {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     let record: ReviewRecord =
-        serde_json::from_slice(&bytes).map_err(|_| D17ReviewError::Ambiguous)?;
+        serde_json::from_slice(&bytes).map_err(|_| ReviewError::Ambiguous)?;
     record.validate(presentation_id, presentation_revision)?;
-    let presentation_directory = path.parent().ok_or(D17ReviewError::Ambiguous)?;
+    let presentation_directory = path.parent().ok_or(ReviewError::Ambiguous)?;
     validate_presentation_identity(presentation_directory, &record)?;
     Ok(MarkerProof {
         path: path.to_path_buf(),
@@ -646,10 +646,10 @@ fn read_marker_at(
     })
 }
 
-fn write_new_marker(path: &Path, record: &ReviewRecord) -> Result<FileIdentity, D17ReviewError> {
-    let bytes = serde_json::to_vec(record).map_err(|_| D17ReviewError::Unavailable)?;
+fn write_new_marker(path: &Path, record: &ReviewRecord) -> Result<FileIdentity, ReviewError> {
+    let bytes = serde_json::to_vec(record).map_err(|_| ReviewError::Unavailable)?;
     if bytes.len() > MAX_REVIEW_RECORD_BYTES {
-        return Err(D17ReviewError::Unavailable);
+        return Err(ReviewError::Unavailable);
     }
     let mut options = OpenOptions::new();
     options.write(true).create_new(true);
@@ -658,29 +658,25 @@ fn write_new_marker(path: &Path, record: &ReviewRecord) -> Result<FileIdentity, 
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    let mut file = options
-        .open(path)
-        .map_err(|_| D17ReviewError::Unavailable)?;
+    let mut file = options.open(path).map_err(|_| ReviewError::Unavailable)?;
     file.write_all(&bytes)
         .and_then(|()| file.sync_all())
-        .map_err(|_| D17ReviewError::Unavailable)?;
-    let metadata = file.metadata().map_err(|_| D17ReviewError::Unavailable)?;
+        .map_err(|_| ReviewError::Unavailable)?;
+    let metadata = file.metadata().map_err(|_| ReviewError::Unavailable)?;
     if !private_file(&metadata) {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     Ok(FileIdentity::from_metadata(&metadata))
 }
 
-fn create_private_directory(path: &Path) -> Result<(), D17ReviewError> {
+fn create_private_directory(path: &Path) -> Result<(), ReviewError> {
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     {
         use std::os::unix::fs::DirBuilderExt;
         builder.mode(0o700);
     }
-    builder
-        .create(path)
-        .map_err(|_| D17ReviewError::Unavailable)
+    builder.create(path).map_err(|_| ReviewError::Unavailable)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -696,31 +692,30 @@ struct ReviewArtifact {
     identity: FileIdentity,
 }
 
-fn review_inventory(presentation_directory: &Path) -> Result<Vec<ReviewArtifact>, D17ReviewError> {
-    let entries = fs::read_dir(presentation_directory).map_err(|_| D17ReviewError::Unavailable)?;
+fn review_inventory(presentation_directory: &Path) -> Result<Vec<ReviewArtifact>, ReviewError> {
+    let entries = fs::read_dir(presentation_directory).map_err(|_| ReviewError::Unavailable)?;
     let mut inventory = Vec::new();
     for entry in entries {
-        let entry = entry.map_err(|_| D17ReviewError::Unavailable)?;
+        let entry = entry.map_err(|_| ReviewError::Unavailable)?;
         let name = entry
             .file_name()
             .into_string()
-            .map_err(|_| D17ReviewError::Ambiguous)?;
+            .map_err(|_| ReviewError::Ambiguous)?;
         let Some(kind) = review_artifact_kind(&name) else {
             if review_shaped_name(&name) {
-                return Err(D17ReviewError::Ambiguous);
+                return Err(ReviewError::Ambiguous);
             }
             continue;
         };
         if inventory.len() >= MAX_REVIEW_ARTIFACTS {
-            return Err(D17ReviewError::Ambiguous);
+            return Err(ReviewError::Ambiguous);
         }
-        let metadata =
-            fs::symlink_metadata(entry.path()).map_err(|_| D17ReviewError::Unavailable)?;
+        let metadata = fs::symlink_metadata(entry.path()).map_err(|_| ReviewError::Unavailable)?;
         if metadata.file_type().is_symlink()
             || (kind == ReviewArtifactKind::Marker && !private_file(&metadata))
             || (kind == ReviewArtifactKind::Directory && !private_directory(&metadata))
         {
-            return Err(D17ReviewError::Ambiguous);
+            return Err(ReviewError::Ambiguous);
         }
         inventory.push(ReviewArtifact {
             name,
@@ -765,28 +760,28 @@ fn retiring_marker_owner(name: &str) -> Option<Uuid> {
         .and_then(|owner| owner.parse().ok())
 }
 
-fn validate_no_review_artifacts(presentation_directory: &Path) -> Result<(), D17ReviewError> {
+fn validate_no_review_artifacts(presentation_directory: &Path) -> Result<(), ReviewError> {
     if review_inventory(presentation_directory)?.is_empty() {
         Ok(())
     } else {
-        Err(D17ReviewError::Ambiguous)
+        Err(ReviewError::Ambiguous)
     }
 }
 
-fn path_metadata(path: &Path) -> Result<Option<fs::Metadata>, D17ReviewError> {
+fn path_metadata(path: &Path) -> Result<Option<fs::Metadata>, ReviewError> {
     match fs::symlink_metadata(path) {
         Ok(metadata) => Ok(Some(metadata)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(_) => Err(D17ReviewError::Unavailable),
+        Err(_) => Err(ReviewError::Unavailable),
     }
 }
 
 fn validate_presentation_identity(
     presentation_directory: &Path,
     record: &ReviewRecord,
-) -> Result<(), D17ReviewError> {
+) -> Result<(), ReviewError> {
     let metadata =
-        fs::symlink_metadata(presentation_directory).map_err(|_| D17ReviewError::Unavailable)?;
+        fs::symlink_metadata(presentation_directory).map_err(|_| ReviewError::Unavailable)?;
     let expected = FileIdentity {
         device: record.presentation_device,
         inode: record.presentation_inode,
@@ -795,18 +790,18 @@ fn validate_presentation_identity(
         || !private_directory(&metadata)
         || !expected.matches(&metadata)
     {
-        return Err(D17ReviewError::Ambiguous);
+        return Err(ReviewError::Ambiguous);
     }
     Ok(())
 }
 
-fn directory_is_empty(path: &Path) -> Result<bool, D17ReviewError> {
-    let mut entries = fs::read_dir(path).map_err(|_| D17ReviewError::Unavailable)?;
+fn directory_is_empty(path: &Path) -> Result<bool, ReviewError> {
+    let mut entries = fs::read_dir(path).map_err(|_| ReviewError::Unavailable)?;
     entries
         .next()
         .transpose()
         .map(|entry| entry.is_none())
-        .map_err(|_| D17ReviewError::Unavailable)
+        .map_err(|_| ReviewError::Unavailable)
 }
 
 fn private_directory(metadata: &fs::Metadata) -> bool {
@@ -841,10 +836,10 @@ fn private_file(metadata: &fs::Metadata) -> bool {
     }
 }
 
-fn sync_directory(path: &Path) -> Result<(), D17ReviewError> {
+fn sync_directory(path: &Path) -> Result<(), ReviewError> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
-        .map_err(|_| D17ReviewError::Unavailable)
+        .map_err(|_| ReviewError::Unavailable)
 }
 
 #[cfg(test)]
@@ -876,7 +871,7 @@ mod tests {
     #[test]
     fn exact_owner_removes_only_its_empty_directory_and_marker() {
         let (_temporary, presentation, id, revision) = fixture();
-        let mut owner = D17ReviewDirectory::create(&presentation, id, revision).unwrap();
+        let mut owner = ReviewDirectory::create(&presentation, id, revision).unwrap();
         let directory = owner.path();
         assert!(directory.is_dir());
         validate_artifacts(&presentation, id, revision).unwrap();
@@ -890,7 +885,7 @@ mod tests {
     #[test]
     fn changed_directory_is_preserved_and_cleanup_fails_closed() {
         let (_temporary, presentation, id, revision) = fixture();
-        let owner = D17ReviewDirectory::create(&presentation, id, revision).unwrap();
+        let owner = ReviewDirectory::create(&presentation, id, revision).unwrap();
         let directory = owner.path();
         fs::remove_dir(&directory).unwrap();
         create_private_directory(&directory).unwrap();
@@ -903,7 +898,7 @@ mod tests {
             Some(result.marker_identity),
         );
 
-        assert!(matches!(cleanup, Err(D17ReviewError::Ambiguous)));
+        assert!(matches!(cleanup, Err(ReviewError::Ambiguous)));
         assert_eq!(fs::read(directory.join("foreign")).unwrap(), b"preserve");
     }
 
@@ -911,7 +906,7 @@ mod tests {
     fn replaced_presentation_parent_preserves_the_original_review() {
         let (_temporary, presentation, id, revision) = fixture();
         let owner =
-            ManuallyDrop::new(D17ReviewDirectory::create(&presentation, id, revision).unwrap());
+            ManuallyDrop::new(ReviewDirectory::create(&presentation, id, revision).unwrap());
         let original = presentation.with_extension("original");
         fs::rename(&presentation, &original).unwrap();
         create_private_directory(&presentation).unwrap();
@@ -922,7 +917,7 @@ mod tests {
             Some(owner.marker_identity),
         );
 
-        assert!(matches!(cleanup, Err(D17ReviewError::Ambiguous)));
+        assert!(matches!(cleanup, Err(ReviewError::Ambiguous)));
         assert!(original.join(owner.record.active_directory_name()).exists());
         assert!(original.join(REVIEW_MARKER_FILE).exists());
     }
@@ -930,11 +925,11 @@ mod tests {
     #[test]
     fn malformed_review_shaped_artifact_blocks_a_new_owner() {
         let (_temporary, presentation, id, revision) = fixture();
-        create_private_directory(&presentation.join("d17-codex-review-not-a-uuid")).unwrap();
+        create_private_directory(&presentation.join("wsnav-codex-review-not-a-uuid")).unwrap();
 
         assert!(matches!(
-            D17ReviewDirectory::create(&presentation, id, revision),
-            Err(D17ReviewError::Ambiguous)
+            ReviewDirectory::create(&presentation, id, revision),
+            Err(ReviewError::Ambiguous)
         ));
     }
 
@@ -942,12 +937,12 @@ mod tests {
     fn dead_owner_cannot_be_adopted_by_a_new_review() {
         let (_temporary, presentation, id, revision) = fixture();
         let owner =
-            ManuallyDrop::new(D17ReviewDirectory::create(&presentation, id, revision).unwrap());
+            ManuallyDrop::new(ReviewDirectory::create(&presentation, id, revision).unwrap());
         let directory = owner.path();
 
         assert!(matches!(
             recover_for_creation_with_probe(&presentation, id, revision, &MissingProcessProbe,),
-            Err(D17ReviewError::Ambiguous)
+            Err(ReviewError::Ambiguous)
         ));
         assert!(directory.exists());
 
@@ -968,14 +963,14 @@ mod tests {
 
         let (_temporary, presentation, id, revision) = fixture();
         let owner =
-            ManuallyDrop::new(D17ReviewDirectory::create(&presentation, id, revision).unwrap());
+            ManuallyDrop::new(ReviewDirectory::create(&presentation, id, revision).unwrap());
         let probe = CurrentProcessProbe {
             birth: RefCell::new(Some(owner.record.owner_birth.clone())),
         };
 
         assert!(matches!(
             recover_for_creation_with_probe(&presentation, id, revision, &probe),
-            Err(D17ReviewError::Active)
+            Err(ReviewError::Active)
         ));
         assert!(owner.path().exists());
     }
@@ -984,7 +979,7 @@ mod tests {
     fn presentation_stop_recovers_a_quarantined_crash_gap() {
         let (_temporary, presentation, id, revision) = fixture();
         let owner =
-            ManuallyDrop::new(D17ReviewDirectory::create(&presentation, id, revision).unwrap());
+            ManuallyDrop::new(ReviewDirectory::create(&presentation, id, revision).unwrap());
         let marker = presentation.join(REVIEW_MARKER_FILE);
         let retiring_marker = presentation.join(owner.record.retiring_marker_name());
         let directory = owner.path();

@@ -34,7 +34,7 @@ cargo package --locked --allow-dirty
 
 shopt -s nullglob
 shell_files=(scripts/check scripts/*-acceptance.sh spikes/*.sh)
-python_files=(spikes/*.py)
+python_files=(scripts/*.py spikes/*.py)
 fixture_files=(spikes/fixtures/*.json)
 
 for shell_file in "${shell_files[@]}"; do
@@ -51,8 +51,9 @@ for fixture_file in "${fixture_files[@]}"; do
     jq empty "${fixture_file}"
 done
 
-scripts/d12-presentation-harness-acceptance.sh
-bash scripts/d17-source-acceptance.sh
+scripts/current-source-acceptance.sh
+scripts/current-presentation-acceptance.sh
+python3 scripts/check-doc-links.py
 
 git diff --check
 git diff --cached --check

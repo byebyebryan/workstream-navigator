@@ -1,4 +1,4 @@
-//! D17 shell-gate authority boundary.
+//! shell-gate authority boundary.
 //!
 //! The hidden shell child classifies its provider command before it
 //! opens state or obtains the provisional lease.  A managed command then has
@@ -11,21 +11,21 @@ use std::{ffi::OsString, path::Path};
 use thiserror::Error;
 
 use crate::{
-    d17_broker::{
+    clock::{Clock, ClockError},
+    domain::{IdGenerator, ProviderKind},
+    onboarding::{ShellCommandDecision, classify_shell_command},
+    onboarding_broker::{
         BrokerError, PrepareContext, PreparedHandoff, PresentationBinding, WorktreeInspector,
         prepare,
     },
-    d17_clock::{ClockError, D17Clock},
-    domain::{IdGenerator, ProviderKind},
-    onboarding::{ShellCommandDecision, classify_shell_command},
     provisional::{LiveProvisionalShell, SlotError, read_marker},
     runtime::{PrivateRuntime, ProcessGroupInfo, ProcessGroupProbe, ProcessProbe, TmuxClient},
-    state::{D16State, ProvisionalLease},
+    state::{CurrentState, ProvisionalLease},
 };
 
 const CAPABILITY_LIFETIME_MILLIS: i64 = 60_000;
 
-/// A shell command classified before any D17 state or lease operation.
+/// A shell command classified before any state or lease operation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum ShellGateDecision {
     /// The provider owns this explicitly enumerated non-session command.
@@ -88,7 +88,7 @@ pub(crate) struct ShellGateContext<'a> {
     pub(crate) tmux: &'a dyn TmuxClient,
     pub(crate) process_probe: &'a dyn ProcessProbe,
     pub(crate) process_group_probe: &'a dyn ProcessGroupProbe,
-    pub(crate) clock: &'a dyn D17Clock,
+    pub(crate) clock: &'a dyn Clock,
     pub(crate) id_generator: &'a dyn IdGenerator,
     pub(crate) worktree_inspector: &'a dyn WorktreeInspector,
 }
@@ -98,19 +98,19 @@ pub(crate) struct ShellGateContext<'a> {
 /// clock values.
 #[derive(Debug, Error)]
 pub(crate) enum ShellGateError {
-    #[error("D17 shell command is not eligible for managed onboarding")]
+    #[error("shell command is not eligible for managed onboarding")]
     Command,
-    #[error("D17 shell invocation identity is unavailable")]
+    #[error("shell invocation identity is unavailable")]
     InvocationIdentityUnavailable,
-    #[error("D17 shell invocation does not match the private provisional shell")]
+    #[error("shell invocation does not match the private provisional shell")]
     InvocationIdentityMismatch,
-    #[error("D17 provisional shell evidence is unavailable")]
+    #[error("provisional shell evidence is unavailable")]
     Slot(#[from] SlotError),
-    #[error("D17 shell clock is unavailable")]
+    #[error("shell clock is unavailable")]
     Clock(#[from] ClockError),
-    #[error("D17 shell state is unavailable")]
+    #[error("shell state is unavailable")]
     State,
-    #[error("D17 shell handoff is unavailable")]
+    #[error("shell handoff is unavailable")]
     Broker(#[from] BrokerError),
 }
 
@@ -118,7 +118,7 @@ pub(crate) enum ShellGateError {
 /// repeats all marker/runtime checks under the caller-held lease through the
 /// broker; it never starts or inspects a provider process.
 pub(crate) fn prepare_managed_shell_gate(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     command: &ManagedShellCommand,
     context: &ShellGateContext<'_>,

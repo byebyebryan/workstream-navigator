@@ -1,4 +1,4 @@
-//! D17 fresh-TUI grammar contract.
+//! fresh-TUI grammar contract.
 //!
 //! This mirrors the pinned 0.150.0/1.18.23 study in typed Rust and feeds the
 //! broker command boundary. It does not intercept or launch a provider.

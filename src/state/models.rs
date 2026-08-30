@@ -21,29 +21,6 @@ use super::utils::{
     default_provider_kind, set_private_directory_permissions, validate_registry_text,
 };
 
-/// Maximum number of direct children returned by the host-local project
-/// browser.  Browser responses are state/application DTOs; they are not part
-/// of the retired framed host protocol.
-pub const MAX_PROJECT_BROWSER_ENTRIES: usize = 128;
-
-/// One bounded host-local project-browser listing.  The root is represented by
-/// a safe display label and a validated relative cursor; absolute paths never
-/// cross the state/application boundary.
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProjectDirectoriesResponse {
-    pub root_label: String,
-    pub relative_path: String,
-    pub include_hidden: bool,
-    pub entries: Vec<ProjectDirectoryEntry>,
-}
-
-/// One direct child in a host-local project-browser listing.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct ProjectDirectoryEntry {
-    pub name: String,
-    pub is_git_repository: bool,
-}
-
 pub struct StateRoot {
     base: PathBuf,
 }
@@ -71,12 +48,6 @@ pub enum StateError {
     InvalidProviderMetadata,
     #[error("provider identity does not match its Workstream, Runtime, or binding")]
     ProviderIdentityMismatch,
-    #[error("project browser root is invalid")]
-    InvalidProjectBrowserRoot,
-    #[error("project browser relative path is invalid")]
-    InvalidProjectBrowserRelativePath,
-    #[error("project browser root is unavailable")]
-    ProjectBrowserRootUnavailable,
     #[error("provider fork plan could not be encoded")]
     ForkPlanEncoding(serde_json::Error),
     #[error("provider fork plan is missing from its operation")]
@@ -105,13 +76,13 @@ pub enum StateError {
     InvalidOpenCodeSessionCreationPlanShape,
     #[error("OpenCode session-creation operation is not available")]
     OpenCodeSessionCreationUnavailable,
-    #[error("D17 onboarding operations are unavailable through the D16 state boundary")]
+    #[error("onboarding operations are unavailable through the current state boundary")]
     OnboardingOperationUnavailable,
-    #[error("D17 onboarding preparation evidence is invalid")]
+    #[error("onboarding preparation evidence is invalid")]
     InvalidOnboardingPreparation,
-    #[error("D17 onboarding capability is expired")]
+    #[error("onboarding capability is expired")]
     OnboardingCapabilityExpired,
-    #[error("D17 onboarding capability does not match the prepared handoff")]
+    #[error("onboarding capability does not match the prepared handoff")]
     OnboardingCapabilityRejected,
     #[error("request key was reused with different workstream intent")]
     OperationRequestMismatch,
@@ -139,7 +110,7 @@ pub enum StateError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(
-        "host state schema {0} belongs to the retired worktree-managed design; reset this host state and re-register projects"
+        "host state schema {0} belongs to the retired worktree-managed design; reset this host state"
     )]
     HostStateResetRequired(i64),
     #[error("unknown operation {0}")]
@@ -163,11 +134,19 @@ pub enum StateError {
     #[error("Codex observer ownership does not match the recorded profile")]
     IntegrationOwnershipMismatch,
     #[error("state recovery required: {0:?}")]
-    StateRecoveryRequired(crate::state::d16::StateRecoveryReason),
+    StateRecoveryRequired(crate::state::current::StateRecoveryReason),
+    #[error("current bootstrap lock is missing")]
+    MissingBootstrapLock,
+    #[error("current bootstrap lock is busy")]
+    BootstrapLockBusy,
+    #[error("current bootstrap lock is malformed or foreign")]
+    InvalidBootstrapLock,
+    #[error("current bootstrap evidence is ambiguous")]
+    BootstrapEffectUnknown,
+    #[error("current bootstrap artifact identity changed")]
+    BootstrapArtifactMismatch,
     #[error("fresh state root is not adoptable: {0:?}")]
-    FreshRootRejected(crate::state::d16::FreshRootRejection),
-    #[error("D16 cutover is required")]
-    CutoverRequired,
+    FreshRootRejected(crate::state::current::FreshRootRejection),
     #[error("fresh state creation is required")]
     FreshStateRequired,
     #[error("malformed host schema evidence")]
@@ -178,16 +157,6 @@ pub enum StateError {
     ObserverDatabaseDeadlineExceeded,
     #[error("observer degraded marker is invalid")]
     InvalidObserverDegradedMarker,
-    #[error("OpenCode observer handover journal is invalid")]
-    InvalidObserverHandoverJournal,
-    #[error("OpenCode observer handover journal phase transition is invalid")]
-    InvalidObserverHandoverTransition,
-    #[error("the requested state transition requires a held transition lease")]
-    TransitionLeaseRequired,
-    #[error("the held transition lease does not match the requested state root")]
-    TransitionLeaseRootMismatch,
-    #[error("the held transition lease is no longer valid")]
-    InvalidTransitionLease,
     #[error("the stable provisional lease is busy")]
     ProvisionalLeaseBusy,
     #[error("the held provisional lease is no longer valid")]
@@ -205,8 +174,8 @@ impl StateError {
 
 impl StateRoot {
     /// Selects a state-root path without creating, chmodding, or otherwise
-    /// inspecting it.  D16 startup uses this before it has classified a root
-    /// as current, cutover, fresh, or recovery-only.
+    /// inspecting it. Current startup uses this before it has classified a root
+    /// as current, fresh, or recovery-only.
     #[must_use]
     pub fn select(base: impl AsRef<Path>) -> Self {
         Self {
@@ -218,9 +187,9 @@ impl StateRoot {
     /// fresh-state orchestration.
     ///
     /// This helper never creates a database or adopts existing state. Callers
-    /// that need a usable registry must go through [`crate::state::fresh_create`]
-    /// (or an explicit current/cutover open), so root creation cannot bypass
-    /// D16's fresh-root classifier.
+    /// that need a usable registry must go through [`crate::state::create_current`]
+    /// (or an explicit current open), so root creation cannot bypass the
+    /// fresh-root classifier.
     ///
     /// # Errors
     ///
@@ -228,10 +197,10 @@ impl StateRoot {
     /// cannot be restricted.
     pub fn create(base: impl AsRef<Path>) -> Result<Self, StateError> {
         let base = base.as_ref().to_path_buf();
-        match crate::state::d16::classify_fresh_root(&base)? {
-            crate::state::d16::FreshRootClassification::Absent
-            | crate::state::d16::FreshRootClassification::Empty => {}
-            crate::state::d16::FreshRootClassification::TransitionLeaseOnly => {
+        match crate::state::current::classify_current_root(&base)? {
+            crate::state::current::CurrentRootClassification::Absent
+            | crate::state::current::CurrentRootClassification::Empty => {}
+            crate::state::current::CurrentRootClassification::NonEmpty => {
                 return Err(StateError::FreshStateRequired);
             }
         }
@@ -264,13 +233,6 @@ pub struct HostRegistry {
 pub struct HostIdentity {
     pub host_id: HostId,
     pub registry_generation: String,
-}
-
-/// One registered project root and its initial Workstream.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ExternalWorkstream {
-    pub location_id: LocationId,
-    pub workstream_id: WorkstreamId,
 }
 
 /// The persisted target of one native provider fork.

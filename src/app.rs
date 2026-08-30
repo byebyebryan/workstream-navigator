@@ -24,7 +24,7 @@ pub(super) use thiserror::Error;
 
 pub(super) use crate::{
     domain::{OperationId, ProviderSessionId, Revision, RuntimeId, WorkstreamId},
-    navigator::{materialize_initial_provisional_shell, run_d17_navigator},
+    navigator::{materialize_initial_provisional_shell, run_navigator},
     presentation::{AttachmentPhase, Presentation},
     provider::codex::app_server::EphemeralAppServer,
     provider::codex::profile::{OBSERVER_PROFILE_SCHEMA_VERSION, ObserverProfile},
@@ -36,37 +36,35 @@ pub(super) use crate::{
     state::{HostRegistry, StateError, StateRoot},
 };
 
-#[allow(unused_imports)]
-pub(crate) use model::AppError;
+use model::AppError;
 /// Runs one direct local CLI command.
 #[must_use]
 pub fn run() -> ExitCode {
     let cli = cli::Cli::parse();
     let observer_command = cli::is_observer_command(cli.command.as_ref());
     let provider_pane_command = cli::is_provider_pane_command(cli.command.as_ref());
-    let d17_shell_gate_command = cli::is_d17_shell_gate_command(cli.command.as_ref());
-    let d17_shell_launch_helper_command =
-        cli::is_d17_shell_launch_helper_command(cli.command.as_ref());
-    let d17_observer_setup_command = cli::is_d17_observer_setup_command(cli.command.as_ref());
+    let shell_gate_command = cli::is_shell_gate_command(cli.command.as_ref());
+    let shell_launch_helper_command = cli::is_shell_launch_helper_command(cli.command.as_ref());
+    let observer_setup_command = cli::is_observer_setup_command(cli.command.as_ref());
     match dispatch::execute(cli) {
         Ok(()) => ExitCode::SUCCESS,
         // The account-shell wrapper needs this one non-error exit code to
         // delegate explicitly unmanaged provider commands back to the native
         // executable. All other gate failures stay silent so the wrapper can
-        // present one fixed diagnostic without leaking D17 state detail.
-        Err(AppError::D17ShellGateUnmanaged) if d17_shell_gate_command => ExitCode::from(10),
-        Err(AppError::D17ObserverReadinessRequired) if d17_shell_gate_command => ExitCode::from(11),
-        Err(_) if d17_shell_gate_command => ExitCode::FAILURE,
+        // present one fixed diagnostic without leaking state detail.
+        Err(AppError::ShellGateUnmanaged) if shell_gate_command => ExitCode::from(10),
+        Err(AppError::ObserverReadinessRequired) if shell_gate_command => ExitCode::from(11),
+        Err(_) if shell_gate_command => ExitCode::FAILURE,
         // The helper replaces the provisional shell, so it has no wrapper to
         // translate its failure. Keep the provider pane free of state detail.
-        Err(_) if d17_shell_launch_helper_command => {
-            eprintln!("WSNav D17 onboarding command is unavailable");
+        Err(_) if shell_launch_helper_command => {
+            eprintln!("WSNav onboarding command is unavailable");
             ExitCode::FAILURE
         }
         // The interactive observer helper runs beside native Codex. Keep its
         // bounded failure silent so only the account-shell wrapper can render
         // the fixed setup-unavailable diagnostic and preserve its status.
-        Err(_) if d17_observer_setup_command => ExitCode::FAILURE,
+        Err(_) if observer_setup_command => ExitCode::FAILURE,
         // Observer helpers are disconnected from the provider pane. Keep
         // their bounded errors silent, but let the owning action observe a
         // non-success exit status. Other provider-pane helpers deliberately

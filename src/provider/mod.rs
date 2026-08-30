@@ -12,7 +12,7 @@ use crate::{
 };
 
 pub mod codex;
-pub(crate) mod d17_grammar;
+pub(crate) mod grammar;
 pub mod lifecycle;
 pub mod names;
 pub mod opencode;
@@ -21,8 +21,8 @@ pub mod opencode;
 ///
 /// Provider capability evidence belongs to the provider boundary rather than
 /// to the retired host protocol.  The application and state layers consume
-/// this typed evidence directly; protocol adapters, where still present for
-/// historical compatibility, merely serialize it.
+/// this typed evidence directly; protocol adapters serialize it at their
+/// provider boundary.
 pub const KNOWN_PROVIDER_KINDS: [ProviderKind; 2] = [ProviderKind::Codex, ProviderKind::OpenCode];
 
 /// Dynamic provider availability observed by one host snapshot.
@@ -172,10 +172,9 @@ pub fn discover_capabilities_with_installation_cache(
 }
 
 /// Capability discovery with an injected `OpenCode` installation outcome. The
-/// Codex-only boolean seam remains available for existing deterministic tests,
-/// while production discovery requires a successful bounded `opencode
-/// --version` result without treating its release as compatibility authority
-/// or consulting provider configuration or credentials.
+/// Codex-only boolean seam remains available for deterministic tests, while
+/// production discovery requires a successful bounded `opencode --version`
+/// result and never consults provider configuration or credentials.
 ///
 /// # Errors
 ///
@@ -627,7 +626,7 @@ mod tests {
     fn registry() -> (tempfile::TempDir, HostRegistry) {
         let temporary = tempfile::tempdir().unwrap();
         let root = temporary.path().join("state");
-        let state = crate::state::fresh_create(&root, &crate::domain::RandomIdGenerator).unwrap();
+        let state = crate::state::create_current(&root, &crate::domain::RandomIdGenerator).unwrap();
         (temporary, state.into_host_registry().unwrap())
     }
 

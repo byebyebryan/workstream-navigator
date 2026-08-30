@@ -270,10 +270,10 @@ impl OperationPhase {
     }
 }
 
-/// The provider-exec lifecycle for one D17 shell-promotion attempt.
+/// The provider-exec lifecycle for one shell-promotion attempt.
 ///
 /// This is deliberately separate from the existing `Start` and `Fork`
-/// operation phases: D17 promotion has a durable ownership boundary before a
+/// operation phases: promotion has a durable ownership boundary before a
 /// provider effect, and no ordinary action authority exists until exact exec
 /// proof or recovery resolves it.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -292,7 +292,7 @@ pub enum OnboardingPhase {
 }
 
 impl OnboardingPhase {
-    /// Maps the durable compound-operation phase used by the D17 journal to
+    /// Maps the durable compound-operation phase used by the onboarding journal to
     /// the onboarding-only transition contract.
     #[must_use]
     pub const fn from_operation_phase(phase: OperationPhase) -> Option<Self> {
@@ -313,7 +313,7 @@ impl OnboardingPhase {
         }
     }
 
-    /// Returns the exact durable compound-operation phase for this D17
+    /// Returns the exact durable compound-operation phase for this
     /// onboarding state.
     #[must_use]
     pub const fn operation_phase(self) -> OperationPhase {
@@ -348,7 +348,7 @@ impl OnboardingPhase {
         matches!(self, Self::KnownAbsentExec | Self::RecoveryRequired)
     }
 
-    /// Validates one monotonic D17 onboarding transition.
+    /// Validates one monotonic onboarding transition.
     ///
     /// # Errors
     ///
@@ -408,8 +408,8 @@ pub struct CompoundOperation {
     pub kind: OperationKind,
     pub phase: OperationPhase,
     pub expected_revisions_json: String,
-    /// D17-only one-shot capability metadata. D16 operations retain `None`
-    /// for every field and never query schema-14 columns.
+    /// -only one-shot capability metadata. current operations retain `None`
+    /// for every field and never query schema-15 columns.
     pub launch_token_id: Option<String>,
     pub launch_token_verifier: Option<String>,
     pub launch_token_expiry_monotonic: Option<i64>,
@@ -515,12 +515,12 @@ impl CompoundOperation {
         Ok(())
     }
 
-    /// Returns the D17-specific phase only for an onboarding operation.
+    /// Returns the -specific phase only for an onboarding operation.
     ///
     /// # Errors
     ///
     /// Returns an error when a Start/Fork operation is treated as onboarding
-    /// state or the persisted phase is outside the D17 lifecycle.
+    /// state or the persisted phase is outside the onboarding lifecycle.
     pub fn onboarding_phase(&self) -> Result<OnboardingPhase, DomainError> {
         if self.kind != OperationKind::Onboard {
             return Err(DomainError::OnboardingOperationRequired);
@@ -529,7 +529,7 @@ impl CompoundOperation {
             .ok_or(DomainError::InvalidOnboardingOperationPhase(self.phase))
     }
 
-    /// Advances one onboarding operation through the D17 ownership and
+    /// Advances one onboarding operation through the ownership and
     /// provider-exec state machine without permitting the generic Start/Fork
     /// transition graph to bypass it.
     ///
@@ -723,9 +723,9 @@ pub enum DomainError {
         from: OnboardingPhase,
         to: OnboardingPhase,
     },
-    #[error("the operation is not a D17 onboarding operation")]
+    #[error("the operation is not an onboarding operation")]
     OnboardingOperationRequired,
-    #[error("the compound operation phase is not valid for D17 onboarding: {0:?}")]
+    #[error("the compound operation phase is not valid for onboarding: {0:?}")]
     InvalidOnboardingOperationPhase(OperationPhase),
     #[error("invalid provider identifier")]
     InvalidProviderIdentifier,

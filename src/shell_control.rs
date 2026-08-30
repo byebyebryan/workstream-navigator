@@ -1,4 +1,4 @@
-//! System adapter for the D17 account-shell gate.
+//! System adapter for the account-shell gate.
 //!
 //! This is the only composition point that knows how to reopen inherited
 //! account-shell discovery paths against the real private state, tmux, Linux
@@ -14,18 +14,19 @@ use std::{
 use thiserror::Error;
 
 use crate::{
+    account_shell::{AccountShellContext, AccountShellError},
     app::observer::{
         ObserverActivation, ObserverActivationError, ObserverReadiness,
-        finalize_observer_trust_d17_under_lease, observer_readiness,
-        prepare_observer_activation_d17,
+        finalize_observer_trust_under_lease, observer_readiness, prepare_observer_activation,
     },
-    d17_account_shell::{AccountShellContext, AccountShellError},
-    d17_broker::{
+    clock::{Clock, SystemClock},
+    domain::{ProviderKind, RandomIdGenerator},
+    onboarding::{ShellCommandDecision, classify_shell_command},
+    onboarding_broker::{
         PrepareContext, PreparedHandoff, PresentationBinding, SystemWorktreeInspector,
         WorktreeInspector,
     },
-    d17_clock::{D17Clock, SystemD17Clock},
-    d17_helper::{
+    onboarding_helper::{
         advance_codex_to_provider_exec_fence, begin_provider_preparation,
         record_codex_exec_failed_known_absent, record_opencode_created_session,
         record_opencode_effect_recovery_required, record_opencode_exec_recovery_required,
@@ -33,22 +34,20 @@ use crate::{
         record_opencode_runtime_handle, record_opencode_session_recovery_required,
         record_provider_preparation_recovery_required,
     },
-    d17_reconcile::{
+    presentation::Presentation,
+    provider::codex::profile::{OBSERVER_PROFILE_NAME, ObserverProfile, ProfileInspection},
+    provider_reconcile::{
         ExpectedProviderExecutable, LinuxProviderExecutableProbe, ReconcileError,
         finalize_opencode_observer_ready, prove_provider_exec,
     },
-    d17_review::D17ReviewDirectory,
-    d17_shell_gate::{
+    provisional::{HostRetirementError, read_marker, retire_provider_exec_proven_marker},
+    review::ReviewDirectory,
+    runtime::{LinuxProcessProbe, PrivateRuntime, ProcessGroupProbe, SystemTmux},
+    shell_gate::{
         ShellGateContext, ShellGateDecision, ShellGateError, ShellGateInvocation,
         classify_shell_gate, prepare_managed_shell_gate, validate_invocation,
     },
-    domain::{ProviderKind, RandomIdGenerator},
-    onboarding::{ShellCommandDecision, classify_shell_command},
-    presentation::Presentation,
-    provider::codex::profile::{OBSERVER_PROFILE_NAME, ObserverProfile, ProfileInspection},
-    provisional::{HostRetirementError, read_marker, retire_provider_exec_proven_marker},
-    runtime::{LinuxProcessProbe, PrivateRuntime, ProcessGroupProbe, SystemTmux},
-    state::{D16State, IntegrationLifecycle, StateRoot, open_d17_current_only},
+    state::{CurrentState, IntegrationLifecycle, StateRoot, open_current},
 };
 
 /// The only two outcomes a shell wrapper needs from the gate. An unmanaged
@@ -74,15 +73,15 @@ impl std::fmt::Debug for AccountShellGateOutcome {
 /// process identifier, or tmux diagnostic crosses this boundary.
 #[derive(Debug, Error)]
 pub(crate) enum AccountShellGateError {
-    #[error("D17 account-shell context is unavailable")]
+    #[error("account-shell context is unavailable")]
     Context(#[from] AccountShellError),
-    #[error("D17 shell state is unavailable")]
+    #[error("shell state is unavailable")]
     State,
-    #[error("D17 shell invocation identity is unavailable")]
+    #[error("shell invocation identity is unavailable")]
     InvocationIdentityUnavailable,
-    #[error("D17 Codex observer readiness is unavailable")]
+    #[error("Codex observer readiness is unavailable")]
     ObserverReadinessUnavailable,
-    #[error("D17 shell handoff is unavailable")]
+    #[error("shell handoff is unavailable")]
     Gate(#[from] ShellGateError),
 }
 
@@ -91,42 +90,42 @@ pub(crate) enum AccountShellGateError {
 /// error: the wrapper owns the fixed user-facing fallback text.
 #[derive(Debug, Error)]
 pub(crate) enum AccountShellObserverSetupError {
-    #[error("D17 account-shell context is unavailable")]
+    #[error("account-shell context is unavailable")]
     Context(#[from] AccountShellError),
-    #[error("D17 observer state is unavailable")]
+    #[error("observer state is unavailable")]
     State,
-    #[error("D17 observer invocation identity is unavailable")]
+    #[error("observer invocation identity is unavailable")]
     InvocationIdentityUnavailable,
-    #[error("D17 observer provisional shell is unavailable")]
+    #[error("observer provisional shell is unavailable")]
     Shell,
-    #[error("D17 observer readiness is unavailable")]
+    #[error("observer readiness is unavailable")]
     Observer(#[from] ObserverActivationError),
-    #[error("D17 native Codex executable is unavailable")]
+    #[error("native Codex executable is unavailable")]
     Executable,
-    #[error("D17 native observer review is unavailable")]
+    #[error("native observer review is unavailable")]
     Review,
-    #[error("D17 observer native trust remains pending")]
+    #[error("observer native trust remains pending")]
     TrustPending,
 }
 
 /// Bounded failure of the final Codex account-shell exec path.
 #[derive(Debug, Error)]
 pub(crate) enum AccountShellCodexLaunchError {
-    #[error("D17 account-shell context is unavailable")]
+    #[error("account-shell context is unavailable")]
     Context(#[from] AccountShellError),
-    #[error("D17 shell state is unavailable")]
+    #[error("shell state is unavailable")]
     State,
-    #[error("D17 shell invocation identity is unavailable")]
+    #[error("shell invocation identity is unavailable")]
     InvocationIdentityUnavailable,
-    #[error("D17 shell command is unavailable")]
+    #[error("shell command is unavailable")]
     Command,
-    #[error("D17 native Codex executable is unavailable")]
+    #[error("native Codex executable is unavailable")]
     Executable,
-    #[error("D17 native Codex observer profile is unavailable")]
+    #[error("native Codex observer profile is unavailable")]
     Observer,
-    #[error("D17 provider launch state is unavailable")]
+    #[error("provider launch state is unavailable")]
     Helper,
-    #[error("D17 native Codex exec failed")]
+    #[error("native Codex exec failed")]
     Exec,
 }
 
@@ -135,21 +134,21 @@ pub(crate) enum AccountShellCodexLaunchError {
 /// hidden CLI will render one fixed diagnostic rather than its source detail.
 #[derive(Debug, Error)]
 pub(crate) enum AccountShellOpenCodeLaunchError {
-    #[error("D17 account-shell context is unavailable")]
+    #[error("account-shell context is unavailable")]
     Context(#[from] AccountShellError),
-    #[error("D17 shell state is unavailable")]
+    #[error("shell state is unavailable")]
     State,
-    #[error("D17 shell invocation identity is unavailable")]
+    #[error("shell invocation identity is unavailable")]
     InvocationIdentityUnavailable,
-    #[error("D17 shell command is unavailable")]
+    #[error("shell command is unavailable")]
     Command,
-    #[error("D17 native OpenCode executable is unavailable")]
+    #[error("native OpenCode executable is unavailable")]
     Executable,
-    #[error("D17 OpenCode preparation is unavailable")]
+    #[error("OpenCode preparation is unavailable")]
     OpenCode(#[from] crate::provider::opencode::OpenCodeError),
-    #[error("D17 provider launch state is unavailable")]
+    #[error("provider launch state is unavailable")]
     Helper,
-    #[error("D17 native OpenCode exec failed")]
+    #[error("native OpenCode exec failed")]
     Exec,
 }
 
@@ -158,26 +157,26 @@ pub(crate) enum AccountShellOpenCodeLaunchError {
 /// exact native-exec proof already visible in the adopted private pane.
 #[derive(Debug, Error)]
 pub(crate) enum ProviderExecReconciliationError {
-    #[error("D17 presentation context is unavailable")]
+    #[error("presentation context is unavailable")]
     Context(#[from] AccountShellError),
-    #[error("D17 provider-exec state is unavailable")]
+    #[error("provider-exec state is unavailable")]
     State,
-    #[error("D17 provider-exec proof is unavailable")]
+    #[error("provider-exec proof is unavailable")]
     Reconcile(#[from] ReconcileError),
-    #[error("D17 completed onboarding retirement is unavailable")]
+    #[error("completed onboarding retirement is unavailable")]
     Retirement(#[from] HostRetirementError),
-    #[error("D17 OpenCode observer handoff is unavailable")]
+    #[error("OpenCode observer handoff is unavailable")]
     Observer,
 }
 
-/// Reopens the private D17 presentation marker before any account-shell path
+/// Reopens the private presentation marker before any account-shell path
 /// may be used to open state. The marker's opaque identity is carried through
 /// all later broker/helper fences; the inherited environment remains only
 /// discovery input.
 fn presentation_binding_from_account_context(
     account_context: &AccountShellContext,
 ) -> Result<PresentationBinding, AccountShellError> {
-    let context = Presentation::d17_context_from_directory(
+    let context = Presentation::context_from_directory(
         account_context.state_root(),
         account_context.presentation_directory(),
     )
@@ -186,7 +185,7 @@ fn presentation_binding_from_account_context(
         .map_err(|_| AccountShellError::ContextUnavailable)
 }
 
-/// Reopens one presentation-private D17 marker and reconciles only its
+/// Reopens one presentation-private marker and reconciles only its
 /// already-owned provider exec. Codex can complete direct proof immediately.
 /// `OpenCode` remains action-fenced until this controller establishes its exact
 /// detached observer and proves it remains live. Neither path constructs or
@@ -199,10 +198,9 @@ pub(crate) fn reconcile_provider_exec_from_presentation(
     let presentation_binding = presentation_binding_from_account_context(&account_context)
         .map_err(ProviderExecReconciliationError::Context)?;
     let root = StateRoot::select(account_context.state_root());
-    let mut state =
-        open_d17_current_only(&root).map_err(|_| ProviderExecReconciliationError::State)?;
+    let mut state = open_current(&root).map_err(|_| ProviderExecReconciliationError::State)?;
     let provisional_lease = state
-        .acquire_d17_provisional_lease()
+        .acquire_provisional_lease()
         .map_err(|_| ProviderExecReconciliationError::State)?;
     let slot = read_marker(state.root(), account_context.presentation_directory())
         .map_err(ReconcileError::from)?;
@@ -239,27 +237,26 @@ pub(crate) fn reconcile_provider_exec_from_presentation(
         .map(crate::domain::OperationId::from)
         .ok_or(ReconcileError::HandoffIdentityUnavailable)?;
     let target = state
-        .d17_onboarding_exec_proof_target_current(&provisional_lease, operation_id)
+        .onboarding_exec_proof_target_current(&provisional_lease, operation_id)
         .map_err(ReconcileError::from)?;
     if target.provider() != ProviderKind::OpenCode {
         return Err(ReconcileError::ProviderIdentityMismatch.into());
     }
     let mut registry = state
-        .into_d17_host_registry()
+        .into_host_registry()
         .map_err(|_| ProviderExecReconciliationError::State)?;
     let record = registry
-        .observer_runtime_by_id(target.ownership().runtime_id)
+        .runtime_by_id(target.ownership().runtime_id)
         .map_err(|_| ProviderExecReconciliationError::State)?
         .ok_or(ProviderExecReconciliationError::Observer)?;
     let handle = registry
-        .observer_opencode_runtime_handle(target.ownership().runtime_id)
+        .opencode_runtime_handle(target.ownership().runtime_id)
         .map_err(|_| ProviderExecReconciliationError::State)?
         .ok_or(ProviderExecReconciliationError::Observer)?;
-    crate::actions::spawn_d17_opencode_observer(&mut registry, root.base(), &record, &handle)
+    crate::actions::spawn_runtime_opencode_observer(&mut registry, root.base(), &record, &handle)
         .map_err(|_| ProviderExecReconciliationError::Observer)?;
     drop(registry);
-    let mut state =
-        open_d17_current_only(&root).map_err(|_| ProviderExecReconciliationError::State)?;
+    let mut state = open_current(&root).map_err(|_| ProviderExecReconciliationError::State)?;
     finalize_opencode_observer_ready(
         &mut state,
         &provisional_lease,
@@ -294,7 +291,7 @@ pub(crate) fn gate_from_account_shell(
     let account_context = AccountShellContext::from_environment()?;
     let presentation_binding = presentation_binding_from_account_context(&account_context)?;
     let root = StateRoot::select(account_context.state_root());
-    let mut state = open_d17_current_only(&root).map_err(|_| AccountShellGateError::State)?;
+    let mut state = open_current(&root).map_err(|_| AccountShellGateError::State)?;
     // Readiness is a pure preflight.  A fresh or trust-pending observer must
     // return before the provisional lease and broker can issue HandoffIssued;
     // the wrapper may then offer the explicit interactive setup flow while
@@ -311,7 +308,7 @@ pub(crate) fn gate_from_account_shell(
         }
     }
     let provisional_lease = state
-        .acquire_d17_provisional_lease()
+        .acquire_provisional_lease()
         .map_err(|_| AccountShellGateError::State)?;
     let process_probe = LinuxProcessProbe;
     let caller_pid = process::id();
@@ -320,7 +317,7 @@ pub(crate) fn gate_from_account_shell(
         .map_err(|_| AccountShellGateError::InvocationIdentityUnavailable)?
         .ok_or(AccountShellGateError::InvocationIdentityUnavailable)?;
     let tmux = SystemTmux::default();
-    let clock = SystemD17Clock;
+    let clock = SystemClock;
     let ids = RandomIdGenerator;
     let context = ShellGateContext {
         presentation_directory: account_context.presentation_directory(),
@@ -335,7 +332,7 @@ pub(crate) fn gate_from_account_shell(
         process_group_probe: &process_probe,
         clock: &clock,
         id_generator: &ids,
-        worktree_inspector: &crate::d17_broker::SystemWorktreeInspector,
+        worktree_inspector: &crate::onboarding_broker::SystemWorktreeInspector,
     };
     let prepared = prepare_managed_shell_gate(&mut state, &provisional_lease, &command, &context)?;
     Ok(AccountShellGateOutcome::Prepared(prepared))
@@ -359,10 +356,9 @@ pub(crate) fn prepare_observer_from_account_shell(
     let account_context = AccountShellContext::from_environment()?;
     let presentation_binding = presentation_binding_from_account_context(&account_context)?;
     let root = StateRoot::select(account_context.state_root());
-    let mut state =
-        open_d17_current_only(&root).map_err(|_| AccountShellObserverSetupError::State)?;
+    let mut state = open_current(&root).map_err(|_| AccountShellObserverSetupError::State)?;
     let provisional_lease = state
-        .acquire_d17_provisional_lease()
+        .acquire_provisional_lease()
         .map_err(|_| AccountShellObserverSetupError::State)?;
     let slot = read_marker(state.root(), account_context.presentation_directory())
         .map_err(|_| AccountShellObserverSetupError::Shell)?;
@@ -402,8 +398,7 @@ pub(crate) fn prepare_observer_from_account_shell(
             ObserverActivationError::NotReady,
         ));
     }
-    let activation =
-        prepare_observer_activation_d17(&root, &mut state, &provisional_lease, &evidence)?;
+    let activation = prepare_observer_activation(&root, &mut state, &provisional_lease, &evidence)?;
     let expected = match activation {
         ObserverActivation::Ready(_) => return Ok(()),
         ObserverActivation::ReviewRequired(integration) => integration,
@@ -422,13 +417,13 @@ pub(crate) fn prepare_observer_from_account_shell(
     drop(state);
     drop(provisional_lease);
 
-    let mut review_directory = D17ReviewDirectory::create(
+    let mut review_directory = ReviewDirectory::create(
         account_context.presentation_directory(),
         slot.presentation_id(),
         slot.presentation_revision(),
     )
     .map_err(|_| AccountShellObserverSetupError::Review)?;
-    let review_context = Presentation::d17_context_from_directory(
+    let review_context = Presentation::context_from_directory(
         account_context.state_root(),
         account_context.presentation_directory(),
     )
@@ -445,10 +440,9 @@ pub(crate) fn prepare_observer_from_account_shell(
     }
     let status = review_result?;
 
-    let mut state =
-        open_d17_current_only(&root).map_err(|_| AccountShellObserverSetupError::State)?;
+    let mut state = open_current(&root).map_err(|_| AccountShellObserverSetupError::State)?;
     let provisional_lease = state
-        .acquire_d17_provisional_lease()
+        .acquire_provisional_lease()
         .map_err(|_| AccountShellObserverSetupError::State)?;
     let current_slot = read_marker(state.root(), account_context.presentation_directory())
         .map_err(|_| AccountShellObserverSetupError::Shell)?;
@@ -475,9 +469,8 @@ pub(crate) fn prepare_observer_from_account_shell(
         },
     )
     .map_err(|_| AccountShellObserverSetupError::InvocationIdentityUnavailable)?;
-    let _ready =
-        finalize_observer_trust_d17_under_lease(&root, state, &provisional_lease, &expected)
-            .map_err(AccountShellObserverSetupError::Observer)?;
+    let _ready = finalize_observer_trust_under_lease(&root, state, &provisional_lease, &expected)
+        .map_err(AccountShellObserverSetupError::Observer)?;
     if !status.success() {
         return Err(AccountShellObserverSetupError::TrustPending);
     }
@@ -524,7 +517,7 @@ fn run_native_observer_review(
 /// A successful Unix `execve` never returns. If it returns an operating-system
 /// error, the exact known-absent journal transition is attempted before the
 /// bounded failure reaches the shell. This routine has no CLI route until the
-/// atomic D17 Navigator cutover.
+/// atomic Navigator startup.
 pub(crate) fn exec_codex_from_account_shell(
     capability: &str,
     arguments: &[OsString],
@@ -541,11 +534,10 @@ pub(crate) fn exec_codex_from_account_shell(
     let account_context = AccountShellContext::from_environment()?;
     let presentation_binding = presentation_binding_from_account_context(&account_context)?;
     let root = StateRoot::select(account_context.state_root());
-    let mut state =
-        open_d17_current_only(&root).map_err(|_| AccountShellCodexLaunchError::State)?;
-    let codex_home = d17_codex_observer_home(&state)?;
+    let mut state = open_current(&root).map_err(|_| AccountShellCodexLaunchError::State)?;
+    let codex_home = codex_observer_home(&state)?;
     let provisional_lease = state
-        .acquire_d17_provisional_lease()
+        .acquire_provisional_lease()
         .map_err(|_| AccountShellCodexLaunchError::State)?;
     let process_probe = LinuxProcessProbe;
     let caller_pid = process::id();
@@ -569,7 +561,7 @@ pub(crate) fn exec_codex_from_account_shell(
         },
     )
     .map_err(|_| AccountShellCodexLaunchError::InvocationIdentityUnavailable)?;
-    let clock = SystemD17Clock;
+    let clock = SystemClock;
     let now_monotonic_millis = clock
         .now_monotonic_millis()
         .map_err(|_| AccountShellCodexLaunchError::Helper)?;
@@ -590,7 +582,7 @@ pub(crate) fn exec_codex_from_account_shell(
             .ok_or(AccountShellCodexLaunchError::Helper)?,
         boot_provenance: &boot_provenance,
         id_generator: &ids,
-        worktree_inspector: &crate::d17_broker::SystemWorktreeInspector,
+        worktree_inspector: &crate::onboarding_broker::SystemWorktreeInspector,
     };
     let exec_fence = advance_codex_to_provider_exec_fence(
         &mut state,
@@ -612,12 +604,12 @@ pub(crate) fn exec_codex_from_account_shell(
 }
 
 /// Requires the exact current-binary observer declaration and native trust
-/// before the D17 helper can consume a Codex launch capability. The
+/// before the helper can consume a Codex launch capability. The
 /// record's profile parent, rather than inherited shell state, becomes the
 /// explicit `CODEX_HOME` for the final native exec.
-fn d17_codex_observer_home(state: &D16State) -> Result<PathBuf, AccountShellCodexLaunchError> {
+fn codex_observer_home(state: &CurrentState) -> Result<PathBuf, AccountShellCodexLaunchError> {
     let integration = state
-        .d17_codex_integration()
+        .codex_integration()
         .map_err(|_| AccountShellCodexLaunchError::State)?
         .ok_or(AccountShellCodexLaunchError::Observer)?;
     if integration.lifecycle != IntegrationLifecycle::Ready {
@@ -638,7 +630,7 @@ fn d17_codex_observer_home(state: &D16State) -> Result<PathBuf, AccountShellCode
     Ok(codex_home)
 }
 
-/// Builds the only D17-managed Codex native command. The closed grammar has
+/// Builds the only -managed Codex native command. The closed grammar has
 /// already rejected caller-provided profile flags, so this exact profile is
 /// the single selected Codex configuration layer.
 fn codex_observer_program(
@@ -660,7 +652,7 @@ fn exec_codex_program(program: &[OsString], codex_home: &std::path::Path) -> std
 
     let (executable, arguments) = program
         .split_first()
-        .expect("the D17 native Codex program is constructed from an exact executable");
+        .expect("the native Codex program is constructed from an exact executable");
     let mut command = Command::new(executable);
     command.args(arguments).env("CODEX_HOME", codex_home);
     command.exec()
@@ -707,10 +699,9 @@ pub(crate) fn exec_opencode_from_account_shell(
     let account_context = AccountShellContext::from_environment()?;
     let presentation_binding = presentation_binding_from_account_context(&account_context)?;
     let root = StateRoot::select(account_context.state_root());
-    let mut state =
-        open_d17_current_only(&root).map_err(|_| AccountShellOpenCodeLaunchError::State)?;
+    let mut state = open_current(&root).map_err(|_| AccountShellOpenCodeLaunchError::State)?;
     let provisional_lease = state
-        .acquire_d17_provisional_lease()
+        .acquire_provisional_lease()
         .map_err(|_| AccountShellOpenCodeLaunchError::State)?;
     let process_probe = LinuxProcessProbe;
     let caller_pid = process::id();
@@ -736,9 +727,9 @@ pub(crate) fn exec_opencode_from_account_shell(
     .map_err(|_| AccountShellOpenCodeLaunchError::InvocationIdentityUnavailable)?;
     let worktree_inspector = SystemWorktreeInspector;
     let repository = worktree_inspector
-        .inspect_containing_worktree(&live.cwd)
+        .discover_containing_worktree(&live.cwd)
         .map_err(|_| AccountShellOpenCodeLaunchError::Helper)?;
-    let clock = SystemD17Clock;
+    let clock = SystemClock;
     let now_monotonic_millis = clock
         .now_monotonic_millis()
         .map_err(|_| AccountShellOpenCodeLaunchError::Helper)?;
@@ -896,7 +887,7 @@ fn exec_program(program: &[OsString]) -> std::io::Error {
 
     let (executable, arguments) = program
         .split_first()
-        .expect("the D17 native program is constructed from an exact executable");
+        .expect("the native program is constructed from an exact executable");
     let mut command = Command::new(executable);
     command.args(arguments);
     command.exec()
@@ -921,8 +912,8 @@ mod tests {
         reconcile_provider_exec_from_presentation,
     };
     use crate::{
-        d17_account_shell::AccountShellError, d17_reconcile::ExpectedProviderExecutable,
-        domain::ProviderKind,
+        account_shell::AccountShellError, domain::ProviderKind,
+        provider_reconcile::ExpectedProviderExecutable,
     };
 
     #[test]

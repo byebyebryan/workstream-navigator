@@ -71,7 +71,7 @@ pub(crate) enum AppError {
     #[error(transparent)]
     AppServer(#[from] crate::provider::codex::app_server::AppServerError),
     #[error(transparent)]
-    D17Navigator(#[from] crate::navigator::D17NavigatorError),
+    Navigator(#[from] crate::navigator::NavigatorError),
     #[error(transparent)]
     Presentation(#[from] crate::presentation::PresentationError),
     #[error(transparent)]
@@ -82,16 +82,12 @@ pub(crate) enum AppError {
     State(#[from] crate::state::StateError),
     #[error(transparent)]
     Startup(#[from] crate::startup::StartupError),
-    #[error(transparent)]
-    Cutover(#[from] crate::cutover::CutoverError),
-    #[error("the D17 account-shell command is explicitly unmanaged")]
-    D17ShellGateUnmanaged,
-    #[error("the D17 Codex observer requires interactive setup")]
-    D17ObserverReadinessRequired,
-    #[error("the D17 account-shell command is unavailable")]
-    D17ShellControlUnavailable,
-    #[error("the D17 runtime attachment is unavailable")]
-    D17AttachmentUnavailable,
-    #[error("close the existing Navigator presentation before D17 cutover")]
-    D17CutoverNeedsPresentationClosed,
+    #[error("the account-shell command is explicitly unmanaged")]
+    ShellGateUnmanaged,
+    #[error("the Codex observer requires interactive setup")]
+    ObserverReadinessRequired,
+    #[error("the account-shell command is unavailable")]
+    ShellControlUnavailable,
+    #[error("the runtime attachment is unavailable")]
+    AttachmentUnavailable,
 }

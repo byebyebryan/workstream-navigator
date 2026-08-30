@@ -1,4 +1,4 @@
-//! D17 presentation-private provisional-slot authority.
+//! presentation-private provisional-slot authority.
 //!
 //! This module owns only the bounded marker contract for an unregistered
 //! candidate Runtime. It composes with the stable host lease, presentation
@@ -18,14 +18,14 @@ use uuid::Uuid;
 use crate::{
     domain::{OperationId, Revision, RuntimeId},
     presentation::{
-        D17ProvisionalInventory, D17ProvisionalInventoryError, Presentation,
-        classify_d17_provisional_inventory,
+        Presentation, ProvisionalInventory, ProvisionalInventoryError,
+        classify_provisional_inventory,
     },
     runtime::{
         LinuxProcessProbe, NativeLaunch, PrivateRuntime, ProcessGroupProbe, RuntimePaths,
         RuntimeProbe, RuntimeStartup, SystemTmux,
     },
-    state::{D16State, ProvisionalLease, StateError},
+    state::{CurrentState, ProvisionalLease, StateError},
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -116,14 +116,14 @@ pub(crate) enum SlotError {
     MarkerTransitionInvalid,
 }
 
-/// Bounded failure from the D17 host-wide provisional-slot classifier. It
+/// Bounded failure from the host-wide provisional-slot classifier. It
 /// retains no marker, Runtime path, journal, shell, or provider detail.
 #[derive(Debug, Error)]
 pub(crate) enum HostInventoryError {
-    #[error("D17 provisional state is unavailable")]
+    #[error("provisional state is unavailable")]
     State(#[from] StateError),
-    #[error("D17 provisional inventory is unavailable")]
-    Inventory(#[from] D17ProvisionalInventoryError),
+    #[error("provisional inventory is unavailable")]
+    Inventory(#[from] ProvisionalInventoryError),
 }
 
 /// Bounded refusal from retiring one terminal, Runtime-owned provisional
@@ -132,31 +132,31 @@ pub(crate) enum HostInventoryError {
 /// never attaches, signals, parks, or removes the provider Runtime.
 #[derive(Debug, Error)]
 pub(crate) enum HostRetirementError {
-    #[error("D17 completed onboarding state is unavailable")]
+    #[error("completed onboarding state is unavailable")]
     State(#[from] StateError),
-    #[error("D17 completed onboarding marker is unavailable")]
+    #[error("completed onboarding marker is unavailable")]
     Slot(#[from] SlotError),
-    #[error("D17 completed onboarding identity is unavailable")]
+    #[error("completed onboarding identity is unavailable")]
     Identity,
 }
 
-/// Bounded refusal from the lease-held D17 shell materialization boundary.
+/// Bounded refusal from the lease-held shell materialization boundary.
 /// It intentionally retains neither the presentation directory nor candidate
 /// Runtime path, so a caller cannot turn an unavailable or occupied host into
 /// a discovery oracle.
 #[derive(Debug, Error)]
 pub(crate) enum HostMaterializationError {
-    #[error("D17 provisional state is unavailable")]
+    #[error("provisional state is unavailable")]
     Inventory(#[from] HostInventoryError),
-    #[error("D17 provisional presentation context is unavailable")]
+    #[error("provisional presentation context is unavailable")]
     Presentation,
-    #[error("the D17 provisional lease does not match the candidate")]
+    #[error("the provisional lease does not match the candidate")]
     Lease,
-    #[error("another D17 provisional shell is already materialized")]
+    #[error("another provisional shell is already materialized")]
     Occupied,
-    #[error("the D17 provisional candidate Runtime is already in use")]
+    #[error("the provisional candidate Runtime is already in use")]
     CandidateInUse,
-    #[error("D17 provisional materialization is unavailable")]
+    #[error("provisional materialization is unavailable")]
     Slot(#[from] SlotError),
 }
 
@@ -175,13 +175,13 @@ pub(crate) enum PreHandoffRecovery {
 /// carries no path, process, operation, or provider detail.
 #[derive(Debug, Error)]
 pub(crate) enum PreHandoffRecoveryError {
-    #[error("D17 provisional recovery state is unavailable")]
+    #[error("provisional recovery state is unavailable")]
     State(#[from] StateError),
-    #[error("D17 provisional recovery marker is unavailable")]
+    #[error("provisional recovery marker is unavailable")]
     Slot(#[from] SlotError),
-    #[error("D17 provisional Runtime evidence is unavailable")]
+    #[error("provisional Runtime evidence is unavailable")]
     Runtime,
-    #[error("D17 provisional recovery is ambiguous")]
+    #[error("provisional recovery is ambiguous")]
     Ambiguous,
 }
 
@@ -189,32 +189,32 @@ const PROVISIONAL_MARKER_VERSION: u8 = 2;
 const MAX_PROVISIONAL_MARKER_BYTES: usize = 8 * 1024;
 const MAX_SHELL_BIRTH_BYTES: usize = 256;
 const MAX_TMUX_PANE_ID_BYTES: usize = 64;
-const PROVISIONAL_SHELL_ARTIFACT_NAMES: [&str; 2] = [".wsnav-d17-bashrc", ".zshrc"];
-pub(crate) const PROVISIONAL_MARKER_FILE: &str = "d17-provisional.json";
+const PROVISIONAL_SHELL_ARTIFACT_NAMES: [&str; 2] = [".wsnav-provisional-bashrc", ".zshrc"];
+pub(crate) const PROVISIONAL_MARKER_FILE: &str = "provisional.json";
 
 /// Rebuilds the complete host-wide singleton inventory while retaining the
 /// stable provisional lease. It performs no marker, runtime, tmux, process,
 /// provider, or filesystem mutation; callers must revalidate the same lease
 /// again immediately before any later materialization step.
 pub(crate) fn classify_host_inventory(
-    state: &D16State,
+    state: &CurrentState,
     provisional_lease: &ProvisionalLease,
-) -> Result<D17ProvisionalInventory, HostInventoryError> {
+) -> Result<ProvisionalInventory, HostInventoryError> {
     provisional_lease.revalidate_for_mutation(state.root())?;
-    let registered_runtime_paths = state.d17_registered_runtime_paths()?;
-    let operations = state.d17_onboarding_operation_inventory()?;
+    let registered_runtime_paths = state.registered_runtime_paths()?;
+    let operations = state.onboarding_operation_inventory()?;
     provisional_lease.revalidate_for_mutation(state.root())?;
-    classify_d17_provisional_inventory(state.root(), &registered_runtime_paths, &operations)
+    classify_provisional_inventory(state.root(), &registered_runtime_paths, &operations)
         .map_err(HostInventoryError::from)
 }
 
 /// Reconciles a marker that has not crossed the durable Runtime-owned fence.
-/// It is safe to call during every D17 startup/reconnect while the caller
+/// It is safe to call during every startup/reconnect while the caller
 /// holds the host-wide provisional lease.  Live or unknown evidence remains
 /// untouched; only a missing private tmux server proves that no provisional
 /// shell remains to preserve.
 pub(crate) fn reconcile_pre_handoff_under_lease(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     presentation_directory: &Path,
 ) -> Result<PreHandoffRecovery, PreHandoffRecoveryError> {
@@ -233,7 +233,7 @@ pub(crate) fn reconcile_pre_handoff_under_lease(
 /// is read-only; no process or tmux control occurs on this path.
 #[allow(clippy::too_many_lines)]
 pub(crate) fn reconcile_pre_handoff_with_runtime(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     presentation_directory: &Path,
     tmux: &dyn crate::runtime::TmuxClient,
@@ -245,7 +245,7 @@ pub(crate) fn reconcile_pre_handoff_with_runtime(
         Err(SlotError::MarkerUnavailable) => return Ok(PreHandoffRecovery::Unchanged),
         Err(error) => return Err(error.into()),
     };
-    let context = Presentation::d17_context_from_directory(state.root(), presentation_directory)
+    let context = Presentation::context_from_directory(state.root(), presentation_directory)
         .map_err(|_| PreHandoffRecoveryError::Ambiguous)?;
     if slot.presentation_id() != context.presentation_id()
         || slot.presentation_revision() != context.presentation_revision()
@@ -265,7 +265,7 @@ pub(crate) fn reconcile_pre_handoff_with_runtime(
     }
 
     let runtime = PrivateRuntime::new(tmux, process_probe, slot.runtime_paths().clone());
-    let operation = state.d17_onboarding_marker_operation_current(
+    let operation = state.onboarding_marker_operation_current(
         provisional_lease,
         slot.presentation_id(),
         slot.presentation_revision(),
@@ -278,7 +278,7 @@ pub(crate) fn reconcile_pre_handoff_with_runtime(
     }
 
     let registered_candidate = state
-        .d17_registered_runtime_paths()?
+        .registered_runtime_paths()?
         .iter()
         .any(|paths| paths == slot.runtime_paths());
 
@@ -345,7 +345,7 @@ pub(crate) fn reconcile_pre_handoff_with_runtime(
     // A missing private server is conclusive no-effect evidence for these
     // phases.  Capability cancellation is transactional; marker/artifacts
     // are removed only after that state boundary commits.
-    state.cancel_d17_onboarding_current(
+    state.cancel_onboarding_current(
         provisional_lease,
         slot.presentation_id(),
         slot.presentation_revision(),
@@ -365,12 +365,12 @@ pub(crate) fn reconcile_pre_handoff_with_runtime(
 /// candidate only after the caller has independently revalidated its shell
 /// lineage; it still never touches the Runtime itself.
 pub(crate) fn cancel_pre_handoff_under_lease(
-    state: &mut D16State,
+    state: &mut CurrentState,
     provisional_lease: &ProvisionalLease,
     presentation_directory: &Path,
     slot: &ProvisionalSlot,
 ) -> Result<bool, PreHandoffRecoveryError> {
-    let context = Presentation::d17_context_from_directory(state.root(), presentation_directory)
+    let context = Presentation::context_from_directory(state.root(), presentation_directory)
         .map_err(|_| PreHandoffRecoveryError::Ambiguous)?;
     if slot.presentation_id() != context.presentation_id()
         || slot.presentation_revision() != context.presentation_revision()
@@ -388,7 +388,7 @@ pub(crate) fn cancel_pre_handoff_under_lease(
     ) {
         return Err(PreHandoffRecoveryError::Ambiguous);
     }
-    let operation = state.d17_onboarding_marker_operation_current(
+    let operation = state.onboarding_marker_operation_current(
         provisional_lease,
         slot.presentation_id(),
         slot.presentation_revision(),
@@ -398,14 +398,14 @@ pub(crate) fn cancel_pre_handoff_under_lease(
     )?;
     if operation.is_none()
         && state
-            .d17_registered_runtime_paths()?
+            .registered_runtime_paths()?
             .iter()
             .any(|paths| paths == slot.runtime_paths())
     {
         return Err(PreHandoffRecoveryError::Ambiguous);
     }
     state
-        .cancel_d17_onboarding_current(
+        .cancel_onboarding_current(
             provisional_lease,
             slot.presentation_id(),
             slot.presentation_revision(),
@@ -568,7 +568,7 @@ fn inspect_exact_provisional_runtime_artifacts(
 /// marker identity proof, unlink, and directory durability. The adopted
 /// Runtime and terminal operation remain untouched.
 pub(crate) fn retire_provider_exec_proven_marker(
-    state: &D16State,
+    state: &CurrentState,
     provisional_lease: &ProvisionalLease,
     presentation_directory: &Path,
     expected: &ProvisionalSlot,
@@ -585,8 +585,7 @@ pub(crate) fn retire_provider_exec_proven_marker(
         .handoff_request()
         .map(OperationId::from)
         .ok_or(HostRetirementError::Identity)?;
-    let target =
-        state.d17_onboarding_exec_proven_target_current(provisional_lease, operation_id)?;
+    let target = state.onboarding_exec_proven_target_current(provisional_lease, operation_id)?;
     if target.ownership().operation_id != operation_id
         || target.ownership().runtime_id != expected.candidate_runtime_id()
     {
@@ -609,12 +608,12 @@ pub(crate) fn retire_provider_exec_proven_marker(
 /// pass through this proof and revalidate the same lease immediately after
 /// their marker-first materialization attempt.
 pub(crate) fn validate_fresh_host_materialization(
-    state: &D16State,
+    state: &CurrentState,
     provisional_lease: &ProvisionalLease,
     presentation_directory: &Path,
     slot: &ProvisionalSlot,
 ) -> Result<(), HostMaterializationError> {
-    let context = Presentation::d17_context_from_directory(state.root(), presentation_directory)
+    let context = Presentation::context_from_directory(state.root(), presentation_directory)
         .map_err(|_| HostMaterializationError::Presentation)?;
     if context.presentation_id() != slot.presentation_id()
         || context.presentation_revision() != slot.presentation_revision()
@@ -627,13 +626,13 @@ pub(crate) fn validate_fresh_host_materialization(
     }
 
     match classify_host_inventory(state, provisional_lease)? {
-        D17ProvisionalInventory::Vacant => {}
-        D17ProvisionalInventory::Occupied => return Err(HostMaterializationError::Occupied),
+        ProvisionalInventory::Vacant => {}
+        ProvisionalInventory::Occupied => return Err(HostMaterializationError::Occupied),
     }
     revalidate_host_materialization_lease(state, provisional_lease)?;
 
     let registered_runtime_paths = state
-        .d17_registered_runtime_paths()
+        .registered_runtime_paths()
         .map_err(HostInventoryError::from)?;
     if registered_runtime_paths
         .iter()
@@ -654,10 +653,10 @@ pub(crate) fn validate_fresh_host_materialization(
 /// plan for this exact private Runtime.
 #[allow(
     clippy::too_many_arguments,
-    reason = "the exact lease, presentation, Runtime, launch, startup, and process evidence must remain visible at one D17 materialization fence"
+    reason = "the exact lease, presentation, Runtime, launch, startup, and process evidence must remain visible at one materialization fence"
 )]
 pub(crate) fn materialize_private_shell_with_startup_under_lease(
-    state: &D16State,
+    state: &CurrentState,
     provisional_lease: &ProvisionalLease,
     presentation_directory: &Path,
     slot: &ProvisionalSlot,
@@ -683,7 +682,7 @@ pub(crate) fn materialize_private_shell_with_startup_under_lease(
     reason = "the exact lease, presentation, Runtime, launch, startup, and process evidence must remain visible at one materialization fence"
 )]
 fn materialize_private_shell_under_lease_inner(
-    state: &D16State,
+    state: &CurrentState,
     provisional_lease: &ProvisionalLease,
     presentation_directory: &Path,
     slot: &ProvisionalSlot,
@@ -707,7 +706,7 @@ fn materialize_private_shell_under_lease_inner(
 }
 
 fn revalidate_host_materialization_lease(
-    state: &D16State,
+    state: &CurrentState,
     provisional_lease: &ProvisionalLease,
 ) -> Result<(), HostMaterializationError> {
     provisional_lease
@@ -1413,7 +1412,7 @@ impl ProvisionalSlot {
 
     /// Returns the canonical presentation seed bound to this exact
     /// provisional candidate. It remains marker-private and is exposed only
-    /// for equality checks at D17 authority fences.
+    /// for equality checks at authority fences.
     #[must_use]
     pub(crate) fn seed_cwd(&self) -> &Path {
         &self.seed_cwd
@@ -1623,16 +1622,17 @@ mod tests {
         domain::{IdGenerator, ProviderKind, Revision, RuntimeId},
         onboarding::{ShellCommandDecision, classify_shell_command},
         presentation::{Presentation, PresentationPaths, create_paths_for_test},
-        repository::RepositoryRegistration,
+        repository::RepositoryDiscovery,
         runtime::{
             NativeLaunch, PrivateRuntime, ProcessGroupInfo, ProcessGroupProbe, ProcessProbe,
             ProcessProbeError, RuntimeError, RuntimePaths, RuntimeStartup, TmuxClient,
             TmuxInvocation, TmuxResponse,
         },
         state::{
-            D16State, ProvisionalLease,
-            d16::{OnboardingPreparation, OnboardingPrepareRequest, OnboardingReservation},
-            fresh_create_d17,
+            CurrentState, ProvisionalLease, create_current,
+            current::{
+                OnboardingPreparation, OnboardingPrepareRequest, onboarding::OnboardingReservation,
+            },
         },
     };
 
@@ -1820,7 +1820,7 @@ mod tests {
         temporary: tempfile::TempDir,
         state_path: PathBuf,
         presentation_directory: PathBuf,
-        state: D16State,
+        state: CurrentState,
         provisional_lease: ProvisionalLease,
         slot: ProvisionalSlot,
         request: Option<OnboardingPrepareRequest>,
@@ -1845,14 +1845,14 @@ mod tests {
             panic!("fixture command must be promotable");
         };
         OnboardingPrepareRequest {
-            request_key: format!("d17-recovery-request-{candidate_runtime_id}"),
+            request_key: format!("recovery-request-{candidate_runtime_id}"),
             presentation_id,
             presentation_revision,
             slot_generation,
             candidate_runtime_id,
             runtime_paths: RuntimePaths::for_runtime(state_path, candidate_runtime_id),
             provider: ProviderKind::Codex,
-            repository: RepositoryRegistration {
+            repository: RepositoryDiscovery {
                 project_root: worktree_root,
                 display_name: "recovery-worktree".to_owned(),
                 remote_identity_fingerprint: Some(format!("git-remote-v1:{}", "a".repeat(64))),
@@ -1864,7 +1864,7 @@ mod tests {
             shell_process_group: 710,
             shell_session: 710,
             argv_digest: launch.argv_digest().to_owned(),
-            boot_provenance: format!("d17-boot-v1:sha256:{}", "b".repeat(64)),
+            boot_provenance: format!("wsnav-boot-v1:sha256:{}", "b".repeat(64)),
             now_monotonic_millis: 10,
             expiry_monotonic_millis: 1_010,
         }
@@ -1873,8 +1873,8 @@ mod tests {
     fn recovery_fixture(materialized: bool, handoff: bool) -> RecoveryFixture {
         let temporary = tempfile::tempdir().unwrap();
         let state_path = temporary.path().join("state");
-        let mut state = fresh_create_d17(&state_path, &RecoveryIds::default()).unwrap();
-        let provisional_lease = state.acquire_d17_provisional_lease().unwrap();
+        let mut state = create_current(&state_path, &RecoveryIds::default()).unwrap();
+        let provisional_lease = state.acquire_provisional_lease().unwrap();
         let presentation_directory = state_path
             .join("presentation")
             .join("presentation-000000000001");
@@ -1899,7 +1899,7 @@ mod tests {
         .unwrap();
         let presentation_id = Uuid::from_u128(0x1700);
         let context = presentation
-            .initialize_d17_context(presentation_id, &seed)
+            .initialize_context(presentation_id, &seed)
             .unwrap();
         let candidate_runtime_id = RuntimeId::from(Uuid::from_u128(0x9000));
         let slot_generation = Uuid::from_u128(0x1701);
@@ -1925,11 +1925,7 @@ mod tests {
                 candidate_runtime_id,
             );
             let reservation = match state
-                .prepare_d17_onboarding_current(
-                    &provisional_lease,
-                    &request,
-                    &RecoveryIds::default(),
-                )
+                .prepare_onboarding_current(&provisional_lease, &request, &RecoveryIds::default())
                 .unwrap()
             {
                 OnboardingPreparation::Issued(reservation) => reservation,
@@ -2048,7 +2044,9 @@ mod tests {
         for path in [
             slot.runtime_paths().config.clone(),
             slot.runtime_paths().launch_barrier(),
-            slot.runtime_paths().directory.join(".wsnav-d17-bashrc"),
+            slot.runtime_paths()
+                .directory
+                .join(".wsnav-provisional-bashrc"),
             slot.runtime_paths().directory.join(".zshrc"),
         ] {
             fs::write(&path, b"fixture").unwrap();
@@ -2139,7 +2137,7 @@ mod tests {
         assert_eq!(
             fixture
                 .state
-                .d17_onboarding_operation_inventory()
+                .onboarding_operation_inventory()
                 .unwrap()
                 .into_iter()
                 .find(|operation| operation.operation_id == operation_id)
@@ -2148,7 +2146,7 @@ mod tests {
         );
         let request = fixture.request.as_ref().unwrap();
         assert!(matches!(
-            fixture.state.consume_d17_onboarding_current(
+            fixture.state.consume_onboarding_current(
                 &fixture.provisional_lease,
                 request,
                 &token,
@@ -2165,7 +2163,7 @@ mod tests {
         let request = fixture.request.as_ref().unwrap();
         fixture
             .state
-            .cancel_d17_onboarding_current(
+            .cancel_onboarding_current(
                 &fixture.provisional_lease,
                 request.presentation_id,
                 request.presentation_revision,
@@ -2201,7 +2199,7 @@ mod tests {
         let reservation = fixture.reservation.as_ref().unwrap();
         fixture
             .state
-            .consume_d17_onboarding_current(
+            .consume_onboarding_current(
                 &fixture.provisional_lease,
                 request,
                 reservation.capability().token(),
@@ -2228,8 +2226,8 @@ mod tests {
         assert!(!fixture.slot.runtime_paths().directory.exists());
         assert_eq!(tmux.calls.borrow().len(), 0);
         assert_eq!(
-            fixture.state.d17_onboarding_operation_inventory().unwrap(),
-            vec![crate::state::d16::D17OnboardingOperationInventory {
+            fixture.state.onboarding_operation_inventory().unwrap(),
+            vec![crate::state::current::OnboardingOperationInventory {
                 operation_id: reservation.operation_id(),
                 workstream_id: fixture.reservation.as_ref().unwrap().workstream_id(),
                 runtime_id: fixture.slot.candidate_runtime_id(),

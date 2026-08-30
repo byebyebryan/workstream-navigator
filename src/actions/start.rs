@@ -735,11 +735,11 @@ struct OpenCodeObserverLaunch {
     handle_revision: Revision,
 }
 
-/// Starts and waits for the exact D17 observer after a separate
+/// Starts and waits for the exact observer after a separate
 /// reconciler has recorded the native provider PID/birth.  This has no
 /// provider-start authority: it accepts only an already-bound `Starting`
 /// handle and never contacts the provider itself.
-pub(crate) fn spawn_d17_opencode_observer(
+pub(crate) fn spawn_runtime_opencode_observer(
     registry: &mut HostRegistry,
     root: &Path,
     record: &crate::state::RuntimeRecord,
@@ -771,14 +771,14 @@ pub(crate) fn spawn_d17_opencode_observer(
         process_birth: process_birth.clone(),
         handle_revision: handle.revision,
     };
-    spawn_opencode_observer_with_mode(registry, &observer, opencode::OpenCodeObserverMode::D17)
+    spawn_opencode_observer_with_mode(registry, &observer, opencode::OpenCodeObserverMode::Current)
 }
 
 fn spawn_opencode_observer(
     registry: &mut HostRegistry,
     observer: &OpenCodeObserverLaunch,
 ) -> Result<(), ActionError> {
-    spawn_opencode_observer_with_mode(registry, observer, opencode::OpenCodeObserverMode::D16)
+    spawn_opencode_observer_with_mode(registry, observer, opencode::OpenCodeObserverMode::Current)
 }
 
 fn spawn_opencode_observer_with_mode(
@@ -1132,8 +1132,11 @@ mod observer_command_tests {
             process_birth: "provider-birth".to_owned(),
             handle_revision: Revision::INITIAL,
         };
-        let mut command =
-            opencode_observer_command(&executable, &observer, opencode::OpenCodeObserverMode::D16);
+        let mut command = opencode_observer_command(
+            &executable,
+            &observer,
+            opencode::OpenCodeObserverMode::Current,
+        );
         let mut child = command.spawn().unwrap();
         let child_pid = i32::try_from(child.id()).unwrap();
 

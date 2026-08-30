@@ -2,19 +2,15 @@
 
 ## Status and authority
 
-D16 host-local implementation and its separately authorized live acceptance
-remain complete historical evidence. D17 shell-first managed-session
-onboarding is complete and is the active source-installed product. D17.1's
-bounded state paging, active schema identity, process cleanup, tmux 3.4
-metadata parsing, and deterministic CI prerequisites are implemented. Its
-repository and Rust-1.88 gates pass and its exact artifact is installed; the
-D17.1 explicitly authorized disposable Codex/OpenCode replay passes with
-complete cleanup. D17's
-schema-14 cutover, Navigator, brokered Codex/OpenCode promotion, managed
-attachment paths, interrupted-shell and unconsumed-capability recovery,
-schema-14 public-command routing, retired-D16 removal, and fresh-state Codex
-observer readiness and recorded operator-gated acceptance remain complete for
-the artifact identified by that historical record.
+D0-D18 are complete. D18 preserves the shell-first managed-session product on
+one direct schema-15 epoch while deleting the old transition and compatibility
+plane. The corrected release artifact is
+installed byte-for-byte, the authorized destructive reset and ordinary
+schema-15 bootstrap are complete, and a real 80-column shell-first launch
+passes. Rust 1.88 and Ubuntu 24.04 clean-environment matrices, explicit native
+observer trust, disposable Codex/OpenCode lifecycle acceptance, complete
+cleanup, and the full repository gate pass. The checkpoint commit containing
+this record binds the accepted source to the installed release artifact.
 
 - [Product and architecture design](design.md) is the V1 contract.
 - [Delivery roadmap](roadmap.md) owns delivery order, checkpoint status, and
@@ -24,9 +20,29 @@ the artifact identified by that historical record.
 - [Historical evidence](evidence/README.md) preserves the exact candidate,
   environment, procedure, and limitations of earlier checkpoints.
 
+## D18 accepted current-only release
+
+[D18 current-only consolidation](design.md#current-schema-15-consolidation-boundary)
+is implemented in the installed release. It preserves the current
+Shell-first product while replacing the accumulated D16/D17 transition plane
+with one direct schema-15 bootstrap and semantic current modules. It is an
+intentional reset epoch: D18 refuses rather than migrates or adopts schema-12
+through schema-14 roots. The
+[roadmap](roadmap.md#completed-checkpoint-d18-current-only-consolidation) records
+the completed disposable-provider, native-trust, cleanup, and commit gates. The
+rejected coherent-backup design remains historical
+evidence in [spike
+0027](evidence/spikes/0027-d18-root-move-falsification.md), but its
+arbitrary-holder proof is not required for discarded state.
+
+The authorized reset parked the exact D17.1 Runtimes, removed the owned observer
+declaration, and quarantined the whole schema-14 root as discarded state before
+D18 installed and directly created schema 15. No old state is migrated,
+adopted, or restored; the exact quarantine was deleted after acceptance.
+
 ## Current operator contract
 
-This section describes the installed D17 binary.
+This section describes the installed D18 release.
 
 WSNav is host-local. Run it on the machine where the provider Runtime lives.
 For another machine, establish ordinary SSH in a separate terminal, tab, or
@@ -43,7 +59,7 @@ views. Workstreams keeps `Enter`, `n`, `f`, `p`, `x`, `a`, and `?`; Archived
 uses `u` to restore without starting or attaching a provider. The installed
 `wsnav --help` output is the CLI reference for that exact binary.
 
-Retained public management commands use the same schema-14 snapshot and
+Retained public management commands use the same schema-15 snapshot and
 revision-fenced action boundaries as the Navigator. Passive status and
 operation queries do not launch a provider or inspect tmux. Direct scripting
 commands never install observer state or open native review; a Codex action
@@ -80,27 +96,16 @@ non-recursively through its process-local owner; presentation teardown finishes
 an interrupted exact cleanup only after stopping the possible native users.
 Changed, non-empty, foreign, or ambiguous paths are preserved.
 
-D16 removes the client catalog in a clean break. The exact
-`client.sqlite`, `client.sqlite-wal`, and `client.sqlite-shm` paths are
-discarded without reading or importing their contents. There is no importer,
-dual write, automatic backup, downgrade, or rollback adapter. An operator who
-wants downgrade insurance may, before interactive confirmation, park or stop
-managed Runtimes, exit WSNav, and create a verified offline copy of the
-complete state root; restoring that external copy is outside D16 and is the
-only downgrade procedure. Schema 12 migrates transactionally to schema 13
-using `host.sqlite` only, preserving host/runtime/provider identity and history
-while rebuilding host-local Projects.
+D18 directly creates only schema 15 through its stable `bootstrap.lock` and
+refuses old, future, foreign, malformed, mixed, or transition-shaped roots
+before SQLite recovery or mutation. There is no importer, migration, adoption,
+automatic backup, downgrade, or state-rollback adapter. The discarded D17.1
+quarantine was deleted after acceptance and is never an input to the installed
+binary.
 
-Legacy presentation retirement is also fail-closed. Attached clients,
-utility shells, and native observer-review surfaces block mutation. A bounded
-drain-only attachment may be offered without opening host state so the user
-can finish and quit the old presentation. Only an exact detached owned
-presentation may be retired under the transition lease; Runtime tmux servers,
-provider processes, sessions, and completed output are never targeted.
+## Managed-onboarding contract
 
-## D17 managed-onboarding contract
-
-D17 reduces the ordinary navigator to Workstreams and Archived. Workstreams
+The ordinary navigator has only Workstreams and Archived. Workstreams
 always shows one pinned `Shell` card. At presentation
 creation, WSNav captures, validates, and canonicalizes that presentation's
 invocation cwd as a private seed. After both presentation panes are proven,
@@ -129,7 +134,7 @@ the capability and onboarding journal bind that generation to the candidate.
 The card is headed exactly `Shell` with no path-selection hint. It shows the
 bounded live cwd described above, then opens a presentation-scoped account
 shell; the user changes
-directory normally and types `codex` or `opencode`. D17 supports Bash and Zsh
+directory normally and types `codex` or `opencode`. WSNav supports Bash and Zsh
 interactive non-login shells only. Shell-specific private wrappers inherit the
 validated presentation environment, original `HOME`, and (for Zsh) original
 `ZDOTDIR`, reproduce the ordinary non-login interactive startup graph in its
@@ -146,27 +151,16 @@ For a promotable fresh interactive native TUI shape, the controlled function
 invokes a bounded prepare broker as a child over private non-terminal control
 I/O. One stable host-private `provisional.lock` serializes materialization,
 close/loss cleanup, prepare/token issuance, helper consume, singleton
-reconciliation, and marker cleanup; it is distinct from D16's schema-cutover
-`transition.lock` and is operational state rather than presentation-private
-storage or a Runtime/card/Workstream row. Schema-14 host-operational lease
-metadata stores only a planned `lease_generation`, install phase `pending` or
-`ready`, and expected lock device/inode once ready; it is not a card, Runtime,
-Workstream, or presentation-private row. The schema/HostId transaction commits
-schema-14 ownership and pending metadata first; schema-13 code and path never
-create or recognize `provisional.lock`.
-Only after that database commit is durable may schema-14 startup reconcile the
-artifact. In `pending`, an absent mode-`0600` current-owner regular file is
-created lazily with create-new/no-follow, bounded file contents are written, the
-file is fsynced, then the containing state-root directory is fsynced before
-metadata finalizes `ready` with expected device/inode;
-an exact file left by a crash may be validated/locked and finalized. Pending
-foreign or mismatched evidence fails closed. In `ready`, missing, replaced, or
-device/inode-mismatched evidence fails closed and is never recreated. The file
-contains only bounded format version, HostId, and `lease_generation`; it carries
-no cwd, command, argv, provider/user content, or provider payload. A pre-schema-14
-artifact is unexpected/ambiguous, remains untouched, and is never adopted or
-deleted. This ordering does not claim cross-store atomicity. Every actor opens it
-no-follow/CLOEXEC, retains one
+reconciliation, and marker cleanup. It is bootstrap-bound operational state,
+not presentation-private storage or a Runtime/card/Workstream row. Direct
+schema-15 bootstrap precommits its generation, installs the exact mode-`0600`
+current-owner create-new/no-follow inode, and records its device/inode before
+the bootstrap becomes `ready`. `bootstrap.lock`, host operational metadata,
+and the file must agree whenever current state opens. A missing, replaced,
+foreign, or mismatched ready artifact fails closed and is never recreated or
+adopted. The file contains only bounded format version, HostId, and
+`lease_generation`; it carries no cwd, command, argv, provider/user content,
+or provider payload. Every actor opens it no-follow/CLOEXEC, retains one
 nonblocking exclusive kernel-lock FD, revalidates root/path/FD device-inode
 identity before mutation, and never leaks the FD across provider exec; crash
 releases only the kernel lock, and restart reacquires the same artifact. Busy,
@@ -295,17 +289,16 @@ back attempt-only graph state and leaves the derived singleton card available
 but unmaterialized. An ambiguous-effect slot is never reusable.
 
 Projects remain internal host-local grouping metadata for Workstreams and
-Archived. D17 exposes no Projects page, provider picker, Location picker,
+Archived. WSNav exposes no Projects page, provider picker, Location picker,
 browser-root setting, repository-registration form, or manual metadata-refresh
-action. The current arbitrary-location `register <checkout> [--provider]`
-command (and equivalent public registration form) is removed at the atomic
-cutover; only the brokered shell can create a new Location/provider pair.
+action. The arbitrary-location `register <checkout> [--provider]` command and
+equivalent public registration form are absent; only the brokered shell can
+create a new Location/provider pair.
 
-The schema-13-to-14 migration removes the obsolete Project-browser setting
-while preserving authoritative Projects, Locations, Workstreams, Runtimes,
-bindings, attention, and unfinished operations. D17 does not require a state
-wipe. Normal detach and reattach to the same owned presentation preserves the
-exact provisional shell. The stable host-private `provisional.lock` lease makes
+Direct schema 15 omits the obsolete Project-browser setting and retains only
+internal Project/Location grouping required by Workstreams. Normal detach and
+reattach to the same owned presentation preserves the exact provisional shell.
+The stable host-private `provisional.lock` lease makes
 confirmed close or conclusive loss recheck the marker, onboarding journal, and
 revisions, then clean only exact pre-handoff provisional ownership by canceling
 an unconsumed capability
@@ -325,17 +318,19 @@ broker-only through the provisional shell.
 Disposable automated evidence covers the schema/lease boundaries, Bash/Zsh
 wrappers, marker-backed Runtime handoff, provider grammar, crash/recovery
 fences, exact attachment, card promotion/selection, live cwd display, and
-retired split-shell bindings. The [D17 roadmap
-checkpoint](roadmap.md#d17---shell-first-managed-session-onboarding) records the
-completed exit gates. Sanitized live Codex/OpenCode acceptance passed with
-explicit operator intent and complete disposable cleanup.
+retired split-shell bindings. The
+[D17 acceptance record](evidence/acceptance/d17-shell-first.md) records the
+historical onboarding exit gates. The
+[D18 acceptance record](evidence/acceptance/d18-current-source-candidate.md)
+records the current sanitized Codex/OpenCode pass with explicit operator intent
+and complete disposable cleanup.
 
 ## Build and command references
 
-The project is a source-installed operator beta. From a reviewed checkout,
-build and install at a high level with `cargo build --locked --release` and
-`install -m 755 target/release/wsnav ~/.local/bin/wsnav`; run `scripts/check`
-for the repository gate. `wsnav --help` is the installed CLI reference. D16
-cutover remains historical; current state opens at schema 14. The normal
-workflow is the Navigator beside either the provisional account shell or the
-native provider TUI.
+The project is a source-installed operator beta. The installed D18 release
+opens only schema 15 and its `wsnav --help` is the installed CLI reference. Run
+`cargo build --locked --release` and `scripts/check` before any replacement.
+The destructive reset, exact installation, native observer trust, and
+live-provider acceptance are complete; there is no state rollback. The normal
+workflow remains the Navigator beside either the provisional account shell or
+the native provider TUI.

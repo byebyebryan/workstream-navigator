@@ -1,7 +1,4 @@
-use std::{
-    env, fs,
-    path::{Component, Path, PathBuf},
-};
+use std::{fs, path::Path};
 
 use crate::domain::{
     OperationKind, OperationPhase, ProviderKind, RuntimeStatus, WorkstreamLifecycle,
@@ -10,7 +7,6 @@ use crate::domain::{
 use crate::provider::names::NameState;
 
 use super::models::{IntegrationLifecycle, StateError};
-use super::schema::{MAX_PROJECT_BROWSER_RELATIVE_PATH_BYTES, MAX_PROJECT_BROWSER_ROOT_BYTES};
 
 pub(in crate::state) fn to_from_sql_error(
     error: impl std::error::Error + Send + Sync + 'static,
@@ -207,99 +203,6 @@ pub(in crate::state) fn validate_repository_fingerprint(
     Ok(())
 }
 
-pub(in crate::state) fn default_project_browser_root() -> Result<PathBuf, StateError> {
-    let home = env::var_os("HOME").ok_or(StateError::ProjectBrowserRootUnavailable)?;
-    Ok(PathBuf::from(home))
-}
-
-pub(in crate::state) fn resolve_project_browser_root(value: &str) -> Result<PathBuf, StateError> {
-    if value.is_empty()
-        || value.len() > MAX_PROJECT_BROWSER_ROOT_BYTES
-        || value.chars().any(char::is_control)
-    {
-        return Err(StateError::InvalidProjectBrowserRoot);
-    }
-    if value == "~" {
-        return env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or(StateError::ProjectBrowserRootUnavailable);
-    }
-    if let Some(relative) = value.strip_prefix("~/") {
-        validate_project_browser_relative_path(relative)?;
-        let home = env::var_os("HOME").ok_or(StateError::ProjectBrowserRootUnavailable)?;
-        return Ok(PathBuf::from(home).join(relative));
-    }
-    let path = PathBuf::from(value);
-    path.is_absolute()
-        .then_some(path)
-        .ok_or(StateError::InvalidProjectBrowserRoot)
-}
-
-pub(in crate::state) fn validate_project_browser_relative_path(
-    value: &str,
-) -> Result<(), StateError> {
-    if value.len() > MAX_PROJECT_BROWSER_RELATIVE_PATH_BYTES
-        || value.chars().any(char::is_control)
-        || value.contains('\\')
-        || value.starts_with('/')
-        || value.ends_with('/')
-    {
-        return Err(StateError::InvalidProjectBrowserRelativePath);
-    }
-    if !value.is_empty()
-        && Path::new(value)
-            .components()
-            .any(|component| !matches!(component, Component::Normal(_)))
-    {
-        return Err(StateError::InvalidProjectBrowserRelativePath);
-    }
-    Ok(())
-}
-
-pub(in crate::state) fn project_browser_directory(
-    root: &Path,
-    relative_path: &str,
-) -> Result<PathBuf, StateError> {
-    let current = fs::canonicalize(root.join(relative_path))
-        .map_err(|_| StateError::ProjectBrowserRootUnavailable)?;
-    if current.starts_with(root) && current.is_dir() {
-        Ok(current)
-    } else {
-        Err(StateError::InvalidProjectBrowserRelativePath)
-    }
-}
-
-pub(in crate::state) fn safe_project_browser_entry_name(name: &str, include_hidden: bool) -> bool {
-    !name.is_empty()
-        && name.len() <= 256
-        && (include_hidden || !name.starts_with('.'))
-        && !name.chars().any(char::is_control)
-        && !name.contains(['/', '\\'])
-        && !matches!(name, "." | "..")
-}
-
-pub(in crate::state) fn project_browser_root_label(root: &Path) -> String {
-    let Some(home) = env::var_os("HOME").map(PathBuf::from) else {
-        return root
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("project root")
-            .to_owned();
-    };
-    if let Ok(relative) = root.strip_prefix(home) {
-        if relative.as_os_str().is_empty() {
-            "~".to_owned()
-        } else {
-            format!("~/{}", relative.to_string_lossy())
-        }
-    } else {
-        root.file_name().and_then(|name| name.to_str()).map_or_else(
-            || "custom project root".to_owned(),
-            |name| format!("custom root · {name}"),
-        )
-    }
-}
-
 #[cfg(unix)]
 pub(in crate::state) fn set_private_directory_permissions(path: &Path) -> Result<(), StateError> {
     use std::os::unix::fs::PermissionsExt;
@@ -312,20 +215,5 @@ pub(in crate::state) fn set_private_directory_permissions(path: &Path) -> Result
 
 #[cfg(not(unix))]
 pub(in crate::state) fn set_private_directory_permissions(_path: &Path) -> Result<(), StateError> {
-    Ok(())
-}
-
-#[cfg(all(unix, test))]
-pub(in crate::state) fn set_private_file_permissions(path: &Path) -> Result<(), StateError> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o600)).map_err(|source| StateError::Io {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-#[cfg(not(unix))]
-pub(in crate::state) fn set_private_file_permissions(_path: &Path) -> Result<(), StateError> {
     Ok(())
 }

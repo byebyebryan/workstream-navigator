@@ -21,6 +21,12 @@ ordinary operator SSH followed by a host-local `wsnav` instance, with separate
 terminal windows per host. The historical files are intentionally not rewritten
 to make their old procedures appear current.
 
+## Authority archives
+
+- [Roadmap through D18 design](../roadmap-through-d18-design.md) preserves
+  the complete pre-slimming delivery narrative and its original status detail.
+  The active roadmap is [`../roadmap.md`](../roadmap.md).
+
 ## Acceptance records
 
 - [D1 local Codex](acceptance/d1-local-codex.md)
@@ -39,6 +45,7 @@ to make their old procedures appear current.
 - [D16 host-local simplification](acceptance/d16-host-local.md)
 - [D17 shell-first managed-session onboarding](acceptance/d17-shell-first.md)
 - [D17.1 correctness and release closure](acceptance/d17.1-correctness-closure.md)
+- [D18 current-only consolidation](acceptance/d18-current-source-candidate.md)
 
 ## Design spikes
 
@@ -78,6 +85,11 @@ concurrent production implementation.
 [Spike 0026](spikes/0026-d17-provider-effect-journal.md) validates the
 synthetic provider-effect journal ordering for Codex no-effect and OpenCode
 known/ambiguous blank-session creation, without launching either provider.
+[Spike 0027](spikes/0027-d18-root-move-falsification.md) records why an
+unprivileged online process cannot prove the race-free zero-holder boundary
+required by the rejected coherent-backup/online-rollback design. The current
+D18 destructive reset does not claim that boundary; no release tool or
+ordinary-state move was attempted during the spike.
 
 ## Provider studies
 

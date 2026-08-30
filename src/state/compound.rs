@@ -409,25 +409,6 @@ impl HostRegistry {
         })
     }
 
-    #[cfg(test)]
-    #[allow(clippy::missing_errors_doc)]
-    pub fn prepare_fork(
-        &mut self,
-        request_key: String,
-        kind: OperationKind,
-        source_workstream_id: WorkstreamId,
-        expected_source_revision: Revision,
-    ) -> Result<ForkPreparation, StateError> {
-        let provider = self.workstream_provider(source_workstream_id)?;
-        self.prepare_fork_with_provider(
-            request_key,
-            kind,
-            source_workstream_id,
-            expected_source_revision,
-            provider,
-        )
-    }
-
     /// Commits a confirmed provider fork together with its destination
     /// Workstream and an exact stopped Runtime binding. The ordinary start
     /// path then launches `codex resume` from that durable binding.

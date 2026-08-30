@@ -2,11 +2,13 @@
 
 Date: 2026-08-29
 
-Status: complete in the checkpoint commit containing this record. Repository
+Status: accepted in the checkpoint commit containing this record. Repository
 checks, the authorized destructive reset, direct ordinary schema-15 bootstrap,
 installed parity, an 80-column shell-first launch, Rust 1.88 and Ubuntu 24.04
 clean-host matrices, explicit native observer trust, disposable Codex/OpenCode
-lifecycle acceptance, and complete cleanup pass.
+lifecycle acceptance, and complete cleanup passed. A later current-source
+correction and its local verification are recorded below without changing the
+historical live-provider acceptance boundary.
 
 ## Candidate boundary
 
@@ -31,11 +33,11 @@ staged/unstaged diff checks.
 
 This post-acceptance index maps the current-only matrix in
 [`docs/design.md`](../../design.md#d18-acceptance-contract) to representative
-tests already present in D18 checkpoint `c961c7e`. It adds no new acceptance
-claim and does not substitute automated evidence for the separately authorized
-live-provider run below. `scripts/check` executes every listed test through the
-locked all-targets/all-features suite; the semantic presentation/state wrapper
-reruns its current-contract subsets.
+tests in the current candidate. It adds no live-provider acceptance claim and
+does not substitute automated evidence for the separately authorized run
+below. `scripts/check` executes every listed test through the locked
+all-targets/all-features suite; the semantic presentation/state wrapper reruns
+its current-contract subsets.
 
 | Contract surface | Representative deterministic proof |
 | --- | --- |
@@ -43,7 +45,7 @@ reruns its current-contract subsets.
 | Brokered Shell promotion, capability consumption, exact handoff ownership, and fresh-Shell selection | `onboarding_broker::tests::broker_reserves_and_consumes_once_after_exact_marker_shell_and_grammar_proof`, `provisional::tests::ownership_consume_removes_cleanup_authority_and_fences_actions_until_exec_proof`, and `navigator::view::tests::promotion_transfers_selection_from_shell_to_its_managed_runtime_card` |
 | Exact attachment, private presentation topology, restart ownership, and native terminal input | `actions::tests::codex_attachment_requires_a_complete_recorded_process_identity`, `presentation::tests::provider_attachment_carries_exact_snapshot_revisions`, and `presentation_recovery::{navigator_stop_leaves_cleanup_to_the_outer_owner,nested_runtime_literal_ctrl_b_reaches_the_provider_as_one_byte}` |
 | Contextual `n` with inherited provider/Location and idempotent independent creation | `navigator::view::tests::new_inherits_the_selected_workstreams_provider_and_location_context` and `actions::tests::{independent_creation_reuses_its_request_without_a_git_effect,independent_creation_keeps_the_project_root_without_touching_files,independent_creation_survives_one_provider_start_failure_without_fallback}` |
-| Same-provider Codex/OpenCode Fork and exact lost-result reconciliation | `provider::codex::app_server::tests::{fork_result_keeps_only_the_exact_destination_identifier,fork_recovery_requires_exact_lineage_and_settled_boundary}` and `provider::opencode::tests::{fork_session_posts_exact_message_boundary_and_returns_distinct_id,fork_session_rejects_same_destination_and_unsafe_boundary}` |
+| Same-provider Codex/OpenCode Fork, transaction ordering, idempotency, recovery, and exact lost-result reconciliation | `actions::tests::{codex_fork_commits_before_start_and_reuses_the_request_without_a_second_fork,opencode_fork_commits_before_start_and_reuses_the_request_without_a_second_fork,codex_fork_reconciles_a_lost_result_without_retrying_the_provider,codex_fork_absent_reconciliation_enters_recovery_and_recovers_exactly_once,opencode_unknown_effect_is_terminal_and_never_retried,opencode_unattempted_recovery_records_attempt_before_effect_and_commits}` plus the provider adapter boundary tests |
 | Park/Start, archive/restore, attention, and durable lifecycle routing | `runtime::tests::park_tolerates_a_private_server_that_is_already_gone`, `actions::tests::archive_and_restore_without_a_runtime_never_start_codex`, and `navigator::view::tests::{primary_action_uses_durable_lifecycle_not_runtime_guesswork,lifecycle_keys_emit_exact_reversible_action_revisions}` |
 | Observer readiness, exact recovery, provisional cleanup/restart, and fail-closed ambiguity | `actions::tests::{completed_native_review_promotes_pending_observer_before_a_managed_action,native_recovery_uses_an_exact_binding_or_the_native_picker,opencode_recovery_handle_match_is_exact_and_provider_namespaced}` and `provisional::tests::{recovery_cancels_handoff_graph_cleans_artifacts_and_rejects_replay,recovery_preserves_live_unknown_foreign_and_changed_evidence}` |
 
@@ -63,11 +65,29 @@ disposable integration matrix passing.
 The first ordinary 80-column attach then exposed a second, narrower race: the
 installed tmux width hook reached the correct final 32/47 layout, but the
 Navigator could inspect the transient attach topology and retain a stale error
-banner. The controller now retries only that exact topology/resize operation
-for at most 100 milliseconds. Two deterministic tests prove transient recovery
-and persistent fail-closed behavior. The final local gate passes 350 library
-tests and 7 presentation integration tests, and the repeated real 80-column
-launch has no banner.
+banner. The original controller-only retry did not protect the equivalent
+one-shot topology observation during presentation startup. The current
+candidate shares one bounded 100-millisecond retry between startup and
+post-attach restoration. Only `InvalidTopology` is retryable; unrelated errors
+fail immediately and persistent incomplete topology still refuses. Three
+deterministic tests prove transient recovery, persistent refusal, and immediate
+unrelated-error refusal.
+
+The post-acceptance correction also drives the production Fork/recovery action
+and transactional state paths through deterministic provider-effect seams for
+both providers. Those tests prove that the attempt marker precedes the provider
+effect, destination commit precedes Runtime start, request replay cannot fork a
+second provider session, Codex lost results reconcile without retry, and
+OpenCode unknown effects become terminal. The obsolete test-only
+`prepare_fork` seam is removed.
+
+For this current candidate, `scripts/check` passed 357 library tests and 7
+presentation integration tests together with formatting, strict Clippy,
+packaging, dependency policy, semantic acceptance, and documentation checks. A
+fresh Rust 1.88.0/Debian/tmux 3.3a container copied the read-only source mount
+to container-local storage, deleted the copied build output, and passed the
+full locked all-targets/all-features suite five consecutive times. Remote CI is
+intentionally not claimed before the correction is committed and pushed.
 
 ## Clean-break correction
 

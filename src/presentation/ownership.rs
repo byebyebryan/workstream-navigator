@@ -562,7 +562,7 @@ impl Presentation {
             .and_then(|()| self.set_pane_remain_on_exit(PROVIDER_PANE, true))
             .and_then(|()| self.install_control_bindings());
         self.complete_start_stage("provider pane setup", result)?;
-        let result = self.set_default_navigator_width();
+        let result = self.retry_default_navigator_width();
         self.complete_start_stage("default navigator width", result)?;
         let result = self.install_navigator_width_hooks();
         self.complete_start_stage("navigator width hooks", result)?;

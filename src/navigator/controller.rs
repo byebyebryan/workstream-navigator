@@ -9,7 +9,6 @@ use std::{
     ffi::OsStr,
     io::{self, Stdout},
     path::{Component, Path, PathBuf},
-    thread,
     time::{Duration, Instant},
 };
 
@@ -42,9 +41,6 @@ use crate::{
 };
 
 use super::view::{Command, Navigator, ObserverSetupKind, ShellLocation};
-
-const NAVIGATOR_WIDTH_RETRY_ATTEMPTS: usize = 20;
-const NAVIGATOR_WIDTH_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 
 /// Errors that prevent the pane from rendering its schema-15-only
 /// Workstreams view.
@@ -264,16 +260,9 @@ fn restore_default_navigator_width(presentation: &Presentation) -> Result<(), Pr
 }
 
 fn retry_default_navigator_width(
-    mut resize: impl FnMut() -> Result<(), PresentationError>,
+    resize: impl FnMut() -> Result<(), PresentationError>,
 ) -> Result<(), PresentationError> {
-    for attempt in 0..NAVIGATOR_WIDTH_RETRY_ATTEMPTS {
-        match resize() {
-            Ok(()) => return Ok(()),
-            Err(error) if attempt + 1 == NAVIGATOR_WIDTH_RETRY_ATTEMPTS => return Err(error),
-            Err(_) => thread::sleep(NAVIGATOR_WIDTH_RETRY_INTERVAL),
-        }
-    }
-    unreachable!("navigator width retry loop has at least one attempt")
+    crate::presentation::retry_default_navigator_width(resize)
 }
 
 /// Refreshes only presentation-local shell context. The cwd is exact live
@@ -1979,11 +1968,10 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        AccountShellInputs, ManagedAction, NAVIGATOR_WIDTH_RETRY_ATTEMPTS, ProviderExecRefresh,
-        apply_managed_action, describe_shell_location, materialize_provisional_shell_with_inputs,
-        observe_shell_cwd, reattach_materialized_provisional_shell, refresh_provider_exec,
-        require_active_workstream, require_parkable_workstream, retry_default_navigator_width,
-        start_same_location,
+        AccountShellInputs, ManagedAction, ProviderExecRefresh, apply_managed_action,
+        describe_shell_location, materialize_provisional_shell_with_inputs, observe_shell_cwd,
+        reattach_materialized_provisional_shell, refresh_provider_exec, require_active_workstream,
+        require_parkable_workstream, retry_default_navigator_width, start_same_location,
     };
     use crate::{
         domain::{
@@ -1991,6 +1979,7 @@ mod tests {
             WorkstreamId, WorkstreamLifecycle,
         },
         navigator::view::ShellLocation,
+        presentation::NAVIGATOR_WIDTH_RETRY_ATTEMPTS,
         presentation::{Presentation, PresentationError},
         process::output_bounded,
         provisional::{ProvisionalPhase, read_marker},
@@ -2054,6 +2043,20 @@ mod tests {
             Err(PresentationError::InvalidTopology)
         ));
         assert_eq!(attempts.get(), NAVIGATOR_WIDTH_RETRY_ATTEMPTS);
+    }
+
+    #[test]
+    fn navigator_width_retry_does_not_retry_unrelated_presentation_failure() {
+        let attempts = Cell::new(0_usize);
+
+        assert!(matches!(
+            retry_default_navigator_width(|| {
+                attempts.set(attempts.get() + 1);
+                Err(PresentationError::ControlRefused("not a topology race"))
+            }),
+            Err(PresentationError::ControlRefused("not a topology race"))
+        ));
+        assert_eq!(attempts.get(), 1);
     }
 
     fn managed_snapshot(onboarding: Option<OnboardingStatus>) -> (Snapshot, WorkstreamId) {

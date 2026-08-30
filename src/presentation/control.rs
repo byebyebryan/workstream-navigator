@@ -52,6 +52,14 @@ impl Presentation {
         )
     }
 
+    /// Reapplies the compact Navigator width across the short topology window
+    /// that can occur while tmux creates or attaches the private presentation.
+    /// Only an incomplete topology is retryable; all other errors, including a
+    /// persistent topology failure, remain fail-closed.
+    pub(crate) fn retry_default_navigator_width(&self) -> Result<(), PresentationError> {
+        retry_default_navigator_width(|| self.set_default_navigator_width())
+    }
+
     pub(super) fn default_navigator_resize_arguments_for(&self, navigator: &str) -> Vec<OsString> {
         vec![
             "resize-pane".into(),
@@ -127,6 +135,28 @@ impl Presentation {
             )))
         }
     }
+}
+
+/// Retries only the topology observation that can be transient during a
+/// private presentation attach.  The bounded policy is shared by startup and
+/// the Navigator's post-attach resize path so the two entry points cannot
+/// drift in their failure behavior.
+pub(crate) fn retry_default_navigator_width(
+    mut resize: impl FnMut() -> Result<(), PresentationError>,
+) -> Result<(), PresentationError> {
+    for attempt in 0..super::NAVIGATOR_WIDTH_RETRY_ATTEMPTS {
+        match resize() {
+            Ok(()) => return Ok(()),
+            Err(error) if !matches!(error, PresentationError::InvalidTopology) => {
+                return Err(error);
+            }
+            Err(error) if attempt + 1 == super::NAVIGATOR_WIDTH_RETRY_ATTEMPTS => {
+                return Err(error);
+            }
+            Err(_) => std::thread::sleep(super::NAVIGATOR_WIDTH_RETRY_INTERVAL),
+        }
+    }
+    unreachable!("navigator width retry loop has at least one attempt")
 }
 
 impl Presentation {

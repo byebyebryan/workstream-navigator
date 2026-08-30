@@ -44,6 +44,7 @@ use attachment::prepare_attach_window_with_size;
 #[cfg(test)]
 use cleanup::should_reuse_presentation;
 use cleanup::{stopped_owned_presentation, validate_presentation_artifact_entries};
+pub(crate) use control::retry_default_navigator_width;
 #[cfg(test)]
 use ownership::create_paths;
 #[cfg(test)]
@@ -86,6 +87,12 @@ const WORKSTREAM_OPTION: &str = "@wsnav_workstream_id";
 const PRESENTATION_CLAIM_OPTION: &str = "@wsnav_presentation_claim";
 const NAVIGATOR_STOP_ATTEMPTS: usize = 20;
 const NAVIGATOR_STOP_RETRY: Duration = Duration::from_millis(5);
+/// A detached tmux server can briefly expose an incomplete pane topology while
+/// its first controlling client attaches.  Width restoration may retry only
+/// that exact transient topology observation, and only for this bounded
+/// interval; persistent or unrelated failures remain refusals.
+pub(crate) const NAVIGATOR_WIDTH_RETRY_ATTEMPTS: usize = 20;
+pub(crate) const NAVIGATOR_WIDTH_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 // tmux 3.4 normalizes literal control separators in `-F` output. Every field
 // using this printable separator is either an owned identifier/enum or is
 // rejected fail-closed if the separator appears in free-form evidence.

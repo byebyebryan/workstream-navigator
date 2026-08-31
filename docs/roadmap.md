@@ -52,6 +52,12 @@ provider-pane Workstream switching through the existing presentation attachment
 claim/status boundary; then complete the full gate and installation. No earlier
 slice changes the installed product contract.
 
+[Spike 0028](evidence/spikes/0028-d19-navigation-readiness.md) records the
+pre-implementation study. It falsifies reuse of D18's permissive Runtime
+tables/topology probe, mutating attachment preflight, and ProjectId-ordered
+group projection for D19. The checkpoint corrects those implementation gaps;
+it does not weaken the focus, no-provider-effect, or shared-order boundaries.
+
 ### D19.0 — Single focus authority
 
 Scope:

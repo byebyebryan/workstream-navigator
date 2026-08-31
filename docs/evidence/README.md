@@ -91,6 +91,10 @@ unprivileged online process cannot prove the race-free zero-holder boundary
 required by the rejected coherent-backup/online-rollback design. The current
 D18 destructive reset does not claim that boundary; no release tool or
 ordinary-state move was attempted during the spike.
+[Spike 0028](spikes/0028-d19-navigation-readiness.md) records the D19
+disposable private-tmux readiness evidence and the three baseline
+falsifications that require exact Runtime topology, read-only attachment
+validation, and one shared activity-based visual order before implementation.
 
 ## Provider studies
 

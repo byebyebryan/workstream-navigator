@@ -1,15 +1,16 @@
 # Workstream Navigator V1 Roadmap
 
-Date: 2026-08-29
+Date: 2026-08-31
 
-Status: D0-D18 are complete. D18 uses a direct schema-15 epoch and an explicit
-destructive reset with no migration or state rollback. Accepted checkpoint
-`c961c7e` binds the reset, ordinary schema-15 bootstrap, exact installation,
-explicit native observer trust, disposable Codex/OpenCode lifecycle
-acceptance, complete cleanup, and installed artifact. Post-acceptance source
-correction `ed0d883` is locally verified, but no remote-CI or
-accepted-release/live-provider evidence is transferred to it; it does not
-reopen the product contract or create a compatibility checkpoint.
+Status: D0-D18 are complete. D19 is the active design-first UI/UX checkpoint;
+its interaction contract is specified below and production implementation has
+not started. D18 remains the implemented baseline: it uses a direct schema-15
+epoch and an explicit destructive reset with no migration or state rollback.
+Accepted checkpoint `c961c7e` binds the reset, ordinary schema-15 bootstrap,
+exact installation, explicit native observer trust, disposable Codex/OpenCode
+lifecycle acceptance, complete cleanup, and installed artifact.
+Post-acceptance source correction `ed0d883` does not transfer those
+accepted-release/live-provider claims or reopen the state contract.
 
 `docs/design.md` is the product and architecture contract. This file owns
 delivery order, implementation status, and exit gates. The complete prior
@@ -28,6 +29,142 @@ roadmap is preserved as
   ambiguity handling.
 - D18 is a clean state break. Schemas 12 through 14 are refusal evidence, not
   migration or adoption inputs.
+
+## Active checkpoint: D19 tmux-derived presentation navigation
+
+Implementation status: design specified; no production implementation or
+acceptance claim.
+
+D19 tightens the existing two-pane shell-first presentation without adding a
+page, pane, window, provider, state schema, provider effect, or persisted UI
+preference. Its governing separation is:
+
+- tmux alone owns which presentation pane receives keyboard input;
+- the Navigator owns its process-local row selection;
+- the presentation controller owns which exact shell, review, or managed
+  Runtime surface appears in the right pane; and
+- lifecycle actions retain their existing revision-fenced state authority.
+
+Delivery order is fixed: prove the tmux mouse, copy-mode, nested-prefix, and
+multi-client semantics in a disposable study; establish the single focus
+authority and closed tables on both private tmux layers; add bounded
+provider-pane Workstream switching through the existing presentation attachment
+claim/status boundary; then complete the full gate and installation. No earlier
+slice changes the installed product contract.
+
+### D19.0 — Single focus authority
+
+Scope:
+
+- keep a fresh presentation focused on Navigator while showing its initial
+  Shell surface, and preserve tmux's existing active pane on reattach;
+- make `Ctrl+b Left` and `Ctrl+b Right`, plus the deliberate primary-button
+  press that begins a click or drag in either pane, the only ordinary
+  focus-changing inputs;
+- keep `Enter`, card activation, Start, Fork, recovery, observer review,
+  background reconciliation, resize, and right-surface replacement from
+  changing pane focus; and
+- keep focus ephemeral in tmux: never persist, infer, poll, or reconstruct it
+  in WSNav state.
+
+The existing exact client, source-pane, ownership, and topology checks remain
+mandatory. Tmux-derived interaction does not authorize a raw default tmux key
+table or a weaker `select-pane` boundary. The active pane is shared tmux
+window/session state: a focus change by one client attached to the same
+presentation is visible to its other attached clients. D19 adds no per-client
+focus field or input lease.
+
+### D19.1 — Fixed private-tmux control surfaces
+
+Scope:
+
+- discard the default prefix and root management tables on both the private
+  presentation server and every private single-pane Runtime server, then rebuild
+  each from its own closed allowlist;
+- on the presentation, keep `Ctrl+b d` for detach, `Ctrl+b Ctrl+b` for the
+  existing bounded literal-prefix path, `Ctrl+b ?` for presentation help, and
+  Left/Right for exact two-pane focus;
+- on a direct Runtime attachment, keep only detach, literal-prefix delivery,
+  bounded help, and copy-mode entry for its exact sole provider pane;
+- remove focus-next and vertical-focus interpretations from `Ctrl+b o`,
+  `Ctrl+b Up`, and `Ctrl+b Down`; and
+- explicitly omit every split, new/select/next/previous/rename/kill/link/move
+  window, pane kill/swap/join/break/rotate/resize, layout mutation, menu, and
+  arbitrary command-prompt route from keyboard and mouse tables.
+
+The primary-button press may both focus the target pane and begin delivery of
+that click or drag to its native surface; release only completes delivery and
+is not an independent focus trigger. Hover and wheel input must not change
+focus. Copy-mode and nested alternate-screen scrolling must remain usable
+without selecting a previously inactive presentation pane. The Runtime root
+table forwards native mouse input only to its exact sole pane; its bounded
+copy/scroll bindings cannot create or select topology.
+
+The allowlists remove interactive routes offered by WSNav-owned key and mouse
+tables; they are not a security boundary against the same user explicitly
+addressing a known private socket with the tmux CLI. Any externally changed or
+ambiguous topology still fails the existing ownership checks closed. Reattach
+must converge exact D18-owned presentation and Runtime servers to the D19
+tables without restarting a provider, and must never touch an ordinary or
+foreign tmux server.
+
+### D19.2 — Provider-pane Workstream switching
+
+Scope:
+
+- when an exact managed provider Runtime owns the focused right pane,
+  `Ctrl+b Up` and `Ctrl+b Down` attach the previous or next eligible managed
+  Workstream strictly above or below the current row in the same bounded visual
+  order as Workstreams; the source must still occur in that fresh active
+  projection;
+- eligible means active, non-archived, free of onboarding/recovery fences, and
+  backed by an already-live Runtime that passes the ordinary attachment
+  preflight;
+- switching never materializes Shell, starts, resumes, recovers, forks, parks,
+  or otherwise causes a provider or lifecycle effect;
+- the first and last eligible Workstreams do not wrap, and an unavailable
+  direction leaves the current attachment and focus unchanged with bounded
+  tmux-client guidance outside provider content;
+- the successful switch preserves focus in the right pane, returns Navigator to
+  Workstreams if necessary, and aligns its process-local selection with the
+  newly attached Workstream; and
+- Shell, provider-wait, native observer review, onboarding, stopped,
+  recovery-required, archived, and direct-attach surfaces do not participate.
+
+The ordered projection and attachment preflight must remain shared semantic
+authorities rather than being reimplemented in tmux shell fragments. No
+Workstream ID, provider identifier, path, or raw state is rendered in tmux
+guidance. The helper resolves from a fresh bounded snapshot and commits through
+the existing presentation attachment claim after revalidating the current
+attachment, source-pane role, pane Workstream marker, topology, and revisions.
+Its existing mode-`0600` attachment status is the presentation-private
+synchronization boundary by which Navigator observes the completed destination
+and aligns its page/selection; D19 adds no listener, general event bus, tmux
+`send-keys` injection, or durable UI state. Races fail closed and preserve the
+current attachment.
+
+### D19 exit gate
+
+- a disposable tmux study first proves click, drag, wheel, copy-mode, nested
+  Runtime prefix, reattach, and optional outer-tmux prefix-passthrough behavior;
+- deterministic tests prove that only Left/Right and primary-button press change
+  focus, while release, wheel, every Navigator action, and asynchronous
+  completion preserve it;
+- deterministic tests prove Up/Down changes only an exact eligible attachment,
+  preserves right-pane focus, aligns Navigator selection, stops at boundaries,
+  and never launches or mutates a Runtime/provider;
+- presentation and Runtime key-table tests prove both complete allowlists, D18
+  live-server convergence, and the absence of split, window, layout, menu,
+  command-prompt, and unsafe mouse routes;
+- a tmux-owned, unambiguous focus cue outside provider content makes the active
+  pane visible without Navigator polling; and
+- `scripts/check`, the declared MSRV job, nested terminal input/fidelity tests,
+  and staged/unstaged diff checks pass before the locked release is installed
+  for operator inspection.
+
+No partial D19 slice is an install candidate. Live-provider acceptance, if the
+final implementation needs it, remains separately authorized and
+artifact-bound.
 
 ## Completed checkpoint: D18 current-only consolidation
 

@@ -2,17 +2,16 @@
 
 ## Status and authority
 
-D0-D18 are complete. D18 preserves the shell-first managed-session product on
-one direct schema-15 epoch while deleting the old transition and compatibility
-plane. The acceptance record binds checkpoint `c961c7e` to the byte-identical
-artifact installed during release acceptance; its destructive reset, ordinary
-schema-15 bootstrap, native observer trust, disposable Codex/OpenCode lifecycle
-acceptance, and complete cleanup remain historical release evidence. The current checkout
-adds post-acceptance correction `ed0d883` for bounded presentation startup and
-direct Fork/recovery transaction coverage. Its full local gate and repeated
-Rust 1.88/tmux 3.3a matrix pass, but no remote-CI or
-accepted-release/live-provider evidence is transferred to the correction.
-Per-host development installation is verified separately.
+D0-D18 are complete. D19 is the active design-first UI/UX checkpoint; its
+tmux-derived navigation contract is documented, but production implementation
+has not started. D18 remains the implemented shell-first managed-session
+product on one direct schema-15 epoch. The acceptance record binds checkpoint
+`c961c7e` to the byte-identical artifact installed during release acceptance;
+its destructive reset, ordinary schema-15 bootstrap, native observer trust,
+disposable Codex/OpenCode lifecycle acceptance, and complete cleanup remain
+historical release evidence. Post-acceptance correction `ed0d883` preserves the
+state/product contract but does not transfer the accepted-release or
+live-provider claims. Per-host development installation is verified separately.
 
 - [Product and architecture design](design.md) is the V1 contract.
 - [Delivery roadmap](roadmap.md) owns delivery order, checkpoint status, and
@@ -42,6 +41,18 @@ The authorized reset parked the exact D17.1 Runtimes, removed the owned observer
 declaration, and quarantined the whole schema-14 root as discarded state before
 D18 installed and directly created schema 15. No old state is migrated,
 adopted, or restored; the exact quarantine was deleted after acceptance.
+
+## Planned D19 navigation checkpoint
+
+[D19](roadmap.md#active-checkpoint-d19-tmux-derived-presentation-navigation)
+separates tmux pane focus from Navigator selection, right-surface attachment,
+and lifecycle actions. The planned contract keeps Navigator actions from
+stealing focus; limits focus changes to `Ctrl+b Left`/`Right` and deliberate
+primary-button press; uses provider-pane `Ctrl+b Up`/`Down` only to attach
+adjacent eligible live Workstreams, without starting or mutating them; and
+rebuilds both presentation and Runtime tmux tables so every split, window,
+layout, menu, and arbitrary tmux command surface is absent. This is design
+scope, not current installed behavior.
 
 ## Current operator contract
 

@@ -1,6 +1,6 @@
 # Workstream Navigator V1 Design
 
-Date: 2026-08-29
+Date: 2026-08-31
 
 Status: D18 implements the shell-first product on a direct, current-only
 schema-15 epoch with semantic modules and no old-root migration or adoption.
@@ -14,7 +14,10 @@ and directly tests current Fork/recovery transaction ordering. Its local full
 gate and repeated Rust 1.88/tmux 3.3a matrix pass; no remote-CI or
 accepted-release/live-provider evidence is transferred to the correction.
 Per-host development installation is a separate operational fact. The product
-and state contract is unchanged, and D18 remains complete.
+and state contract is unchanged, and D18 remains complete. D19 is the active
+design-first UI/UX checkpoint. It specifies tmux-owned pane focus and bounded
+provider-pane Workstream switching below; that planned interaction contract is
+not implemented by the D18 artifact.
 
 The design is the current product and architecture contract. Dated acceptance,
 spike, and study records preserve the evidence and limitations of the candidate
@@ -289,7 +292,7 @@ operator terminal on the execution host
 └── dedicated host-local tmux presentation session (disposable)
     ├── navigator pane
     │   └── wsnav TUI with one pinned provisional-shell card
-    └── active pane
+    └── right-hand surface pane
         └── either
             ├── wsnav attach helper -> exact Runtime tmux server
             │                                      └── native provider TUI
@@ -368,26 +371,29 @@ touches no ordinary tmux server, and neither captures nor injects provider
 terminal bytes. Individual renderers retain their compact fallbacks for
 explicitly narrowed panes.
 
-The presentation has exactly the Navigator and one active pane. The active pane
-is either the selected managed Runtime attachment or the presentation's
-provisional account shell. Selecting another card replaces that exact surface;
-WSNav exposes no third pane or split-shell action. Unknown or duplicate
-pane-role evidence is ambiguity and must leave the layout unchanged.
+The presentation has exactly the Navigator and one right-hand surface pane. The
+right-hand surface is either the selected managed Runtime attachment or the
+presentation's provisional account shell. Selecting another card replaces that
+exact surface; WSNav exposes no third pane or split-shell action. Unknown or
+duplicate pane-role evidence is ambiguity and must leave the layout unchanged.
 
-The private presentation does not inherit tmux's general-purpose prefix or root
-management tables. Its prefix table is rebuilt as an explicit allowlist:
-`Ctrl+b d` detaches; `Ctrl+b o` and directional keys move among the two owned
-panes; `Ctrl+b Ctrl+b` delivers a literal `Ctrl+b` to the focused application
-without exposing the nested Runtime's tmux prefix table; and `Ctrl+b ?` shows
-only this curated help. The retired D12 `Ctrl+b "`, `Ctrl+b %`, and `Ctrl+b x`
-bindings are explicitly absent, including when an older live presentation is
-reattached. The root table retains only the primary mouse
-selection/forwarding and bounded scrolling/copy interactions required by the
-Navigator and active native surface. Default right-click management menus,
+The installed D18 private presentation does not inherit tmux's general-purpose
+prefix or root management tables. Its prefix table is rebuilt as an explicit
+allowlist: `Ctrl+b d` detaches; `Ctrl+b o` and directional keys move among the
+two owned panes; `Ctrl+b Ctrl+b` delivers a literal `Ctrl+b` to the focused
+application without exposing the nested Runtime's tmux prefix table; and
+`Ctrl+b ?` shows only this curated help. The retired D12 `Ctrl+b "`,
+`Ctrl+b %`, and `Ctrl+b x` bindings are explicitly absent, including when an
+older live presentation is reattached. The root table retains only the primary
+mouse selection/forwarding and bounded scrolling/copy interactions required by
+the Navigator and active native surface. Default right-click management menus,
 mouse split/swap/kill/respawn actions, arbitrary tmux command prompts,
 additional splits, windows, sessions, and layout mutation bindings are absent.
-These restrictions belong only to WSNav's private presentation server and never
-modify the user's ordinary tmux server or configuration.
+These D18 restrictions belong only to WSNav's private presentation server and
+never modify the user's ordinary tmux server or configuration. D19 replaces
+that focus table and extends closed-table ownership to the private Runtime
+servers as specified below; until D19 passes its complete gate, this paragraph
+remains the implemented behavior.
 
 Both private tmux layers also own their copy-mode wheel behavior. They bind
 `WheelUpPane` and `WheelDownPane` in the `copy-mode` and `copy-mode-vi` tables
@@ -443,7 +449,8 @@ Project groups. At presentation creation, WSNav captures, validates, and
 canonicalizes the invocation cwd as that presentation's private seed cwd.
 After the fresh presentation has created and proven both owned panes, startup
 selects the card, materializes exactly one opaque candidate `RuntimeId` and
-fresh opaque `slot_generation`, and shows that account shell in the active pane.
+fresh opaque `slot_generation`, and shows that account shell in the right-hand
+surface pane.
 It creates the
 provisional tmux directory, socket, configuration, and session using the
 existing final full-UUID `RuntimePaths` fields (directory, socket,
@@ -895,16 +902,18 @@ ProjectLocation registration is a bounded host operation inside successful
 brokered promotion, and the shell remains the user's familiar path-selection
 surface.
 
-The Workstreams page retains its accepted muscle memory: `Enter` attaches a
-live Runtime, starts/resumes a parked or stopped one, or enters exact native
-recovery for an ordinary lost Runtime. `n` starts a sibling at the selected
-managed Workstream's exact ProjectLocation with the same provider; `f` forks;
-`p` parks; `x` opens the reversible archive confirmation; `a` acknowledges
-only result attention; `r` opens bounded Codex Rename or recovers the selected
-unresolved Fork; and `?` toggles the full reference. `u` on Archived restores
-without starting. On the provisional shell card, `Enter` opens or focuses the
-shell and `n` has no separate meaning. `Left` and `Right` remain inert. There
-is no hard delete: archive/restore is the sole Workstream visibility control.
+The Workstreams page retains its accepted action muscle memory: `Enter`
+attaches a live Runtime, starts/resumes a parked or stopped one, or enters exact
+native recovery for an ordinary lost Runtime. Under D19 that action may replace
+the right-hand surface but never changes pane focus. `n` starts a sibling at
+the selected managed Workstream's exact ProjectLocation with the same provider;
+`f` forks; `p` parks; `x` opens the reversible archive confirmation; `a`
+acknowledges only result attention; `r` opens bounded Codex Rename or recovers
+the selected unresolved Fork; and `?` toggles the full reference. `u` on
+Archived restores without starting. On the provisional shell card, `Enter`
+shows the shell without transferring focus and `n` has no separate meaning.
+Unprefixed `Left` and `Right` remain inert. There is no hard delete:
+archive/restore is the sole Workstream visibility control.
 
 Workstreams always groups active Workstreams by Project. Groups sort by their
 newest included member's durable `last_activity_sequence`, descending, with
@@ -1021,16 +1030,22 @@ also classified as failed. These files disappear with the disposable
 presentation and contain only the Workstream ID, attempt ID, and phase. The
 current host is implicit in the presentation's selected state root.
 
-Focus is local presentation state, not durable Workstream state. A primary
-mouse click on any line of a Workstream card selects that exact Workstream and
-switches the provider pane to its normal open/start/recover attachment while
-retaining keyboard focus in the Navigator. The user explicitly enters the
-native provider with `Enter`, `Tab`, or a click in the provider pane. This lets
-successive card clicks browse live Workstreams without transferring keyboard
-control on every selection; it does not create a passive preview mode or alter
-the selected Workstream's lifecycle action. Two navigator clients may look at
-different workstreams without racing over a global `current` record. Durable
-state records activity and attention, never an authoritative focused pane.
+Focus is tmux presentation state, not durable Workstream state. A deliberate
+primary-button press on any line of a Workstream card focuses Navigator,
+selects that exact Workstream, and runs its normal open/start/recover action;
+the resulting right-hand replacement does not transfer keyboard focus. `Enter`
+runs the same selected-row action while retaining the pane that already owns
+focus. The user explicitly enters the native provider with `Ctrl+b Right` or a
+primary-button press in the right-hand pane, and returns with `Ctrl+b Left` or a
+press in Navigator. This lets successive card clicks browse live Workstreams
+without transferring keyboard control on every activation; it does not create
+a passive preview mode or alter the selected Workstream's lifecycle action.
+Independent presentations may select different Workstreams without racing over
+a global `current` record. Multiple clients attached to one presentation share
+that tmux session's active pane and the single Navigator process's page and
+selection; D19 does not pretend they have per-client focus or selection.
+Durable state records activity and attention, never an authoritative focused
+pane.
 
 A provider Runtime may have more than one same-user tmux attachment, including
 another Workstream Navigator client or a deliberate direct attachment to its
@@ -2349,9 +2364,9 @@ user selects an existing managed Workstream and presses n
 path for another blank conversation with the same provider at the same exact
 registered root; it does not open a provider chooser, infer another Location,
 or copy conversation context. A different provider or directory starts through
-the provisional shell. On the provisional shell card, `Enter` opens or focuses
-the shell and `n` performs no separate action. An archived Workstream must be
-restored before it can be the source of `n`.
+the provisional shell. On the provisional shell card, `Enter` shows the shell
+without transferring pane focus and `n` performs no separate action. An
+archived Workstream must be restored before it can be the source of `n`.
 
 No workstream name, model, branch, session ID, or first prompt is required in a
 manager-owned creation form. Before binding, the row shows
@@ -2375,7 +2390,8 @@ source provider turn may still be running
    session ID at the same ProjectLocation
 -> provider lifecycle evidence confirms the new native session
 -> source runtime continues unchanged
--> navigator may focus destination; source completion only raises attention
+-> navigator selects and may display destination without changing pane focus;
+   source completion only raises attention
 ```
 
 If the selected provider contract cannot prove a settled-prefix fork for a live
@@ -2446,7 +2462,8 @@ Required interactions:
 
 - keyboard and mouse selection in the navigator;
 - direct keyboard and mouse interaction in the provider pane;
-- one action to focus or reconnect a Workstream;
+- one action to display or reconnect a Workstream without treating that action
+  as pane-focus authority;
 - keep exactly one provisional shell card visible, lazily open its account
   shell, and promote it in place only through an exact brokered provider launch;
 - detect the broker cwd's exact Git worktree root and register it atomically
@@ -2498,7 +2515,7 @@ Fork. If several unfinished Forks share the source, a bounded chooser lists
 only those candidates. The source Workstream ID is transient routing metadata,
 never rendered; request keys, paths, provider identifiers, and raw evidence
 remain hidden. A recovered destination opens directly in the native provider
-pane.
+pane without changing tmux pane focus.
 
 Projects remain durable presentation groups behind Workstream and Archived
 rows, but WSNav provides no Projects page or Project-level action surface.
@@ -2536,6 +2553,181 @@ IDs, or a mandatory title in the ordinary path.
 A direct mode, such as `wsnav attach <workstream>`, bypasses the navigator pane
 while using the same host/runtime contracts.
 
+## Planned D19 tmux-derived interaction contract
+
+D19 preserves the fixed two-pane presentation and separates four concerns that
+the D18 controller partially combines:
+
+| Concern | Sole authority |
+| --- | --- |
+| Pane receiving keyboard input | The exact private presentation tmux server |
+| Highlighted Workstreams row | Navigator process-local selection |
+| Shell, review, or managed Runtime shown on the right | Presentation attachment controller |
+| Start, Fork, Park, archive, recovery, and other effects | Existing revision-fenced WSNav actions |
+
+Changing one concern does not imply changing another. In particular, opening
+or replacing the right-hand surface never grants it keyboard focus.
+
+### Focus and activation
+
+A fresh presentation starts with Navigator focused and the initial Shell
+already visible on the right. Reattaching preserves the exact tmux active pane;
+WSNav neither normalizes it nor persists a parallel focus field.
+
+`Ctrl+b Left` and `Ctrl+b Right` move focus between the two exact owned panes.
+A deliberate primary-button press that begins a click or drag also focuses its
+target pane and may deliver that same press to Navigator or the native
+right-hand surface. These are the only ordinary focus transitions. Release
+only completes the native click/drag sequence; it is not a second focus trigger.
+Wheel, hover, Navigator row movement, `Enter`, card activation, finite actions,
+observer review, right-surface replacement, background reconciliation, and
+resize do not move focus. No Navigator loop polls tmux to mirror focus.
+
+`Enter` retains one meaning: activate the selected Navigator row. It may
+materialize or display Shell, attach an already-proven Runtime, or perform the
+selected row's existing primary action, but focus stays in Navigator. Mouse
+activation of a Navigator card follows the same action semantics after the
+primary-button press has focused Navigator. Start, Fork, recovery, and completed
+observer review may replace the right surface but never steal focus. If the
+user is already focused right when an asynchronous replacement completes,
+tmux naturally keeps that pane focused; if the user moved left, it stays left.
+
+Focus is visible through a tmux-owned, unambiguous cue outside provider content.
+The disposable study selects the exact border/format treatment only after it
+proves that both panes remain distinguishable in the fixed layout; ordinary
+active-border color alone is not assumed sufficient. Navigator selection
+remains visible independently and does not claim that its row currently
+receives input or owns the shown surface.
+
+The active pane is shared tmux window/session state. A focus change from one
+client attached to a presentation is therefore visible to every client on that
+same presentation. D19 deliberately adds no per-client focus field, input
+lease, or independent Navigator selection; independent presentations remain
+independent.
+
+When WSNav itself runs inside an ordinary operator tmux, the operator must pass
+the presentation prefix through that outer layer in the ordinary tmux manner.
+D19 does not add unprefixed Alt/arrow shortcuts or intercept native provider
+keys to hide that nested boundary.
+
+### Closed private-tmux management surfaces
+
+Both private layers discard inherited/default prefix and root management tables
+and install role-specific exact allowlists. On the presentation, `Ctrl+b d`
+detaches, `Ctrl+b ?` shows bounded presentation help, and `Ctrl+b Ctrl+b`
+retains the existing validated literal-prefix path. `Ctrl+b Left` and
+`Ctrl+b Right` are its only focus commands. `Ctrl+b o` is absent rather than
+becoming a second focus rule.
+
+On each single-pane Runtime server, direct attachment retains only `Ctrl+b d`
+for detach, `Ctrl+b Ctrl+b` for a literal prefix to the provider, `Ctrl+b [` for
+copy-mode entry in that exact pane, and `Ctrl+b ?` for bounded Runtime help.
+There is no Runtime directional-focus command because there is no second pane.
+The provider remains a native terminal application, and none of these bindings
+captures its ordinary unprefixed keyboard input.
+
+Neither private server exposes a split; new, next, previous, selected, renamed,
+linked, moved, or killed window; killed, swapped, joined, broken, rotated, or
+freely resized pane; layout mutation; arbitrary tmux command prompt; management
+menu; or arbitrary tmux command route. The same restriction applies to mouse
+tables.
+These controls are absent from WSNav-owned interaction tables by construction,
+not accepted and repaired afterward. Exact client identity, source-pane role,
+owned topology, and target revalidation still precede each allowed presentation
+control action; a changed or ambiguous two-pane topology leaves focus and
+attachment untouched. Direct Runtime attach similarly revalidates the exact
+owned single session/window/pane before applying its table.
+
+This is an interaction boundary, not a same-user security boundary. A user or
+provider process that discovers a private socket can explicitly invoke the tmux
+CLI against it; D19 neither claims to prevent that nor removes `TMUX` from the
+native provider environment. Any resulting topology drift is external evidence
+that makes later WSNav control fail closed. Ordinary and foreign tmux servers
+remain untouched.
+
+Primary-button press preserves normal terminal behavior by focusing the mouse
+target and forwarding the full press/drag/release sequence. Wheel events may
+scroll the native alternate-screen application or tmux copy-mode target but do
+not select an inactive presentation pane. Because the D18 shared copy-mode
+profile deliberately selects the mouse pane, D19 implementation begins with a
+disposable tmux study and may separate presentation and single-pane Runtime
+scroll bindings while retaining one-line scrolling and native mouse behavior.
+The Runtime root table forwards native mouse input only to its exact sole pane;
+its bounded copy/scroll tables cannot create, select, or mutate topology.
+
+New servers receive these tables in their fixed configurations. Reattach-time
+reconciliation must also replace the exact tables of an owned D18 presentation
+and Runtime server without restarting its provider. It may do so only after
+exact ownership/topology proof and never by reading, sourcing, or mutating the
+operator's ordinary tmux configuration or server.
+
+### Switching managed Workstreams from the provider pane
+
+`Ctrl+b Up` and `Ctrl+b Down` are not directional focus commands in the fixed
+horizontal layout. When the focused right pane is an exact managed provider
+attachment, they request the previous or next eligible Workstream in the same
+bounded Project-grouped visual order used by Workstreams. The current attachment
+must itself still occur in that fresh active projection. Up chooses the nearest
+eligible row strictly above it and Down the nearest eligible row strictly below
+it. The current attachment remains selected at either boundary; switching does
+not wrap; bounded content-free guidance, if shown, is tmux-client chrome outside
+provider content. The Navigator page is not a precondition: a successful switch
+returns Navigator to Workstreams and selects the destination, while focus
+remains in the right pane.
+
+An eligible destination is active, non-archived, free of onboarding and
+recovery fences, backed by an already-live Runtime, and accepted by the normal
+exact attachment preflight. Cycling skips every ineligible row. It never opens
+or materializes Shell and never starts, resumes, recovers, forks, parks, or
+otherwise mutates a provider, Runtime, lifecycle, or durable row. Shell,
+provider-wait, observer-review, onboarding, stopped, recovery-required,
+archived, and direct-attach surfaces reject the command without changing the
+right pane, Navigator page/selection, or focus.
+
+A successful switch replaces only the right-hand attachment, keeps that pane
+focused, returns Navigator to Workstreams if needed, and aligns its process-local
+selection with the attached Workstream. The ordering and eligibility projection
+is the same shared pure semantic function used by Navigator; it is not
+reconstructed in a tmux format or shell script. The helper resolves a fresh
+bounded snapshot, then commits through the existing serialized presentation
+attachment claim only after revalidating current attachment status, source-pane
+role, the pane's exact Workstream marker, owned topology, and relevant revisions.
+
+The existing mode-`0600` presentation attachment status is the bounded
+synchronization record by which Navigator observes the completed destination
+and aligns its page/selection. D19 may version that status shape only with the
+minimum bounded phase/result metadata needed for this handshake; it adds no
+listener, general event bus, tmux `send-keys` injection, provider traffic, or
+durable UI state. Stale revisions, a changed current attachment, multiple
+candidates, or ambiguous topology fail closed with content-free guidance and
+preserve the current provider output.
+
+### D19 acceptance boundary
+
+Before implementation, disposable tmux evidence must cover primary-button press,
+drag, wheel, copy mode, nested Runtime prefix delivery, presentation reattach,
+multiple attached clients, and optional outer-tmux prefix passthrough. The
+implementation gate then proves:
+
+- `Enter`, every Navigator action, observer review, asynchronous completion,
+  and resize preserve the exact active pane;
+- only Left/Right and primary-button press change focus; release, wheel, hover,
+  and drag completion preserve it;
+- Up/Down attaches only an eligible already-live Runtime, preserves right-pane
+  focus, returns to Workstreams, aligns Navigator selection, does not wrap, and
+  has no provider or lifecycle effect;
+- both presentation and Runtime prefix/root tables equal their role-specific
+  closed allowlists, converge exact D18-owned live servers, and expose no split,
+  window, layout, menu, prompt, or unsafe mouse command;
+- the tmux-owned focus cue is unambiguous, requires no Navigator polling, and
+  writes nothing into a provider pane; and
+- the existing nested `Ctrl+b` path, native modified keys, mouse input,
+  copy-mode scrolling, completed provider output, and direct `wsnav attach`
+  behavior remain intact.
+
+D18 remains the implemented operator contract until this complete gate passes.
+No partial D19 slice changes the installed product contract.
+
 ## Failure and recovery model
 
 | Failure | V1 behavior |
@@ -2571,6 +2763,8 @@ while using the same host/runtime contracts.
 | Name refresh is unavailable | Keep the dedicated TUI untouched and retain the cached native name with stale provenance |
 | Ephemeral App Server mutation is ambiguous | Reconcile exact persisted effects; never retry a non-idempotent fork unless absence is proven, otherwise require recovery |
 | Another client or direct tmux client attaches | Show the same tmux-managed screen; do not create a lease or detach either client; simultaneous input may interleave |
+| D19 Up/Down source, ordering, revision, attachment status, pane marker, or topology changes before commit | Fail closed under the presentation attachment claim; preserve the current provider output, right-pane focus, and Navigator page/selection; never fall through to Start, Resume, recovery, or another lifecycle action |
+| D19 table convergence cannot prove an exact owned presentation or Runtime server and its expected topology | Leave that server and provider untouched, expose no fallback default-table route, and return bounded diagnosis outside provider content; never mutate an ordinary or foreign tmux server |
 | Navigator crashes during focus switch | Focus is ephemeral; no durable runtime or Workstream mutation is implied |
 | Navigator disconnects during Start or Fork | Start is already committed locally; reopen the exact Fork operation only when provider cutover is unresolved |
 | Provider changes directory or creates, enters, or removes a worktree | Leave Git and cwd state entirely to the provider or user; keep the Workstream pinned to its launch-time ProjectLocation and perform no passive Git inspection |
@@ -2777,6 +2971,7 @@ roadmap and version-specific decisions remain in
 | D16 | Host-local clean break | [D16 acceptance](evidence/acceptance/d16-host-local.md) |
 | D17-D17.1 | Shell-first onboarding and correctness closure | [D17](evidence/acceptance/d17-shell-first.md), [D17.1](evidence/acceptance/d17.1-correctness-closure.md) |
 | D18 | Current-only schema-15 consolidation | [Completed roadmap](roadmap.md#completed-checkpoint-d18-current-only-consolidation) |
+| D19 | Active design-only tmux-derived presentation navigation | [Active roadmap](roadmap.md#active-checkpoint-d19-tmux-derived-presentation-navigation) |
 
 ## Current concrete provider boundary
 

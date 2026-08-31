@@ -14,7 +14,7 @@ use super::{
         start_independent_workstream_with,
     },
     model::reconcile_observer_trust_with_manager,
-    park,
+    park, preflight_attachment_read_only,
     providers::managed_codex_environment,
     reconcile_lost_runtimes, restore, start,
     start::{
@@ -23,12 +23,16 @@ use super::{
     },
 };
 use crate::provider::names::NameState;
+use crate::runtime::{LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, SystemTmux};
 
 use std::{
     cell::Cell,
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
+    process::Command,
+    thread,
+    time::{Duration, Instant},
 };
 
 use rusqlite::{Connection, params};
@@ -82,6 +86,136 @@ fn registry_for_provider(
         .unwrap();
     let registry = state.into_host_registry().unwrap();
     (temporary, root, registry, workstream_id)
+}
+
+struct DisposableRuntimeGuard {
+    socket: PathBuf,
+    directory: PathBuf,
+}
+
+impl Drop for DisposableRuntimeGuard {
+    fn drop(&mut self) {
+        let _ = Command::new("tmux")
+            .env_remove("TMUX")
+            .args(["-f", "/dev/null", "-S"])
+            .arg(&self.socket)
+            .arg("kill-server")
+            .spawn()
+            .and_then(std::process::Child::wait_with_output);
+        let _ = fs::remove_dir_all(&self.directory);
+    }
+}
+
+fn live_runtime_for_read_only_test(
+    provider: ProviderKind,
+) -> (
+    tempfile::TempDir,
+    crate::state::StateRoot,
+    crate::state::RuntimeRecord,
+    WorkstreamId,
+    DisposableRuntimeGuard,
+) {
+    let (temporary, root, mut registry, workstream_id) = registry_for_provider(provider);
+    let repository = temporary.path().join("repository");
+    fs::create_dir(&repository).unwrap();
+    let runtime_record = registry.reserve_runtime(workstream_id).unwrap();
+    drop(registry);
+
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime_paths = RuntimePaths::for_record(
+        root.base(),
+        runtime_record.runtime_id,
+        &runtime_record.tmux_session,
+    )
+    .unwrap();
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, runtime_paths.clone());
+    runtime
+        .start(&NativeLaunch {
+            cwd: repository.clone(),
+            program: vec![
+                OsString::from("/bin/sh"),
+                OsString::from("-c"),
+                OsString::from("exec sleep 60"),
+            ],
+            environment: std::collections::BTreeMap::new(),
+        })
+        .unwrap();
+    let guard = DisposableRuntimeGuard {
+        socket: runtime_paths.socket.clone(),
+        directory: runtime_paths.directory.clone(),
+    };
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let (provider_pid, process_birth) = loop {
+        if let Ok(RuntimeProbe::Live {
+            pane_pid,
+            process_birth: Some(process_birth),
+            ..
+        }) = runtime.probe()
+        {
+            break (pane_pid, process_birth);
+        }
+        assert!(
+            Instant::now() < deadline,
+            "fake Runtime did not become live"
+        );
+        thread::sleep(Duration::from_millis(10));
+    };
+
+    let mut registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    registry
+        .record_runtime_process_identity(
+            runtime_record.runtime_id,
+            runtime_record.revision,
+            provider_pid,
+            &process_birth,
+        )
+        .unwrap();
+    drop(registry);
+    let connection = Connection::open(root.host_database_path()).unwrap();
+    connection
+        .execute(
+            "UPDATE runtimes SET cwd = ?1, lifecycle = 'idle' WHERE runtime_id = ?2",
+            params![
+                repository.to_string_lossy().to_string(),
+                runtime_record.runtime_id.to_string(),
+            ],
+        )
+        .unwrap();
+    drop(connection);
+    let record = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap()
+        .runtime_by_id(runtime_record.runtime_id)
+        .unwrap()
+        .unwrap();
+    (temporary, root, record, workstream_id, guard)
+}
+
+fn host_database_bytes(root: &crate::state::StateRoot) -> [Option<Vec<u8>>; 2] {
+    ["host.sqlite", "host.sqlite-wal"].map(|name| fs::read(root.base().join(name)).ok())
+}
+
+fn workstream_revisions(
+    root: &crate::state::StateRoot,
+    workstream_id: WorkstreamId,
+) -> (Revision, Revision) {
+    let registry = crate::state::open_current(root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    let overview = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    (overview.revision, overview.runtime.unwrap().revision)
 }
 
 fn fork_registry_for_provider(
@@ -658,6 +792,129 @@ fn live_runtime_is_accepted_only_when_its_recorded_identity_matches() {
             diagnostic: "probe unavailable".to_owned(),
         },
     ));
+}
+
+#[test]
+#[cfg(unix)]
+fn read_only_codex_preflight_preserves_state_on_success_and_topology_refusal() {
+    if Command::new("tmux")
+        .arg("-V")
+        .spawn()
+        .and_then(std::process::Child::wait_with_output)
+        .is_err()
+    {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+    let (_temporary, root, record, workstream_id, _runtime_guard) =
+        live_runtime_for_read_only_test(ProviderKind::Codex);
+    let before_success_bytes = host_database_bytes(&root);
+    let before_success_revisions = workstream_revisions(&root, workstream_id);
+    let registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    assert_eq!(
+        preflight_attachment_read_only(&root, &registry, workstream_id)
+            .unwrap()
+            .runtime_id,
+        record.runtime_id
+    );
+    drop(registry);
+    assert_eq!(host_database_bytes(&root), before_success_bytes);
+    let after_success_revisions = workstream_revisions(&root, workstream_id);
+    assert_eq!(after_success_revisions, before_success_revisions);
+
+    let paths =
+        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session).unwrap();
+    let extra = Command::new("tmux")
+        .env_remove("TMUX")
+        .args(["-f", "/dev/null", "-S"])
+        .arg(&paths.socket)
+        .args(["split-window", "-d", "-t"])
+        .arg(format!("{}:provider", record.tmux_session))
+        .args(["/bin/sleep", "60"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .and_then(std::process::Child::wait_with_output)
+        .unwrap();
+    assert!(extra.status.success(), "tmux failed: {:?}", extra.stderr);
+
+    let before_refusal_bytes = host_database_bytes(&root);
+    let before_refusal_revisions = workstream_revisions(&root, workstream_id);
+    let registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    assert!(preflight_attachment_read_only(&root, &registry, workstream_id).is_err());
+    drop(registry);
+    assert_eq!(host_database_bytes(&root), before_refusal_bytes);
+    let after_refusal_revisions = workstream_revisions(&root, workstream_id);
+    assert_eq!(after_refusal_revisions, before_refusal_revisions);
+}
+
+#[test]
+#[cfg(unix)]
+fn read_only_opencode_refusal_preserves_missing_provider_handle() {
+    if Command::new("tmux")
+        .arg("-V")
+        .spawn()
+        .and_then(std::process::Child::wait_with_output)
+        .is_err()
+    {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+    let (_temporary, root, record, workstream_id, _runtime_guard) =
+        live_runtime_for_read_only_test(ProviderKind::OpenCode);
+    let paths =
+        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session).unwrap();
+    assert!(paths.socket.exists(), "fake OpenCode Runtime did not start");
+
+    let before_bytes = host_database_bytes(&root);
+    let (before_handle, before_revisions) = {
+        let registry = crate::state::open_current(&root)
+            .unwrap()
+            .into_host_registry()
+            .unwrap();
+        let overview = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == workstream_id)
+            .unwrap();
+        (
+            registry.opencode_runtime_handle(record.runtime_id).unwrap(),
+            (overview.revision, overview.runtime.unwrap().revision),
+        )
+    };
+    assert!(before_handle.is_none());
+    let registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    assert!(preflight_attachment_read_only(&root, &registry, workstream_id).is_err());
+    drop(registry);
+    let (after_handle, after_revisions) = {
+        let registry = crate::state::open_current(&root)
+            .unwrap()
+            .into_host_registry()
+            .unwrap();
+        let overview = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == workstream_id)
+            .unwrap();
+        (
+            registry.opencode_runtime_handle(record.runtime_id).unwrap(),
+            (overview.revision, overview.runtime.unwrap().revision),
+        )
+    };
+    assert_eq!(after_handle, before_handle);
+    assert_eq!(after_revisions, before_revisions);
+    assert_eq!(host_database_bytes(&root), before_bytes);
 }
 
 #[test]

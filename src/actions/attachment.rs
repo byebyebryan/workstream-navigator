@@ -110,6 +110,38 @@ pub(super) fn validate_opencode_live_runtime(
     runtime: &crate::state::RuntimeRecord,
     probe: &RuntimeProbe,
 ) -> Result<PriorOpenCodeRuntime, ActionError> {
+    if !opencode_live_runtime_matches(registry, runtime, probe)? {
+        if let Some(handle) = registry.opencode_runtime_handle(runtime.runtime_id)? {
+            crate::provider::opencode::mark_unknown_handle(
+                registry,
+                &handle,
+                &runtime.tmux_generation,
+            );
+        }
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    Ok(PriorOpenCodeRuntime::AlreadyLive)
+}
+
+/// Strict provider-aware attachment evidence. Unlike the ordinary action
+/// preflight this path never repairs, fences, or marks any durable record.
+pub(super) fn validate_opencode_live_runtime_read_only(
+    registry: &HostRegistry,
+    runtime: &crate::state::RuntimeRecord,
+    probe: &RuntimeProbe,
+) -> Result<(), ActionError> {
+    if opencode_live_runtime_matches(registry, runtime, probe)? {
+        Ok(())
+    } else {
+        Err(ActionError::RuntimeProbeAmbiguous)
+    }
+}
+
+fn opencode_live_runtime_matches(
+    registry: &HostRegistry,
+    runtime: &crate::state::RuntimeRecord,
+    probe: &RuntimeProbe,
+) -> Result<bool, ActionError> {
     let RuntimeProbe::Live {
         pane_pid,
         cwd,
@@ -117,10 +149,10 @@ pub(super) fn validate_opencode_live_runtime(
         ..
     } = probe
     else {
-        return Err(ActionError::RuntimeProbeAmbiguous);
+        return Ok(false);
     };
     let Some(handle) = registry.opencode_runtime_handle(runtime.runtime_id)? else {
-        return Err(ActionError::RuntimeProbeAmbiguous);
+        return Ok(false);
     };
     let binding = registry.binding_for_runtime(runtime.runtime_id)?;
     let endpoint = OpenCodeEndpoint::loopback(handle.endpoint_port)?;
@@ -152,11 +184,7 @@ pub(super) fn validate_opencode_live_runtime(
             Ok(crate::provider::opencode::OpenCodeSessionStatus::Busy
                 | crate::provider::opencode::OpenCodeSessionStatus::Idle)
         );
-    if !exact {
-        crate::provider::opencode::mark_unknown_handle(registry, &handle, &runtime.tmux_generation);
-        return Err(ActionError::RuntimeProbeAmbiguous);
-    }
-    Ok(PriorOpenCodeRuntime::AlreadyLive)
+    Ok(exact)
 }
 
 /// Performs the authoritative, provider-aware checks required immediately
@@ -222,6 +250,39 @@ pub fn preflight_attachment(
     }
     if runtime_record.provider == ProviderKind::OpenCode {
         validate_opencode_live_runtime(registry, &runtime_record, &probe)?;
+    }
+    Ok(runtime_record)
+}
+
+/// Read-only counterpart used by provider-pane cycling. It accepts only
+/// already-exact persisted evidence; every refusal leaves the database,
+/// revisions, and provider handle untouched.
+pub(crate) fn preflight_attachment_read_only(
+    root: &crate::state::StateRoot,
+    registry: &HostRegistry,
+    workstream_id: WorkstreamId,
+) -> Result<crate::state::RuntimeRecord, ActionError> {
+    let runtime_record = registry
+        .runtime_for_workstream(workstream_id)?
+        .ok_or(ActionError::NoRuntime(workstream_id))?;
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(
+        &tmux,
+        &process_probe,
+        RuntimePaths::for_record(
+            root.base(),
+            runtime_record.runtime_id,
+            &runtime_record.tmux_session,
+        )?,
+    );
+    runtime.validate_exact_topology()?;
+    let probe = runtime.probe()?;
+    if !attachment_runtime_matches(&runtime_record, &probe) {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    if runtime_record.provider == ProviderKind::OpenCode {
+        validate_opencode_live_runtime_read_only(registry, &runtime_record, &probe)?;
     }
     Ok(runtime_record)
 }

@@ -1,5 +1,5 @@
 use super::{
-    AttachmentPhase, AttachmentStatus, CurrentState, LinuxProcessProbe,
+    AttachmentPhase, AttachmentPurpose, AttachmentStatus, CurrentState, LinuxProcessProbe,
     MAX_ATTACHMENT_STATUS_BYTES, MAX_ATTACHMENT_STATUS_BYTES_USIZE, NAVIGATOR_STOP_ATTEMPTS,
     NAVIGATOR_STOP_RETRY, NAVIGATOR_WINDOW, OpenOptions, OsString, Path, Presentation,
     PresentationError, PresentationPaneRole, PrivateRuntime, ProvisionalLease, ProvisionalSlot,
@@ -48,8 +48,9 @@ impl Presentation {
         runtime_id: RuntimeId,
         expected_runtime_revision: Revision,
         attempt_id: uuid::Uuid,
+        purpose: AttachmentPurpose,
     ) -> Vec<OsString> {
-        vec![
+        let mut command = vec![
             self.executable.clone().into_os_string(),
             "--state-root".into(),
             self.state_root.clone().into_os_string(),
@@ -67,17 +68,23 @@ impl Presentation {
             self.paths.session_name.clone().into(),
             "--attempt-id".into(),
             attempt_id.to_string().into(),
-        ]
+        ];
+        if purpose == AttachmentPurpose::ProviderCycle {
+            command.push("--provider-cycle".into());
+        }
+        command
     }
 
-    pub(super) fn prepare_attachment(
+    pub(super) fn prepare_attachment_with_purpose(
         &self,
         workstream_id: WorkstreamId,
+        purpose: AttachmentPurpose,
     ) -> Result<AttachmentStatus, PresentationError> {
         let status = AttachmentStatus {
             attempt_id: uuid::Uuid::new_v4(),
             workstream_id,
             phase: AttachmentPhase::Pending,
+            purpose,
         };
         self.write_attachment_status(&status)?;
         Ok(status)
@@ -170,6 +177,16 @@ impl Presentation {
             self.write_attachment_status(&status)?;
         }
         Ok(Some(status))
+    }
+
+    /// Reads the current attachment attempt without inspecting or repairing
+    /// the provider pane. Cycling uses this accessor so a refusal cannot turn
+    /// a pending attempt into a durable `Failed` status as a side effect of
+    /// merely checking whether the action is allowed.
+    pub(crate) fn attachment_status_read_only(
+        &self,
+    ) -> Result<Option<AttachmentStatus>, PresentationError> {
+        self.read_attachment_status()
     }
 
     /// Stops the owned presentation after the Navigator pane has exited.
@@ -283,6 +300,8 @@ impl Presentation {
         columns: u16,
         rows: u16,
     ) -> Result<(), PresentationError> {
+        self.context()?;
+        self.attachment_topology()?;
         prepare_attach_window_with_size(&self.paths.session_name, columns, rows, |arguments| {
             self.invoke(None, arguments)
         })?;
@@ -302,32 +321,185 @@ impl Presentation {
         runtime_id: RuntimeId,
         expected_runtime_revision: Revision,
     ) -> Result<AttachmentStatus, PresentationError> {
+        self.attach_workstream_with_purpose(
+            workstream_id,
+            expected_workstream_revision,
+            runtime_id,
+            expected_runtime_revision,
+            AttachmentPurpose::Ordinary,
+        )
+    }
+
+    fn attach_workstream_with_purpose(
+        &self,
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        runtime_id: RuntimeId,
+        expected_runtime_revision: Revision,
+        purpose: AttachmentPurpose,
+    ) -> Result<AttachmentStatus, PresentationError> {
         self.context()?;
         self.with_attachment_claim(|| {
-            let status = self.prepare_attachment(workstream_id)?;
-            let result = (|| {
-                let provider = self.provider_target_for_attachment()?;
-                self.set_pane_role(
-                    &provider,
-                    PresentationPaneRole::Provider,
-                    Some(status.workstream_id),
-                )?;
-                self.invoke(
-                    None,
-                    self.provider_respawn_for_command(
-                        &provider,
-                        self.provider_attach_command(
-                            workstream_id,
-                            expected_workstream_revision,
-                            runtime_id,
-                            expected_runtime_revision,
-                            status.attempt_id,
-                        ),
-                    ),
-                )
-            })();
-            self.finish_attachment_start(status, result)
+            self.attach_workstream_claimed(
+                workstream_id,
+                expected_workstream_revision,
+                runtime_id,
+                expected_runtime_revision,
+                purpose,
+            )
         })
+    }
+
+    /// Performs the exact outer-pane replacement while the caller already
+    /// owns the presentation attachment claim. This avoids nested claims for
+    /// provider-pane cycling, whose source/destination evidence is serialized
+    /// by the same claim.
+    pub(crate) fn attach_workstream_claimed(
+        &self,
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        runtime_id: RuntimeId,
+        expected_runtime_revision: Revision,
+        purpose: AttachmentPurpose,
+    ) -> Result<AttachmentStatus, PresentationError> {
+        self.attach_workstream_claimed_with_respawn(
+            workstream_id,
+            expected_workstream_revision,
+            runtime_id,
+            expected_runtime_revision,
+            purpose,
+            |presentation, arguments| presentation.invoke(None, arguments),
+        )
+    }
+
+    #[cfg(test)]
+    fn attach_workstream_claimed_with_injected_respawn(
+        &self,
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        runtime_id: RuntimeId,
+        expected_runtime_revision: Revision,
+        purpose: AttachmentPurpose,
+        respawn_result: Result<(), PresentationError>,
+    ) -> Result<AttachmentStatus, PresentationError> {
+        self.attach_workstream_claimed_with_respawn(
+            workstream_id,
+            expected_workstream_revision,
+            runtime_id,
+            expected_runtime_revision,
+            purpose,
+            |_presentation, _arguments| respawn_result,
+        )
+    }
+
+    fn attach_workstream_claimed_with_respawn(
+        &self,
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        runtime_id: RuntimeId,
+        expected_runtime_revision: Revision,
+        purpose: AttachmentPurpose,
+        respawn: impl FnOnce(&Self, Vec<OsString>) -> Result<(), PresentationError>,
+    ) -> Result<AttachmentStatus, PresentationError> {
+        let prior_cycle = if purpose == AttachmentPurpose::ProviderCycle {
+            let topology = self.attachment_topology()?;
+            let provider = topology
+                .provider()
+                .ok_or(PresentationError::InvalidTopology)?;
+            let previous = self
+                .read_attachment_status()?
+                .filter(|status| status.phase == AttachmentPhase::Running)
+                .ok_or(PresentationError::ControlRefused(
+                    "provider switching requires a live attachment",
+                ))?;
+            if provider.workstream_id != Some(previous.workstream_id) {
+                return Err(PresentationError::ControlRefused(
+                    "provider switching attachment marker is unavailable",
+                ));
+            }
+            Some(CyclePrecommit {
+                provider_pane: provider.id.clone(),
+                previous_status: previous,
+            })
+        } else {
+            None
+        };
+        let status = self.prepare_attachment_with_purpose(workstream_id, purpose)?;
+        let result = (|| {
+            let provider = self.provider_target_for_attachment()?;
+            self.set_pane_role(
+                &provider,
+                PresentationPaneRole::Provider,
+                Some(status.workstream_id),
+            )?;
+            respawn(
+                self,
+                self.provider_respawn_for_command(
+                    &provider,
+                    self.provider_attach_command(
+                        workstream_id,
+                        expected_workstream_revision,
+                        runtime_id,
+                        expected_runtime_revision,
+                        status.attempt_id,
+                        status.purpose,
+                    ),
+                ),
+            )
+        })();
+        if purpose == AttachmentPurpose::ProviderCycle {
+            if let Err(error) = result {
+                self.restore_cycle_precommit(&status, prior_cycle.as_ref());
+                return Err(error);
+            }
+            return Ok(status);
+        }
+        self.finish_attachment_start(status, result)
+    }
+
+    /// Restores the source attachment after a cycle failed before tmux
+    /// accepted the provider respawn. The status and marker are restored only
+    /// while the exact pending attempt and original provider pane remain
+    /// present; an ambiguous topology is left untouched for recovery.
+    fn restore_cycle_precommit(&self, pending: &AttachmentStatus, prior: Option<&CyclePrecommit>) {
+        let Some(prior) = prior else {
+            return;
+        };
+        let Ok(Some(current)) = self.read_attachment_status() else {
+            return;
+        };
+        if current.attempt_id != pending.attempt_id
+            || current.workstream_id != pending.workstream_id
+            || current.phase != AttachmentPhase::Pending
+            || current.purpose != AttachmentPurpose::ProviderCycle
+        {
+            return;
+        }
+        let Ok(topology) = self.attachment_topology() else {
+            return;
+        };
+        let Some(provider) = topology.provider() else {
+            return;
+        };
+        if provider.id != prior.provider_pane
+            || !cycle_marker_is_restorable(
+                provider.workstream_id,
+                pending.workstream_id,
+                prior.previous_status.workstream_id,
+            )
+        {
+            return;
+        }
+        if self
+            .set_pane_role(
+                &provider.id,
+                PresentationPaneRole::Provider,
+                Some(prior.previous_status.workstream_id),
+            )
+            .is_ok()
+        {
+            let _ = self.write_attachment_status(&prior.previous_status);
+        }
     }
 
     /// Replaces only the outer provider pane with the exact private tmux
@@ -667,5 +839,290 @@ impl Presentation {
             ));
         }
         Ok(provider.dead)
+    }
+}
+
+#[derive(Clone, Debug)]
+struct CyclePrecommit {
+    provider_pane: String,
+    previous_status: AttachmentStatus,
+}
+
+fn cycle_marker_is_restorable(
+    marker: Option<WorkstreamId>,
+    pending: WorkstreamId,
+    previous: WorkstreamId,
+) -> bool {
+    marker.is_none() || marker == Some(pending) || marker == Some(previous)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use uuid::Uuid;
+
+    use super::*;
+    use crate::domain::WorkstreamId;
+
+    #[test]
+    fn cycle_rollback_restores_when_marker_write_has_not_started() {
+        let previous = WorkstreamId::from(Uuid::from_u128(1));
+        let pending = WorkstreamId::from(Uuid::from_u128(2));
+
+        assert!(cycle_marker_is_restorable(
+            Some(previous),
+            pending,
+            previous
+        ));
+    }
+
+    #[test]
+    fn cycle_rollback_restores_after_marker_write_or_partial_clear() {
+        let previous = WorkstreamId::from(Uuid::from_u128(1));
+        let pending = WorkstreamId::from(Uuid::from_u128(2));
+        let foreign = WorkstreamId::from(Uuid::from_u128(3));
+
+        assert!(cycle_marker_is_restorable(None, pending, previous));
+        assert!(cycle_marker_is_restorable(Some(pending), pending, previous));
+        assert!(!cycle_marker_is_restorable(
+            Some(foreign),
+            pending,
+            previous
+        ));
+    }
+
+    struct CyclePresentationFixture {
+        _temporary: tempfile::TempDir,
+        presentation: Presentation,
+        provider: String,
+        _cleanup: DisposableAttachmentTmuxGuard,
+    }
+
+    impl CyclePresentationFixture {
+        fn new(context_id: u128) -> Self {
+            let temporary = tempfile::tempdir().unwrap();
+            let seed = temporary.path().join("seed");
+            fs::create_dir(&seed).unwrap();
+            let fixture = temporary.path().join("presentation-fixture");
+            fs::write(
+                &fixture,
+                "#!/bin/sh\ncase \"$3\" in _navigator|_provider_wait) exec sleep 60;; esac\nexit 0\n",
+            )
+            .unwrap();
+            set_mode(&fixture, 0o700).unwrap();
+            let presentation = Presentation::fresh_with_executable(temporary.path(), fixture);
+            presentation
+                .start_with_context(Uuid::from_u128(context_id), &seed)
+                .unwrap();
+            let provider = presentation
+                .read_topology()
+                .unwrap()
+                .provider()
+                .unwrap()
+                .id
+                .clone();
+            let cleanup = DisposableAttachmentTmuxGuard {
+                socket: presentation.paths.socket.clone(),
+                directory: presentation.paths.directory.clone(),
+            };
+            Self {
+                _temporary: temporary,
+                presentation,
+                provider,
+                _cleanup: cleanup,
+            }
+        }
+
+        fn focus_provider(&self) {
+            private_tmux_command()
+                .arg("-S")
+                .arg(&self.presentation.paths.socket)
+                .args(["select-pane", "-t"])
+                .arg(&self.provider)
+                .status()
+                .unwrap();
+        }
+
+        fn pane_active(&self, target: impl Into<OsString>) -> String {
+            self.presentation
+                .invoke_capture(
+                    None,
+                    vec![
+                        "display-message".into(),
+                        "-p".into(),
+                        "-t".into(),
+                        target.into(),
+                        "#{pane_active}".into(),
+                    ],
+                )
+                .unwrap()
+                .trim()
+                .to_owned()
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cycle_precommit_failure_restores_running_marker_and_focus() {
+        if super::private_tmux_command()
+            .arg("-V")
+            .spawn()
+            .and_then(std::process::Child::wait_with_output)
+            .is_err()
+        {
+            eprintln!("skipped: tmux is unavailable");
+            return;
+        }
+        let fixture = CyclePresentationFixture::new(4);
+        let previous = WorkstreamId::from(Uuid::from_u128(5));
+        let pending = WorkstreamId::from(Uuid::from_u128(6));
+        fixture
+            .presentation
+            .set_pane_role(
+                &fixture.provider,
+                PresentationPaneRole::Provider,
+                Some(previous),
+            )
+            .unwrap();
+        let prior_status = AttachmentStatus {
+            attempt_id: Uuid::from_u128(7),
+            workstream_id: previous,
+            phase: AttachmentPhase::Running,
+            purpose: AttachmentPurpose::Ordinary,
+        };
+        fixture
+            .presentation
+            .write_attachment_status(&prior_status)
+            .unwrap();
+        fixture.focus_provider();
+
+        let result = fixture
+            .presentation
+            .attach_workstream_claimed_with_injected_respawn(
+                pending,
+                Revision::INITIAL,
+                RuntimeId::new(),
+                Revision::INITIAL,
+                AttachmentPurpose::ProviderCycle,
+                Err(PresentationError::TmuxRejected(
+                    "injected respawn failure".to_owned(),
+                )),
+            );
+        assert!(matches!(
+            result,
+            Err(PresentationError::TmuxRejected(message)) if message == "injected respawn failure"
+        ));
+        assert_eq!(
+            fixture.presentation.read_attachment_status().unwrap(),
+            Some(prior_status)
+        );
+        assert_eq!(
+            fixture
+                .presentation
+                .attachment_topology()
+                .unwrap()
+                .provider()
+                .unwrap()
+                .workstream_id,
+            Some(previous)
+        );
+        assert_eq!(fixture.pane_active(&fixture.provider), "1");
+        assert_eq!(
+            fixture.pane_active(format!("{}:0.0", fixture.presentation.paths.session_name)),
+            "0"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cycle_precommit_success_keeps_provider_focus_through_running() {
+        if super::private_tmux_command()
+            .arg("-V")
+            .spawn()
+            .and_then(std::process::Child::wait_with_output)
+            .is_err()
+        {
+            eprintln!("skipped: tmux is unavailable");
+            return;
+        }
+        let fixture = CyclePresentationFixture::new(14);
+        let previous = WorkstreamId::from(Uuid::from_u128(15));
+        let destination = WorkstreamId::from(Uuid::from_u128(16));
+        fixture
+            .presentation
+            .set_pane_role(
+                &fixture.provider,
+                PresentationPaneRole::Provider,
+                Some(previous),
+            )
+            .unwrap();
+        fixture
+            .presentation
+            .write_attachment_status(&AttachmentStatus {
+                attempt_id: Uuid::from_u128(17),
+                workstream_id: previous,
+                phase: AttachmentPhase::Running,
+                purpose: AttachmentPurpose::Ordinary,
+            })
+            .unwrap();
+        fixture.focus_provider();
+
+        let pending = fixture
+            .presentation
+            .attach_workstream_claimed_with_injected_respawn(
+                destination,
+                Revision::INITIAL,
+                RuntimeId::new(),
+                Revision::INITIAL,
+                AttachmentPurpose::ProviderCycle,
+                Ok(()),
+            )
+            .unwrap();
+        assert_eq!(pending.phase, AttachmentPhase::Pending);
+        assert_eq!(pending.purpose, AttachmentPurpose::ProviderCycle);
+        assert_eq!(pending.workstream_id, destination);
+        assert_eq!(
+            fixture
+                .presentation
+                .attachment_topology()
+                .unwrap()
+                .provider()
+                .unwrap()
+                .workstream_id,
+            Some(destination)
+        );
+        assert_eq!(fixture.pane_active(&fixture.provider), "1");
+        fixture
+            .presentation
+            .report_attachment_phase(pending.attempt_id, AttachmentPhase::Running)
+            .unwrap();
+        assert_eq!(
+            fixture.presentation.read_attachment_status().unwrap(),
+            Some(AttachmentStatus {
+                attempt_id: pending.attempt_id,
+                workstream_id: destination,
+                phase: AttachmentPhase::Running,
+                purpose: AttachmentPurpose::ProviderCycle,
+            })
+        );
+        assert_eq!(fixture.pane_active(&fixture.provider), "1");
+    }
+
+    struct DisposableAttachmentTmuxGuard {
+        socket: PathBuf,
+        directory: PathBuf,
+    }
+
+    impl Drop for DisposableAttachmentTmuxGuard {
+        fn drop(&mut self) {
+            let _ = super::private_tmux_command()
+                .arg("-S")
+                .arg(&self.socket)
+                .arg("kill-server")
+                .spawn()
+                .and_then(std::process::Child::wait_with_output);
+            let _ = fs::remove_dir_all(&self.directory);
+        }
     }
 }

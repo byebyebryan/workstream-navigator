@@ -110,6 +110,18 @@ pub(super) enum Commands {
         #[arg(long)]
         client_name: String,
     },
+    /// Internal read-only primary-button validation for the presentation.
+    #[command(name = "_presentation_mouse", hide = true)]
+    PresentationMouse {
+        #[arg(long)]
+        presentation_socket: PathBuf,
+        #[arg(long)]
+        presentation_session: String,
+        #[arg(long)]
+        target_pane: String,
+        #[arg(long)]
+        client_name: String,
+    },
     /// Internal blank provider-pane placeholder before an exact attachment is selected.
     #[command(name = "_provider_wait", hide = true)]
     ProviderWait,
@@ -129,6 +141,8 @@ pub(super) enum Commands {
         presentation_session: String,
         #[arg(long)]
         attempt_id: String,
+        #[arg(long)]
+        provider_cycle: bool,
     },
     /// Internal passive Codex lifecycle hook entrypoint.
     #[command(name = "_hook", hide = true)]
@@ -176,6 +190,10 @@ pub(super) const fn is_provider_pane_command(command: Option<&Commands>) -> bool
                 | Commands::RuntimeLaunch { .. }
         )
     )
+}
+
+pub(super) const fn is_presentation_mouse_command(command: Option<&Commands>) -> bool {
+    matches!(command, Some(Commands::PresentationMouse { .. }))
 }
 
 pub(super) const fn is_observer_command(command: Option<&Commands>) -> bool {

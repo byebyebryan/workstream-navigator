@@ -1,5 +1,6 @@
+use super::topology::Direction;
 use super::{
-    CurrentState, DEFAULT_NAVIGATOR_PANE_WIDTH, Direction, MAX_TMUX_OUTPUT_BYTES,
+    COPY_MODE_SCROLL_BINDINGS, CurrentState, DEFAULT_NAVIGATOR_PANE_WIDTH, MAX_TMUX_OUTPUT_BYTES,
     NAVIGATOR_WIDTH_HOOKS, NAVIGATOR_WINDOW, OsString, PRESENTATION_CLAIM_OPTION, Path,
     Presentation, PresentationAction, PresentationError, PresentationPaneRole,
     PresentationTopology, ProvisionalLease, ProvisionalPhase, ProvisionalSlot, ROLE_OPTION,
@@ -160,27 +161,6 @@ pub(crate) fn retry_default_navigator_width(
 }
 
 impl Presentation {
-    /// Gives keyboard focus to the directly interactive provider pane.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the exact owned pane cannot be focused.
-    pub fn focus_provider(&self) -> Result<(), PresentationError> {
-        let provider = self.provider_target()?;
-        self.select_owned_pane(&provider)
-    }
-
-    /// Gives keyboard focus to the navigator pane without touching a provider
-    /// Runtime or its attachment helper.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the exact owned pane cannot be focused.
-    pub fn focus_navigator(&self) -> Result<(), PresentationError> {
-        let navigator = self.navigator_target()?;
-        self.select_owned_pane(&navigator)
-    }
-
     /// Returns the exact owned role for a pane supplied by tmux's format
     /// expansion. No positional pane index is accepted at this boundary.
     ///
@@ -197,6 +177,100 @@ impl Presentation {
             .pane(source_pane)
             .map(|pane| pane.role)
             .ok_or(PresentationError::InvalidTopology)
+    }
+
+    /// Proves that the tmux-expanded source is the currently active provider
+    /// pane in the exact fixed two-pane presentation.
+    pub(crate) fn validate_focused_provider(
+        &self,
+        source_pane: &str,
+    ) -> Result<(), PresentationError> {
+        let topology = self.read_topology()?;
+        let provider = topology
+            .provider()
+            .filter(|_| topology.panes.len() == 2 && topology.utility().is_none())
+            .ok_or(PresentationError::InvalidTopology)?;
+        if provider.id != source_pane {
+            return Err(PresentationError::ControlRefused(
+                "provider switch requires the focused provider pane",
+            ));
+        }
+        let active = self.invoke_capture(
+            None,
+            vec![
+                "display-message".into(),
+                "-p".into(),
+                "-t".into(),
+                source_pane.into(),
+                "#{pane_active}".into(),
+            ],
+        )?;
+        if active.trim() == "1" {
+            Ok(())
+        } else {
+            Err(PresentationError::ControlRefused(
+                "provider switch requires the focused provider pane",
+            ))
+        }
+    }
+
+    /// Proves a deliberate primary-button press belongs to the exact active
+    /// source and clicked target in this presentation. The caller invokes
+    /// this predicate synchronously from tmux's `if-shell`; no pane is
+    /// selected and no mouse event is forwarded until every check succeeds.
+    pub(crate) fn validate_mouse_press(
+        &self,
+        target_pane: &str,
+        client_name: &str,
+    ) -> Result<(), PresentationError> {
+        self.validate_presentation_client(client_name)?;
+        let topology = self.read_topology()?;
+        if topology.panes.len() != 2 || topology.utility().is_some() {
+            return Err(PresentationError::ControlRefused(
+                "mouse focus requires the exact two-pane presentation",
+            ));
+        }
+        let target = topology
+            .pane(target_pane)
+            .ok_or(PresentationError::InvalidTopology)?;
+        if !matches!(
+            target.role,
+            PresentationPaneRole::Navigator | PresentationPaneRole::Provider
+        ) {
+            return Err(PresentationError::ControlRefused(
+                "mouse focus requires owned interactive panes",
+            ));
+        }
+        let active = self.invoke_capture(
+            None,
+            vec![
+                "display-message".into(),
+                "-p".into(),
+                "-c".into(),
+                client_name.into(),
+                "#{pane_id}|#{pane_active}".into(),
+            ],
+        )?;
+        let mut fields = active.trim().split(TMUX_FIELD_SEPARATOR);
+        let source_pane = fields.next().ok_or(PresentationError::InvalidTopology)?;
+        let active_flag = fields.next().ok_or(PresentationError::InvalidTopology)?;
+        if fields.next().is_some() || active_flag != "1" {
+            return Err(PresentationError::ControlRefused(
+                "mouse focus source is not active",
+            ));
+        }
+        let source = topology
+            .pane(source_pane)
+            .ok_or(PresentationError::InvalidTopology)?;
+        if !matches!(
+            source.role,
+            PresentationPaneRole::Navigator | PresentationPaneRole::Provider
+        ) {
+            return Err(PresentationError::ControlRefused(
+                "mouse focus source is not interactive",
+            ));
+        }
+        Ok(())
     }
 
     /// Validates that the provider role still names the exact local
@@ -256,11 +330,12 @@ impl Presentation {
             self.validate_presentation_client(client_name)?;
         }
         match action {
-            PresentationAction::FocusUp
-            | PresentationAction::FocusDown
-            | PresentationAction::FocusLeft
-            | PresentationAction::FocusRight
-            | PresentationAction::FocusNext => self.focus_direction(source_pane, action),
+            PresentationAction::FocusLeft | PresentationAction::FocusRight => {
+                self.focus_direction(source_pane, action)
+            }
+            PresentationAction::SwitchPrevious | PresentationAction::SwitchNext => Err(
+                PresentationError::ControlRefused("provider switching requires attachment state"),
+            ),
             PresentationAction::LiteralCtrlB => {
                 let role = self.focused_pane_role(source_pane)?;
                 if role == PresentationPaneRole::Provider {
@@ -342,16 +417,30 @@ impl Presentation {
         action: PresentationAction,
     ) -> Result<(), PresentationError> {
         let topology = self.read_topology()?;
+        if topology.panes.len() != 2
+            || topology.navigator().is_none()
+            || topology.provider().is_none()
+            || topology.utility().is_some()
+        {
+            return Err(PresentationError::ControlRefused(
+                "focus requires the exact two-pane presentation",
+            ));
+        }
         let source = topology
             .pane(source_pane)
             .ok_or(PresentationError::InvalidTopology)?;
+        if !matches!(
+            source.role,
+            PresentationPaneRole::Navigator | PresentationPaneRole::Provider
+        ) {
+            return Err(PresentationError::ControlRefused(
+                "focus source is not an interactive presentation pane",
+            ));
+        }
         let target = match action {
-            PresentationAction::FocusNext => topology.next(source),
-            PresentationAction::FocusUp => topology.directional(source, Direction::Up),
-            PresentationAction::FocusDown => topology.directional(source, Direction::Down),
             PresentationAction::FocusLeft => topology.directional(source, Direction::Left),
             PresentationAction::FocusRight => topology.directional(source, Direction::Right),
-            PresentationAction::LiteralCtrlB => None,
+            _ => None,
         };
         let Some(target) = target else {
             return Err(PresentationError::ControlRefused(
@@ -379,6 +468,28 @@ impl Presentation {
                 "display-message".into(),
                 "-t".into(),
                 navigator.into(),
+                "-d".into(),
+                "3000".into(),
+                message.into(),
+            ],
+        )
+    }
+
+    /// Displays fixed guidance in one already-validated invoking client. The
+    /// client is revalidated immediately before the tmux command and no
+    /// fallback target is used if it disappeared or changed sessions.
+    pub(crate) fn show_client_guidance(
+        &self,
+        client_name: &str,
+        message: &str,
+    ) -> Result<(), PresentationError> {
+        self.validate_presentation_client(client_name)?;
+        self.invoke(
+            None,
+            vec![
+                "display-message".into(),
+                "-c".into(),
+                client_name.into(),
                 "-d".into(),
                 "3000".into(),
                 message.into(),
@@ -571,13 +682,6 @@ impl Presentation {
             .ok_or(PresentationError::InvalidTopology)
     }
 
-    fn provider_target(&self) -> Result<String, PresentationError> {
-        self.read_topology()?
-            .provider()
-            .map(|pane| pane.id.clone())
-            .ok_or(PresentationError::InvalidTopology)
-    }
-
     /// Attachment replacement is the one active path that may accept an exact
     /// dead provider helper pane: tmux retains that owned pane specifically so
     /// `respawn-pane -k` can reconnect another live Runtime in place. A dead
@@ -636,10 +740,39 @@ impl Presentation {
     }
 
     pub(crate) fn install_control_bindings(&self) -> Result<(), PresentationError> {
+        // Reconciliation is a mutating tmux boundary. Prove the owned
+        // context and allowed two-pane topology before changing even a
+        // presentation option or key table.
+        self.context()?;
+        self.attachment_topology()?;
+        for (option, value) in [
+            ("status", "off"),
+            ("mouse", "on"),
+            ("remain-on-exit", "on"),
+            ("prefix", "C-b"),
+            ("prefix2", "None"),
+            ("pane-border-status", "top"),
+            (
+                "pane-border-format",
+                " #{?pane_active,▶ ACTIVE,◇ INACTIVE} ",
+            ),
+        ] {
+            self.invoke(
+                None,
+                vec![
+                    "set-option".into(),
+                    "-g".into(),
+                    option.into(),
+                    value.into(),
+                ],
+            )?;
+        }
+        for table in ["prefix", "root"] {
+            self.reset_key_table(table)?;
+        }
         let bindings = [
-            ("o", PresentationAction::FocusNext),
-            ("Up", PresentationAction::FocusUp),
-            ("Down", PresentationAction::FocusDown),
+            ("Up", PresentationAction::SwitchPrevious),
+            ("Down", PresentationAction::SwitchNext),
             ("Left", PresentationAction::FocusLeft),
             ("Right", PresentationAction::FocusRight),
             ("C-b", PresentationAction::LiteralCtrlB),
@@ -657,17 +790,6 @@ impl Presentation {
                     key.into(),
                     "run-shell".into(),
                     self.control_shell_command(action)?.into(),
-                ],
-            )?;
-        }
-        for retired in ["\"", "%", "x"] {
-            self.invoke(
-                None,
-                vec![
-                    "unbind-key".into(),
-                    "-T".into(),
-                    "prefix".into(),
-                    retired.into(),
                 ],
             )?;
         }
@@ -689,8 +811,88 @@ impl Presentation {
                 "prefix".into(),
                 "?".into(),
                 "display-message".into(),
-                "Ctrl+b: o/directions focus | d detach | Ctrl+b literal | ? help".into(),
+                "Ctrl+b: Left/Right focus | Up/Down switch | d detach | Ctrl+b literal | ? help"
+                    .into(),
             ],
+        )?;
+        self.install_root_mouse_bindings()
+    }
+
+    fn install_root_mouse_bindings(&self) -> Result<(), PresentationError> {
+        let mouse_validation = self.mouse_press_shell_command()?;
+        let bindings = [
+            vec![
+                "MouseDown1Pane",
+                "if-shell",
+                mouse_validation.as_str(),
+                "select-pane -t = ; send-keys -M",
+            ],
+            vec!["MouseUp1Pane", "send-keys", "-M"],
+            vec![
+                "MouseDrag1Pane",
+                "if-shell",
+                "-F",
+                "#{||:#{pane_in_mode},#{mouse_any_flag}}",
+                "send-keys -M",
+                "copy-mode -M",
+            ],
+            vec![
+                "WheelUpPane",
+                "if-shell",
+                "-F",
+                "#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}",
+                "send-keys -M",
+                "copy-mode -e",
+            ],
+            vec![
+                "WheelDownPane",
+                "if-shell",
+                "-F",
+                "#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}",
+                "send-keys -M",
+                "send-keys -M",
+            ],
+        ];
+        for binding in bindings {
+            let mut arguments = vec![
+                OsString::from("bind-key"),
+                OsString::from("-T"),
+                OsString::from("root"),
+            ];
+            arguments.extend(binding.into_iter().map(OsString::from));
+            self.invoke(None, arguments)?;
+        }
+        for binding in COPY_MODE_SCROLL_BINDINGS {
+            self.invoke(
+                None,
+                binding
+                    .arguments()
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Tmux creates a key table lazily. Seed it with a fixed, immediately
+    /// removed binding before clearing so reconciliation never interprets a
+    /// missing-table diagnostic permissively.
+    fn reset_key_table(&self, table: &str) -> Result<(), PresentationError> {
+        self.invoke(
+            None,
+            vec![
+                "bind-key".into(),
+                "-T".into(),
+                table.into(),
+                "F12".into(),
+                "display-message".into(),
+                "".into(),
+            ],
+        )?;
+        self.invoke(
+            None,
+            vec!["unbind-key".into(), "-a".into(), "-T".into(), table.into()],
         )
     }
 
@@ -706,5 +908,13 @@ impl Presentation {
             "exec {executable} --state-root {state_root} _presentation_control --presentation-socket {socket} --presentation-session {session} --action {} --source-pane '#{{pane_id}}' --client-name #{{q:client_name}}",
             action.as_str()
         ))
+    }
+
+    pub(super) fn mouse_press_shell_command(&self) -> Result<String, PresentationError> {
+        super::presentation_mouse_validation_command(
+            &self.paths,
+            &self.executable,
+            &self.state_root,
+        )
     }
 }

@@ -43,6 +43,7 @@ pub fn run() -> ExitCode {
     let cli = cli::Cli::parse();
     let observer_command = cli::is_observer_command(cli.command.as_ref());
     let provider_pane_command = cli::is_provider_pane_command(cli.command.as_ref());
+    let presentation_mouse_command = cli::is_presentation_mouse_command(cli.command.as_ref());
     let shell_gate_command = cli::is_shell_gate_command(cli.command.as_ref());
     let shell_launch_helper_command = cli::is_shell_launch_helper_command(cli.command.as_ref());
     let observer_setup_command = cli::is_observer_setup_command(cli.command.as_ref());
@@ -61,6 +62,10 @@ pub fn run() -> ExitCode {
             eprintln!("WSNav onboarding command is unavailable");
             ExitCode::FAILURE
         }
+        // The root mouse predicate is a synchronous tmux gate. Its failure
+        // remains non-zero and silent so tmux does not select or forward the
+        // original press, while diagnostics never reach a pane.
+        Err(_) if presentation_mouse_command => ExitCode::FAILURE,
         // The interactive observer helper runs beside native Codex. Keep its
         // bounded failure silent so only the account-shell wrapper can render
         // the fixed setup-unavailable diagnostic and preserve its status.

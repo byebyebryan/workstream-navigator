@@ -27,7 +27,7 @@ use crate::{
         finalize_observer_trust_under_lease, observer_readiness, prepare_observer_activation,
     },
     domain::{OperationId, ProviderKind, Revision, RuntimeId, WorkstreamId},
-    presentation::{Presentation, PresentationError},
+    presentation::{AttachmentPhase, AttachmentPurpose, Presentation, PresentationError},
     provider_reconcile::ExpectedProviderExecutable,
     provisional::{
         PreHandoffRecovery, ProvisionalPhase, ProvisionalSlot, SlotError, SlotGeneration,
@@ -102,6 +102,7 @@ pub(crate) fn run_navigator(
     let mut mouse_down = None;
     let mut promoted_runtime = None;
     let mut pending_observer = None;
+    let mut seen_cycle_attempt = None;
 
     let quit = loop {
         if redraw {
@@ -120,7 +121,6 @@ pub(crate) fn run_navigator(
                         root,
                         &mut navigator,
                         &presentation,
-                        FocusAfter::Provider,
                         &mut pending_observer,
                     ) {
                         break true;
@@ -158,9 +158,6 @@ pub(crate) fn run_navigator(
                             let pressed = mouse_down.take();
                             if pressed.is_some() && pressed == target {
                                 pressed.map(|row| navigator.model_mut().activate_row(row))
-                            } else if target.is_none() {
-                                presentation.focus_navigator().ok();
-                                None
                             } else {
                                 None
                             }
@@ -173,7 +170,6 @@ pub(crate) fn run_navigator(
                             root,
                             &mut navigator,
                             &presentation,
-                            FocusAfter::Navigator,
                             &mut pending_observer,
                         )
                     {
@@ -202,7 +198,6 @@ pub(crate) fn run_navigator(
             root,
             &mut navigator,
             &presentation,
-            FocusAfter::Provider,
             &mut pending_observer,
         ) {
             break true;
@@ -227,6 +222,7 @@ pub(crate) fn run_navigator(
             }
             if let Ok(snapshot) = read_snapshot(root) {
                 navigator.replace_snapshot(snapshot);
+                sync_cycle_selection(&presentation, &mut navigator, &mut seen_cycle_attempt);
                 if let Some(runtime_id) = promoted_runtime
                     && navigator.select_runtime(runtime_id)
                 {
@@ -257,6 +253,35 @@ pub(crate) fn run_navigator(
 /// persistent ownership or shape failure remains a visible refusal.
 fn restore_default_navigator_width(presentation: &Presentation) -> Result<(), PresentationError> {
     retry_default_navigator_width(|| presentation.set_default_navigator_width())
+}
+
+/// Consumes one purpose-tagged provider-cycle status on the existing bounded
+/// refresh path. The attempt fence prevents repeated selection forcing while
+/// leaving ordinary Navigator attachments entirely unaffected.
+fn sync_cycle_selection(
+    presentation: &Presentation,
+    navigator: &mut Navigator,
+    seen_attempt: &mut Option<uuid::Uuid>,
+) {
+    let Ok(Some(status)) = presentation.attachment_status_read_only() else {
+        return;
+    };
+    let Some(attempt_id) = cycle_selection_attempt(&status, *seen_attempt) else {
+        return;
+    };
+    if navigator.select_workstream(status.workstream_id) {
+        *seen_attempt = Some(attempt_id);
+    }
+}
+
+fn cycle_selection_attempt(
+    status: &crate::presentation::AttachmentStatus,
+    seen_attempt: Option<uuid::Uuid>,
+) -> Option<uuid::Uuid> {
+    (status.purpose == AttachmentPurpose::ProviderCycle
+        && status.phase == AttachmentPhase::Running
+        && seen_attempt != Some(status.attempt_id))
+    .then_some(status.attempt_id)
 }
 
 fn retry_default_navigator_width(
@@ -380,12 +405,6 @@ fn abbreviated_path_component(component: &str) -> String {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum FocusAfter {
-    Provider,
-    Navigator,
-}
-
 /// Process-local intent retained while Codex native observer review owns the
 /// right-hand presentation pane. It deliberately carries only typed IDs and
 /// revisions; no provider argv, prompt, output, or capture is retained.
@@ -499,9 +518,8 @@ struct PendingObserverSetup {
     review_directory: Option<ReviewDirectory>,
 }
 
-/// Executes one model command while keeping keyboard- and mouse-originated
-/// focus policy explicit. Mouse activation switches the provider attachment
-/// but leaves keyboard focus in Navigator.
+/// Executes one model command. Presentation tmux alone owns pane focus;
+/// replacing or attaching the right-hand surface never selects a pane.
 #[allow(
     clippy::too_many_lines,
     reason = "The small command set keeps exact attachment and focus outcomes in one controller seam."
@@ -511,16 +529,12 @@ fn execute_command(
     root: &StateRoot,
     navigator: &mut Navigator,
     presentation: &Presentation,
-    focus_after: FocusAfter,
     pending_observer: &mut Option<PendingObserverSetup>,
 ) -> bool {
     match command {
         Command::Quit => true,
         Command::MaterializeProvisionalShell => {
             if materialize_provisional_shell(root, presentation).is_ok() {
-                if focus_after == FocusAfter::Provider && presentation.focus_provider().is_err() {
-                    navigator.set_guidance("Shell opened; provider-pane focus is unavailable");
-                }
             } else {
                 navigator.set_guidance("New session shell unavailable; exact state required");
             }
@@ -541,10 +555,6 @@ fn execute_command(
                 )
                 .is_ok()
             {
-                if focus_after == FocusAfter::Provider && presentation.focus_provider().is_err() {
-                    navigator
-                        .set_guidance("Managed session opened; provider-pane focus is unavailable");
-                }
             } else {
                 navigator.set_guidance(
                     "Managed session is unavailable; exact Runtime evidence required",
@@ -593,13 +603,6 @@ fn execute_command(
                         )
                         .is_ok()
                     {
-                        if focus_after == FocusAfter::Provider
-                            && presentation.focus_provider().is_err()
-                        {
-                            navigator.set_guidance(
-                                "New session started; provider-pane focus is unavailable",
-                            );
-                        }
                     } else {
                         navigator.set_guidance(
                             "New session started; exact Runtime attachment is unavailable",
@@ -626,7 +629,6 @@ fn execute_command(
                 root,
                 navigator,
                 presentation,
-                focus_after,
                 provider,
                 action,
                 pending_observer,
@@ -647,7 +649,6 @@ fn execute_command(
                 root,
                 navigator,
                 presentation,
-                focus_after,
                 provider,
                 action,
                 pending_observer,
@@ -662,7 +663,6 @@ fn execute_command(
                 root,
                 navigator,
                 presentation,
-                focus_after,
                 ManagedAction::Park {
                     workstream_id,
                     expected_workstream_revision,
@@ -678,7 +678,6 @@ fn execute_command(
                 root,
                 navigator,
                 presentation,
-                focus_after,
                 ManagedAction::Archive {
                     workstream_id,
                     expected_workstream_revision,
@@ -694,7 +693,6 @@ fn execute_command(
                 root,
                 navigator,
                 presentation,
-                focus_after,
                 ManagedAction::Restore {
                     workstream_id,
                     expected_workstream_revision,
@@ -710,7 +708,6 @@ fn execute_command(
                 root,
                 navigator,
                 presentation,
-                focus_after,
                 ManagedAction::AcknowledgeResult {
                     workstream_id,
                     expected_attention_revision,
@@ -732,7 +729,6 @@ fn execute_command(
                 root,
                 navigator,
                 presentation,
-                focus_after,
                 provider,
                 action,
                 pending_observer,
@@ -753,7 +749,6 @@ fn execute_command(
                 root,
                 navigator,
                 presentation,
-                focus_after,
                 provider,
                 action,
                 pending_observer,
@@ -780,7 +775,6 @@ fn execute_command(
                 root,
                 navigator,
                 presentation,
-                focus_after,
                 ManagedAction::Rename {
                     workstream_id,
                     expected_workstream_revision,
@@ -858,7 +852,6 @@ fn execute_managed_action_or_request(
     root: &StateRoot,
     navigator: &mut Navigator,
     presentation: &Presentation,
-    focus_after: FocusAfter,
     _provider: ProviderKind,
     action: ManagedAction,
     pending_observer: &mut Option<PendingObserverSetup>,
@@ -872,7 +865,7 @@ fn execute_managed_action_or_request(
     ) else {
         return;
     };
-    execute_managed_action(root, navigator, presentation, focus_after, action);
+    execute_managed_action(root, navigator, presentation, action);
 }
 
 /// Reads the exact schema-15 observer state without reserving onboarding
@@ -1096,14 +1089,7 @@ fn accept_observer_setup(
         let command = pending.intent.into_command();
         drop(provisional_lease);
         drop(state);
-        let _ = execute_command(
-            command,
-            root,
-            navigator,
-            presentation,
-            FocusAfter::Provider,
-            pending_observer,
-        );
+        let _ = execute_command(command, root, navigator, presentation, pending_observer);
         return;
     };
     let Some(path) = std::env::var_os("PATH") else {
@@ -1167,15 +1153,9 @@ fn accept_observer_setup(
     pending.expected_integration = Some(expected);
     pending.review_directory = Some(review_directory);
     *pending_observer = Some(pending);
-    if presentation.focus_provider().is_err() {
-        navigator.set_guidance(
-            "Complete Codex native /hooks review; provider-pane focus is unavailable",
-        );
-    } else {
-        navigator.set_guidance(
-            "Complete Codex native /hooks review in the right-hand pane; the selected action resumes after exact trust proof",
-        );
-    }
+    navigator.set_guidance(
+        "Complete Codex native /hooks review in the right-hand pane; the selected action resumes after exact trust proof",
+    );
 }
 
 /// Polls only the exact native review pane. Once it exits, native trust and
@@ -1292,7 +1272,6 @@ fn execute_managed_action(
     root: &StateRoot,
     navigator: &mut Navigator,
     presentation: &Presentation,
-    focus_after: FocusAfter,
     action: ManagedAction,
 ) {
     let restored_workstream = match &action {
@@ -1338,8 +1317,6 @@ fn execute_managed_action(
         .is_err()
     {
         navigator.set_guidance("Managed session started; exact Runtime attachment is unavailable");
-    } else if focus_after == FocusAfter::Provider && presentation.focus_provider().is_err() {
-        navigator.set_guidance("Managed session started; provider-pane focus is unavailable");
     }
 }
 
@@ -1969,7 +1946,8 @@ mod tests {
 
     use super::{
         AccountShellInputs, ManagedAction, ProviderExecRefresh, apply_managed_action,
-        describe_shell_location, materialize_provisional_shell_with_inputs, observe_shell_cwd,
+        cycle_selection_attempt, describe_shell_location,
+        materialize_provisional_shell_with_inputs, observe_shell_cwd,
         reattach_materialized_provisional_shell, refresh_provider_exec, require_active_workstream,
         require_parkable_workstream, retry_default_navigator_width, start_same_location,
     };
@@ -1980,7 +1958,9 @@ mod tests {
         },
         navigator::view::ShellLocation,
         presentation::NAVIGATOR_WIDTH_RETRY_ATTEMPTS,
-        presentation::{Presentation, PresentationError},
+        presentation::{
+            AttachmentPhase, AttachmentPurpose, AttachmentStatus, Presentation, PresentationError,
+        },
         process::output_bounded,
         provisional::{ProvisionalPhase, read_marker},
         snapshot::{OnboardingStatus, ProjectSnapshot, Snapshot, WorkstreamSnapshot},
@@ -2077,6 +2057,7 @@ mod tests {
                     provider: ProviderKind::Codex,
                     lifecycle: WorkstreamLifecycle::Open,
                     archived: false,
+                    last_activity_sequence: 1,
                     revision: Revision::INITIAL,
                     runtime: None,
                     onboarding,
@@ -2089,6 +2070,36 @@ mod tests {
             },
             workstream_id,
         )
+    }
+
+    #[test]
+    fn cycle_selection_requires_running_provider_cycle_once_per_attempt() {
+        let attempt = Uuid::from_u128(810);
+        let status = AttachmentStatus {
+            attempt_id: attempt,
+            workstream_id: WorkstreamId::from(Uuid::from_u128(811)),
+            phase: AttachmentPhase::Running,
+            purpose: AttachmentPurpose::ProviderCycle,
+        };
+        assert_eq!(cycle_selection_attempt(&status, None), Some(attempt));
+        assert_eq!(cycle_selection_attempt(&status, Some(attempt)), None);
+
+        for phase in [
+            AttachmentPhase::Pending,
+            AttachmentPhase::Completed,
+            AttachmentPhase::Failed,
+        ] {
+            let status = AttachmentStatus {
+                phase,
+                ..status.clone()
+            };
+            assert_eq!(cycle_selection_attempt(&status, None), None);
+        }
+        let status = AttachmentStatus {
+            purpose: AttachmentPurpose::Ordinary,
+            ..status
+        };
+        assert_eq!(cycle_selection_attempt(&status, None), None);
     }
 
     #[test]

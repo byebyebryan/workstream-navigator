@@ -3,7 +3,7 @@ use super::{
     cli::{Cli, Commands},
     launch::{
         OpenCodeObserverArguments, attach_runtime, opencode_observer, presentation_control,
-        provider_attach, provider_wait, runtime_launch,
+        presentation_mouse_validate, provider_attach, provider_wait, runtime_launch,
     },
     local::observe_hook,
     model::{
@@ -168,6 +168,18 @@ fn execute_root_command(root: &StateRoot, command: Commands) -> Result<(), AppEr
             &source_pane,
             &client_name,
         ),
+        Commands::PresentationMouse {
+            presentation_socket,
+            presentation_session,
+            target_pane,
+            client_name,
+        } => presentation_mouse_validate(
+            root,
+            presentation_socket,
+            presentation_session,
+            &target_pane,
+            &client_name,
+        ),
         Commands::ProviderWait => provider_wait(),
         command => execute_root_surface(root, command),
     }
@@ -187,6 +199,7 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
             presentation_socket,
             presentation_session,
             attempt_id,
+            provider_cycle,
         } => provider_attach(
             root,
             &workstream_id,
@@ -196,6 +209,7 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
             presentation_socket,
             presentation_session,
             &attempt_id,
+            provider_cycle,
         ),
         Commands::RuntimeLaunch {
             runtime_id,
@@ -244,6 +258,7 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
         Commands::Navigator
         | Commands::NavigatorPane { .. }
         | Commands::PresentationControl { .. }
+        | Commands::PresentationMouse { .. }
         | Commands::ProviderWait
         | Commands::Hook
         | Commands::OpenCodeServeBarrier { .. }

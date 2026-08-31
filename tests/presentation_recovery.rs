@@ -2,6 +2,7 @@ use std::{
     collections::BTreeSet,
     ffi::OsString,
     fs,
+    io::Write,
     path::{Path, PathBuf},
     process::{Child, Command, Output, Stdio},
     thread,
@@ -217,7 +218,7 @@ fn private_presentation_has_only_owned_roles_and_bounded_key_tables() {
     assert!(!prefix.contains("run-shell -b"));
     assert_eq!(
         binding_keys(&prefix),
-        BTreeSet::from(["?", "d", "o", "Up", "Down", "Left", "Right", "C-b",])
+        BTreeSet::from(["?", "d", "Up", "Down", "Left", "Right", "C-b",])
     );
     let root = tmux_output(&paths.socket, ["list-keys", "-T", "root"]);
     assert_eq!(
@@ -230,6 +231,120 @@ fn private_presentation_has_only_owned_roles_and_bounded_key_tables() {
             "WheelDownPane",
         ])
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn primary_mouse_press_validates_focus_and_forwards_native_event() {
+    if !tmux_available() {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+
+    let state_root = current_state_root();
+    let presentation = Presentation::fresh_with_executable(
+        state_root.path(),
+        PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
+    );
+    let paths = presentation.paths().clone();
+    let _guard = PrivateTmuxGuard {
+        directory: paths.directory.clone(),
+        socket: paths.socket.clone(),
+    };
+    presentation
+        .start(uuid::Uuid::from_u128(0x1710), state_root.path())
+        .unwrap();
+
+    let mut client = attach_tmux_client(&paths);
+    let _initial_client_name = wait_for_presentation_client(&paths);
+    let provider = pane_id_for_role(&paths, "provider");
+    let navigator = pane_id_for_role(&paths, "navigator");
+
+    // Establish an invalid topology before any mouse input reaches the
+    // provider PTY. The synchronous predicate must refuse without either
+    // selecting or forwarding the press.
+    select_pane(&paths.socket, &navigator);
+    let extra = tmux_command(&paths.socket)
+        .args([
+            "split-window",
+            "-v",
+            "-d",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            "-t",
+            &provider,
+            SLEEP_PROGRAM,
+            "60",
+        ])
+        .output()
+        .unwrap();
+    assert!(extra.status.success(), "tmux failed: {:?}", extra.stderr);
+    let invalid_ready = state_root.path().join("mouse-invalid-ready");
+    let invalid_capture = state_root.path().join("mouse-invalid-capture");
+    respawn_mouse_fixture(&paths.socket, &provider, &invalid_ready, &invalid_capture);
+    wait_for_path(&invalid_ready);
+    thread::sleep(Duration::from_millis(100));
+    let (invalid_left, invalid_top, _, _) = pane_geometry(&paths.socket, &provider);
+    let invalid_x = invalid_left.saturating_add(4);
+    let invalid_y = invalid_top.saturating_add(3);
+    assert_eq!(active_pane(&paths.socket), navigator);
+    select_pane(&paths.socket, &navigator);
+    send_sgr_mouse_press(&mut client, invalid_x, invalid_y);
+    thread::sleep(Duration::from_millis(150));
+    assert_eq!(active_pane(&paths.socket), navigator);
+    assert_eq!(
+        fs::metadata(&invalid_capture).map_or(0, |metadata| metadata.len()),
+        0
+    );
+    send_sgr_mouse_release(&mut client, invalid_x, invalid_y);
+    thread::sleep(Duration::from_millis(50));
+
+    let extra = String::from_utf8(extra.stdout).unwrap().trim().to_owned();
+    let killed = tmux_command(&paths.socket)
+        .args(["kill-pane", "-t", &extra])
+        .output()
+        .unwrap();
+    assert!(killed.status.success(), "tmux failed: {:?}", killed.stderr);
+    let _ = client.kill();
+    let _ = client.wait();
+    let mut client = attach_tmux_client(&paths);
+    let client_name = wait_for_presentation_client(&paths);
+
+    // With the exact topology restored, a fresh provider PTY receives the
+    // translated SGR press after tmux moves focus to the clicked pane.
+    let ready = state_root.path().join("mouse-ready");
+    let capture = state_root.path().join("mouse-capture");
+    respawn_mouse_fixture(&paths.socket, &provider, &ready, &capture);
+    wait_for_path(&ready);
+    let (left, top, width, height) = pane_geometry(&paths.socket, &provider);
+    assert!(width > 8 && height > 6);
+    let x = left.saturating_add(4);
+    let y = top.saturating_add(3);
+    let expected_press = format!(
+        "\x1b[<0;{};{}M",
+        x.saturating_sub(left).saturating_add(1),
+        y.saturating_sub(top).saturating_add(1)
+    );
+    select_pane(&paths.socket, &navigator);
+    assert_eq!(active_pane(&paths.socket), navigator);
+    send_sgr_mouse_press(&mut client, x, y);
+    wait_for_active_pane(&paths.socket, &provider);
+    wait_for_file_len(&capture, expected_press.len() as u64);
+    assert_eq!(fs::read(&capture).unwrap(), expected_press.as_bytes());
+
+    // Release and wheel events over an inactive pane never select it.
+    select_pane(&paths.socket, &navigator);
+    send_sgr_mouse_release(&mut client, x, y);
+    send_sgr_mouse_wheel_up(&mut client, x, y);
+    thread::sleep(Duration::from_millis(100));
+    assert_eq!(active_pane(&paths.socket), navigator);
+
+    // Keep the exact client lookup live in the test so a stale/foreign client
+    // cannot accidentally make the valid path pass.
+    assert!(!client_name.is_empty());
+    let _ = client.kill();
+    let _ = client.wait();
 }
 
 #[test]
@@ -266,7 +381,11 @@ fn mutated_private_geometry_fails_closed_without_rearranging_panes() {
     assert!(status.success());
     let before = pane_snapshot(&paths);
     assert_eq!(before.len(), 3);
-    assert!(presentation.focus_navigator().is_err());
+    assert!(
+        presentation
+            .control(PresentationAction::FocusLeft, "%0")
+            .is_err()
+    );
     assert_eq!(pane_snapshot(&paths), before);
 }
 
@@ -294,9 +413,8 @@ fn tmux_control_bindings_are_parseable_active_helpers_only() {
 
     let prefix = tmux_output(&paths.socket, ["list-keys", "-T", "prefix"]);
     for action in [
-        "focus-next",
-        "focus-up",
-        "focus-down",
+        "switch-previous",
+        "switch-next",
         "focus-left",
         "focus-right",
         "literal-c-b",
@@ -508,6 +626,174 @@ fn attach_tmux_session_client(socket: &Path, session: &str) -> Child {
     let _ = child.kill();
     let _ = child.wait();
     panic!("private presentation client did not attach");
+}
+
+fn wait_for_presentation_client(paths: &PresentationPaths) -> String {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    while Instant::now() < deadline {
+        let output = tmux_command(&paths.socket)
+            .args([
+                "list-clients",
+                "-F",
+                "#{client_name}|#{session_name}|#{window_name}",
+            ])
+            .output()
+            .unwrap();
+        if output.status.success()
+            && let Some(client) =
+                String::from_utf8(output.stdout)
+                    .unwrap()
+                    .lines()
+                    .find_map(|line| {
+                        let fields = line.split('|').collect::<Vec<_>>();
+                        (fields.len() == 3
+                            && fields[1] == paths.session_name
+                            && fields[2] == "navigator")
+                            .then(|| fields[0].to_owned())
+                    })
+        {
+            return client;
+        }
+        thread::sleep(READINESS_POLL);
+    }
+    panic!("private presentation client was not discoverable");
+}
+
+fn pane_id_for_role(paths: &PresentationPaths, role: &str) -> String {
+    let output = tmux_output(
+        &paths.socket,
+        [
+            "list-panes",
+            "-t",
+            &format!("{}:navigator", paths.session_name),
+            "-F",
+            "#{pane_id}|#{@wsnav_role}",
+        ],
+    );
+    output
+        .lines()
+        .find_map(|line| {
+            let (pane, pane_role) = line.split_once('|')?;
+            (pane_role == role).then(|| pane.to_owned())
+        })
+        .unwrap_or_else(|| panic!("missing {role} pane"))
+}
+
+fn select_pane(socket: &Path, pane: &str) {
+    let output = tmux_command(socket)
+        .args(["select-pane", "-t", pane])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "tmux failed: {:?}", output.stderr);
+}
+
+fn active_pane(socket: &Path) -> String {
+    tmux_output(socket, ["display-message", "-p", "#{pane_id}"])
+        .trim()
+        .to_owned()
+}
+
+fn wait_for_active_pane(socket: &Path, expected: &str) {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    while Instant::now() < deadline {
+        if active_pane(socket) == expected {
+            return;
+        }
+        thread::sleep(READINESS_POLL);
+    }
+    panic!(
+        "expected active pane {expected}, got {}",
+        active_pane(socket)
+    );
+}
+
+fn pane_geometry(socket: &Path, pane: &str) -> (u16, u16, u16, u16) {
+    let output = tmux_output(
+        socket,
+        [
+            "display-message",
+            "-p",
+            "-t",
+            pane,
+            "#{pane_left}|#{pane_top}|#{pane_width}|#{pane_height}",
+        ],
+    );
+    let fields = output
+        .trim()
+        .split('|')
+        .map(|field| field.parse::<u16>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(fields.len(), 4);
+    (fields[0], fields[1], fields[2], fields[3])
+}
+
+fn respawn_mouse_fixture(socket: &Path, pane: &str, ready: &Path, capture: &Path) {
+    let script = format!(
+        "printf '\\033[?1000h\\033[?1006h'; stty -icanon min 1 time 0; touch {}; dd if=/dev/stdin of={} bs=1 count=9 status=none; sleep 60",
+        shell_quote_for_test(ready),
+        shell_quote_for_test(capture),
+    );
+    let output = tmux_command(socket)
+        .args(["respawn-pane", "-k", "-t", pane, "/bin/sh", "-c"])
+        .arg(script)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "tmux failed: {:?}", output.stderr);
+}
+
+fn wait_for_path(path: &Path) {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    while !path.exists() && Instant::now() < deadline {
+        thread::sleep(READINESS_POLL);
+    }
+    assert!(
+        path.exists(),
+        "fixture did not become ready: {}",
+        path.display()
+    );
+}
+
+fn wait_for_file_len(path: &Path, expected: u64) {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    while fs::metadata(path).map_or(0, |metadata| metadata.len()) < expected
+        && Instant::now() < deadline
+    {
+        thread::sleep(READINESS_POLL);
+    }
+    assert_eq!(fs::metadata(path).unwrap().len(), expected);
+}
+
+fn send_sgr_mouse_press(client: &mut Child, x: u16, y: u16) {
+    send_sgr_mouse(client, b'M', x, y);
+}
+
+fn send_sgr_mouse_release(client: &mut Child, x: u16, y: u16) {
+    send_sgr_mouse(client, b'm', x, y);
+}
+
+fn send_sgr_mouse_wheel_up(client: &mut Child, x: u16, y: u16) {
+    let stdin = client.stdin.as_mut().expect("attached client stdin");
+    write!(
+        stdin,
+        "\x1b[<64;{};{}M",
+        x.saturating_add(1),
+        y.saturating_add(1)
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+}
+
+fn send_sgr_mouse(client: &mut Child, suffix: u8, x: u16, y: u16) {
+    let stdin = client.stdin.as_mut().expect("attached client stdin");
+    write!(
+        stdin,
+        "\x1b[<0;{};{}{}",
+        x.saturating_add(1),
+        y.saturating_add(1),
+        char::from(suffix)
+    )
+    .unwrap();
+    stdin.flush().unwrap();
 }
 
 fn tmux_has_client(socket: &Path, session: &str) -> bool {

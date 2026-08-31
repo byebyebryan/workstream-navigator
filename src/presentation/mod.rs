@@ -18,7 +18,9 @@ use thiserror::Error;
 
 use crate::{
     domain::{OnboardingPhase, Revision, RuntimeId, WorkstreamId},
-    private_tmux::{TERMINAL_CAPABILITY_CONFIG, copy_mode_scroll_config},
+    private_tmux::{
+        COPY_MODE_SCROLL_BINDINGS, TERMINAL_CAPABILITY_CONFIG, copy_mode_scroll_config,
+    },
     process::{BoundedProcessError, output_bounded},
     provisional::{
         PROVISIONAL_MARKER_FILE, ProvisionalPhase, ProvisionalSlot, cancel_pre_handoff_under_lease,
@@ -53,7 +55,7 @@ use ownership::{
     PresentationArtifactSet, presentation_ownership_marker_path, read_presentation_ownership,
 };
 pub(crate) use provisional::classify_provisional_inventory;
-use topology::{Direction, PresentationTopology, parse_topology, parse_topology_with_dead};
+use topology::{PresentationTopology, parse_topology, parse_topology_with_dead};
 
 const PRESENTATION_DIRECTORY: &str = "presentation";
 const PRESENTATION_PREFIX: &str = "wsnav-presentation-";
@@ -102,14 +104,17 @@ const PRESENTATION_TMUX_CONFIG_PREFIX: &str = concat!(
     "set -g status off\n",
     "set -g mouse on\n",
     "set -g remain-on-exit on\n",
+    "set -g pane-border-status top\n",
+    "set -g pane-border-format \" #{?pane_active,▶ ACTIVE,◇ INACTIVE} \"\n",
     "set -g prefix C-b\n",
     "set -g prefix2 None\n",
+    "bind-key -T prefix F12 display-message \"\"\n",
+    "bind-key -T root F12 display-message \"\"\n",
     "unbind-key -a -T prefix\n",
     "unbind-key -a -T root\n",
 );
 const PRESENTATION_TMUX_CONFIG_SUFFIX: &str = concat!(
-    "bind-key -T root MouseDown1Pane select-pane -t = \\; send-keys -M\n",
-    "bind-key -T root MouseUp1Pane select-pane -t = \\; send-keys -M\n",
+    "bind-key -T root MouseUp1Pane send-keys -M\n",
     "bind-key -T root MouseDrag1Pane if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"copy-mode -M\"\n",
     "bind-key -T root WheelUpPane if-shell -F \"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"copy-mode -e\"\n",
     "bind-key -T root WheelDownPane if-shell -F \"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"send-keys -M\"\n",
@@ -124,12 +129,6 @@ fn presentation_tmux_config() -> String {
         PRESENTATION_TMUX_CONFIG_SUFFIX,
     ]
     .concat()
-}
-
-fn private_tmux_command() -> Command {
-    let mut command = Command::new("tmux");
-    command.env_remove("TMUX").arg("-u");
-    command
 }
 
 fn expected_presentation_config_identity() -> PresentationFileIdentity {
@@ -150,13 +149,32 @@ fn config_content_matches(identity: &PresentationFileIdentity) -> bool {
     identity.size == expected.size && identity.digest == expected.digest
 }
 
+fn presentation_mouse_validation_command(
+    paths: &PresentationPaths,
+    executable: &Path,
+    state_root: &Path,
+) -> Result<String, PresentationError> {
+    let executable = shell_quote(executable.as_os_str())?;
+    let state_root = shell_quote(state_root.as_os_str())?;
+    let socket = shell_quote(paths.socket.as_os_str())?;
+    let session = shell_quote(paths.session_name.as_ref())?;
+    Ok(format!(
+        "exec {executable} --state-root {state_root} _presentation_mouse --presentation-socket {socket} --presentation-session {session} --target-pane '#{{mouse_pane}}' --client-name #{{q:client_name}}"
+    ))
+}
+
+fn private_tmux_command() -> Command {
+    let mut command = Command::new("tmux");
+    command.env_remove("TMUX").arg("-u");
+    command
+}
+
 /// Actions exposed by the private presentation prefix table. The strings are
 /// fixed internal ABI values; no arbitrary tmux command can enter this path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PresentationAction {
-    FocusNext,
-    FocusUp,
-    FocusDown,
+    SwitchPrevious,
+    SwitchNext,
     FocusLeft,
     FocusRight,
     LiteralCtrlB,
@@ -166,9 +184,8 @@ impl PresentationAction {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::FocusNext => "focus-next",
-            Self::FocusUp => "focus-up",
-            Self::FocusDown => "focus-down",
+            Self::SwitchPrevious => "switch-previous",
+            Self::SwitchNext => "switch-next",
             Self::FocusLeft => "focus-left",
             Self::FocusRight => "focus-right",
             Self::LiteralCtrlB => "literal-c-b",
@@ -181,9 +198,8 @@ impl FromStr for PresentationAction {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value {
-            "focus-next" => Ok(Self::FocusNext),
-            "focus-up" => Ok(Self::FocusUp),
-            "focus-down" => Ok(Self::FocusDown),
+            "switch-previous" => Ok(Self::SwitchPrevious),
+            "switch-next" => Ok(Self::SwitchNext),
             "focus-left" => Ok(Self::FocusLeft),
             "focus-right" => Ok(Self::FocusRight),
             "literal-c-b" => Ok(Self::LiteralCtrlB),
@@ -206,6 +222,19 @@ pub struct AttachmentStatus {
     pub attempt_id: uuid::Uuid,
     pub workstream_id: WorkstreamId,
     pub phase: AttachmentPhase,
+    /// Process-local UI synchronization purpose. D18 status files omit this
+    /// field and therefore decode as an ordinary Navigator attachment.
+    #[serde(default)]
+    pub purpose: AttachmentPurpose,
+}
+
+/// Distinguishes a provider-pane cycle from an ordinary Navigator attach
+/// without adding durable UI state or changing the bounded status contract.
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub enum AttachmentPurpose {
+    #[default]
+    Ordinary,
+    ProviderCycle,
 }
 
 /// Immutable, presentation-private shell-onboarding context. The seed is
@@ -1141,9 +1170,8 @@ mod tests {
                 ("copy-mode-vi", "WheelUpPane", "scroll-up"),
                 ("copy-mode-vi", "WheelDownPane", "scroll-down"),
             ] {
-                let expected = format!(
-                    "bind-key -T {table} {key} select-pane \\; send-keys -X -N {repeat_count} {direction}"
-                );
+                let expected =
+                    format!("bind-key -T {table} {key} send-keys -X -N {repeat_count} {direction}");
                 let bindings = output(socket, ["list-keys", "-T", table].as_slice());
                 assert!(
                     bindings
@@ -1168,8 +1196,6 @@ mod tests {
                             "-T",
                             table,
                             key,
-                            "select-pane",
-                            "\\;",
                             "send-keys",
                             "-X",
                             "-N",
@@ -1782,43 +1808,33 @@ mod tests {
     }
 
     #[test]
-    fn presentation_config_selects_the_clicked_pane_on_mouse_release() {
+    fn presentation_config_selects_the_clicked_pane_on_mouse_press() {
         let config = presentation_tmux_config();
         assert!(config.contains("set -g mouse on"));
-        assert!(config.contains("bind-key -T root MouseUp1Pane select-pane -t = \\; send-keys -M"));
+        assert!(!config.contains("MouseDown1Pane"));
+        assert!(config.contains("bind-key -T root MouseUp1Pane send-keys -M"));
+        assert!(config.contains("pane-border-format"));
         assert!(config.contains("WheelUpPane"));
         assert!(!config.contains("MouseDown3Pane"));
     }
 
     #[test]
     fn presentation_config_rebuilds_bounded_allowlists() {
-        assert_eq!(
-            presentation_tmux_config(),
-            concat!(
-                "set -g status off\n",
-                "set -g mouse on\n",
-                "set -g remain-on-exit on\n",
-                "set -g prefix C-b\n",
-                "set -g prefix2 None\n",
-                "unbind-key -a -T prefix\n",
-                "unbind-key -a -T root\n",
-                "set -g default-terminal tmux-256color\n",
-                "set-environment -g COLORTERM truecolor\n",
-                "set -g extended-keys always\n",
-                "set -q -g extended-keys-format csi-u\n",
-                "set -as terminal-features ',xterm-ghostty:RGB:extkeys'\n",
-                "set -as terminal-features ',tmux-256color:RGB:extkeys'\n",
-                "bind-key -T copy-mode WheelUpPane select-pane \\; send-keys -X -N 1 scroll-up\n",
-                "bind-key -T copy-mode WheelDownPane select-pane \\; send-keys -X -N 1 scroll-down\n",
-                "bind-key -T copy-mode-vi WheelUpPane select-pane \\; send-keys -X -N 1 scroll-up\n",
-                "bind-key -T copy-mode-vi WheelDownPane select-pane \\; send-keys -X -N 1 scroll-down\n",
-                "bind-key -T root MouseDown1Pane select-pane -t = \\; send-keys -M\n",
-                "bind-key -T root MouseUp1Pane select-pane -t = \\; send-keys -M\n",
-                "bind-key -T root MouseDrag1Pane if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"copy-mode -M\"\n",
-                "bind-key -T root WheelUpPane if-shell -F \"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"copy-mode -e\"\n",
-                "bind-key -T root WheelDownPane if-shell -F \"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"send-keys -M\"\n",
-            )
-        );
+        let config = presentation_tmux_config();
+        for expected in [
+            "set -g status off",
+            "set -g mouse on",
+            "set -g pane-border-status top",
+            "bind-key -T prefix F12 display-message \"\"",
+            "bind-key -T root F12 display-message \"\"",
+            "bind-key -T root MouseUp1Pane send-keys -M",
+            "bind-key -T root WheelUpPane if-shell",
+        ] {
+            assert!(config.contains(expected), "missing {expected:?}");
+        }
+        assert!(!config.contains("MouseDown1Pane"));
+        assert!(!config.contains("split-window"));
+        assert!(!config.contains("command-prompt"));
     }
 
     #[test]
@@ -1853,8 +1869,16 @@ mod tests {
         );
         assert!(parse_topology(valid).is_ok());
         assert!(parse_topology(&valid.replace("|33|0|95|24", "|34|0|94|24")).is_err());
-        assert!(parse_topology(&valid.replace("|0|0|32|24|128", "|1|0|32|24|128")).is_err());
         assert!(parse_topology(&valid.replace("|128|24", "|127|24")).is_err());
+
+        let bordered = valid
+            .replace("|0|0|32|24|128", "|0|1|32|23|128")
+            .replace("|0|33|0|95|24|128", "|0|33|1|95|23|128");
+        assert!(parse_topology(&bordered).is_ok());
+        let arbitrary_offset = bordered
+            .replace("|0|1|32|23|128", "|0|2|32|22|128")
+            .replace("|0|33|1|95|23|128", "|0|33|2|95|22|128");
+        assert!(parse_topology(&arbitrary_offset).is_err());
 
         let three_pane = concat!(
             "%0|navigator||0|0|0|32|24|128|24\n",
@@ -1877,7 +1901,7 @@ mod tests {
         };
 
         let command = presentation
-            .control_shell_command(PresentationAction::FocusNext)
+            .control_shell_command(PresentationAction::SwitchPrevious)
             .unwrap();
 
         assert!(command.contains("'/tmp/wsnav'\\''s executable/##{danger}/##(marker)'"));
@@ -1886,7 +1910,7 @@ mod tests {
         let source_only = command.replace("##{danger}", "").replace("##(marker)", "");
         assert_eq!(source_only.matches("#{").count(), 2);
         assert!(!source_only.contains("#("));
-        assert!(command.contains("--action focus-next"));
+        assert!(command.contains("--action switch-previous"));
         assert!(command.contains("--source-pane '#{pane_id}'"));
         assert!(command.contains("--client-name #{q:client_name}"));
         assert!(!command.contains("; tmux"));
@@ -1995,7 +2019,9 @@ mod tests {
             state_root: temporary.path().to_path_buf(),
         };
         let workstream_id = WorkstreamId::new();
-        let pending = presentation.prepare_attachment(workstream_id).unwrap();
+        let pending = presentation
+            .prepare_attachment_with_purpose(workstream_id, AttachmentPurpose::Ordinary)
+            .unwrap();
 
         assert_eq!(
             presentation.read_attachment_status().unwrap(),
@@ -2032,7 +2058,7 @@ mod tests {
             state_root: temporary.path().to_path_buf(),
         };
         let pending = presentation
-            .prepare_attachment(WorkstreamId::new())
+            .prepare_attachment_with_purpose(WorkstreamId::new(), AttachmentPurpose::Ordinary)
             .unwrap();
         presentation
             .report_attachment_phase(pending.attempt_id, AttachmentPhase::Running)
@@ -2058,7 +2084,7 @@ mod tests {
             state_root: temporary.path().to_path_buf(),
         };
         presentation
-            .prepare_attachment(WorkstreamId::new())
+            .prepare_attachment_with_purpose(WorkstreamId::new(), AttachmentPurpose::Ordinary)
             .unwrap();
 
         assert_eq!(
@@ -2088,6 +2114,7 @@ mod tests {
             runtime_id,
             Revision::INITIAL,
             uuid::Uuid::from_u128(73),
+            AttachmentPurpose::Ordinary,
         );
 
         assert!(

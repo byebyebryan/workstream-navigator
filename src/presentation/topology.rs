@@ -2,8 +2,6 @@ use super::{PresentationError, PresentationPaneRole, TMUX_FIELD_SEPARATOR, Works
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Direction {
-    Up,
-    Down,
     Left,
     Right,
 }
@@ -50,13 +48,6 @@ impl PresentationTopology {
             .find(|pane| pane.role == PresentationPaneRole::Utility)
     }
 
-    pub(crate) fn next(&self, source: &OwnedPane) -> Option<&OwnedPane> {
-        let mut panes: Vec<&OwnedPane> = self.panes.iter().collect();
-        panes.sort_by_key(|pane| (pane.top, pane.left, pane.id.as_str()));
-        let index = panes.iter().position(|pane| pane.id == source.id)?;
-        panes.get((index + 1) % panes.len()).copied()
-    }
-
     pub(crate) fn directional(
         &self,
         source: &OwnedPane,
@@ -72,12 +63,6 @@ impl PresentationTopology {
                 let pane_x = i32::from(pane.left) + i32::from(pane.width) / 2;
                 let pane_y = i32::from(pane.top) + i32::from(pane.height) / 2;
                 let (primary, secondary) = match direction {
-                    Direction::Up if pane_y < source_y => {
-                        (source_y - pane_y, (source_x - pane_x).abs())
-                    }
-                    Direction::Down if pane_y > source_y => {
-                        (pane_y - source_y, (source_x - pane_x).abs())
-                    }
                     Direction::Left if pane_x < source_x => {
                         (source_x - pane_x, (source_y - pane_y).abs())
                     }
@@ -238,10 +223,14 @@ fn validate_topology_shape(topology: &PresentationTopology) -> Result<(), Presen
     let provider = topology
         .provider()
         .ok_or(PresentationError::InvalidTopology)?;
+    let navigator_full_height =
+        u32::from(navigator.top) + u32::from(navigator.height) == u32::from(topology.window_height);
+    let provider_full_height =
+        u32::from(provider.top) + u32::from(provider.height) == u32::from(topology.window_height);
     if navigator.left != 0
-        || navigator.top != 0
-        || navigator.height != topology.window_height
-        || provider.top != 0
+        || navigator.top > 1
+        || !navigator_full_height
+        || provider.top != navigator.top
         || provider.left
             != navigator
                 .left
@@ -253,7 +242,7 @@ fn validate_topology_shape(topology: &PresentationTopology) -> Result<(), Presen
         return Err(PresentationError::InvalidTopology);
     }
     match topology.utility() {
-        None if provider.height == topology.window_height => {}
+        None if provider_full_height => {}
         Some(utility)
             if provider.height < topology.window_height
                 && utility.left == provider.left

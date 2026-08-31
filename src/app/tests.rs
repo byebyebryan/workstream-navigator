@@ -1,8 +1,9 @@
 use super::{
     StateRoot,
     cli::{
-        Cli, Commands, is_observer_command, is_observer_setup_command, is_provider_pane_command,
-        is_shell_gate_command, is_shell_launch_helper_command,
+        Cli, Commands, is_observer_command, is_observer_setup_command,
+        is_presentation_mouse_command, is_provider_pane_command, is_shell_gate_command,
+        is_shell_launch_helper_command,
     },
     dispatch,
     model::AppError,
@@ -167,6 +168,27 @@ fn runtime_launch_barrier_is_parseable_but_hidden() {
         ])
         .is_err()
     );
+}
+
+#[test]
+fn presentation_mouse_helper_is_not_success_suppressed() {
+    let parsed = Cli::try_parse_from([
+        "wsnav",
+        "--state-root",
+        "/state",
+        "_presentation_mouse",
+        "--presentation-socket",
+        "/state/presentation/presentation-0123456789ab/tmux.sock",
+        "--presentation-session",
+        "wsnav-presentation-0123456789ab",
+        "--target-pane",
+        "%1",
+        "--client-name",
+        "/dev/pts/1",
+    ])
+    .unwrap();
+    assert!(is_presentation_mouse_command(parsed.command.as_ref()));
+    assert!(!is_provider_pane_command(parsed.command.as_ref()));
 }
 
 #[test]

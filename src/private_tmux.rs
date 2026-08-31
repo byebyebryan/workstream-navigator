@@ -18,10 +18,9 @@ pub(crate) const TERMINAL_CAPABILITY_CONFIG: &str = concat!(
 
 /// One owned copy-mode wheel binding shared by both private tmux layers.
 ///
-/// The `select-pane` command is deliberately part of each binding. tmux's
-/// stock wheel bindings select the pane named by the mouse event before
-/// entering copy mode; retaining that command keeps the same pane-selection
-/// behavior while changing only the scroll repeat count.
+/// The binding deliberately does not select a pane. Selecting from a wheel
+/// event would make scrolling an inactive presentation pane a hidden focus
+/// transition; tmux already routes the copy-mode event to the active pane.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct CopyModeScrollBinding {
     table: &'static str,
@@ -35,14 +34,12 @@ impl CopyModeScrollBinding {
     /// The escaped semicolon is an argv element rather than a shell command
     /// separator. Both private tmux callers therefore remain shell-free.
     #[must_use]
-    pub(crate) const fn arguments(self) -> [&'static str; 11] {
+    pub(crate) const fn arguments(self) -> [&'static str; 9] {
         [
             "bind-key",
             "-T",
             self.table,
             self.key,
-            "select-pane",
-            "\\;",
             "send-keys",
             "-X",
             "-N",

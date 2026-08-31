@@ -44,6 +44,9 @@ pub(crate) struct WorkstreamSnapshot {
     pub(crate) provider: ProviderKind,
     pub(crate) lifecycle: WorkstreamLifecycle,
     pub(crate) archived: bool,
+    /// Monotonic activity sequence used by both Navigator rows and provider
+    /// cycling. The value is bounded registry metadata, not provider content.
+    pub(crate) last_activity_sequence: i64,
     pub(crate) revision: Revision,
     pub(crate) runtime: Option<RuntimeSnapshot>,
     pub(crate) onboarding: Option<OnboardingStatus>,
@@ -204,6 +207,7 @@ pub(crate) fn read_snapshot(root: &StateRoot) -> Result<Snapshot, SnapshotError>
                 provider: workstream.provider,
                 lifecycle: workstream.lifecycle,
                 archived: workstream.archived_at_millis.is_some(),
+                last_activity_sequence: workstream.last_activity_sequence,
                 revision: workstream.revision,
                 runtime: workstream.runtime.map(|runtime| RuntimeSnapshot {
                     runtime_id: runtime.runtime_id,

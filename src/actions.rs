@@ -16,6 +16,7 @@ mod start;
 mod tests;
 
 pub use attachment::preflight_attachment;
+pub(crate) use attachment::preflight_attachment_read_only;
 pub use creation::{fork_workstream, recover_managed_operation, start_independent_workstream};
 pub use lifecycle::{archive, await_deliberate_park, park, rename, restore};
 pub use model::{ActionError, StartOutcome, reconcile_observer_trust};

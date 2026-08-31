@@ -27,7 +27,28 @@ const LAUNCH_BARRIER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const PROVIDER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const PROCESS_GROUP_STAT_READ_ATTEMPTS: usize = 3;
 const PROCESS_GROUP_STAT_RETRY_DELAY: Duration = Duration::from_millis(1);
-const RUNTIME_TMUX_CONFIG_PREFIX: &str = concat!("set -g status off\n", "set -g mouse on\n",);
+const RUNTIME_TMUX_CONFIG_PREFIX: &str = concat!(
+    "set -g status off\n",
+    "set -g mouse on\n",
+    "set -g remain-on-exit on\n",
+    "set -g prefix C-b\n",
+    "set -g prefix2 None\n",
+    "bind-key -T prefix F12 display-message \"\"\n",
+    "bind-key -T root F12 display-message \"\"\n",
+    "unbind-key -a -T prefix\n",
+    "unbind-key -a -T root\n",
+);
+const RUNTIME_TMUX_CONFIG_SUFFIX: &str = concat!(
+    "bind-key -T prefix d detach-client\n",
+    "bind-key -T prefix ? display-message \"Ctrl+b: d detach | Ctrl+b Ctrl+b literal | Ctrl+b [ copy mode | ? help\"\n",
+    "bind-key -T prefix C-b send-prefix\n",
+    "bind-key -T prefix [ copy-mode\n",
+    "bind-key -T root MouseDown1Pane send-keys -M\n",
+    "bind-key -T root MouseUp1Pane send-keys -M\n",
+    "bind-key -T root MouseDrag1Pane if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"copy-mode -M\"\n",
+    "bind-key -T root WheelUpPane if-shell -F \"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"copy-mode -e\"\n",
+    "bind-key -T root WheelDownPane if-shell -F \"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"send-keys -M\"\n",
+);
 
 fn runtime_tmux_config() -> String {
     let copy_mode_scroll_config = crate::private_tmux::copy_mode_scroll_config();
@@ -35,6 +56,7 @@ fn runtime_tmux_config() -> String {
         RUNTIME_TMUX_CONFIG_PREFIX,
         TERMINAL_CAPABILITY_CONFIG,
         &copy_mode_scroll_config,
+        RUNTIME_TMUX_CONFIG_SUFFIX,
     ]
     .concat()
 }
@@ -1649,7 +1671,7 @@ impl<'a> PrivateRuntime<'a> {
         rows: u16,
     ) -> Result<(), RuntimeError> {
         let (columns, rows) = validate_terminal_geometry(columns, rows)?;
-        self.reconcile_copy_mode_scroll_bindings()?;
+        self.reconcile_private_controls()?;
         let target = OsString::from(format!("{}:{PROVIDER_WINDOW}", self.paths.session_name));
         let resized = self.tmux.invoke(&TmuxInvocation {
             socket: self.paths.socket.clone(),
@@ -1684,31 +1706,144 @@ impl<'a> PrivateRuntime<'a> {
         Ok(())
     }
 
-    /// Reapplies the owned copy-mode wheel profile to an existing Runtime.
-    ///
-    /// Runtime servers outlive individual `wsnav attach` processes. Binding
-    /// the exact four entries on every attach converges servers created by an
-    /// older binary without restarting the native provider. Repeated binds
-    /// replace the same keys and are therefore idempotent.
-    fn reconcile_copy_mode_scroll_bindings(&self) -> Result<(), RuntimeError> {
-        for binding in COPY_MODE_SCROLL_BINDINGS {
-            let arguments = binding
-                .arguments()
-                .into_iter()
-                .map(OsString::from)
-                .collect();
-            let response = self.tmux.invoke(&TmuxInvocation {
-                socket: self.paths.socket.clone(),
-                config: None,
-                arguments,
-            })?;
-            if !response.success {
-                return Err(RuntimeError::TmuxRejected(trim_diagnostic(
-                    &response.stderr,
-                )));
-            }
+    /// Proves the private Runtime still has exactly one expected session,
+    /// provider window, and live sole pane. This is intentionally independent
+    /// of the ordinary process probe: a valid `0.0` target is insufficient
+    /// when a same-socket extra window or pane has been introduced.
+    pub(crate) fn validate_exact_topology(&self) -> Result<(), RuntimeError> {
+        let session = self.paths.session_name.as_str();
+        let response = self.tmux.invoke(&TmuxInvocation {
+            socket: self.paths.socket.clone(),
+            config: None,
+            arguments: vec![
+                OsString::from("list-sessions"),
+                OsString::from("-F"),
+                OsString::from("#{session_name}"),
+            ],
+        })?;
+        if !response.success || response.stdout.lines().collect::<Vec<_>>() != [session] {
+            return Err(RuntimeError::InvalidTopology);
+        }
+        let response = self.tmux.invoke(&TmuxInvocation {
+            socket: self.paths.socket.clone(),
+            config: None,
+            arguments: vec![
+                OsString::from("list-windows"),
+                OsString::from("-t"),
+                OsString::from(session),
+                OsString::from("-F"),
+                OsString::from("#{window_index}|#{window_name}|#{window_panes}"),
+            ],
+        })?;
+        if !response.success || response.stdout.lines().collect::<Vec<_>>() != ["0|provider|1"] {
+            return Err(RuntimeError::InvalidTopology);
+        }
+        let response = self.tmux.invoke(&TmuxInvocation {
+            socket: self.paths.socket.clone(),
+            config: None,
+            arguments: vec![
+                OsString::from("list-panes"),
+                OsString::from("-t"),
+                OsString::from(format!("{session}:{PROVIDER_WINDOW}")),
+                OsString::from("-F"),
+                OsString::from("#{pane_index}|#{pane_dead}"),
+            ],
+        })?;
+        if !response.success || response.stdout.lines().collect::<Vec<_>>() != ["0|0"] {
+            return Err(RuntimeError::InvalidTopology);
         }
         Ok(())
+    }
+
+    /// Reapplies the complete owned Runtime interaction profile to an
+    /// existing server. The exact topology proof runs first so a foreign or
+    /// externally changed server cannot be repaired permissively.
+    fn reconcile_private_controls(&self) -> Result<(), RuntimeError> {
+        self.validate_exact_topology()?;
+        for table in ["prefix", "root"] {
+            self.reset_runtime_key_table(table)?;
+        }
+        for (option, value) in [
+            ("status", "off"),
+            ("mouse", "on"),
+            ("remain-on-exit", "on"),
+            ("prefix", "C-b"),
+            ("prefix2", "None"),
+        ] {
+            self.invoke_runtime_tmux(&["set-option", "-g", option, value])?;
+        }
+        let bindings: &[&[&str]] = &[
+            &["prefix", "d", "detach-client"],
+            &[
+                "prefix",
+                "?",
+                "display-message",
+                "Ctrl+b: d detach | Ctrl+b Ctrl+b literal | Ctrl+b [ copy mode | ? help",
+            ],
+            &["prefix", "C-b", "send-prefix"],
+            &["prefix", "[", "copy-mode"],
+            &["root", "MouseDown1Pane", "send-keys", "-M"],
+            &["root", "MouseUp1Pane", "send-keys", "-M"],
+            &[
+                "root",
+                "MouseDrag1Pane",
+                "if-shell",
+                "-F",
+                "#{||:#{pane_in_mode},#{mouse_any_flag}}",
+                "send-keys -M",
+                "copy-mode -M",
+            ],
+            &[
+                "root",
+                "WheelUpPane",
+                "if-shell",
+                "-F",
+                "#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}",
+                "send-keys -M",
+                "copy-mode -e",
+            ],
+            &[
+                "root",
+                "WheelDownPane",
+                "if-shell",
+                "-F",
+                "#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}",
+                "send-keys -M",
+                "send-keys -M",
+            ],
+        ];
+        for binding in bindings {
+            let mut arguments = vec!["bind-key", "-T"];
+            arguments.extend_from_slice(binding);
+            self.invoke_runtime_tmux(&arguments)?;
+        }
+        for binding in COPY_MODE_SCROLL_BINDINGS {
+            self.invoke_runtime_tmux(&binding.arguments())?;
+        }
+        Ok(())
+    }
+
+    /// Tmux creates a key table lazily. Seed it with a fixed harmless binding
+    /// before clearing so an absent table is never treated as an acceptable
+    /// reconciliation result.
+    fn reset_runtime_key_table(&self, table: &str) -> Result<(), RuntimeError> {
+        self.invoke_runtime_tmux(&["bind-key", "-T", table, "F12", "display-message", ""])?;
+        self.invoke_runtime_tmux(&["unbind-key", "-a", "-T", table])
+    }
+
+    fn invoke_runtime_tmux(&self, arguments: &[&str]) -> Result<(), RuntimeError> {
+        let response = self.tmux.invoke(&TmuxInvocation {
+            socket: self.paths.socket.clone(),
+            config: None,
+            arguments: arguments.iter().map(OsString::from).collect(),
+        })?;
+        if response.success {
+            Ok(())
+        } else {
+            Err(RuntimeError::TmuxRejected(trim_diagnostic(
+                &response.stderr,
+            )))
+        }
     }
 
     /// Delivers exactly one literal C-b to the owned provider pane through
@@ -1976,6 +2111,8 @@ pub enum RuntimeError {
     OutputTooLarge,
     #[error("private runtime already exists at {0}")]
     RuntimeAlreadyOwned(PathBuf),
+    #[error("private runtime tmux topology is ambiguous")]
+    InvalidTopology,
     #[error("tmux rejected the private runtime action: {0}")]
     TmuxRejected(String),
     #[error("could not execute bounded private tmux control command")]
@@ -2010,10 +2147,44 @@ impl RuntimeError {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
-    use std::{cell::RefCell, collections::VecDeque};
+    use std::{
+        cell::RefCell,
+        collections::{BTreeSet, VecDeque},
+        process::{Command, Stdio},
+    };
 
     use super::*;
     use crate::domain::RuntimeId;
+
+    fn command_output(command: &mut Command) -> std::io::Result<std::process::Output> {
+        command.stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+            .spawn()
+            .and_then(std::process::Child::wait_with_output)
+    }
+
+    fn binding_keys(socket: &Path, table: &str) -> BTreeSet<String> {
+        let output = command_output(
+            Command::new("tmux")
+                .env_remove("TMUX")
+                .args(["-f", "/dev/null", "-S"])
+                .arg(socket)
+                .args(["list-keys", "-T", table]),
+        )
+        .unwrap();
+        assert!(output.status.success(), "tmux failed: {:?}", output.stderr);
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter_map(|line| {
+                let fields = line.split_whitespace().collect::<Vec<_>>();
+                let table_index = fields.iter().position(|field| *field == "-T")?;
+                fields
+                    .get(table_index + 2)
+                    .map(|key| key.trim_start_matches('\\').to_owned())
+            })
+            .collect()
+    }
 
     #[derive(Default)]
     struct FakeTmux {
@@ -2239,6 +2410,26 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         }
+    }
+
+    fn exact_topology_responses(session: &str) -> Vec<TmuxResponse> {
+        vec![
+            TmuxResponse {
+                success: true,
+                stdout: format!("{session}\n"),
+                stderr: String::new(),
+            },
+            TmuxResponse {
+                success: true,
+                stdout: "0|provider|1\n".to_owned(),
+                stderr: String::new(),
+            },
+            TmuxResponse {
+                success: true,
+                stdout: "0|0\n".to_owned(),
+                stderr: String::new(),
+            },
+        ]
     }
 
     fn parsed_process_stat(process_group_id: u32, session_id: u32) -> LinuxProcessStat {
@@ -3023,35 +3214,80 @@ mod tests {
     fn attach_geometry_targets_exact_window_and_restores_latest() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
-        let tmux = FakeTmux::with_responses([
-            successful(),
-            successful(),
-            successful(),
-            successful(),
-            successful(),
-            successful(),
-        ]);
+        let tmux = FakeTmux::with_responses(
+            exact_topology_responses(&paths.session_name)
+                .into_iter()
+                .chain((0..24).map(|_| successful())),
+        );
         let process_probe = FakeProcessProbe;
         let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
 
         runtime.prepare_attach_with_size(150, 40).unwrap();
 
         let calls = tmux.calls.borrow();
-        assert_eq!(calls.len(), 6);
+        assert_eq!(calls.len(), 27);
         assert_eq!(calls[0].socket, paths.socket);
         assert_eq!(calls[0].config, None);
-        for (call, binding) in calls.iter().zip(COPY_MODE_SCROLL_BINDINGS).take(4) {
-            assert_eq!(
-                call.arguments,
-                binding
-                    .arguments()
-                    .into_iter()
-                    .map(OsString::from)
-                    .collect::<Vec<_>>()
-            );
+        assert_eq!(calls[0].arguments[0], "list-sessions");
+        assert_eq!(calls[1].arguments[0], "list-windows");
+        assert_eq!(calls[2].arguments[0], "list-panes");
+        assert_eq!(
+            calls[3].arguments[0..4],
+            [
+                OsString::from("bind-key"),
+                OsString::from("-T"),
+                OsString::from("prefix"),
+                OsString::from("F12"),
+            ]
+        );
+        assert_eq!(
+            calls[4].arguments[0..4],
+            [
+                OsString::from("unbind-key"),
+                OsString::from("-a"),
+                OsString::from("-T"),
+                OsString::from("prefix"),
+            ]
+        );
+        assert_eq!(
+            calls[5].arguments[0..4],
+            [
+                OsString::from("bind-key"),
+                OsString::from("-T"),
+                OsString::from("root"),
+                OsString::from("F12"),
+            ]
+        );
+        assert_eq!(
+            calls[6].arguments[0..4],
+            [
+                OsString::from("unbind-key"),
+                OsString::from("-a"),
+                OsString::from("-T"),
+                OsString::from("root"),
+            ]
+        );
+        for call in calls.iter().skip(12).take(9) {
+            assert_eq!(call.arguments[0], "bind-key");
         }
         assert_eq!(
-            calls[4].arguments,
+            calls[21].arguments,
+            COPY_MODE_SCROLL_BINDINGS[0]
+                .arguments()
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            calls[24].arguments,
+            COPY_MODE_SCROLL_BINDINGS[3]
+                .arguments()
+                .into_iter()
+                .map(OsString::from)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            calls[25].arguments,
             vec![
                 OsString::from("resize-window"),
                 OsString::from("-t"),
@@ -3063,7 +3299,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            calls[5].arguments,
+            calls[26].arguments,
             vec![
                 OsString::from("set-window-option"),
                 OsString::from("-t"),
@@ -3083,13 +3319,12 @@ mod tests {
             stdout: String::new(),
             stderr: "resize rejected".to_owned(),
         };
-        let tmux = FakeTmux::with_responses([
-            successful(),
-            successful(),
-            successful(),
-            successful(),
-            rejected,
-        ]);
+        let tmux = FakeTmux::with_responses(
+            exact_topology_responses(&paths.session_name)
+                .into_iter()
+                .chain((0..22).map(|_| successful()))
+                .chain([rejected]),
+        );
         let process_probe = FakeProcessProbe;
         let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
 
@@ -3097,7 +3332,7 @@ mod tests {
             runtime.prepare_attach_with_size(150, 40),
             Err(RuntimeError::TmuxRejected(message)) if message == "resize rejected"
         ));
-        assert_eq!(tmux.calls.borrow().len(), 5);
+        assert_eq!(tmux.calls.borrow().len(), 26);
     }
 
     #[test]
@@ -3109,14 +3344,12 @@ mod tests {
             stdout: String::new(),
             stderr: "latest rejected".to_owned(),
         };
-        let tmux = FakeTmux::with_responses([
-            successful(),
-            successful(),
-            successful(),
-            successful(),
-            successful(),
-            rejected,
-        ]);
+        let tmux = FakeTmux::with_responses(
+            exact_topology_responses(&paths.session_name)
+                .into_iter()
+                .chain((0..22).map(|_| successful()))
+                .chain([successful(), rejected]),
+        );
         let process_probe = FakeProcessProbe;
         let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
 
@@ -3124,14 +3357,20 @@ mod tests {
             runtime.prepare_attach_with_size(150, 40),
             Err(RuntimeError::TmuxRejected(message)) if message == "latest rejected"
         ));
-        assert_eq!(tmux.calls.borrow().len(), 6);
+        assert_eq!(tmux.calls.borrow().len(), 27);
     }
 
     #[test]
     fn attach_reconciles_copy_mode_scroll_bindings_idempotently() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
-        let tmux = FakeTmux::with_responses((0..12).map(|_| successful()));
+        let tmux = FakeTmux::with_responses(
+            exact_topology_responses(&paths.session_name)
+                .into_iter()
+                .chain((0..24).map(|_| successful()))
+                .chain(exact_topology_responses(&paths.session_name))
+                .chain((0..24).map(|_| successful())),
+        );
         let process_probe = FakeProcessProbe;
         let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
 
@@ -3139,12 +3378,13 @@ mod tests {
         runtime.prepare_attach_with_size(150, 40).unwrap();
 
         let calls = tmux.calls.borrow();
-        assert_eq!(calls.len(), 12);
-        assert_eq!(&calls[0..4], &calls[6..10]);
-        assert_eq!(calls[4].arguments[0], "resize-window");
-        assert_eq!(calls[5].arguments[0], "set-window-option");
-        assert_eq!(calls[10].arguments[0], "resize-window");
-        assert_eq!(calls[11].arguments[0], "set-window-option");
+        assert_eq!(calls.len(), 54);
+        assert_eq!(calls[0].arguments[0], "list-sessions");
+        assert_eq!(calls[27].arguments[0], "list-sessions");
+        assert_eq!(calls[25].arguments[0], "resize-window");
+        assert_eq!(calls[26].arguments[0], "set-window-option");
+        assert_eq!(calls[52].arguments[0], "resize-window");
+        assert_eq!(calls[53].arguments[0], "set-window-option");
     }
 
     #[test]
@@ -3156,7 +3396,11 @@ mod tests {
             stdout: String::new(),
             stderr: "binding rejected".to_owned(),
         };
-        let tmux = FakeTmux::with_responses([successful(), rejected]);
+        let tmux = FakeTmux::with_responses(
+            exact_topology_responses(&paths.session_name)
+                .into_iter()
+                .chain([successful(), rejected]),
+        );
         let process_probe = FakeProcessProbe;
         let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
 
@@ -3165,9 +3409,9 @@ mod tests {
             Err(RuntimeError::TmuxRejected(message)) if message == "binding rejected"
         ));
         let calls = tmux.calls.borrow();
-        assert_eq!(calls.len(), 2);
-        assert_eq!(calls[0].arguments[0], "bind-key");
-        assert_eq!(calls[1].arguments[0], "bind-key");
+        assert_eq!(calls.len(), 5);
+        assert_eq!(calls[3].arguments[0], "bind-key");
+        assert_eq!(calls[4].arguments[0], "unbind-key");
         assert!(calls.iter().all(|call| {
             call.arguments[0] != "resize-window" && call.arguments[0] != "set-window-option"
         }));
@@ -3220,18 +3464,138 @@ mod tests {
             concat!(
                 "set -g status off\n",
                 "set -g mouse on\n",
+                "set -g remain-on-exit on\n",
+                "set -g prefix C-b\n",
+                "set -g prefix2 None\n",
+                "bind-key -T prefix F12 display-message \"\"\n",
+                "bind-key -T root F12 display-message \"\"\n",
+                "unbind-key -a -T prefix\n",
+                "unbind-key -a -T root\n",
                 "set -g default-terminal tmux-256color\n",
                 "set-environment -g COLORTERM truecolor\n",
                 "set -g extended-keys always\n",
                 "set -q -g extended-keys-format csi-u\n",
                 "set -as terminal-features ',xterm-ghostty:RGB:extkeys'\n",
                 "set -as terminal-features ',tmux-256color:RGB:extkeys'\n",
-                "bind-key -T copy-mode WheelUpPane select-pane \\; send-keys -X -N 1 scroll-up\n",
-                "bind-key -T copy-mode WheelDownPane select-pane \\; send-keys -X -N 1 scroll-down\n",
-                "bind-key -T copy-mode-vi WheelUpPane select-pane \\; send-keys -X -N 1 scroll-up\n",
-                "bind-key -T copy-mode-vi WheelDownPane select-pane \\; send-keys -X -N 1 scroll-down\n",
+                "bind-key -T copy-mode WheelUpPane send-keys -X -N 1 scroll-up\n",
+                "bind-key -T copy-mode WheelDownPane send-keys -X -N 1 scroll-down\n",
+                "bind-key -T copy-mode-vi WheelUpPane send-keys -X -N 1 scroll-up\n",
+                "bind-key -T copy-mode-vi WheelDownPane send-keys -X -N 1 scroll-down\n",
+                "bind-key -T prefix d detach-client\n",
+                "bind-key -T prefix ? display-message \"Ctrl+b: d detach | Ctrl+b Ctrl+b literal | Ctrl+b [ copy mode | ? help\"\n",
+                "bind-key -T prefix C-b send-prefix\n",
+                "bind-key -T prefix [ copy-mode\n",
+                "bind-key -T root MouseDown1Pane send-keys -M\n",
+                "bind-key -T root MouseUp1Pane send-keys -M\n",
+                "bind-key -T root MouseDrag1Pane if-shell -F \"#{||:#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"copy-mode -M\"\n",
+                "bind-key -T root WheelUpPane if-shell -F \"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"copy-mode -e\"\n",
+                "bind-key -T root WheelDownPane if-shell -F \"#{||:#{alternate_on},#{pane_in_mode},#{mouse_any_flag}}\" \"send-keys -M\" \"send-keys -M\"\n",
             )
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn live_runtime_reconciles_closed_controls_without_restarting_provider() {
+        if command_output(Command::new("tmux").arg("-V")).is_err() {
+            eprintln!("skipped: tmux is unavailable");
+            return;
+        }
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let tmux = SystemTmux::default();
+        let process_probe = LinuxProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
+        runtime
+            .start(&NativeLaunch {
+                cwd: temporary.path().to_path_buf(),
+                program: vec![
+                    OsString::from("/bin/sh"),
+                    OsString::from("-c"),
+                    OsString::from("exec sleep 60"),
+                ],
+                environment: BTreeMap::new(),
+            })
+            .unwrap();
+        let cleanup = LiveRuntimeTmuxGuard {
+            socket: paths.socket.clone(),
+            directory: paths.directory.clone(),
+        };
+        let before = match runtime.probe().unwrap() {
+            RuntimeProbe::Live {
+                pane_pid,
+                process_birth: Some(process_birth),
+                ..
+            } => (pane_pid, process_birth),
+            other => panic!("fake Runtime did not become live: {other:?}"),
+        };
+        let assert_owned_tables = || {
+            assert_eq!(
+                binding_keys(&paths.socket, "prefix"),
+                BTreeSet::from([
+                    "?".to_owned(),
+                    "[".to_owned(),
+                    "C-b".to_owned(),
+                    "d".to_owned()
+                ])
+            );
+            assert_eq!(
+                binding_keys(&paths.socket, "root"),
+                BTreeSet::from([
+                    "MouseDown1Pane".to_owned(),
+                    "MouseUp1Pane".to_owned(),
+                    "MouseDrag1Pane".to_owned(),
+                    "WheelUpPane".to_owned(),
+                    "WheelDownPane".to_owned(),
+                ])
+            );
+        };
+        assert_owned_tables();
+
+        for (table, key) in [("prefix", "x"), ("root", "z")] {
+            let output = command_output(
+                Command::new("tmux")
+                    .env_remove("TMUX")
+                    .args(["-f", "/dev/null", "-S"])
+                    .arg(&paths.socket)
+                    .args(["bind-key", "-T", table, key, "split-window", "-h"]),
+            )
+            .unwrap();
+            assert!(output.status.success(), "tmux failed: {:?}", output.stderr);
+        }
+        assert!(binding_keys(&paths.socket, "prefix").contains("x"));
+        assert!(binding_keys(&paths.socket, "root").contains("z"));
+
+        runtime.prepare_attach_with_size(100, 24).unwrap();
+        assert_owned_tables();
+        let after = match runtime.probe().unwrap() {
+            RuntimeProbe::Live {
+                pane_pid,
+                process_birth: Some(process_birth),
+                ..
+            } => (pane_pid, process_birth),
+            other => panic!("fake Runtime stopped during reconciliation: {other:?}"),
+        };
+        assert_eq!(after, before);
+        drop(cleanup);
+    }
+
+    struct LiveRuntimeTmuxGuard {
+        socket: PathBuf,
+        directory: PathBuf,
+    }
+
+    impl Drop for LiveRuntimeTmuxGuard {
+        fn drop(&mut self) {
+            let _ = command_output(
+                Command::new("tmux")
+                    .env_remove("TMUX")
+                    .args(["-f", "/dev/null", "-S"])
+                    .arg(&self.socket)
+                    .arg("kill-server"),
+            );
+            let _ = fs::remove_dir_all(&self.directory);
+        }
     }
 
     #[test]

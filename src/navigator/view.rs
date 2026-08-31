@@ -4,7 +4,7 @@
 //! intent. It does not open state, materialize a provisional shell, attach a
 //! provider, or render a provider pane.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crossterm::event::KeyCode;
 use ratatui::{
@@ -832,34 +832,68 @@ const ONBOARDING_RECOVERY_GUIDANCE: &str =
     "Managed session requires onboarding recovery; only Park is currently available";
 const RENAME_UNAVAILABLE_GUIDANCE: &str = "The selected provider does not support navigator Rename";
 
-fn rows_for(snapshot: &Snapshot, page: Page, shell_location: &ShellLocation) -> Vec<Row> {
-    let archived = page == Page::Archived;
-    let mut workstreams_by_project = BTreeMap::<_, Vec<_>>::new();
+/// Returns the single semantic Workstream order shared by Navigator rows and
+/// provider-pane cycling. Projects are ordered by the newest included member;
+/// children then use their own activity sequence and stable ID tie-breakers.
+pub(crate) fn workstreams_in_visual_order(
+    snapshot: &Snapshot,
+    archived: bool,
+) -> Vec<&WorkstreamSnapshot> {
+    let mut grouped = BTreeMap::<_, Vec<&WorkstreamSnapshot>>::new();
     for workstream in snapshot
         .workstreams
         .iter()
         .filter(|workstream| workstream.archived == archived)
     {
-        workstreams_by_project
+        grouped
             .entry(workstream.project_id)
             .or_default()
-            .push(workstream.clone());
+            .push(workstream);
     }
+    let mut projects = grouped
+        .into_iter()
+        .map(|(project_id, mut workstreams)| {
+            workstreams.sort_by(|left, right| {
+                right
+                    .last_activity_sequence
+                    .cmp(&left.last_activity_sequence)
+                    .then_with(|| left.workstream_id.cmp(&right.workstream_id))
+            });
+            let newest = workstreams
+                .first()
+                .map_or(0, |workstream| workstream.last_activity_sequence);
+            (project_id, newest, workstreams)
+        })
+        .collect::<Vec<_>>();
+    projects.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+    projects
+        .into_iter()
+        .flat_map(|(_, _, workstreams)| workstreams)
+        .collect()
+}
 
+fn rows_for(snapshot: &Snapshot, page: Page, shell_location: &ShellLocation) -> Vec<Row> {
+    let archived = page == Page::Archived;
+    let ordered = workstreams_in_visual_order(snapshot, archived);
     let mut rows = Vec::new();
     if page == Page::Workstreams {
         rows.push(Row::ProvisionalShell {
             location: shell_location.clone(),
         });
     }
-    for project in &snapshot.projects {
-        let Some(workstreams) = workstreams_by_project.remove(&project.project_id) else {
-            continue;
-        };
-        rows.push(Row::ProjectHeader {
-            display_name: project.display_name.clone(),
-        });
-        rows.extend(workstreams.into_iter().map(Row::Workstream));
+    let mut seen_projects = BTreeSet::new();
+    for workstream in ordered {
+        if seen_projects.insert(workstream.project_id)
+            && let Some(project) = snapshot
+                .projects
+                .iter()
+                .find(|project| project.project_id == workstream.project_id)
+        {
+            rows.push(Row::ProjectHeader {
+                display_name: project.display_name.clone(),
+            });
+        }
+        rows.push(Row::Workstream(workstream.clone()));
     }
     if page == Page::Workstreams {
         rows.extend(
@@ -1513,6 +1547,7 @@ mod tests {
 
     use super::{
         Command, Modal, Model, Navigator, ObserverSetupKind, Page, Row, RowId, ShellLocation,
+        workstreams_in_visual_order,
     };
     use crate::{
         domain::{
@@ -1550,6 +1585,7 @@ mod tests {
                         provider: ProviderKind::Codex,
                         lifecycle: WorkstreamLifecycle::Open,
                         archived: false,
+                        last_activity_sequence: 1,
                         revision: Revision::INITIAL,
                         runtime: None,
                         onboarding: None,
@@ -1565,6 +1601,7 @@ mod tests {
                         provider: ProviderKind::OpenCode,
                         lifecycle: WorkstreamLifecycle::Open,
                         archived: true,
+                        last_activity_sequence: 1,
                         revision: Revision::INITIAL,
                         runtime: None,
                         onboarding: None,
@@ -1581,6 +1618,91 @@ mod tests {
         )
     }
 
+    fn visual_order_snapshot() -> (Snapshot, Vec<WorkstreamId>, Vec<WorkstreamId>) {
+        let project_low = ProjectId::from(Uuid::from_u128(10));
+        let project_high = ProjectId::from(Uuid::from_u128(11));
+        let location_low = LocationId::from(Uuid::from_u128(12));
+        let location_high = LocationId::from(Uuid::from_u128(13));
+        let low_first = WorkstreamId::from(Uuid::from_u128(20));
+        let low_second = WorkstreamId::from(Uuid::from_u128(21));
+        let high_first = WorkstreamId::from(Uuid::from_u128(22));
+        let archived = WorkstreamId::from(Uuid::from_u128(23));
+        let workstream =
+            |project_id, location_id, workstream_id, archived, last_activity_sequence| {
+                WorkstreamSnapshot {
+                    project_id,
+                    location_id,
+                    workstream_id,
+                    provider: ProviderKind::Codex,
+                    lifecycle: WorkstreamLifecycle::Open,
+                    archived,
+                    last_activity_sequence,
+                    revision: Revision::INITIAL,
+                    runtime: None,
+                    onboarding: None,
+                    native_name: None,
+                    attention_revision: Revision::INITIAL,
+                    result_unseen: false,
+                    recovery_unseen: false,
+                }
+            };
+        (
+            Snapshot {
+                projects: vec![
+                    ProjectSnapshot {
+                        project_id: project_high,
+                        display_name: "high".to_owned(),
+                        locations: vec![],
+                    },
+                    ProjectSnapshot {
+                        project_id: project_low,
+                        display_name: "low".to_owned(),
+                        locations: vec![],
+                    },
+                ],
+                workstreams: vec![
+                    workstream(project_low, location_low, low_first, false, 7),
+                    workstream(project_low, location_low, low_second, false, 7),
+                    workstream(project_high, location_high, high_first, false, 7),
+                    workstream(project_high, location_high, archived, true, 99),
+                ],
+                unresolved_operations: vec![],
+            },
+            vec![low_first, low_second, high_first],
+            vec![archived],
+        )
+    }
+
+    #[test]
+    fn visual_order_and_rows_share_newest_member_project_order() {
+        let (snapshot, expected_active, expected_archived) = visual_order_snapshot();
+        let ordered = workstreams_in_visual_order(&snapshot, false);
+        assert_eq!(
+            ordered
+                .iter()
+                .map(|workstream| workstream.workstream_id)
+                .collect::<Vec<_>>(),
+            expected_active
+        );
+        let model = Model::new(snapshot.clone());
+        let row_workstreams = model
+            .rows()
+            .into_iter()
+            .filter_map(|row| match row {
+                Row::Workstream(workstream) => Some(workstream.workstream_id),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(row_workstreams, expected_active);
+        assert_eq!(
+            workstreams_in_visual_order(&snapshot, true)
+                .into_iter()
+                .map(|workstream| workstream.workstream_id)
+                .collect::<Vec<_>>(),
+            expected_archived
+        );
+    }
+
     #[test]
     fn workstreams_always_start_with_one_provisional_shell_card() {
         let (snapshot, _, _) = snapshot();
@@ -1595,6 +1717,20 @@ mod tests {
             model.handle_key(crossterm::event::KeyCode::Enter),
             Command::MaterializeProvisionalShell
         );
+    }
+
+    #[test]
+    fn selecting_an_active_workstream_from_archived_returns_to_workstreams() {
+        let (snapshot, active, _) = snapshot();
+        let mut model = Model::new(snapshot);
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('.')),
+            Command::None
+        );
+        assert_eq!(model.page(), Page::Archived);
+        assert!(model.select_workstream(active));
+        assert_eq!(model.page(), Page::Workstreams);
+        assert_eq!(model.selected(), Some(RowId::Workstream(active)));
     }
 
     #[test]

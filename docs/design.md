@@ -2,22 +2,16 @@
 
 Date: 2026-08-31
 
-Status: D18 implements the shell-first product on a direct, current-only
-schema-15 epoch with semantic modules and no old-root migration or adoption.
-Accepted checkpoint `c961c7e` and installed artifact
+Status: D19 implements the shell-first product on the unchanged direct,
+current-only schema-15 epoch. Checkpoint `a0ec38b` completes tmux-owned pane
+focus, closed private-tmux controls, and bounded provider-pane Workstream
+switching; its full local/disposable gate, Rust 1.88/tmux 3.3a matrix, and
+byte-identical per-host installation pass. It adds no provider lifecycle effect
+or durable focus/selection state. No remote-CI or live-provider acceptance is
+claimed for D19. D18 checkpoint `c961c7e` and installed artifact
 `f732e2b16344b038cd05996501ce77be42302f7403de9720d156dbf24777d124`
-passed the authorized destructive reset, direct ordinary bootstrap, explicit
-native observer trust, disposable Codex/OpenCode lifecycle acceptance, and
-complete cleanup. Post-acceptance source correction `ed0d883` shares a bounded
-fail-closed topology retry across presentation startup and attach restoration
-and directly tests current Fork/recovery transaction ordering. Its local full
-gate and repeated Rust 1.88/tmux 3.3a matrix pass; no remote-CI or
-accepted-release/live-provider evidence is transferred to the correction.
-Per-host development installation is a separate operational fact. The product
-and state contract is unchanged, and D18 remains complete. D19 is the active
-design-first UI/UX checkpoint. It specifies tmux-owned pane focus and bounded
-provider-pane Workstream switching below; that planned interaction contract is
-not implemented by the D18 artifact.
+remain the latest separately accepted destructive-reset, native-trust, and
+disposable Codex/OpenCode lifecycle evidence.
 
 The design is the current product and architecture contract. Dated acceptance,
 spike, and study records preserve the evidence and limitations of the candidate
@@ -377,23 +371,20 @@ presentation's provisional account shell. Selecting another card replaces that
 exact surface; WSNav exposes no third pane or split-shell action. Unknown or
 duplicate pane-role evidence is ambiguity and must leave the layout unchanged.
 
-The installed D18 private presentation does not inherit tmux's general-purpose
-prefix or root management tables. Its prefix table is rebuilt as an explicit
-allowlist: `Ctrl+b d` detaches; `Ctrl+b o` and directional keys move among the
-two owned panes; `Ctrl+b Ctrl+b` delivers a literal `Ctrl+b` to the focused
-application without exposing the nested Runtime's tmux prefix table; and
-`Ctrl+b ?` shows only this curated help. The retired D12 `Ctrl+b "`,
-`Ctrl+b %`, and `Ctrl+b x` bindings are explicitly absent, including when an
-older live presentation is reattached. The root table retains only the primary
-mouse selection/forwarding and bounded scrolling/copy interactions required by
-the Navigator and active native surface. Default right-click management menus,
-mouse split/swap/kill/respawn actions, arbitrary tmux command prompts,
-additional splits, windows, sessions, and layout mutation bindings are absent.
-These D18 restrictions belong only to WSNav's private presentation server and
-never modify the user's ordinary tmux server or configuration. D19 replaces
-that focus table and extends closed-table ownership to the private Runtime
-servers as specified below; until D19 passes its complete gate, this paragraph
-remains the implemented behavior.
+The private presentation does not inherit tmux's general-purpose prefix or root
+management tables. Its prefix table is rebuilt as an explicit allowlist:
+`Ctrl+b d` detaches; `Ctrl+b Left` and `Ctrl+b Right` move focus between the
+two exact panes; provider-pane `Ctrl+b Up` and `Ctrl+b Down` request bounded
+Workstream switching; `Ctrl+b Ctrl+b` delivers a literal `Ctrl+b` through the
+validated nested path; and `Ctrl+b ?` shows only curated help. `Ctrl+b o`,
+splits, window/session selection or creation, layout mutation, menus, and
+arbitrary command prompts are absent. The root table contains only validated
+primary-button delivery and bounded drag, release, wheel, and copy interactions.
+The single-pane Runtime server has its own smaller closed allowlist for detach,
+literal prefix, help, copy mode, and native mouse delivery. Reattach converges
+exact owned D18-era servers to these tables without restarting a provider.
+These restrictions belong only to WSNav private servers and never modify the
+user's ordinary tmux server or configuration.
 
 Both private tmux layers also own their copy-mode wheel behavior. They bind
 `WheelUpPane` and `WheelDownPane` in the `copy-mode` and `copy-mode-vi` tables
@@ -406,11 +397,11 @@ WSNav does not source, parse, or execute the user's ordinary tmux
 configuration. A tmux configuration is an executable command stream that may
 install hooks, plugins, shell commands, or topology-changing bindings, so it
 cannot be treated as a safe preference document and then repaired by later
-overrides. Newly created private servers receive the fixed copy-mode profile
-from one shared source of truth. Immediately before attachment, the Runtime
-owner idempotently reapplies only those four fixed bindings through the exact
-owned socket so a Runtime created by an older WSNav build converges without a
-provider restart. This reconciliation reads no key table or pane content,
+overrides. Newly created private servers receive the fixed interaction profile
+from one shared source of truth. Immediately before attachment, each
+private-server owner idempotently reapplies its complete fixed profile through
+the exact owned socket so a server created by an older WSNav build converges
+without a provider restart. This reconciliation reads no pane content,
 touches no ordinary tmux server, and adds no user configuration, durable state,
 protocol, or provider-input surface.
 
@@ -2553,7 +2544,7 @@ IDs, or a mandatory title in the ordinary path.
 A direct mode, such as `wsnav attach <workstream>`, bypasses the navigator pane
 while using the same host/runtime contracts.
 
-## Planned D19 tmux-derived interaction contract
+## D19 tmux-derived interaction contract
 
 D19 preserves the fixed two-pane presentation and separates four concerns that
 the D18 controller partially combines:
@@ -2592,12 +2583,10 @@ observer review may replace the right surface but never steal focus. If the
 user is already focused right when an asynchronous replacement completes,
 tmux naturally keeps that pane focused; if the user moved left, it stays left.
 
-Focus is visible through a tmux-owned, unambiguous cue outside provider content.
-The disposable study selects the exact border/format treatment only after it
-proves that both panes remain distinguishable in the fixed layout; ordinary
-active-border color alone is not assumed sufficient. Navigator selection
-remains visible independently and does not claim that its row currently
-receives input or owns the shown surface.
+Focus is visible through a tmux-owned, unambiguous cue outside provider content:
+the active pane's top border reads `▶ ACTIVE` and the other pane reads
+`◇ INACTIVE`. Navigator selection remains visible independently and does not
+claim that its row currently receives input or owns the shown surface.
 
 The active pane is shared tmux window/session state. A focus change from one
 client attached to a presentation is therefore visible to every client on that
@@ -2645,19 +2634,18 @@ native provider environment. Any resulting topology drift is external evidence
 that makes later WSNav control fail closed. Ordinary and foreign tmux servers
 remain untouched.
 
-Primary-button press preserves normal terminal behavior by focusing the mouse
-target and forwarding the full press/drag/release sequence. Wheel events may
+Primary-button press preserves normal terminal behavior by synchronously
+validating the exact presentation client, source, target, and topology before
+focusing the target and forwarding the same press. Release and drag complete
+native delivery without independently selecting a pane. Wheel events may
 scroll the native alternate-screen application or tmux copy-mode target but do
-not select an inactive presentation pane. Because the D18 shared copy-mode
-profile deliberately selects the mouse pane, D19 implementation begins with a
-disposable tmux study and may separate presentation and single-pane Runtime
-scroll bindings while retaining one-line scrolling and native mouse behavior.
-The Runtime root table forwards native mouse input only to its exact sole pane;
-its bounded copy/scroll tables cannot create, select, or mutate topology.
+not select an inactive presentation pane. The Runtime root table forwards
+native mouse input only to its exact sole pane; its bounded copy/scroll tables
+cannot create, select, or mutate topology.
 
 New servers receive these tables in their fixed configurations. Reattach-time
-reconciliation must also replace the exact tables of an owned D18 presentation
-and Runtime server without restarting its provider. It may do so only after
+reconciliation replaces the exact tables of an owned D18 presentation and
+Runtime server without restarting its provider. It does so only after
 exact ownership/topology proof and never by reading, sourcing, or mutating the
 operator's ordinary tmux configuration or server.
 
@@ -2693,10 +2681,10 @@ bounded snapshot, then commits through the existing serialized presentation
 attachment claim only after revalidating current attachment status, source-pane
 role, the pane's exact Workstream marker, owned topology, and relevant revisions.
 
-The existing mode-`0600` presentation attachment status is the bounded
-synchronization record by which Navigator observes the completed destination
-and aligns its page/selection. D19 may version that status shape only with the
-minimum bounded phase/result metadata needed for this handshake; it adds no
+The mode-`0600` presentation attachment status is the bounded synchronization
+record by which Navigator observes a destination's provider-cycle `Running`
+phase and aligns its page/selection once. The status carries only the minimum
+bounded purpose/attempt metadata needed for this handshake; D19 adds no
 listener, general event bus, tmux `send-keys` injection, provider traffic, or
 durable UI state. Stale revisions, a changed current attachment, multiple
 candidates, or ambiguous topology fail closed with content-free guidance and
@@ -2704,10 +2692,10 @@ preserve the current provider output.
 
 ### D19 acceptance boundary
 
-Before implementation, disposable tmux evidence must cover primary-button press,
-drag, wheel, copy mode, nested Runtime prefix delivery, presentation reattach,
-multiple attached clients, and optional outer-tmux prefix passthrough. The
-implementation gate then proves:
+Disposable tmux and deterministic implementation evidence cover primary-button
+press, drag/release/wheel routes, copy mode, nested Runtime prefix delivery,
+presentation reattach, shared active-pane semantics, and the optional
+outer-tmux prefix-passthrough boundary. The gate proves:
 
 - `Enter`, every Navigator action, observer review, asynchronous completion,
   and resize preserve the exact active pane;
@@ -2725,8 +2713,9 @@ implementation gate then proves:
   copy-mode scrolling, completed provider output, and direct `wsnav attach`
   behavior remain intact.
 
-D18 remains the implemented operator contract until this complete gate passes.
-No partial D19 slice changes the installed product contract.
+The complete gate passes for checkpoint `a0ec38b`; D19 is the current locally
+installed operator contract. The evidence is local/disposable and does not
+claim remote CI or real-provider acceptance. No partial D19 slice was installed.
 
 ## Failure and recovery model
 
@@ -2971,7 +2960,7 @@ roadmap and version-specific decisions remain in
 | D16 | Host-local clean break | [D16 acceptance](evidence/acceptance/d16-host-local.md) |
 | D17-D17.1 | Shell-first onboarding and correctness closure | [D17](evidence/acceptance/d17-shell-first.md), [D17.1](evidence/acceptance/d17.1-correctness-closure.md) |
 | D18 | Current-only schema-15 consolidation | [Completed roadmap](roadmap.md#completed-checkpoint-d18-current-only-consolidation) |
-| D19 | Active design-only tmux-derived presentation navigation | [Active roadmap](roadmap.md#active-checkpoint-d19-tmux-derived-presentation-navigation) |
+| D19 | Completed tmux-derived presentation navigation | [Acceptance](evidence/acceptance/d19-tmux-navigation.md) |
 
 ## Current concrete provider boundary
 

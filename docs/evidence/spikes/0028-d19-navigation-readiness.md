@@ -74,3 +74,11 @@ shared ordering authority would either mutate durable state or create a second
 ordering implementation. Any disposable study result that requires provider
 content, Navigator polling, unbounded IPC, or a weaker topology check returns
 to design review instead of being worked around.
+
+## Follow-up
+
+Checkpoint `a0ec38b` subsequently corrected all three falsifications and passed
+the complete local/disposable D19 gate. The exact candidate, installed artifact,
+and remaining evidence limits are recorded in the
+[D19 acceptance record](../acceptance/d19-tmux-navigation.md). This follow-up
+does not rewrite the partial pre-implementation status of the study above.

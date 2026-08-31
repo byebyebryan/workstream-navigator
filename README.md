@@ -5,16 +5,15 @@ coding-agent workstreams on the machine where it is running. It adds
 organization, attachment, status, and a few compound workstream actions
 around the provider's native terminal UI.
 
-> **D18 status:** accepted release with a verified source correction.
-> The D18 acceptance record binds checkpoint `c961c7e` to its byte-identical
-> installed artifact and direct schema-15 epoch, which refuses older WSNav
-> roots instead of migrating or adopting them. The current checkout adds correction
-> `ed0d883`, which closes a transient presentation-startup topology race and
-> adds direct Fork/recovery transaction coverage without changing the product
-> contract. Its full local gate and repeated Rust 1.88/tmux 3.3a matrix pass;
-> no remote-CI or accepted-release/live-provider claim is transferred to that
-> correction. Per-host installation must be verified separately. See the
-> [roadmap](docs/roadmap.md#completed-checkpoint-d18-current-only-consolidation).
+> **D19 status:** implemented and locally accepted for operator inspection.
+> Checkpoint `a0ec38b` completes the tmux-derived navigation contract, passes
+> the full repository gate and the Rust 1.88/tmux 3.3a matrix, and is installed
+> byte-identically at SHA-256
+> `8c2517dab05ab64f7df720d3f4373b1c486e91ad176c8d7b791e740388251777`.
+> This is local/disposable acceptance, not remote-CI or live-provider
+> acceptance. D18 checkpoint `c961c7e` remains the latest artifact with
+> separately authorized Codex/OpenCode lifecycle evidence. See the
+> [roadmap](docs/roadmap.md#completed-checkpoint-d19-tmux-derived-presentation-navigation).
 
 ## Host-local by design
 
@@ -67,6 +66,23 @@ The Navigator has two direct pages. Page selection is process-local and is not p
 into complete key/action pairs at the available width, and `?` shows a compact,
 colored page-specific reference. Actions always resolve an exact Workstream ID
 or the presentation-local shell singleton.
+
+Pane focus is tmux-owned and separate from Navigator row selection. Use
+`Ctrl+b Left` and `Ctrl+b Right`, or deliberately press the primary mouse
+button in a pane, to move keyboard control. `Enter` and every Navigator action
+may replace the right-hand surface but do not move focus. While the managed
+provider pane is focused, `Ctrl+b Up` and `Ctrl+b Down` attach the previous or
+next eligible already-live Workstream in Navigator visual order; they skip
+ineligible rows, never wrap, and never start, resume, recover, or otherwise
+mutate a provider lifecycle. The pane border labels the focused pane
+`▶ ACTIVE` and the other pane `◇ INACTIVE`.
+
+The presentation and each Runtime use closed private-tmux key tables. The
+presentation retains detach, bounded help, literal `Ctrl+b`, Left/Right focus,
+and provider-pane Up/Down switching. Direct Runtime attachment retains detach,
+bounded help, literal `Ctrl+b`, and copy-mode entry. Split, window, layout,
+menu, and arbitrary-command bindings are absent; none of these restrictions
+changes the user's ordinary tmux server or configuration.
 
 A fresh presentation starts with the Shell card selected and its account shell
 already visible on the right; reconnecting a detached presentation preserves
@@ -128,11 +144,10 @@ migration, state rollback, automatic downgrade, or compatibility launcher.
 
 ## Build, install, and CLI
 
-WSNav remains source-installed. The D18 acceptance record identifies the exact
-artifact installed during release acceptance; a development host may run that
-artifact or a newer explicitly installed candidate. This checkout contains the
-verified source correction described above. Build and validate any replacement
-before atomically installing its exact release artifact:
+WSNav remains source-installed. This host runs the byte-identical D19 candidate
+identified above; the D18 acceptance record separately identifies the exact
+artifact used for live-provider release acceptance. Build and validate any
+replacement before atomically installing its exact release artifact:
 
 ```console
 cargo build --locked --release
@@ -150,7 +165,7 @@ ordinary work happens in the Navigator/provider presentation. The destructive
 reset, exact-artifact installation, native observer trust, and disposable
 live-provider release acceptance are complete for the accepted D18 artifact.
 They are historical evidence, not accepted-release or live-provider evidence
-for a newer source candidate.
+for the locally installed D19 candidate.
 
 ## See it
 

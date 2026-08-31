@@ -47,6 +47,7 @@ to make their old procedures appear current.
 - [D17.1 correctness and release closure](acceptance/d17.1-correctness-closure.md)
 - [D18 current-only consolidation and post-acceptance source
   correction](acceptance/d18-current-source-candidate.md)
+- [D19 tmux-derived navigation](acceptance/d19-tmux-navigation.md)
 
 ## Design spikes
 
@@ -95,6 +96,9 @@ ordinary-state move was attempted during the spike.
 disposable private-tmux readiness evidence and the three baseline
 falsifications that require exact Runtime topology, read-only attachment
 validation, and one shared activity-based visual order before implementation.
+The later [D19 acceptance record](acceptance/d19-tmux-navigation.md) binds the
+implemented correction of those falsifications to its local/disposable gate
+and installed artifact without claiming live-provider or remote-CI evidence.
 
 ## Provider studies
 

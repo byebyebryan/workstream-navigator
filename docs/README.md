@@ -2,16 +2,13 @@
 
 ## Status and authority
 
-D0-D18 are complete. D19 is the active design-first UI/UX checkpoint; its
-tmux-derived navigation contract is documented, but production implementation
-has not started. D18 remains the implemented shell-first managed-session
-product on one direct schema-15 epoch. The acceptance record binds checkpoint
-`c961c7e` to the byte-identical artifact installed during release acceptance;
-its destructive reset, ordinary schema-15 bootstrap, native observer trust,
-disposable Codex/OpenCode lifecycle acceptance, and complete cleanup remain
-historical release evidence. Post-acceptance correction `ed0d883` preserves the
-state/product contract but does not transfer the accepted-release or
-live-provider claims. Per-host development installation is verified separately.
+D0-D19 are complete. D19 checkpoint `a0ec38b` implements the tmux-derived
+navigation contract and passes the full local/disposable gate, the declared
+Rust 1.88 matrix, and byte-identical per-host installation. It adds no state
+epoch or provider lifecycle effect. This result does not claim remote CI or
+live Codex/OpenCode acceptance. D18 checkpoint `c961c7e` remains the latest
+artifact with separately authorized destructive-reset, native-trust, and
+disposable live-provider release evidence.
 
 - [Product and architecture design](design.md) is the V1 contract.
 - [Delivery roadmap](roadmap.md) owns delivery order, checkpoint status, and
@@ -42,21 +39,22 @@ declaration, and quarantined the whole schema-14 root as discarded state before
 D18 installed and directly created schema 15. No old state is migrated,
 adopted, or restored; the exact quarantine was deleted after acceptance.
 
-## Planned D19 navigation checkpoint
+## D19 tmux-derived navigation
 
-[D19](roadmap.md#active-checkpoint-d19-tmux-derived-presentation-navigation)
+[D19](roadmap.md#completed-checkpoint-d19-tmux-derived-presentation-navigation)
 separates tmux pane focus from Navigator selection, right-surface attachment,
-and lifecycle actions. The planned contract keeps Navigator actions from
-stealing focus; limits focus changes to `Ctrl+b Left`/`Right` and deliberate
-primary-button press; uses provider-pane `Ctrl+b Up`/`Down` only to attach
-adjacent eligible live Workstreams, without starting or mutating them; and
-rebuilds both presentation and Runtime tmux tables so every split, window,
-layout, menu, and arbitrary tmux command surface is absent. This is design
-scope, not current installed behavior.
+and lifecycle actions. Navigator actions do not steal focus; only
+`Ctrl+b Left`/`Right` and deliberate primary-button press move it.
+Provider-pane `Ctrl+b Up`/`Down` attaches adjacent eligible live Workstreams
+without starting or mutating them. Presentation and Runtime tmux tables are
+closed allowlists with every split, window, layout, menu, and arbitrary tmux
+command surface absent. The exact local evidence and its limitations are in
+the [D19 acceptance record](evidence/acceptance/d19-tmux-navigation.md).
 
 ## Current operator contract
 
-This section describes the installed D18 release.
+This section describes the locally installed D19 development artifact. D18
+remains the latest separately accepted live-provider release.
 
 WSNav is host-local. Run it on the machine where the provider Runtime lives.
 For another machine, establish ordinary SSH in a separate terminal, tab, or
@@ -72,6 +70,16 @@ opens Archived; `Esc` returns to Workstreams; `Left` and `Right` do not cycle
 views. Workstreams keeps `Enter`, `n`, `f`, `p`, `x`, `a`, and `?`; Archived
 uses `u` to restore without starting or attaching a provider. The installed
 `wsnav --help` output is the CLI reference for that exact binary.
+
+Tmux alone owns pane focus. `Ctrl+b Left`/`Right` and deliberate primary-button
+press are the only ordinary focus transitions; Navigator activation and
+right-surface replacement preserve the active pane. A tmux border cue shows
+`▶ ACTIVE` or `◇ INACTIVE`. From an exact focused managed provider pane,
+`Ctrl+b Up`/`Down` attaches the previous or next eligible already-live
+Workstream in the same activity-based order as Navigator, skipping ineligible
+rows without wrapping or causing provider/lifecycle effects. `Ctrl+b o`, pane
+splits, window switching/creation, layout mutation, menus, and arbitrary tmux
+commands are absent from WSNav's private tables.
 
 Retained public management commands use the same schema-15 snapshot and
 revision-fenced action boundaries as the Navigator. Passive status and
@@ -341,13 +349,14 @@ and complete disposable cleanup.
 
 ## Build and command references
 
-The project is a source-installed operator beta. The installed D18 release
-opens only schema 15 and its `wsnav --help` is the installed CLI reference. The
-current checkout contains a newer source correction. A host must not be
-described as running it until a replacement artifact is built, checked,
-atomically installed, and checksum-verified there. Run
+The project is a source-installed operator beta. This host's installed D19
+development artifact opens only schema 15 and its `wsnav --help` is the
+installed CLI reference. A host must not be described as running a candidate
+until its artifact is built, checked, atomically installed, and
+checksum-verified there. Run
 `cargo build --locked --release` and `scripts/check` before any
-replacement. The destructive reset, exact installation, native observer trust,
-and live-provider acceptance are complete for the accepted artifact; there is
-no state rollback. The normal workflow remains the Navigator beside either the
-provisional account shell or the native provider TUI.
+replacement. D19's local/disposable acceptance and installation are recorded
+separately from D18's destructive reset, native observer trust, and
+live-provider acceptance; there is no state rollback. The normal workflow
+remains the Navigator beside either the provisional account shell or the native
+provider TUI.

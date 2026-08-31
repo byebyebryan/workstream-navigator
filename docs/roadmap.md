@@ -2,15 +2,13 @@
 
 Date: 2026-08-31
 
-Status: D0-D18 are complete. D19 is the active design-first UI/UX checkpoint;
-its interaction contract is specified below and production implementation has
-not started. D18 remains the implemented baseline: it uses a direct schema-15
-epoch and an explicit destructive reset with no migration or state rollback.
-Accepted checkpoint `c961c7e` binds the reset, ordinary schema-15 bootstrap,
-exact installation, explicit native observer trust, disposable Codex/OpenCode
-lifecycle acceptance, complete cleanup, and installed artifact.
-Post-acceptance source correction `ed0d883` does not transfer those
-accepted-release/live-provider claims or reopen the state contract.
+Status: D0-D19 are complete. D19 checkpoint `a0ec38b` implements the complete
+tmux-derived navigation contract and passes its local/disposable repository,
+Rust 1.88, private-tmux, and byte-identical installation gates. It adds no
+state epoch or provider lifecycle effect. No remote-CI or live-provider claim
+is transferred to D19. D18 checkpoint `c961c7e` remains the latest accepted
+artifact with separately authorized reset, native-trust, and disposable
+Codex/OpenCode lifecycle evidence.
 
 `docs/design.md` is the product and architecture contract. This file owns
 delivery order, implementation status, and exit gates. The complete prior
@@ -30,10 +28,11 @@ roadmap is preserved as
 - D18 is a clean state break. Schemas 12 through 14 are refusal evidence, not
   migration or adoption inputs.
 
-## Active checkpoint: D19 tmux-derived presentation navigation
+## Completed checkpoint: D19 tmux-derived presentation navigation
 
-Implementation status: design specified; no production implementation or
-acceptance claim.
+Implementation status: complete in `a0ec38b`; locally accepted and installed
+for operator inspection. See the
+[D19 acceptance record](evidence/acceptance/d19-tmux-navigation.md).
 
 D19 tightens the existing two-pane shell-first presentation without adding a
 page, pane, window, provider, state schema, provider effect, or persisted UI
@@ -45,12 +44,10 @@ preference. Its governing separation is:
   Runtime surface appears in the right pane; and
 - lifecycle actions retain their existing revision-fenced state authority.
 
-Delivery order is fixed: prove the tmux mouse, copy-mode, nested-prefix, and
-multi-client semantics in a disposable study; establish the single focus
-authority and closed tables on both private tmux layers; add bounded
-provider-pane Workstream switching through the existing presentation attachment
-claim/status boundary; then complete the full gate and installation. No earlier
-slice changes the installed product contract.
+The checkpoint first established disposable tmux behavior and recorded three
+baseline falsifications, then implemented the single focus authority, closed
+tables on both private tmux layers, bounded provider-pane Workstream switching,
+the full gate, and installation as one coherent candidate.
 
 [Spike 0028](evidence/spikes/0028-d19-navigation-readiness.md) records the
 pre-implementation study. It falsifies reuse of D18's permissive Runtime
@@ -143,9 +140,10 @@ Workstream ID, provider identifier, path, or raw state is rendered in tmux
 guidance. The helper resolves from a fresh bounded snapshot and commits through
 the existing presentation attachment claim after revalidating the current
 attachment, source-pane role, pane Workstream marker, topology, and revisions.
-Its existing mode-`0600` attachment status is the presentation-private
-synchronization boundary by which Navigator observes the completed destination
-and aligns its page/selection; D19 adds no listener, general event bus, tmux
+Its mode-`0600` attachment status is the presentation-private synchronization
+boundary by which Navigator observes the destination's provider-cycle
+`Running` phase and aligns its page/selection once; D19 adds no listener,
+general event bus, tmux
 `send-keys` injection, or durable UI state. Races fail closed and preserve the
 current attachment.
 
@@ -171,6 +169,15 @@ current attachment.
 No partial D19 slice is an install candidate. Live-provider acceptance, if the
 final implementation needs it, remains separately authorized and
 artifact-bound.
+
+The complete local gate passed for `a0ec38b`: `scripts/check` passed 369
+library and 8 presentation integration tests together with formatting, strict
+Clippy, packaging, dependency policy, semantic acceptance, documentation, and
+diff checks. A clean Rust 1.88.0/Debian/tmux 3.3a container passed the same 377
+locked all-targets/all-features tests. The locked release was installed
+byte-identically for operator inspection. No real provider was launched for
+D19 acceptance; the composed deterministic switching proof and remaining
+evidence limitations are recorded in the acceptance record.
 
 ## Completed checkpoint: D18 current-only consolidation
 

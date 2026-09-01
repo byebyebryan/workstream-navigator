@@ -58,7 +58,14 @@ impl Presentation {
     /// Only an incomplete topology is retryable; all other errors, including a
     /// persistent topology failure, remain fail-closed.
     pub(crate) fn retry_default_navigator_width(&self) -> Result<(), PresentationError> {
-        retry_default_navigator_width(|| self.set_default_navigator_width())
+        retry_invalid_topology(|| self.set_default_navigator_width())
+    }
+
+    /// Finishes the fresh provider-pane setup after tmux has published its
+    /// second pane. Older tmux versions can briefly expose an incomplete
+    /// topology at this boundary; only that exact observation is retried.
+    pub(crate) fn retry_fresh_start_control_bindings(&self) -> Result<(), PresentationError> {
+        retry_invalid_topology(|| self.install_control_bindings())
     }
 
     pub(super) fn default_navigator_resize_arguments_for(&self, navigator: &str) -> Vec<OsString> {
@@ -138,26 +145,34 @@ impl Presentation {
     }
 }
 
-/// Retries only the topology observation that can be transient during a
-/// private presentation attach.  The bounded policy is shared by startup and
-/// the Navigator's post-attach resize path so the two entry points cannot
-/// drift in their failure behavior.
-pub(crate) fn retry_default_navigator_width(
-    mut resize: impl FnMut() -> Result<(), PresentationError>,
+/// Retries only the exact transient invalid-topology observation at a private
+/// tmux boundary. The bounded policy is shared by fresh control setup and the
+/// Navigator's post-attach resize path so the two entry points cannot drift in
+/// their failure behavior.
+pub(crate) fn retry_invalid_topology(
+    mut operation: impl FnMut() -> Result<(), PresentationError>,
 ) -> Result<(), PresentationError> {
-    for attempt in 0..super::NAVIGATOR_WIDTH_RETRY_ATTEMPTS {
-        match resize() {
+    for attempt in 0..super::INVALID_TOPOLOGY_RETRY_ATTEMPTS {
+        match operation() {
             Ok(()) => return Ok(()),
             Err(error) if !matches!(error, PresentationError::InvalidTopology) => {
                 return Err(error);
             }
-            Err(error) if attempt + 1 == super::NAVIGATOR_WIDTH_RETRY_ATTEMPTS => {
+            Err(error) if attempt + 1 == super::INVALID_TOPOLOGY_RETRY_ATTEMPTS => {
                 return Err(error);
             }
-            Err(_) => std::thread::sleep(super::NAVIGATOR_WIDTH_RETRY_INTERVAL),
+            Err(_) => std::thread::sleep(super::INVALID_TOPOLOGY_RETRY_INTERVAL),
         }
     }
-    unreachable!("navigator width retry loop has at least one attempt")
+    unreachable!("invalid-topology retry loop has at least one attempt")
+}
+
+/// Preserves the existing Navigator resize test seam while delegating to the
+/// shared invalid-topology retry policy.
+pub(crate) fn retry_default_navigator_width(
+    operation: impl FnMut() -> Result<(), PresentationError>,
+) -> Result<(), PresentationError> {
+    retry_invalid_topology(operation)
 }
 
 impl Presentation {
@@ -749,13 +764,14 @@ impl Presentation {
             ("status", "off"),
             ("mouse", "on"),
             ("remain-on-exit", "on"),
+            ("focus-events", "on"),
             ("prefix", "C-b"),
             ("prefix2", "None"),
-            ("pane-border-status", "top"),
-            (
-                "pane-border-format",
-                " #{?pane_active,▶ ACTIVE,◇ INACTIVE} ",
-            ),
+            ("pane-border-status", "off"),
+            ("pane-border-format", ""),
+            ("pane-border-indicators", "off"),
+            ("pane-border-style", "fg=colour7"),
+            ("pane-active-border-style", "fg=colour7"),
         ] {
             self.invoke(
                 None,

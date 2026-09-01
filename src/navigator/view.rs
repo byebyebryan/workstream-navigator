@@ -221,6 +221,7 @@ pub(crate) struct Model {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Navigator {
     model: Model,
+    terminal_focused: bool,
 }
 
 impl Navigator {
@@ -228,7 +229,15 @@ impl Navigator {
     pub(crate) fn new(snapshot: Snapshot) -> Self {
         Self {
             model: Model::new(snapshot),
+            terminal_focused: true,
         }
+    }
+
+    /// Updates only the ephemeral visual focus cue from a terminal focus
+    /// event. Tmux remains the focus authority; this value never authorizes an
+    /// action, changes selection, or enters durable state.
+    pub(crate) const fn set_terminal_focused(&mut self, focused: bool) {
+        self.terminal_focused = focused;
     }
 
     pub(crate) const fn model_mut(&mut self) -> &mut Model {
@@ -299,7 +308,7 @@ impl Navigator {
     /// Renders the -only Workstreams/Archived surface. The renderer has no
     /// provider-pane, shell, state, or filesystem effect.
     pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect) {
-        render_model(frame, area, &self.model);
+        render_model(frame, area, &self.model, self.terminal_focused);
     }
 }
 
@@ -907,15 +916,16 @@ fn rows_for(snapshot: &Snapshot, page: Page, shell_location: &ShellLocation) -> 
     rows
 }
 
-fn render_model(frame: &mut Frame<'_>, area: Rect, model: &Model) {
-    let footer_height = footer_height(area, model);
+fn render_model(frame: &mut Frame<'_>, area: Rect, model: &Model, terminal_focused: bool) {
+    let content = navigator_inner(area);
+    let footer_height = footer_height(content, model);
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(footer_height)])
-        .split(area);
+        .split(content);
     let selected = model.selected();
     let rows = model.rows();
-    let available_width = layout[0].width.saturating_sub(2);
+    let available_width = layout[0].width;
     let items = rows
         .iter()
         .map(|row| {
@@ -929,19 +939,13 @@ fn render_model(frame: &mut Frame<'_>, area: Rect, model: &Model) {
         .collect::<Vec<_>>();
     let title = format!(" {} ", model.page().title());
     frame.render_widget(
-        List::new(items).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(Color::Cyan))
-                .title(Span::styled(
-                    title,
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
-                )),
-        ),
-        layout[0],
+        Block::default()
+            .borders(navigator_borders())
+            .border_style(Style::default().fg(Color::Green))
+            .title(Span::styled(title, navigator_title_style(terminal_focused))),
+        area,
     );
+    frame.render_widget(List::new(items), layout[0]);
     if let Some(guidance) = model.guidance() {
         let controls_height = controls_height(model, layout[1].width).min(layout[1].height);
         let guidance_height = layout[1].height.saturating_sub(controls_height);
@@ -955,7 +959,7 @@ fn render_model(frame: &mut Frame<'_>, area: Rect, model: &Model) {
         frame.render_widget(
             Paragraph::new(guidance).wrap(Wrap { trim: true }).block(
                 Block::default()
-                    .borders(Borders::ALL)
+                    .borders(Borders::TOP)
                     .border_style(Style::default().fg(Color::Yellow))
                     .title(Span::styled(" Status ", Style::default().fg(Color::Yellow))),
             ),
@@ -972,10 +976,28 @@ fn render_model(frame: &mut Frame<'_>, area: Rect, model: &Model) {
         );
     }
     if model.help_visible() {
-        render_help(frame, area);
+        render_help(frame, content);
     } else if let Some(modal) = model.modal() {
-        render_modal(frame, area, modal);
+        render_modal(frame, content, modal);
     }
+}
+
+fn navigator_title_style(terminal_focused: bool) -> Style {
+    Style::default()
+        .fg(if terminal_focused {
+            Color::Green
+        } else {
+            Color::DarkGray
+        })
+        .add_modifier(Modifier::BOLD)
+}
+
+fn navigator_borders() -> Borders {
+    Borders::ALL
+}
+
+fn navigator_inner(area: Rect) -> Rect {
+    Block::default().borders(navigator_borders()).inner(area)
 }
 
 fn row_lines(row: &Row, available_width: u16) -> Vec<Line<'static>> {
@@ -1150,13 +1172,10 @@ fn control_bindings(model: &Model) -> &'static [(&'static str, &'static str)] {
                     }) =>
             {
                 &[
-                    ("↑↓", "select"),
-                    ("Enter", "open"),
                     ("n", "new here"),
                     ("f", "fork"),
                     ("p", "park"),
                     ("x", "archive"),
-                    ("a", "acknowledge"),
                     ("r", "rename"),
                     (".", "archived"),
                     ("?", "help"),
@@ -1172,7 +1191,6 @@ fn control_bindings(model: &Model) -> &'static [(&'static str, &'static str)] {
                     }) =>
             {
                 &[
-                    ("↑↓", "select"),
                     ("p", "park"),
                     (".", "archived"),
                     ("?", "help"),
@@ -1180,28 +1198,14 @@ fn control_bindings(model: &Model) -> &'static [(&'static str, &'static str)] {
                 ]
             }
             Some(RowId::Operation(_)) => &[
-                ("↑↓", "select"),
                 ("r", "recover"),
                 (".", "archived"),
                 ("?", "help"),
                 ("q", "quit"),
             ],
-            Some(RowId::ProvisionalShell) => &[
-                ("↑↓", "select"),
-                ("Enter", "shell"),
-                (".", "archived"),
-                ("?", "help"),
-                ("q", "quit"),
-            ],
-            _ => &[
-                ("↑↓", "select"),
-                (".", "archived"),
-                ("?", "help"),
-                ("q", "quit"),
-            ],
+            _ => &[(".", "archived"), ("?", "help"), ("q", "quit")],
         },
         Page::Archived => &[
-            ("↑↓", "select"),
             ("u", "restore"),
             ("w / Esc", "workstreams"),
             ("?", "help"),
@@ -1264,7 +1268,7 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
     frame.render_widget(
         Paragraph::new(help_lines()).block(
             Block::default()
-                .borders(Borders::ALL)
+                .borders(Borders::TOP)
                 .border_style(Style::default().fg(Color::Cyan))
                 .title(Span::styled(
                     " Help ",
@@ -1277,11 +1281,11 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-/// Gives Help every available Navigator column while fitting its border and
+/// Gives Help every available Navigator column while fitting its top rule and
 /// fixed rows exactly to content. A shorter terminal necessarily clips, but
 /// no height is otherwise reserved or wasted.
 fn help_overlay(area: Rect) -> Rect {
-    let content_height = u16::try_from(help_lines().len().saturating_add(2)).unwrap_or(u16::MAX);
+    let content_height = u16::try_from(help_lines().len().saturating_add(1)).unwrap_or(u16::MAX);
     let height = content_height.min(area.height).max(1);
     Rect::new(
         area.x,
@@ -1409,12 +1413,12 @@ fn footer_height(area: Rect, model: &Model) -> u16 {
 }
 
 fn status_block_height(area: Rect, guidance: &str) -> u16 {
-    let content_width = usize::from(area.width.saturating_sub(2).max(1));
+    let content_width = usize::from(area.width.max(1));
     let content_height = wrapped_display_line_count(guidance, content_width).max(1);
     u16::try_from(content_height)
         .unwrap_or(u16::MAX)
-        .saturating_add(2)
-        .min(area.height.saturating_sub(2))
+        .saturating_add(1)
+        .min(area.height.saturating_sub(1))
 }
 
 fn wrapped_display_line_count(value: &str, width: usize) -> usize {
@@ -1522,20 +1526,16 @@ fn is_unicode_format(character: char) -> bool {
 }
 
 fn list_geometry(area: Rect, model: &Model) -> ListGeometry {
+    let content = navigator_inner(area);
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),
-            Constraint::Length(footer_height(area, model)),
+            Constraint::Length(footer_height(content, model)),
         ])
-        .split(area);
+        .split(content);
     let outer = vertical[0];
-    let inner = Rect::new(
-        outer.x.saturating_add(1),
-        outer.y.saturating_add(1),
-        outer.width.saturating_sub(2),
-        outer.height.saturating_sub(2),
-    );
+    let inner = outer;
     ListGeometry { outer, inner }
 }
 
@@ -1543,7 +1543,7 @@ fn list_geometry(area: Rect, model: &Model) -> ListGeometry {
 mod tests {
     use uuid::Uuid;
 
-    use ratatui::{layout::Rect, style::Color};
+    use ratatui::{layout::Rect, style::Color, widgets::Borders};
 
     use super::{
         Command, Modal, Model, Navigator, ObserverSetupKind, Page, Row, RowId, ShellLocation,
@@ -1720,6 +1720,38 @@ mod tests {
     }
 
     #[test]
+    fn terminal_focus_changes_only_the_navigator_title_color() {
+        let (snapshot, _, _) = snapshot();
+        let mut navigator = Navigator::new(snapshot);
+        let model = navigator.model.clone();
+
+        assert_eq!(
+            super::navigator_title_style(navigator.terminal_focused).fg,
+            Some(Color::Green)
+        );
+        navigator.set_terminal_focused(false);
+        assert_eq!(navigator.model, model);
+        assert_eq!(
+            super::navigator_title_style(navigator.terminal_focused).fg,
+            Some(Color::DarkGray)
+        );
+    }
+
+    #[test]
+    fn navigator_frame_wraps_the_list_and_footer() {
+        let borders = super::navigator_borders();
+        assert!(borders.contains(Borders::LEFT));
+        assert!(borders.contains(Borders::TOP));
+        assert!(borders.contains(Borders::BOTTOM));
+        assert!(borders.contains(Borders::RIGHT));
+
+        assert_eq!(
+            super::navigator_inner(Rect::new(0, 0, 32, 24)),
+            Rect::new(1, 1, 30, 22)
+        );
+    }
+
+    #[test]
     fn selecting_an_active_workstream_from_archived_returns_to_workstreams() {
         let (snapshot, active, _) = snapshot();
         let mut model = Model::new(snapshot);
@@ -1889,18 +1921,15 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        for expected in [
-            "↑↓ select",
-            "Enter open",
-            "n new here",
-            ". archived",
-            "q quit",
-        ] {
+        for expected in ["n new here", ". archived", "q quit"] {
             assert!(
                 rendered.contains(expected),
                 "missing {expected:?}: {rendered}"
             );
         }
+        assert!(!rendered.contains("↑↓ select"));
+        assert!(!rendered.contains("Enter open"));
+        assert!(!rendered.contains("a acknowledge"));
         assert!(lines.iter().all(|line| line.width() <= 32));
         assert_eq!(
             super::controls_height(&model, 32),
@@ -1909,12 +1938,38 @@ mod tests {
     }
 
     #[test]
+    fn compact_footer_omits_full_help_only_bindings() {
+        let (snapshot, _, _) = snapshot();
+        let mut model = Model::new(snapshot);
+
+        for bindings in [
+            super::control_bindings(&model),
+            {
+                model.select_next();
+                super::control_bindings(&model)
+            },
+            {
+                let _ = model.handle_key(crossterm::event::KeyCode::Char('.'));
+                super::control_bindings(&model)
+            },
+        ] {
+            assert!(!bindings.iter().any(|(key, _)| *key == "↑↓"));
+            assert!(!bindings.iter().any(|(key, _)| *key == "a"));
+            assert!(
+                !bindings
+                    .iter()
+                    .any(|(key, action)| *key == "Enter" && matches!(*action, "open" | "shell"))
+            );
+        }
+    }
+
+    #[test]
     fn help_is_full_width_colored_and_fits_its_content() {
         let overlay = super::help_overlay(Rect::new(0, 0, 32, 24));
-        assert_eq!(overlay, Rect::new(0, 4, 32, 16));
+        assert_eq!(overlay, Rect::new(0, 4, 32, 15));
         assert_eq!(
             super::help_overlay(Rect::new(0, 0, 32, 18)),
-            Rect::new(0, 1, 32, 16)
+            Rect::new(0, 1, 32, 15)
         );
 
         let lines = super::help_lines();

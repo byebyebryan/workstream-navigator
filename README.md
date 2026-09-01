@@ -6,10 +6,10 @@ organization, attachment, status, and a few compound workstream actions
 around the provider's native terminal UI.
 
 > **D19 status:** implemented and locally accepted for operator inspection.
-> Checkpoint `a0ec38b` completes the tmux-derived navigation contract, passes
-> the full repository gate and the Rust 1.88/tmux 3.3a matrix, and is installed
-> byte-identically at SHA-256
-> `8c2517dab05ab64f7df720d3f4373b1c486e91ad176c8d7b791e740388251777`.
+> Checkpoint `a0ec38b` completes the tmux-derived navigation contract; the
+> current focus-and-frame refinement passes the full repository gate and the Rust
+> 1.88/tmux 3.3a matrix and is installed byte-identically at SHA-256
+> `46365fe25fe0edacc728f4f1269487a24671a4ad90695264db2e70ed55e26b2c`.
 > This is local/disposable acceptance, not remote-CI or live-provider
 > acceptance. D18 checkpoint `c961c7e` remains the latest artifact with
 > separately authorized Codex/OpenCode lifecycle evidence. See the
@@ -59,13 +59,14 @@ The Navigator has two direct pages. Page selection is process-local and is not p
 
 | Page | Purpose and direct controls |
 | --- | --- |
-| **Workstreams** | Default page with one pinned **Shell** card plus active Workstreams grouped by Project. `Enter` opens the selected shell or managed session; on a managed Workstream, `n` starts a same-provider session at its exact Location, `f` forks, `p` parks, `x` archives, `a` acknowledges attention, `r` recovers an unresolved operation, and `?` opens page help. |
+| **Workstreams** | Default page with one pinned **Shell** card plus active Workstreams grouped by Project. `Enter` opens the selected shell or managed session; on a managed Workstream, `n` starts a same-provider session at its exact Location, `f` forks, `p` parks, `x` archives, `a` clears its unseen-result indicator, `r` recovers an unresolved operation, and `?` opens page help. |
 | **Archived** | Project-grouped archived Workstreams. `u` restores the selected Workstream and returns to Workstreams without launching or attaching a provider. |
 
-`.` opens or closes Archived; `Esc` returns to Workstreams. Footer hints pack
-into complete key/action pairs at the available width, and `?` shows a compact,
-colored page-specific reference. Actions always resolve an exact Workstream ID
-or the presentation-local shell singleton.
+`.` opens or closes Archived; `Esc` returns to Workstreams. The compact footer
+omits the baseline `↑↓` selection, `Enter` open/shell, and `a` acknowledge-result
+hints; those remain in the complete `?` reference. Remaining footer hints pack
+into complete key/action pairs at the available width. Actions always resolve
+an exact Workstream ID or the presentation-local shell singleton.
 
 Pane focus is tmux-owned and separate from Navigator row selection. Use
 `Ctrl+b Left` and `Ctrl+b Right`, or deliberately press the primary mouse
@@ -74,8 +75,13 @@ may replace the right-hand surface but do not move focus. While the managed
 provider pane is focused, `Ctrl+b Up` and `Ctrl+b Down` attach the previous or
 next eligible already-live Workstream in Navigator visual order; they skip
 ineligible rows, never wrap, and never start, resume, recover, or otherwise
-mutate a provider lifecycle. The pane border labels the focused pane
-`▶ ACTIVE` and the other pane `◇ INACTIVE`.
+mutate a provider lifecycle. There is no separate pane-focus header: the
+Navigator page title stays green while it receives keyboard input and dims to
+dark gray while the provider pane is active.
+
+One continuous green outline now wraps the entire Navigator, including its
+footer. The adjacent tmux pane divider uses the same white foreground in both
+focus states, with no forced background and no half-border indicators.
 
 The presentation and each Runtime use closed private-tmux key tables. The
 presentation retains detach, bounded help, literal `Ctrl+b`, Left/Right focus,

@@ -3,12 +3,12 @@
 Date: 2026-08-31
 
 Status: D0-D19 are complete. D19 checkpoint `a0ec38b` implements the complete
-tmux-derived navigation contract and passes its local/disposable repository,
-Rust 1.88, private-tmux, and byte-identical installation gates. It adds no
-state epoch or provider lifecycle effect. No remote-CI or live-provider claim
-is transferred to D19. D18 checkpoint `c961c7e` remains the latest accepted
-artifact with separately authorized reset, native-trust, and disposable
-Codex/OpenCode lifecycle evidence.
+tmux-derived navigation contract. The current focus-cue refinement passes its
+local/disposable repository, Rust 1.88, private-tmux, and byte-identical
+installation gates. It adds no state epoch or provider lifecycle effect. No
+remote-CI or live-provider claim is transferred to D19. D18 checkpoint
+`c961c7e` remains the latest accepted artifact with separately authorized
+reset, native-trust, and disposable Codex/OpenCode lifecycle evidence.
 
 `docs/design.md` is the product and architecture contract. This file owns
 delivery order, implementation status, and exit gates. The complete prior
@@ -160,8 +160,14 @@ current attachment.
 - presentation and Runtime key-table tests prove both complete allowlists, D18
   live-server convergence, and the absence of split, window, layout, menu,
   command-prompt, and unsafe mouse routes;
-- a tmux-owned, unambiguous focus cue outside provider content makes the active
-  pane visible without Navigator polling; and
+- tmux focus events drive only the Navigator page-title color, making the exact
+  active pane visible without a separate header, Navigator polling, focus
+  authority, or provider-pane write; a real disposable client proves the
+  initial and both directional focus transitions from Navigator-only output;
+- repeated fresh starts prove the exact two-pane roles and closed presentation
+  controls are published before startup returns; only the bounded transient
+  `InvalidTopology` observation may retry, while persistent or unrelated
+  failures remain closed; and
 - `scripts/check`, the declared MSRV job, nested terminal input/fidelity tests,
   and staged/unstaged diff checks pass before the locked release is installed
   for operator inspection.
@@ -178,6 +184,27 @@ locked all-targets/all-features tests. The locked release was installed
 byte-identically for operator inspection. No real provider was launched for
 D19 acceptance; the composed deterministic switching proof and remaining
 evidence limitations are recorded in the acceptance record.
+
+Before the startup closure, the focus-and-frame refinement plus compact-footer
+tightening passed `scripts/check` with 372 library and 8 presentation
+integration tests. That source mounted read-only in a Rust
+1.88.0/Debian/tmux 3.3a container passed the same 380 locked
+all-targets/all-features tests before its locked release was installed
+byte-identically.
+
+The final startup/focus candidate passes `scripts/check` with 372 library and
+10 presentation integration tests. The current source mounted read-only in a
+Rust 1.88.0/Debian/tmux 3.3a container passes the same 382 locked tests,
+including 16 consecutive fresh detached starts and the real-client
+green/dark-gray/green focus proof, before its locked release is installed
+byte-identically for operator inspection.
+
+The same refinement replaces the stacked list/footer outlines with one
+continuous green frame around the entire Navigator. The adjacent tmux boundary
+uses a white foreground and default background in both focus states, with
+half-border indicators disabled. Focus remains indicated only by the page-title
+color. The compact footer omits `↑↓` selection, `Enter` open/shell, and `a`
+acknowledge-result hints while retaining them in the complete `?` reference.
 
 ## Completed checkpoint: D18 current-only consolidation
 

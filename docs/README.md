@@ -3,12 +3,12 @@
 ## Status and authority
 
 D0-D19 are complete. D19 checkpoint `a0ec38b` implements the tmux-derived
-navigation contract and passes the full local/disposable gate, the declared
-Rust 1.88 matrix, and byte-identical per-host installation. It adds no state
-epoch or provider lifecycle effect. This result does not claim remote CI or
-live Codex/OpenCode acceptance. D18 checkpoint `c961c7e` remains the latest
-artifact with separately authorized destructive-reset, native-trust, and
-disposable live-provider release evidence.
+navigation contract, and the current focus-cue refinement passes the full
+local/disposable gate, the declared Rust 1.88 matrix, and byte-identical
+per-host installation. It adds no state epoch or provider lifecycle effect.
+This result does not claim remote CI or live Codex/OpenCode acceptance. D18
+checkpoint `c961c7e` remains the latest artifact with separately authorized
+destructive-reset, native-trust, and disposable live-provider release evidence.
 
 - [Product and architecture design](design.md) is the V1 contract.
 - [Delivery roadmap](roadmap.md) owns delivery order, checkpoint status, and
@@ -73,13 +73,20 @@ uses `u` to restore without starting or attaching a provider. The installed
 
 Tmux alone owns pane focus. `Ctrl+b Left`/`Right` and deliberate primary-button
 press are the only ordinary focus transitions; Navigator activation and
-right-surface replacement preserve the active pane. A tmux border cue shows
-`▶ ACTIVE` or `◇ INACTIVE`. From an exact focused managed provider pane,
+right-surface replacement preserve the active pane. No separate pane-focus
+header is shown. Tmux focus events keep the Navigator page title green while it
+is active and dark gray while the provider pane is active. From an exact
+focused managed provider pane,
 `Ctrl+b Up`/`Down` attaches the previous or next eligible already-live
 Workstream in the same activity-based order as Navigator, skipping ineligible
 rows without wrapping or causing provider/lifecycle effects. `Ctrl+b o`, pane
 splits, window switching/creation, layout mutation, menus, and arbitrary tmux
 commands are absent from WSNav's private tables.
+
+One continuous green outline wraps the entire Navigator, including its footer.
+The adjacent tmux Navigator/provider divider uses the same white foreground in
+both focus states, with no forced background and no half-border indicators. It
+therefore reads as one native tmux boundary rather than changing by pane focus.
 
 Retained public management commands use the same schema-15 snapshot and
 revision-fenced action boundaries as the Navigator. Passive status and

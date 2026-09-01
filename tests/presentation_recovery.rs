@@ -22,6 +22,7 @@ const SLEEP_PROGRAM: &str = "/usr/bin/sleep";
 const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 const READINESS_POLL: Duration = Duration::from_millis(10);
 const DEFAULT_NAVIGATOR_PANE_WIDTH: u16 = 32;
+const FOCUS_TEST_CHILD: &str = "WSNAV_FOCUS_TEST_CHILD";
 
 fn current_state_root() -> tempfile::TempDir {
     let root = tempfile::tempdir().expect("temporary state root");
@@ -200,6 +201,40 @@ fn private_presentation_has_only_owned_roles_and_bounded_key_tables() {
     assert!(panes.contains("provider"));
     assert!(!panes.contains("utility"));
 
+    assert_eq!(
+        tmux_output(&paths.socket, ["show-options", "-gv", "focus-events"]).trim(),
+        "on"
+    );
+    assert_eq!(
+        tmux_output(&paths.socket, ["show-options", "-gv", "pane-border-status"]).trim(),
+        "off"
+    );
+    assert!(
+        tmux_output(&paths.socket, ["show-options", "-gv", "pane-border-format"])
+            .trim()
+            .is_empty()
+    );
+    assert_eq!(
+        tmux_output(
+            &paths.socket,
+            ["show-options", "-gv", "pane-border-indicators"]
+        )
+        .trim(),
+        "off"
+    );
+    assert_eq!(
+        tmux_output(&paths.socket, ["show-options", "-gv", "pane-border-style"]).trim(),
+        "fg=colour7"
+    );
+    assert_eq!(
+        tmux_output(
+            &paths.socket,
+            ["show-options", "-gv", "pane-active-border-style"]
+        )
+        .trim(),
+        "fg=colour7"
+    );
+
     let prefix = tmux_output(&paths.socket, ["list-keys", "-T", "prefix"]);
     for unsafe_binding in [
         "split-window",
@@ -231,6 +266,125 @@ fn private_presentation_has_only_owned_roles_and_bounded_key_tables() {
             "WheelDownPane",
         ])
     );
+}
+
+#[test]
+#[cfg(unix)]
+fn fresh_presentation_focuses_navigator_and_tmux_left_right_updates_cue() {
+    if !tmux_available() {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+    if std::env::var_os(FOCUS_TEST_CHILD).is_none() {
+        let output = Command::new(std::env::current_exe().unwrap())
+            .env_remove("NO_COLOR")
+            .env(FOCUS_TEST_CHILD, "1")
+            .args([
+                "--exact",
+                "fresh_presentation_focuses_navigator_and_tmux_left_right_updates_cue",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "color-enabled focus proof failed:\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        return;
+    }
+    let state_root = current_state_root();
+    let presentation = Presentation::fresh_with_executable(
+        state_root.path(),
+        PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
+    );
+    let paths = presentation.paths().clone();
+    let _guard = PrivateTmuxGuard {
+        directory: paths.directory.clone(),
+        socket: paths.socket.clone(),
+    };
+    presentation
+        .start(uuid::Uuid::from_u128(0x1708), state_root.path())
+        .unwrap();
+
+    let navigator = pane_id_for_role(&paths, "navigator");
+    let provider = pane_id_for_role(&paths, "provider");
+    let focus_output = state_root.path().join("navigator-focus-output");
+    pipe_navigator_output(&paths, &navigator, &focus_output);
+    let mut client = attach_tmux_client(&paths);
+    wait_for_presentation_client(&paths);
+    wait_for_active_pane(&paths.socket, &navigator);
+    wait_for_navigator_text(&paths, &navigator, "Workstreams");
+    wait_for_navigator_color_sequence(&focus_output, &["\x1b[38;5;2;"]);
+
+    send_client_keys(&mut client, b"\x02\x1b[C");
+    wait_for_active_pane(&paths.socket, &provider);
+    wait_for_navigator_color_sequence(&focus_output, &["\x1b[38;5;2;", "\x1b[38;5;8;"]);
+
+    send_client_keys(&mut client, b"\x02\x1b[D");
+    wait_for_active_pane(&paths.socket, &navigator);
+    wait_for_navigator_color_sequence(
+        &focus_output,
+        &["\x1b[38;5;2;", "\x1b[38;5;8;", "\x1b[38;5;2;"],
+    );
+    let _ = client.kill();
+    let _ = client.wait();
+}
+
+#[test]
+#[cfg(unix)]
+fn repeated_fresh_presentations_publish_exact_controls_before_returning() {
+    if !tmux_available() {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+    let state_root = current_state_root();
+
+    for attempt in 0_u128..16 {
+        let presentation = Presentation::fresh_with_executable(
+            state_root.path(),
+            PathBuf::from(env!("CARGO_BIN_EXE_wsnav")),
+        );
+        let paths = presentation.paths().clone();
+        let guard = PrivateTmuxGuard {
+            directory: paths.directory.clone(),
+            socket: paths.socket.clone(),
+        };
+        presentation
+            .start(uuid::Uuid::from_u128(0x1718 + attempt), state_root.path())
+            .unwrap_or_else(|error| panic!("fresh start {attempt} failed: {error:?}"));
+
+        let mut panes = tmux_output(
+            &paths.socket,
+            [
+                "list-panes",
+                "-t",
+                &format!("{}:navigator", paths.session_name),
+                "-F",
+                "#{@wsnav_role}|#{pane_dead}",
+            ],
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+        panes.sort();
+        assert_eq!(panes, ["navigator|0", "provider|0"]);
+        assert_eq!(
+            tmux_output(&paths.socket, ["show-options", "-gv", "focus-events"]).trim(),
+            "on"
+        );
+        let prefix = tmux_output(&paths.socket, ["list-keys", "-T", "prefix"]);
+        assert_eq!(
+            binding_keys(&prefix),
+            BTreeSet::from(["?", "d", "Up", "Down", "Left", "Right", "C-b",])
+        );
+
+        presentation.close().unwrap();
+        assert!(!paths.directory.exists());
+        drop(guard);
+    }
 }
 
 #[test]
@@ -705,6 +859,67 @@ fn wait_for_active_pane(socket: &Path, expected: &str) {
         "expected active pane {expected}, got {}",
         active_pane(socket)
     );
+}
+
+fn navigator_capture(paths: &PresentationPaths, pane: &str) -> String {
+    tmux_output(&paths.socket, ["capture-pane", "-e", "-p", "-t", pane])
+}
+
+fn pipe_navigator_output(paths: &PresentationPaths, pane: &str, output: &Path) {
+    let command = format!("cat > {}", shell_quote_for_test(output));
+    let piped = tmux_command(&paths.socket)
+        .args(["pipe-pane", "-O", "-t", pane, &command])
+        .output()
+        .unwrap();
+    assert!(piped.status.success(), "tmux failed: {:?}", piped.stderr);
+}
+
+fn wait_for_navigator_color_sequence(output: &Path, colors: &[&str]) {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    while Instant::now() < deadline {
+        let bytes = fs::read(output).unwrap_or_default();
+        if colors_in_order(&bytes, colors) {
+            return;
+        }
+        thread::sleep(READINESS_POLL);
+    }
+    panic!(
+        "Navigator focus cue did not reach {colors:?}: {:?}",
+        String::from_utf8_lossy(&fs::read(output).unwrap_or_default())
+    );
+}
+
+fn colors_in_order(mut output: &[u8], colors: &[&str]) -> bool {
+    for color in colors {
+        let Some(offset) = output
+            .windows(color.len())
+            .position(|candidate| candidate == color.as_bytes())
+        else {
+            return false;
+        };
+        output = &output[offset + color.len()..];
+    }
+    true
+}
+
+fn wait_for_navigator_text(paths: &PresentationPaths, pane: &str, text: &str) {
+    let deadline = Instant::now() + READINESS_TIMEOUT;
+    while Instant::now() < deadline {
+        if navigator_capture(paths, pane).contains(text) {
+            return;
+        }
+        thread::sleep(READINESS_POLL);
+    }
+    panic!(
+        "Navigator text did not reach {text:?}: {:?}",
+        navigator_capture(paths, pane)
+    );
+}
+
+fn send_client_keys(client: &mut Child, bytes: &[u8]) {
+    let stdin = client.stdin.as_mut().expect("attached client stdin");
+    stdin.write_all(bytes).unwrap();
+    stdin.flush().unwrap();
 }
 
 fn pane_geometry(socket: &Path, pane: &str) -> (u16, u16, u16, u16) {

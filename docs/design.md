@@ -5,10 +5,11 @@ Date: 2026-08-31
 Status: D19 implements the shell-first product on the unchanged direct,
 current-only schema-15 epoch. Checkpoint `a0ec38b` completes tmux-owned pane
 focus, closed private-tmux controls, and bounded provider-pane Workstream
-switching; its full local/disposable gate, Rust 1.88/tmux 3.3a matrix, and
-byte-identical per-host installation pass. It adds no provider lifecycle effect
-or durable focus/selection state. No remote-CI or live-provider acceptance is
-claimed for D19. D18 checkpoint `c961c7e` and installed artifact
+switching. The current focus-cue refinement and its full local/disposable gate,
+Rust 1.88/tmux 3.3a matrix, and byte-identical per-host installation pass. It
+adds no provider lifecycle effect or durable focus/selection state. No remote-CI
+or live-provider acceptance is claimed for D19. D18 checkpoint `c961c7e` and
+installed artifact
 `f732e2b16344b038cd05996501ce77be42302f7403de9720d156dbf24777d124`
 remain the latest separately accepted destructive-reset, native-trust, and
 disposable Codex/OpenCode lifecycle evidence.
@@ -385,6 +386,17 @@ literal prefix, help, copy mode, and native mouse delivery. Reattach converges
 exact owned D18-era servers to these tables without restarting a provider.
 These restrictions belong only to WSNav private servers and never modify the
 user's ordinary tmux server or configuration.
+
+One continuous green outer frame wraps the entire Navigator content area,
+including its list and footer. Status and Help use only an internal top rule;
+they do not introduce another full-width side outline. The adjacent tmux
+pane-boundary column uses a fixed white foreground and the terminal's default
+background for both active and inactive panes. Half-border activity indicators
+are disabled, so the divider reads as one native tmux line rather than changing
+with pane focus. Focus remains visible only through the Navigator page-title
+color, which is green while the Navigator is focused and dark gray while it is
+inactive. Centered modal borders remain self-contained inside the Navigator
+frame.
 
 Both private tmux layers also own their copy-mode wheel behavior. They bind
 `WheelUpPane` and `WheelDownPane` in the `copy-mode` and `copy-mode-vi` tables
@@ -880,8 +892,10 @@ context. No page creates a tmux popup, overlays the provider pane, or replaces
 the native TUI.
 
 Direct page-local keys are the canonical control path. The compact footer
-shows the most relevant bindings for the current page and state; `?` reveals
-the complete list. The management lists provide bounded status and context
+shows the most relevant bindings for the current page and state, deliberately
+omitting the baseline `↑↓` selection, `Enter` open/shell, and `a`
+acknowledge-result hints; `?` reveals the complete list. The management lists
+provide bounded status and context
 inline, but D7 does not require a menu-driven action system. A later clickable action menu may
 augment the same operations without replacing or delaying the direct keys.
 Each stateful action introduces its own bounded text entry, confirmation, and
@@ -2583,10 +2597,16 @@ observer review may replace the right surface but never steal focus. If the
 user is already focused right when an asynchronous replacement completes,
 tmux naturally keeps that pane focused; if the user moved left, it stays left.
 
-Focus is visible through a tmux-owned, unambiguous cue outside provider content:
-the active pane's top border reads `▶ ACTIVE` and the other pane reads
-`◇ INACTIVE`. Navigator selection remains visible independently and does not
-claim that its row currently receives input or owns the shown surface.
+Focus is visible without a separate pane header. The presentation enables tmux
+focus events, and the Navigator renders its current page title green while its
+terminal has focus and dark gray after focus moves to the provider pane. This
+ephemeral rendering hint is downstream of tmux authority: it cannot move
+focus, authorize an action, change selection, enter durable state, or poll tmux.
+The provider pane receives no cue traffic or WSNav content. In the exact
+two-pane presentation, a dim Navigator title unambiguously identifies the
+provider pane as the active pane. Navigator selection remains visible
+independently and does not claim that its row currently receives input or owns
+the shown surface.
 
 The active pane is shared tmux window/session state. A focus change from one
 client attached to a presentation is therefore visible to every client on that
@@ -2649,6 +2669,17 @@ Runtime server without restarting its provider. It does so only after
 exact ownership/topology proof and never by reading, sourcing, or mutating the
 operator's ordinary tmux configuration or server.
 
+Fresh presentation startup treats pane publication as one bounded tmux
+observation boundary. After creating and role-marking the provider pane, but
+before changing any presentation option or key table, it reopens the exact
+owned context and requires the complete two-pane topology. Only
+`InvalidTopology` at this fresh-start boundary may be retried, for at most 20
+observations separated by 5 ms. Every other error refuses immediately, and a
+persistent incomplete or ambiguous topology still fails closed and follows
+owned startup cleanup. The same narrow retry policy serves the existing
+post-attach Navigator-width convergence; it does not weaken reattach-time,
+mouse, focus, or attachment mutation validation.
+
 ### Switching managed Workstreams from the provider pane
 
 `Ctrl+b Up` and `Ctrl+b Down` are not directional focus commands in the fixed
@@ -2707,8 +2738,14 @@ outer-tmux prefix-passthrough boundary. The gate proves:
 - both presentation and Runtime prefix/root tables equal their role-specific
   closed allowlists, converge exact D18-owned live servers, and expose no split,
   window, layout, menu, prompt, or unsafe mouse command;
-- the tmux-owned focus cue is unambiguous, requires no Navigator polling, and
-  writes nothing into a provider pane; and
+- tmux focus events drive only the Navigator page-title color, with no separate
+  pane header, Navigator polling, focus authority, or provider-pane write; a
+  disposable real-client proof observes the initial green title, the dark-gray
+  title after `Ctrl+b Right`, and green again after `Ctrl+b Left` from only the
+  Navigator pane's bounded output; and
+- repeated fresh detached starts return only after the exact two owned panes
+  and closed presentation controls are observable, while transient topology
+  retry tests keep persistent and unrelated failures closed; and
 - the existing nested `Ctrl+b` path, native modified keys, mouse input,
   copy-mode scrolling, completed provider output, and direct `wsnav attach`
   behavior remain intact.

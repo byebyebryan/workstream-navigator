@@ -2,20 +2,45 @@
 
 Date: 2026-08-31
 
-Status: implemented and locally accepted checkpoint `a0ec38b`. The full
-repository gate, a clean Rust 1.88/tmux 3.3a compatibility run, the locked
-release build, and byte-identical per-host installation passed. This record
-does not claim remote CI or real Codex/OpenCode acceptance; D18 remains the
-latest checkpoint with separately authorized live-provider lifecycle evidence.
+Status: implemented and locally accepted checkpoint `a0ec38b`, with a current
+focus-and-frame refinement. The full repository gate, a clean Rust 1.88/tmux 3.3a
+compatibility run, the locked release build, and byte-identical per-host
+installation passed for the current source. This record does not claim remote
+CI or real Codex/OpenCode acceptance; D18 remains the latest checkpoint with
+separately authorized live-provider lifecycle evidence.
+
+The current follow-up removes the visually heavy `ACTIVE`/`INACTIVE` pane
+header. The presentation instead forwards tmux focus events, and the Navigator
+uses them only to keep its page title green while focused and dark gray while
+inactive. The title color is ephemeral rendering state, not focus authority or
+durable UI state, and no cue is written into the provider pane.
+
+The follow-up wraps the entire Navigator, including its footer, in one
+continuous green frame. The adjacent tmux pane-boundary column uses a white
+foreground and default background in both focus states, and half-border
+indicators are disabled. The divider therefore remains one consistent native
+tmux line. The compact footer also omits `↑↓` selection, `Enter` open/shell,
+and `a` acknowledge-result hints while the complete `?` reference retains them.
 
 ## Candidate boundary
 
 - Tmux is the only pane-focus authority. `Ctrl+b Left`/`Right` and validated
   primary-button press are the only ordinary focus transitions; Navigator
   activation and right-surface replacement preserve focus.
+- The Navigator page-title color follows terminal focus gain/loss. There is no
+  separate pane-focus header, tmux query loop, provider-pane traffic, or action
+  authority attached to the color.
+- One green outer frame contains the Navigator list and footer. The adjacent
+  tmux boundary uses identical white active/inactive foregrounds and no forced
+  background; disabled half-border indicators prevent a split divider.
 - Presentation and Runtime prefix/root tables are exact role-specific closed
   allowlists. Split, window, layout, menu, prompt, and arbitrary-command routes
   are absent from WSNav-owned interaction tables.
+- Fresh presentation startup retries only the exact transient
+  `InvalidTopology` observation while tmux publishes its second pane, for at
+  most 20 observations separated by 5 ms. Each attempt revalidates the owned
+  context and complete two-pane topology before the first control mutation;
+  every other error and persistent ambiguity remains a refusal.
 - Provider-pane `Ctrl+b Up`/`Down` selects the adjacent eligible already-live
   Workstream in the same activity-based visual order as Navigator. It skips
   ineligible rows, does not wrap, preserves right-pane focus, and causes no
@@ -35,11 +60,11 @@ activity-based Project/Workstream ordering authority.
 
 ## Repository and compatibility evidence
 
-`scripts/check` passed on the development host with Rust 1.98.0 and tmux 3.7c.
-It ran formatting, strict Clippy, 369 library tests, 8 presentation integration
-tests, packaging, dependency license/advisory policy, shell/Python/fixture
-checks, source and CLI acceptance, disposable presentation/state acceptance,
-Markdown links, and staged/unstaged diff checks.
+The original `a0ec38b` `scripts/check` passed on the development host with Rust
+1.98.0 and tmux 3.7c. It ran formatting, strict Clippy, 369 library tests, 8
+presentation integration tests, packaging, dependency license/advisory policy,
+shell/Python/fixture checks, source and CLI acceptance, disposable
+presentation/state acceptance, Markdown links, and staged/unstaged diff checks.
 
 An exact local clone of `a0ec38b` in `rust:1.88-bookworm`, with tmux 3.3a,
 passed:
@@ -53,11 +78,52 @@ cargo test --locked --all-targets --all-features --quiet -- --test-threads=1
 The container clone was deleted after the run. No ordinary WSNav state or
 default tmux server was used.
 
+Before the startup closure, the focus-and-frame refinement plus compact-footer
+tightening passed `scripts/check` on Rust 1.98.0/tmux 3.7c with 372 library and
+8 presentation integration tests. That workspace was then mounted read-only
+into `rust:1.88-bookworm`; Rust 1.88.0 and tmux 3.3a passed the same 380 locked
+all-targets/all-features tests. The container was removed after the run.
+
+Before the current startup closure, several visual-refinement compatibility
+runs passed every library test, then a presentation integration fixture refused
+its initial provider-pane topology before reaching the behavior under test.
+Each exact fixture passed on an isolated retry, and a fresh complete run after
+each refusal passed the entire matrix. Those refusals were fail-closed and
+created no provider effect; no interrupted matrix is counted as a passing gate.
+They are retained here as the falsification that motivated the narrow bounded
+startup policy rather than erased by the fix.
+
+The current focused presentation target passes 10/10 tests on tmux 3.7c. Its
+new startup fixture completes 16 consecutive fresh detached presentations and
+requires exact live `navigator`/`provider` roles plus the complete closed prefix
+table after every return. Its real-client focus fixture observes Navigator as
+initially active and green, provider active with a dark-gray Navigator title
+after `Ctrl+b Right`, and Navigator active and green again after `Ctrl+b Left`.
+Only the Navigator pane's bounded output is inspected, under a disposable state
+root and private tmux socket; provider output is neither captured nor written.
+
+The final startup/focus candidate passed `scripts/check` on Rust 1.98.0/tmux
+3.7c with 372 library and 10 presentation integration tests, plus formatting,
+strict Clippy, packaging, dependency policy, source/CLI acceptance,
+presentation/state acceptance, Markdown links, and staged/unstaged diff checks.
+The current workspace was then mounted read-only into
+`rust:1.88-bookworm`; Rust 1.88.0, tmux 3.3a, and zsh 5.9 passed all 382 locked
+all-targets/all-features tests serially. An earlier under-provisioned container
+without zsh stopped at the two explicit account-shell preconditions after
+370/372 library tests; it is not counted as a passing gate. Each container was
+removed after its run.
+
 Representative deterministic proof includes:
 
 - live presentation mouse validation refuses changed topology before focus or
   delivery, and valid SGR press focuses and forwards while release/wheel over
   an inactive pane preserve focus;
+- a real attached tmux client drives initial/Right/Left focus and observes the
+  Navigator title's ordered green/dark-gray/green terminal output without
+  polling tmux from the product or inspecting the provider pane;
+- 16 consecutive fresh detached starts return with the exact two live roles and
+  complete closed prefix table, while deterministic retry tests prove transient
+  success, persistent refusal, and immediate unrelated-error refusal;
 - exact presentation and Runtime table inventories, unsafe-binding absence,
   topology refusal, and live Runtime table convergence without provider-process
   restart;
@@ -77,7 +143,7 @@ Source and installed artifacts compare byte-for-byte, are executable mode
 `0755`, and share SHA-256:
 
 ```text
-8c2517dab05ab64f7df720d3f4373b1c486e91ad176c8d7b791e740388251777
+46365fe25fe0edacc728f4f1269487a24671a4ad90695264db2e70ed55e26b2c
 ```
 
 Installation is operator-inspection evidence, not publication or an accepted

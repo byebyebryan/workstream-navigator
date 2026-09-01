@@ -89,12 +89,12 @@ const WORKSTREAM_OPTION: &str = "@wsnav_workstream_id";
 const PRESENTATION_CLAIM_OPTION: &str = "@wsnav_presentation_claim";
 const NAVIGATOR_STOP_ATTEMPTS: usize = 20;
 const NAVIGATOR_STOP_RETRY: Duration = Duration::from_millis(5);
-/// A detached tmux server can briefly expose an incomplete pane topology while
-/// its first controlling client attaches.  Width restoration may retry only
-/// that exact transient topology observation, and only for this bounded
-/// interval; persistent or unrelated failures remain refusals.
-pub(crate) const NAVIGATOR_WIDTH_RETRY_ATTEMPTS: usize = 20;
-pub(crate) const NAVIGATOR_WIDTH_RETRY_INTERVAL: Duration = Duration::from_millis(5);
+/// A private tmux server can briefly expose an incomplete pane topology while
+/// it publishes a new pane or attaches its first controlling client.  Only
+/// that exact transient topology observation may be retried, and only for
+/// this bounded interval; persistent or unrelated failures remain refusals.
+pub(crate) const INVALID_TOPOLOGY_RETRY_ATTEMPTS: usize = 20;
+pub(crate) const INVALID_TOPOLOGY_RETRY_INTERVAL: Duration = Duration::from_millis(5);
 // tmux 3.4 normalizes literal control separators in `-F` output. Every field
 // using this printable separator is either an owned identifier/enum or is
 // rejected fail-closed if the separator appears in free-form evidence.
@@ -104,8 +104,12 @@ const PRESENTATION_TMUX_CONFIG_PREFIX: &str = concat!(
     "set -g status off\n",
     "set -g mouse on\n",
     "set -g remain-on-exit on\n",
-    "set -g pane-border-status top\n",
-    "set -g pane-border-format \" #{?pane_active,▶ ACTIVE,◇ INACTIVE} \"\n",
+    "set -g focus-events on\n",
+    "set -g pane-border-status off\n",
+    "set -g pane-border-format \"\"\n",
+    "set -g pane-border-indicators off\n",
+    "set -g pane-border-style fg=colour7\n",
+    "set -g pane-active-border-style fg=colour7\n",
     "set -g prefix C-b\n",
     "set -g prefix2 None\n",
     "bind-key -T prefix F12 display-message \"\"\n",
@@ -1811,9 +1815,15 @@ mod tests {
     fn presentation_config_selects_the_clicked_pane_on_mouse_press() {
         let config = presentation_tmux_config();
         assert!(config.contains("set -g mouse on"));
+        assert!(config.contains("set -g focus-events on"));
+        assert!(config.contains("set -g pane-border-status off"));
+        assert!(config.contains("set -g pane-border-format \"\""));
+        assert!(config.contains("set -g pane-border-indicators off"));
+        assert!(config.contains("set -g pane-border-style fg=colour7"));
+        assert!(config.contains("set -g pane-active-border-style fg=colour7"));
+        assert!(!config.contains("ACTIVE"));
         assert!(!config.contains("MouseDown1Pane"));
         assert!(config.contains("bind-key -T root MouseUp1Pane send-keys -M"));
-        assert!(config.contains("pane-border-format"));
         assert!(config.contains("WheelUpPane"));
         assert!(!config.contains("MouseDown3Pane"));
     }
@@ -1824,7 +1834,12 @@ mod tests {
         for expected in [
             "set -g status off",
             "set -g mouse on",
-            "set -g pane-border-status top",
+            "set -g focus-events on",
+            "set -g pane-border-status off",
+            "set -g pane-border-format \"\"",
+            "set -g pane-border-indicators off",
+            "set -g pane-border-style fg=colour7",
+            "set -g pane-active-border-style fg=colour7",
             "bind-key -T prefix F12 display-message \"\"",
             "bind-key -T root F12 display-message \"\"",
             "bind-key -T root MouseUp1Pane send-keys -M",

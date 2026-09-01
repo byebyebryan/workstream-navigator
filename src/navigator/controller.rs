@@ -13,7 +13,10 @@ use std::{
 };
 
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, Event, MouseButton, MouseEventKind},
+    event::{
+        self, DisableFocusChange, DisableMouseCapture, EnableFocusChange, EnableMouseCapture,
+        Event, MouseButton, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -185,7 +188,16 @@ pub(crate) fn run_navigator(
                     }
                     redraw = true;
                 }
-                _ => {}
+                Event::FocusGained => {
+                    navigator.set_terminal_focused(true);
+                    redraw = true;
+                }
+                Event::FocusLost => {
+                    navigator.set_terminal_focused(false);
+                    mouse_down = None;
+                    redraw = true;
+                }
+                Event::Paste(_) => {}
             }
         }
         if let Some(command) = finish_pending_observer_review(
@@ -1910,7 +1922,8 @@ impl TerminalSession {
         if let Err(error) = execute!(
             terminal.backend_mut(),
             EnterAlternateScreen,
-            EnableMouseCapture
+            EnableMouseCapture,
+            EnableFocusChange
         ) {
             disable_raw_mode()?;
             return Err(error);
@@ -1925,8 +1938,9 @@ impl Drop for TerminalSession {
         let _ = disable_raw_mode();
         let _ = execute!(
             self.terminal.backend_mut(),
-            LeaveAlternateScreen,
-            DisableMouseCapture
+            DisableFocusChange,
+            DisableMouseCapture,
+            LeaveAlternateScreen
         );
     }
 }
@@ -1957,7 +1971,7 @@ mod tests {
             WorkstreamId, WorkstreamLifecycle,
         },
         navigator::view::ShellLocation,
-        presentation::NAVIGATOR_WIDTH_RETRY_ATTEMPTS,
+        presentation::INVALID_TOPOLOGY_RETRY_ATTEMPTS,
         presentation::{
             AttachmentPhase, AttachmentPurpose, AttachmentStatus, Presentation, PresentationError,
         },
@@ -2022,7 +2036,7 @@ mod tests {
             }),
             Err(PresentationError::InvalidTopology)
         ));
-        assert_eq!(attempts.get(), NAVIGATOR_WIDTH_RETRY_ATTEMPTS);
+        assert_eq!(attempts.get(), INVALID_TOPOLOGY_RETRY_ATTEMPTS);
     }
 
     #[test]

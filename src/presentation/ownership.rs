@@ -560,7 +560,7 @@ impl Presentation {
         let result = self
             .set_pane_role(PROVIDER_PANE, PresentationPaneRole::Provider, None)
             .and_then(|()| self.set_pane_remain_on_exit(PROVIDER_PANE, true))
-            .and_then(|()| self.install_control_bindings());
+            .and_then(|()| self.retry_fresh_start_control_bindings());
         self.complete_start_stage("provider pane setup", result)?;
         let result = self.retry_default_navigator_width();
         self.complete_start_stage("default navigator width", result)?;

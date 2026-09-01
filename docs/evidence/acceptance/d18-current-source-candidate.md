@@ -76,7 +76,7 @@ deterministic tests prove transient recovery, persistent refusal, and immediate
 unrelated-error refusal.
 
 The missing startup coverage was later reproduced by both jobs in
-[CI run 33292725378](https://github.com/byebyebryan/workstream-navigator/actions/runs/33292725378)
+[CI run 33292725378](https://github.com/byebyebryan/wsnav/actions/runs/33292725378)
 for traceability commit `08f9265`, including the accepted Rust
 1.88/tmux 3.3a matrix. That falsification triggered correction `ed0d883`; it
 does not retroactively turn the original controller-only retry into passing

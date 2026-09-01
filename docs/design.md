@@ -975,7 +975,7 @@ The grouped view renders an explicit minimal tree instead of communicating
 hierarchy through indentation alone:
 
 ```text
-workstream-navigator
+wsnav
 ├ Codex                                     3 min ago
 │ ✓ lifecycle repair
 └ OpenCode                                   1 day ago
@@ -2450,7 +2450,7 @@ The default view is intentionally small:
 
 ```text
 Shell
-  ~/c/workstream-navigator
+  ~/c/wsnav
 Project
 ├── Tip thread name         working
 ├── Prior name ↻ unnamed    working

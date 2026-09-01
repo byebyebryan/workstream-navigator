@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 rust-version = "1.88"
 description = "A native-workflow terminal navigator for persistent host-local coding workstreams."
-repository = "https://github.com/byebyebryan/workstream-navigator"
+repository = "https://github.com/byebyebryan/wsnav"
 license = "MIT"
 publish = false
 

@@ -1769,15 +1769,12 @@ mod tests {
     fn shell_card_renders_live_context_without_onboarding_instructions() {
         let (snapshot, _, _) = snapshot();
         let mut model = Model::new(snapshot);
-        model.set_shell_location(ShellLocation::cwd("~/c/workstream-navigator"));
+        model.set_shell_location(ShellLocation::cwd("~/c/wsnav"));
         let rows = model.rows();
         let shell = super::row_lines(&rows[0], 30);
 
         assert_eq!(shell[0].spans[0].content.as_ref(), "Shell");
-        assert_eq!(
-            shell[1].spans[1].content.as_ref(),
-            "~/c/workstream-navigator"
-        );
+        assert_eq!(shell[1].spans[1].content.as_ref(), "~/c/wsnav");
         assert_eq!(shell.len(), 2);
         assert!(
             shell[1]
@@ -1824,7 +1821,7 @@ mod tests {
         );
 
         let mut navigator = Navigator::new(snapshot);
-        navigator.set_shell_location(ShellLocation::cwd("~/c/workstream-navigator"));
+        navigator.set_shell_location(ShellLocation::cwd("~/c/wsnav"));
         let geometry = navigator.list_geometry(area);
         let x = geometry.inner.x;
 

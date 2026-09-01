@@ -100,7 +100,7 @@ presentation starts with that card selected and its account shell visible on
 the right; reconnect preserves the detached presentation's current surface.
 The stable two-line card shows `Shell`, then a cwd line that abbreviates every
 parent component and keeps the leaf folder whole, for example
-`~/c/workstream-navigator`. This display is neither persisted nor used as
+`~/c/wsnav`. This display is neither persisted nor used as
 launch authority. Change directory with ordinary shell commands and run
 `codex` or `opencode`. The native command owns provider and launch-option
 choice. Successful brokered launch registers the detected worktree root,

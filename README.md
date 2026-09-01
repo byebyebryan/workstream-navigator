@@ -94,7 +94,7 @@ A fresh presentation starts with the Shell card selected and its account shell
 already visible on the right; reconnecting a detached presentation preserves
 its existing surface. The card is a stable two-line surface: `Shell`, then an
 abbreviated cwd with every parent shortened and the leaf folder kept whole,
-for example `~/c/workstream-navigator`. This presentation-local display
+for example `~/c/wsnav`. This presentation-local display
 evidence is neither persisted nor launch authority. Use ordinary shell
 commands to choose a directory, then run `codex` or `opencode`; the native
 command owns provider and launch-option choice. Successful brokered launch

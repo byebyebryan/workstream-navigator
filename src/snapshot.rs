@@ -47,6 +47,10 @@ pub(crate) struct WorkstreamSnapshot {
     /// Monotonic activity sequence used by both Navigator rows and provider
     /// cycling. The value is bounded registry metadata, not provider content.
     pub(crate) last_activity_sequence: i64,
+    /// Wall-clock time of the most recent observed native conversation
+    /// activity. `None` means no turn has been observed and no time is
+    /// inferred.
+    pub(crate) last_activity_at_millis: Option<i64>,
     pub(crate) revision: Revision,
     pub(crate) runtime: Option<RuntimeSnapshot>,
     pub(crate) onboarding: Option<OnboardingStatus>,
@@ -208,6 +212,7 @@ pub(crate) fn read_snapshot(root: &StateRoot) -> Result<Snapshot, SnapshotError>
                 lifecycle: workstream.lifecycle,
                 archived: workstream.archived_at_millis.is_some(),
                 last_activity_sequence: workstream.last_activity_sequence,
+                last_activity_at_millis: workstream.last_activity_at_millis,
                 revision: workstream.revision,
                 runtime: workstream.runtime.map(|runtime| RuntimeSnapshot {
                     runtime_id: runtime.runtime_id,
@@ -252,6 +257,7 @@ pub(crate) fn read_snapshot(root: &StateRoot) -> Result<Snapshot, SnapshotError>
 mod tests {
     use std::{ffi::OsString, fs};
 
+    use rusqlite::{Connection, params};
     use uuid::Uuid;
 
     use super::{OnboardingStatus, read_snapshot};
@@ -306,6 +312,22 @@ mod tests {
             Revision::INITIAL
         );
         assert!(snapshot.unresolved_operations.is_empty());
+        assert_eq!(snapshot.workstreams[0].last_activity_at_millis, None);
+
+        let connection = Connection::open(state_path.join("host.sqlite")).unwrap();
+        connection
+            .execute(
+                "UPDATE workstreams SET last_activity_at_millis = ?1
+                 WHERE workstream_id = ?2",
+                params![1_700_000_000_000_i64, workstream_id.to_string()],
+            )
+            .unwrap();
+        drop(connection);
+        let snapshot = read_snapshot(&root).unwrap();
+        assert_eq!(
+            snapshot.workstreams[0].last_activity_at_millis,
+            Some(1_700_000_000_000)
+        );
 
         let state = open_current(&root).unwrap();
         let mut registry = state.into_host_registry().unwrap();

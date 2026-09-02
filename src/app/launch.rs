@@ -606,6 +606,7 @@ mod tests {
             lifecycle: WorkstreamLifecycle::Open,
             archived: false,
             last_activity_sequence: 1,
+            last_activity_at_millis: None,
             revision: Revision::INITIAL,
             runtime: None,
             onboarding: None,

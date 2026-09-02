@@ -17,8 +17,8 @@ use ratatui::{
 
 use crate::{
     domain::{
-        OperationId, OperationKind, OperationPhase, ProviderKind, Revision, RuntimeId,
-        RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
+        Clock, OperationId, OperationKind, OperationPhase, ProviderKind, Revision, RuntimeId,
+        RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle,
     },
     snapshot::{OnboardingStatus, OperationSnapshot, Snapshot, WorkstreamSnapshot},
 };
@@ -311,10 +311,17 @@ impl Navigator {
             .row_id_at_render_line(usize::from(row.saturating_sub(geometry.inner.y)))
     }
 
-    /// Renders the -only Workstreams/Archived surface. The renderer has no
+    /// Renders the read-only Workstreams/Archived surface. The renderer has no
     /// provider-pane, shell, state, or filesystem effect.
     pub(crate) fn render(&self, frame: &mut Frame<'_>, area: Rect) {
-        render_model(frame, area, &self.model, self.terminal_focused);
+        self.render_at(frame, area, SystemClock.now_millis().ok());
+    }
+
+    /// Renders with an explicit wall-clock sample. Production callers use the
+    /// system clock through [`Self::render`]; tests and visual probes can pass
+    /// a deterministic value without depending on timing.
+    pub(crate) fn render_at(&self, frame: &mut Frame<'_>, area: Rect, now_millis: Option<i64>) {
+        render_model(frame, area, &self.model, self.terminal_focused, now_millis);
     }
 }
 
@@ -930,7 +937,13 @@ fn rows_for(snapshot: &Snapshot, page: Page, shell_location: &ShellLocation) -> 
     rows
 }
 
-fn render_model(frame: &mut Frame<'_>, area: Rect, model: &Model, terminal_focused: bool) {
+fn render_model(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    model: &Model,
+    terminal_focused: bool,
+    now_millis: Option<i64>,
+) {
     let content = navigator_inner(area);
     let footer_height = footer_height(content, model);
     let layout = Layout::default()
@@ -942,8 +955,12 @@ fn render_model(frame: &mut Frame<'_>, area: Rect, model: &Model, terminal_focus
     let available_width = layout[0].width;
     let items = rows
         .iter()
-        .map(|row| {
-            let item = ListItem::new(row_lines(row, available_width));
+        .enumerate()
+        .map(|(index, row)| {
+            let tree_last = rows
+                .get(index.saturating_add(1))
+                .is_none_or(|next| !same_project_workstream(row, next));
+            let item = ListItem::new(row_lines_at(row, tree_last, available_width, now_millis));
             if row.id() == selected {
                 item.style(Style::default().bg(Color::DarkGray))
             } else {
@@ -996,6 +1013,13 @@ fn render_model(frame: &mut Frame<'_>, area: Rect, model: &Model, terminal_focus
     }
 }
 
+fn same_project_workstream(left: &Row, right: &Row) -> bool {
+    match (left, right) {
+        (Row::Workstream(left), Row::Workstream(right)) => left.project_id == right.project_id,
+        _ => false,
+    }
+}
+
 fn navigator_title_style(terminal_focused: bool) -> Style {
     Style::default()
         .fg(if terminal_focused {
@@ -1014,7 +1038,25 @@ fn navigator_inner(area: Rect) -> Rect {
     Block::default().borders(navigator_borders()).inner(area)
 }
 
-fn row_lines(row: &Row, available_width: u16) -> Vec<Line<'static>> {
+const PARKED_INDICATOR_COLOR: Color = Color::Indexed(110);
+
+/// Activity age is a neutral brightness ramp. It does not compete with the
+/// provider, Project, or lifecycle color axes.
+const AGE_UNKNOWN_COLOR: Color = Color::Indexed(244);
+const AGE_RECENT_COLOR: Color = Color::Indexed(255);
+const AGE_HOURLY_COLOR: Color = Color::Indexed(251);
+const AGE_DAILY_COLOR: Color = Color::Indexed(247);
+const AGE_WEEKLY_COLOR: Color = Color::Indexed(244);
+const AGE_STALE_COLOR: Color = Color::Indexed(241);
+
+const PROJECT_TREE_COLOR: Color = Color::Indexed(245);
+
+fn row_lines_at(
+    row: &Row,
+    tree_last: bool,
+    available_width: u16,
+    now_millis: Option<i64>,
+) -> Vec<Line<'static>> {
     match row {
         Row::ProvisionalShell { location } => {
             vec![
@@ -1034,44 +1076,30 @@ fn row_lines(row: &Row, available_width: u16) -> Vec<Line<'static>> {
                 .add_modifier(Modifier::BOLD),
         ))],
         Row::Workstream(workstream) => {
-            let runtime = match workstream.onboarding {
-                Some(OnboardingStatus::ActionFenced) => "onboarding",
-                Some(OnboardingStatus::RecoveryRequired) => "recovery",
-                None if workstream.lifecycle == WorkstreamLifecycle::Parked => "parked",
-                None if workstream.lifecycle == WorkstreamLifecycle::RecoveryRequired => "recovery",
-                None => workstream
-                    .runtime
-                    .map_or("stopped", |runtime| runtime_status_label(runtime.status)),
-            };
-            let title = workstream
-                .native_name
-                .clone()
-                .unwrap_or_else(|| workstream.workstream_id.short());
-            let indicator = if workstream.onboarding == Some(OnboardingStatus::RecoveryRequired)
-                || workstream.recovery_unseen
-            {
-                ("!", Color::Red)
-            } else if workstream.result_unseen {
-                ("✓", Color::Green)
-            } else {
-                ("·", Color::Gray)
-            };
+            let branch = if tree_last { "└ " } else { "├ " };
+            let continuation = if tree_last { "  " } else { "│ " };
+            let (marker, marker_style) = workstream_marker(workstream);
+            let title = workstream_name(workstream);
+            let age = activity_label(workstream.last_activity_at_millis, now_millis);
+            let age_style = Style::default().fg(activity_age_color(
+                workstream.last_activity_at_millis,
+                now_millis,
+            ));
             vec![
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(
-                        provider_label(workstream.provider),
-                        provider_color(workstream.provider),
-                    ),
-                    Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(runtime, Style::default().fg(Color::Gray)),
-                ]),
-                Line::from(vec![
-                    Span::raw("  "),
-                    Span::styled(indicator.0, Style::default().fg(indicator.1)),
-                    Span::raw(" "),
-                    Span::styled(title, Style::default().fg(Color::White)),
-                ]),
+                Line::from(context_line(
+                    branch,
+                    workstream.provider,
+                    &age,
+                    age_style,
+                    available_width,
+                )),
+                Line::from(thread_line(
+                    continuation,
+                    marker,
+                    marker_style,
+                    &title,
+                    available_width,
+                )),
             ]
         }
         Row::Operation(operation) => vec![
@@ -1145,6 +1173,94 @@ const fn provider_label(provider: ProviderKind) -> &'static str {
     }
 }
 
+fn workstream_marker(workstream: &WorkstreamSnapshot) -> (&'static str, Style) {
+    if workstream.lifecycle == WorkstreamLifecycle::Parked {
+        ("p", Style::default().fg(PARKED_INDICATOR_COLOR))
+    } else if workstream.onboarding == Some(OnboardingStatus::RecoveryRequired)
+        || workstream.lifecycle == WorkstreamLifecycle::RecoveryRequired
+        || workstream.recovery_unseen
+    {
+        ("!", Style::default().fg(Color::Red))
+    } else if workstream.result_unseen {
+        ("✓", Style::default().fg(Color::Green))
+    } else if workstream.onboarding == Some(OnboardingStatus::ActionFenced) {
+        ("…", Style::default().fg(Color::Cyan))
+    } else {
+        match workstream.runtime.map(|runtime| runtime.status) {
+            Some(RuntimeStatus::Working) => ("●", Style::default().fg(Color::Yellow)),
+            Some(RuntimeStatus::Starting) => ("…", Style::default().fg(Color::Cyan)),
+            Some(RuntimeStatus::Unknown) => ("?", Style::default().fg(Color::Red)),
+            Some(RuntimeStatus::Stopped | RuntimeStatus::Attention | RuntimeStatus::Idle)
+            | None => (" ", Style::default()),
+        }
+    }
+}
+
+fn workstream_name(workstream: &WorkstreamSnapshot) -> String {
+    workstream
+        .native_name
+        .clone()
+        .filter(|name| !name.is_empty())
+        .unwrap_or_else(|| workstream.workstream_id.short())
+}
+
+fn context_line(
+    prefix: &str,
+    provider_kind: ProviderKind,
+    age: &str,
+    age_style: Style,
+    available_width: u16,
+) -> Vec<Span<'static>> {
+    let available_width = usize::from(available_width);
+    let prefix = truncate_display(prefix, available_width);
+    let prefix_width = display_width(&prefix);
+    let content_width = available_width.saturating_sub(prefix_width);
+    let provider = truncate_display(provider_label(provider_kind), content_width);
+    let provider_width = display_width(&provider);
+    let age_budget = content_width
+        .saturating_sub(provider_width)
+        .saturating_sub(usize::from(!provider.is_empty()));
+    let age = truncate_display(age, age_budget);
+    let padding = available_width.saturating_sub(
+        prefix_width
+            .saturating_add(provider_width)
+            .saturating_add(display_width(&age)),
+    );
+
+    vec![
+        Span::styled(prefix, Style::default().fg(PROJECT_TREE_COLOR)),
+        Span::styled(provider, provider_color(provider_kind)),
+        Span::raw(" ".repeat(padding)),
+        Span::styled(age, age_style),
+    ]
+}
+
+fn thread_line(
+    prefix: &str,
+    indicator: &str,
+    indicator_style: Style,
+    title: &str,
+    available_width: u16,
+) -> Vec<Span<'static>> {
+    let available_width = usize::from(available_width);
+    let prefix = truncate_display(prefix, available_width);
+    let prefix_width = display_width(&prefix);
+    let indicator = truncate_display(indicator, available_width.saturating_sub(prefix_width));
+    let indicator_width = display_width(&indicator);
+    let separator_budget = available_width
+        .saturating_sub(prefix_width)
+        .saturating_sub(indicator_width);
+    let separator = if separator_budget > 0 { " " } else { "" };
+    let title_budget = separator_budget.saturating_sub(display_width(separator));
+    let title = truncate_display(title, title_budget);
+    vec![
+        Span::styled(prefix, Style::default().fg(PROJECT_TREE_COLOR)),
+        Span::styled(indicator, indicator_style),
+        Span::raw(separator),
+        Span::styled(title, Style::default().fg(Color::White)),
+    ]
+}
+
 const fn provider_color(provider: ProviderKind) -> Style {
     match provider {
         ProviderKind::Codex => Style::new().fg(Color::Blue).add_modifier(Modifier::BOLD),
@@ -1152,14 +1268,45 @@ const fn provider_color(provider: ProviderKind) -> Style {
     }
 }
 
-const fn runtime_status_label(status: crate::domain::RuntimeStatus) -> &'static str {
-    match status {
-        crate::domain::RuntimeStatus::Starting => "starting",
-        crate::domain::RuntimeStatus::Working => "working",
-        crate::domain::RuntimeStatus::Idle => "idle",
-        crate::domain::RuntimeStatus::Attention => "attention",
-        crate::domain::RuntimeStatus::Stopped => "stopped",
-        crate::domain::RuntimeStatus::Unknown => "recovery",
+fn activity_label(last_activity_at_millis: Option<i64>, now_millis: Option<i64>) -> String {
+    relative_activity_age(last_activity_at_millis, now_millis)
+        .unwrap_or_else(|| "activity unknown".to_owned())
+}
+
+fn relative_activity_age(
+    last_activity_at_millis: Option<i64>,
+    now_millis: Option<i64>,
+) -> Option<String> {
+    let elapsed_seconds = activity_elapsed_seconds(last_activity_at_millis, now_millis)?;
+    Some(match elapsed_seconds {
+        0..=59 => "now".to_owned(),
+        60..=3_599 => format!("{} min ago", elapsed_seconds / 60),
+        3_600..=86_399 => format!("{} hr ago", elapsed_seconds / 3_600),
+        86_400..=172_799 => "1 day ago".to_owned(),
+        _ => format!("{} days ago", elapsed_seconds / 86_400),
+    })
+}
+
+fn activity_elapsed_seconds(
+    last_activity_at_millis: Option<i64>,
+    now_millis: Option<i64>,
+) -> Option<i64> {
+    Some(
+        now_millis?
+            .saturating_sub(last_activity_at_millis?)
+            .max(0)
+            .saturating_div(1_000),
+    )
+}
+
+fn activity_age_color(last_activity_at_millis: Option<i64>, now_millis: Option<i64>) -> Color {
+    match activity_elapsed_seconds(last_activity_at_millis, now_millis) {
+        None => AGE_UNKNOWN_COLOR,
+        Some(0..=59) => AGE_RECENT_COLOR,
+        Some(60..=3_599) => AGE_HOURLY_COLOR,
+        Some(3_600..=86_399) => AGE_DAILY_COLOR,
+        Some(86_400..=604_799) => AGE_WEEKLY_COLOR,
+        Some(_) => AGE_STALE_COLOR,
     }
 }
 
@@ -1557,11 +1704,11 @@ fn list_geometry(area: Rect, model: &Model) -> ListGeometry {
 mod tests {
     use uuid::Uuid;
 
-    use ratatui::{layout::Rect, style::Color, widgets::Borders};
+    use ratatui::{Terminal, backend::TestBackend, layout::Rect, style::Color, widgets::Borders};
 
     use super::{
         Command, Modal, Model, Navigator, ObserverSetupKind, Page, Row, RowId, ShellLocation,
-        workstreams_in_visual_order,
+        workstream_marker, workstreams_in_visual_order,
     };
     use crate::{
         domain::{
@@ -1600,6 +1747,7 @@ mod tests {
                         lifecycle: WorkstreamLifecycle::Open,
                         archived: false,
                         last_activity_sequence: 1,
+                        last_activity_at_millis: None,
                         revision: Revision::INITIAL,
                         runtime: None,
                         onboarding: None,
@@ -1616,6 +1764,7 @@ mod tests {
                         lifecycle: WorkstreamLifecycle::Open,
                         archived: true,
                         last_activity_sequence: 1,
+                        last_activity_at_millis: None,
                         revision: Revision::INITIAL,
                         runtime: None,
                         onboarding: None,
@@ -1651,6 +1800,7 @@ mod tests {
                     lifecycle: WorkstreamLifecycle::Open,
                     archived,
                     last_activity_sequence,
+                    last_activity_at_millis: None,
                     revision: Revision::INITIAL,
                     runtime: None,
                     onboarding: None,
@@ -1785,7 +1935,7 @@ mod tests {
         let mut model = Model::new(snapshot);
         model.set_shell_location(ShellLocation::cwd("~/c/wsnav"));
         let rows = model.rows();
-        let shell = super::row_lines(&rows[0], 30);
+        let shell = super::row_lines_at(&rows[0], true, 30, None);
 
         assert_eq!(shell[0].spans[0].content.as_ref(), "Shell");
         assert_eq!(shell[1].spans[1].content.as_ref(), "~/c/wsnav");
@@ -1798,7 +1948,7 @@ mod tests {
                 .sum::<usize>()
                 <= 30
         );
-        let narrow = super::row_lines(&rows[0], 1);
+        let narrow = super::row_lines_at(&rows[0], true, 1, None);
         assert!(
             narrow[1]
                 .spans
@@ -1812,6 +1962,187 @@ mod tests {
                 && !span.content.contains("codex")
                 && !span.content.contains("opencode")
         }));
+    }
+
+    fn line_text(line: &ratatui::text::Line<'_>) -> String {
+        line.spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn session_card_restores_compact_tree_name_and_right_aligned_age() {
+        let (mut snapshot, active, _) = snapshot();
+        let now = 10_000_000_i64;
+        snapshot.workstreams[0].native_name = Some("native thread".to_owned());
+        snapshot.workstreams[0].last_activity_at_millis = Some(now - 3 * 60 * 1_000);
+        let row = Row::Workstream(snapshot.workstreams[0].clone());
+
+        let lines = super::row_lines_at(&row, true, 30, Some(now));
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].width(), 30);
+        assert!(lines[1].width() <= 30);
+        assert!(line_text(&lines[0]).starts_with("└ Codex"));
+        assert!(line_text(&lines[0]).ends_with("3 min ago"));
+        assert_eq!(line_text(&lines[1]), "    native thread");
+        assert!(!line_text(&lines[0]).contains("starting"));
+        assert!(!line_text(&lines[0]).contains("attention"));
+        assert!(!line_text(&lines[1]).contains('·'));
+        assert_eq!(active, snapshot.workstreams[0].workstream_id);
+    }
+
+    #[test]
+    fn session_card_age_labels_have_deterministic_boundaries_and_unknown_state() {
+        let now = 10_000_000_i64;
+        let cases = [
+            (0_i64, "now"),
+            (59, "now"),
+            (60, "1 min ago"),
+            (3_599, "59 min ago"),
+            (3_600, "1 hr ago"),
+            (86_399, "23 hr ago"),
+            (86_400, "1 day ago"),
+            (172_799, "1 day ago"),
+            (172_800, "2 days ago"),
+            (7 * 86_400, "7 days ago"),
+        ];
+        for (elapsed, expected) in cases {
+            assert_eq!(
+                super::relative_activity_age(Some(now - elapsed * 1_000), Some(now)),
+                Some(expected.to_owned()),
+                "elapsed seconds: {elapsed}"
+            );
+        }
+        assert_eq!(super::relative_activity_age(None, Some(now)), None);
+        assert_eq!(super::relative_activity_age(Some(now), None), None);
+        assert_eq!(super::activity_label(None, Some(now)), "activity unknown");
+        assert_eq!(super::activity_label(Some(now), None), "activity unknown");
+        assert_eq!(super::activity_label(Some(now + 1_000), Some(now)), "now");
+    }
+
+    #[test]
+    fn session_card_marker_precedence_is_compact_and_semantic() {
+        let (snapshot, _, _) = snapshot();
+        let mut workstream = snapshot.workstreams[0].clone();
+        let runtime_id = RuntimeId::from(Uuid::from_u128(5));
+        let marker = |workstream: &WorkstreamSnapshot| {
+            let (value, style) = workstream_marker(workstream);
+            (value, style.fg)
+        };
+
+        workstream.lifecycle = WorkstreamLifecycle::Parked;
+        workstream.result_unseen = true;
+        workstream.recovery_unseen = true;
+        workstream.onboarding = Some(OnboardingStatus::RecoveryRequired);
+        assert_eq!(marker(&workstream), ("p", Some(Color::Indexed(110))));
+
+        workstream.lifecycle = WorkstreamLifecycle::Open;
+        assert_eq!(marker(&workstream), ("!", Some(Color::Red)));
+
+        workstream.onboarding = None;
+        workstream.recovery_unseen = false;
+        assert_eq!(marker(&workstream), ("✓", Some(Color::Green)));
+
+        workstream.result_unseen = false;
+        workstream.onboarding = Some(OnboardingStatus::ActionFenced);
+        assert_eq!(marker(&workstream), ("…", Some(Color::Cyan)));
+
+        workstream.onboarding = None;
+        workstream.runtime = Some(RuntimeSnapshot {
+            runtime_id,
+            status: RuntimeStatus::Starting,
+            revision: Revision::INITIAL,
+        });
+        assert_eq!(marker(&workstream), ("…", Some(Color::Cyan)));
+
+        workstream.runtime.as_mut().unwrap().status = RuntimeStatus::Working;
+        assert_eq!(marker(&workstream), ("●", Some(Color::Yellow)));
+
+        workstream.runtime.as_mut().unwrap().status = RuntimeStatus::Unknown;
+        assert_eq!(marker(&workstream), ("?", Some(Color::Red)));
+
+        for status in [
+            RuntimeStatus::Idle,
+            RuntimeStatus::Attention,
+            RuntimeStatus::Stopped,
+        ] {
+            workstream.runtime.as_mut().unwrap().status = status;
+            assert_eq!(marker(&workstream), (" ", None));
+        }
+        workstream.runtime = None;
+        assert_eq!(marker(&workstream), (" ", None));
+    }
+
+    #[test]
+    fn session_card_tree_continuation_and_narrow_widths_remain_bounded() {
+        let (mut snapshot, _, _) = snapshot();
+        snapshot.workstreams[0].native_name = Some("a very long native thread title".to_owned());
+        snapshot.workstreams[0].last_activity_at_millis = Some(1_000);
+        let row = Row::Workstream(snapshot.workstreams[0].clone());
+
+        let branch = super::row_lines_at(&row, false, 30, Some(100_000));
+        assert!(line_text(&branch[0]).starts_with("├ Codex"));
+        assert!(line_text(&branch[1]).starts_with("│  "));
+        assert!(line_text(&branch[1]).ends_with('…'));
+
+        for width in 0..=32 {
+            let lines = super::row_lines_at(&row, width % 2 == 0, width, Some(100_000));
+            assert!(
+                lines.iter().all(|line| line.width() <= usize::from(width)),
+                "width {width}: {lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn archived_cards_use_the_same_compact_shape_and_age_projection() {
+        let (snapshot, _, archived) = snapshot();
+        let mut model = Model::new(snapshot);
+        let _ = model.handle_key(crossterm::event::KeyCode::Char('.'));
+        let row = model
+            .rows()
+            .into_iter()
+            .find(|row| row.id() == Some(RowId::Workstream(archived)))
+            .expect("archived workstream row");
+        let lines = super::row_lines_at(&row, true, 30, Some(10_000_000));
+        assert_eq!(lines.len(), 2);
+        assert!(line_text(&lines[0]).starts_with("└ OpenCode"));
+        assert!(line_text(&lines[0]).ends_with("activity unknown"));
+        assert!(line_text(&lines[1]).starts_with("   "));
+        assert!(line_text(&lines[1]).ends_with(archived.short().as_str()));
+        assert!(!line_text(&lines[1]).contains("Workstream"));
+    }
+
+    #[test]
+    fn rendered_selection_changes_background_without_overwriting_card_semantics() {
+        let (mut snapshot, active, _) = snapshot();
+        snapshot.workstreams[0].native_name = Some("selected thread".to_owned());
+        snapshot.workstreams[0].last_activity_at_millis = Some(9_999_000);
+        let mut navigator = Navigator::new(snapshot);
+        navigator.model_mut().select_next();
+        let backend = TestBackend::new(32, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| navigator.render_at(frame, frame.area(), Some(10_000_000)))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let geometry = navigator.list_geometry(Rect::new(0, 0, 32, 24));
+        let first_card_line = geometry.inner.y.saturating_add(3);
+        assert_eq!(
+            buffer[(geometry.inner.x, first_card_line)].bg,
+            Color::DarkGray
+        );
+        assert_eq!(buffer[(geometry.inner.x, first_card_line)].symbol(), "└");
+        assert_eq!(
+            buffer[(
+                geometry.inner.x.saturating_add(2),
+                first_card_line.saturating_add(1)
+            )]
+                .symbol(),
+            " ",
+        );
+        assert_eq!(navigator.model.selected(), Some(RowId::Workstream(active)));
     }
 
     #[test]
@@ -2045,13 +2376,14 @@ mod tests {
             .iter()
             .find(|row| row.id() == Some(RowId::Workstream(active)))
             .expect("active onboarding row");
-        let lines = super::row_lines(workstream, 30);
-        assert!(
-            lines[0]
-                .spans
-                .iter()
-                .any(|span| span.content == "onboarding")
-        );
+        let lines = super::row_lines_at(workstream, true, 30, None);
+        let rendered = lines
+            .iter()
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(rendered.contains("…"));
+        assert!(!rendered.contains("onboarding"));
     }
 
     #[test]

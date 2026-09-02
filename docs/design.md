@@ -2,12 +2,13 @@
 
 Date: 2026-09-02
 
-Status: D22 is active on the unchanged direct, current-only schema-15 epoch. It
-adds exact, read-only confirmation for a still-live Codex retained-session
-recovery whose native `SessionStart(source=resume)` was missed, without
-restarting or steering the provider. D21 checkpoint `868ee85` remains the
-completed provider-derived attention boundary. No remote-CI or live-provider
-acceptance is claimed for D22. D18 checkpoint `c961c7e` and
+Status: D22 checkpoint `ed74b0b` implements exact, read-only confirmation for a
+still-live Codex retained-session recovery whose native
+`SessionStart(source=resume)` was missed, without restarting or steering the
+provider. It passes its full local/disposable gate and byte-identical per-host
+installation on the unchanged direct, current-only schema-15 epoch. No
+remote-CI or live-provider acceptance is claimed for D22. D18 checkpoint
+`c961c7e` and
 installed artifact
 `f732e2b16344b038cd05996501ce77be42302f7403de9720d156dbf24777d124`
 remain the latest separately accepted destructive-reset, native-trust, and
@@ -2969,7 +2970,7 @@ roadmap and version-specific decisions remain in
 | D19 | Completed tmux-derived presentation navigation | [Acceptance](evidence/acceptance/d19-tmux-navigation.md) |
 | D20 | Native-owned conversation branching | [Acceptance](evidence/acceptance/d20-native-owned-branching.md) |
 | D21 | Provider-derived attention | [Acceptance](evidence/acceptance/d21-provider-derived-attention.md) |
-| D22 | Exact live retained-session recovery confirmation | Active; see [roadmap](roadmap.md#active-checkpoint-d22-exact-live-recovery-confirmation) |
+| D22 | Exact live retained-session recovery confirmation | [Acceptance](evidence/acceptance/d22-exact-live-recovery.md) |
 
 ## Current concrete provider boundary
 

@@ -50,6 +50,7 @@ to make their old procedures appear current.
 - [D19 tmux-derived navigation](acceptance/d19-tmux-navigation.md)
 - [D20 native-owned conversation branching](acceptance/d20-native-owned-branching.md)
 - [D21 provider-derived attention](acceptance/d21-provider-derived-attention.md)
+- [D22 exact live recovery confirmation](acceptance/d22-exact-live-recovery.md)
 
 ## Design spikes
 

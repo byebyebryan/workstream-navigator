@@ -2,10 +2,12 @@
 
 Date: 2026-09-02
 
-Status: D0-D21 are complete. D22 is active and closes the exact retained-session
-Codex recovery-confirmation gap exposed when a native `SessionStart` is missed.
-D21 checkpoint `868ee85` remains the completed provider-derived attention
-boundary. No remote-CI or live-provider claim is transferred to D22. D18
+Status: D0-D22 are complete. D22 checkpoint `ed74b0b` closes the exact
+retained-session Codex recovery-confirmation gap exposed when a native
+`SessionStart(source=resume)` is missed. It is locally accepted and installed
+for operator inspection. D21 checkpoint `868ee85` remains the completed
+provider-derived attention boundary. No remote-CI or live-provider claim is
+transferred to D22. D18
 checkpoint `c961c7e` remains the latest accepted artifact with separately
 authorized reset, native-trust, and disposable Codex/OpenCode lifecycle
 evidence.
@@ -28,9 +30,11 @@ roadmap is preserved as
 - D18 is a clean state break. Schemas 12 through 14 are refusal evidence, not
   migration or adoption inputs.
 
-## Active checkpoint: D22 exact live recovery confirmation
+## Completed checkpoint: D22 exact live recovery confirmation
 
-Implementation status: active; not yet accepted or installed.
+Implementation status: complete in `ed74b0b`; locally accepted and installed
+with executable SHA-256
+`1bbf53aa5ca1a02930140cca1ad8358e8f9b0b632311bd18ceee82017c084fe1`.
 
 D22 makes an interrupted Codex recovery handshake retryable without stopping,
 restarting, steering, or otherwise mutating the live provider. A missed or
@@ -85,6 +89,10 @@ Exit gate:
 - the locked release is built, atomically installed, and verified by version
   and executable hash. Opening or mutating the currently live provider remains
   separately authorized operator acceptance.
+
+Completed evidence:
+
+- [D22 exact live recovery acceptance](evidence/acceptance/d22-exact-live-recovery.md)
 
 ## Completed checkpoint: D21 provider-derived attention
 
@@ -585,6 +593,7 @@ historical evidence rather than current delivery authority.
 | D19 | Tmux-derived presentation navigation; locally accepted for operator inspection | [D19 acceptance](evidence/acceptance/d19-tmux-navigation.md) |
 | D20 | Provider-native conversation branching; managed Fork creation and recovery retired | [D20 acceptance](evidence/acceptance/d20-native-owned-branching.md) |
 | D21 | Provider-derived attention; Navigator acknowledgment and duplicate sticky state retired | [D21 acceptance](evidence/acceptance/d21-provider-derived-attention.md) |
+| D22 | Exact live retained-session Codex recovery confirmation | [D22 acceptance](evidence/acceptance/d22-exact-live-recovery.md) |
 
 ## Deferred product decisions
 

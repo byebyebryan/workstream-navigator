@@ -1,6 +1,6 @@
 use super::{
     ActionError, IntegrationLifecycle, ObserverProfile, OsString, ProcessProbe, ProviderBinding,
-    ProviderKind, ProviderSessionId, Revision, RuntimeId, RuntimeProbe, WorkstreamId,
+    ProviderKind, ProviderSessionId, Revision, RuntimeId, RuntimeProbe, StartOutcome, WorkstreamId,
     WorkstreamLifecycle, archive,
     attachment::inspect_opencode_prior_runtime,
     cleanup::{
@@ -14,19 +14,24 @@ use super::{
     providers::managed_codex_environment,
     reconcile_lost_runtimes, restore, start,
     start::{
-        backfill_live_runtime_provider_pid, opencode_recovery_handle_matches,
-        runtime_launch_program,
+        CodexRecoveryEvidence, CodexThreadReader, backfill_live_runtime_provider_pid,
+        opencode_recovery_handle_matches, reconcile_live_codex_recovery, runtime_launch_program,
     },
 };
+use crate::provider::codex::app_server::{AppServerError, ThreadMetadata};
+use crate::provider::lifecycle::{LifecycleEvent, LifecycleObservation};
 use crate::provider::names::NameState;
-use crate::runtime::{LinuxProcessProbe, NativeLaunch, PrivateRuntime, RuntimePaths, SystemTmux};
+use crate::runtime::{
+    LinuxProcessProbe, NativeLaunch, PrivateRuntime, ProcessCommand, RuntimePaths, SystemTmux,
+};
 
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
     process::Command,
+    rc::Rc,
     thread,
     time::{Duration, Instant},
 };
@@ -80,6 +85,123 @@ fn registry_for_provider(
         .unwrap();
     let registry = state.into_host_registry().unwrap();
     (temporary, root, registry, workstream_id)
+}
+
+fn codex_recovery_fixture() -> (
+    tempfile::TempDir,
+    crate::state::StateRoot,
+    crate::state::HostRegistry,
+    WorkstreamId,
+    crate::state::RuntimeRecord,
+    crate::state::ProviderBinding,
+    RuntimeProbe,
+    Revision,
+) {
+    let (temporary, root, mut registry, workstream_id) = registry_for_provider(ProviderKind::Codex);
+    let runtime = registry.reserve_runtime(workstream_id).unwrap();
+    registry
+        .record_runtime_process_identity(runtime.runtime_id, runtime.revision, 42, "birth-a")
+        .unwrap();
+    let runtime = registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap();
+    registry
+        .apply_lifecycle_observation(
+            runtime.runtime_id,
+            &runtime.tmux_generation,
+            LifecycleObservation {
+                event: LifecycleEvent::SessionStart,
+                cwd: runtime.cwd.to_string_lossy().into_owned(),
+                native_session_id: "retained-session".to_owned(),
+                turn_id: None,
+                source: Some("startup".to_owned()),
+            },
+        )
+        .unwrap();
+    let runtime = registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap();
+    registry
+        .mark_runtime_recovery_required(runtime.runtime_id, runtime.revision)
+        .unwrap();
+    let retained_binding = registry
+        .retained_codex_binding_for_runtime(runtime.runtime_id)
+        .unwrap()
+        .unwrap();
+    let runtime = registry
+        .reserve_runtime_recovery_with_provider(workstream_id, ProviderKind::Codex)
+        .unwrap();
+    registry
+        .record_runtime_process_identity(runtime.runtime_id, runtime.revision, 42, "birth-b")
+        .unwrap();
+    let runtime = registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap();
+    let recovery_revision = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap()
+        .revision;
+    let probe = RuntimeProbe::Live {
+        pane_id: "%1".to_owned(),
+        pane_pid: 42,
+        cwd: runtime.cwd.clone(),
+        process_birth: Some("birth-b".to_owned()),
+    };
+    (
+        temporary,
+        root,
+        registry,
+        workstream_id,
+        runtime,
+        retained_binding,
+        probe,
+        recovery_revision,
+    )
+}
+
+struct RecoveryProcessProbe {
+    birth: Option<String>,
+    command: Option<ProcessCommand>,
+    events: Option<Rc<RefCell<Vec<&'static str>>>>,
+}
+
+impl ProcessProbe for RecoveryProcessProbe {
+    fn process_birth(&self, _pid: u32) -> Option<String> {
+        if let Some(events) = &self.events {
+            events.borrow_mut().push("process_birth");
+        }
+        self.birth.clone()
+    }
+
+    fn process_command_checked(
+        &self,
+        _pid: u32,
+    ) -> Result<Option<ProcessCommand>, crate::runtime::ProcessProbeError> {
+        if let Some(events) = &self.events {
+            events.borrow_mut().push("process_command");
+        }
+        Ok(self.command.clone())
+    }
+}
+
+struct RecoveryThreadReader {
+    expected_session: String,
+    accept: bool,
+    calls: Cell<usize>,
+    events: Option<Rc<RefCell<Vec<&'static str>>>>,
+}
+
+impl CodexThreadReader for RecoveryThreadReader {
+    fn read_thread(&self, thread_id: &str) -> Result<ThreadMetadata, AppServerError> {
+        self.calls.set(self.calls.get() + 1);
+        if let Some(events) = &self.events {
+            events.borrow_mut().push("thread_read");
+        }
+        if self.accept && thread_id == self.expected_session {
+            Ok(ThreadMetadata {
+                name: Some("provider-owned name".to_owned()),
+            })
+        } else {
+            Err(AppServerError::ThreadIdentityMismatch)
+        }
+    }
 }
 
 struct DisposableRuntimeGuard {
@@ -431,6 +553,401 @@ fn native_recovery_uses_an_exact_binding_or_the_native_picker() {
             "resume".into(),
         ]
     );
+}
+
+#[test]
+fn exact_live_codex_recovery_reconciles_the_retained_binding_only() {
+    let (
+        _temporary,
+        _root,
+        mut registry,
+        workstream_id,
+        runtime,
+        binding,
+        probe,
+        workstream_revision,
+    ) = codex_recovery_fixture();
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let command = ProcessCommand {
+        executable: PathBuf::from("/usr/local/bin/codex"),
+        argv: codex_recovery_program(&runtime.cwd, Some(&binding)),
+    };
+    let process_probe = RecoveryProcessProbe {
+        birth: Some("birth-b".to_owned()),
+        command: Some(command),
+        events: Some(events.clone()),
+    };
+    let reader = RecoveryThreadReader {
+        expected_session: binding.native_session_id.native_id().to_owned(),
+        accept: true,
+        calls: Cell::new(0),
+        events: Some(events.clone()),
+    };
+    let overview_before = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    let outcome = reconcile_live_codex_recovery(
+        &mut registry,
+        workstream_id,
+        workstream_revision,
+        &runtime,
+        &probe,
+        CodexRecoveryEvidence {
+            process_probe: &process_probe,
+            thread_reader: &reader,
+            revalidate: |_: &crate::state::RuntimeRecord,
+                         probe: &RuntimeProbe,
+                         _: &crate::state::ProviderBinding| {
+                events.borrow_mut().push("revalidate");
+                Ok(probe.clone())
+            },
+        },
+    )
+    .unwrap();
+
+    assert_eq!(outcome, StartOutcome::Reconciled);
+    assert_eq!(reader.calls.get(), 1);
+    assert_eq!(
+        events.borrow().as_slice(),
+        [
+            "process_birth",
+            "process_command",
+            "thread_read",
+            "revalidate"
+        ]
+    );
+    let runtime_after = registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap();
+    assert_eq!(runtime_after, runtime);
+    let overview_after = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert_eq!(overview_after.lifecycle, WorkstreamLifecycle::Open);
+    assert_eq!(overview_after.revision, workstream_revision.next());
+    assert_eq!(
+        overview_after.last_activity_sequence,
+        overview_before.last_activity_sequence + 1
+    );
+    let binding_after = registry
+        .binding_for_runtime(runtime.runtime_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding_after.runtime_generation, runtime.tmux_generation);
+    assert_eq!(binding_after.revision, binding.revision.next());
+    assert_eq!(binding_after.native_session_id, binding.native_session_id);
+    assert_eq!(binding_after.start_source, binding.start_source);
+    assert_eq!(
+        binding_after.last_settled_turn_id,
+        binding.last_settled_turn_id
+    );
+    assert_eq!(
+        binding_after.observed_thread_name,
+        binding.observed_thread_name
+    );
+    assert_eq!(binding_after.name_state, binding.name_state);
+}
+
+#[test]
+fn codex_live_recovery_refuses_process_or_thread_mismatch_without_state_change() {
+    for mismatch in ["pid", "birth", "cwd", "executable", "argv", "thread"] {
+        let (_temporary, _root, mut registry, workstream_id, runtime, binding, probe, revision) =
+            codex_recovery_fixture();
+        let mut probe = probe;
+        match mismatch {
+            "pid" => {
+                if let RuntimeProbe::Live { pane_pid, .. } = &mut probe {
+                    *pane_pid = 43;
+                }
+            }
+            "cwd" => {
+                if let RuntimeProbe::Live { cwd, .. } = &mut probe {
+                    *cwd = PathBuf::from("/disposable/other-repository");
+                }
+            }
+            _ => {}
+        }
+        let mut argv = codex_recovery_program(&runtime.cwd, Some(&binding));
+        if mismatch == "argv" {
+            argv.push("unexpected".into());
+        }
+        let executable = if mismatch == "executable" {
+            PathBuf::from("/usr/local/bin/other")
+        } else {
+            PathBuf::from("/usr/local/bin/codex")
+        };
+        let process_probe = RecoveryProcessProbe {
+            birth: Some(if mismatch == "birth" {
+                "different-birth".to_owned()
+            } else {
+                "birth-b".to_owned()
+            }),
+            command: Some(ProcessCommand { executable, argv }),
+            events: None,
+        };
+        let reader = RecoveryThreadReader {
+            expected_session: binding.native_session_id.native_id().to_owned(),
+            accept: mismatch != "thread",
+            calls: Cell::new(0),
+            events: None,
+        };
+        let runtime_before = registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap();
+        let error = reconcile_live_codex_recovery(
+            &mut registry,
+            workstream_id,
+            revision,
+            &runtime,
+            &probe,
+            CodexRecoveryEvidence {
+                process_probe: &process_probe,
+                thread_reader: &reader,
+                revalidate: |_: &crate::state::RuntimeRecord,
+                             probe: &RuntimeProbe,
+                             _: &crate::state::ProviderBinding| {
+                    Ok(probe.clone())
+                },
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(error, ActionError::RuntimeProbeAmbiguous)
+                || matches!(
+                    error,
+                    ActionError::AppServer(AppServerError::ThreadIdentityMismatch)
+                )
+        );
+        assert_eq!(
+            registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap(),
+            runtime_before
+        );
+        let overview = registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == workstream_id)
+            .unwrap();
+        assert_eq!(overview.lifecycle, WorkstreamLifecycle::RecoveryRequired);
+        assert_eq!(overview.revision, revision);
+        assert!(
+            registry
+                .codex_recovery_binding(
+                    workstream_id,
+                    revision,
+                    runtime.runtime_id,
+                    runtime.revision,
+                    &runtime.tmux_generation,
+                )
+                .is_ok()
+        );
+        assert_eq!(reader.calls.get(), usize::from(mismatch == "thread"));
+    }
+}
+
+#[test]
+fn codex_live_recovery_reprobes_after_thread_read_and_rejects_changed_evidence() {
+    let (_temporary, root, mut registry, workstream_id, runtime, binding, probe, revision) =
+        codex_recovery_fixture();
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let process_probe = RecoveryProcessProbe {
+        birth: Some("birth-b".to_owned()),
+        command: Some(ProcessCommand {
+            executable: PathBuf::from("/usr/local/bin/codex"),
+            argv: codex_recovery_program(&runtime.cwd, Some(&binding)),
+        }),
+        events: Some(events.clone()),
+    };
+    let reader = RecoveryThreadReader {
+        expected_session: binding.native_session_id.native_id().to_owned(),
+        accept: true,
+        calls: Cell::new(0),
+        events: Some(events.clone()),
+    };
+    let runtime_before = registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap();
+    let state_before = host_database_bytes(&root);
+    let error = reconcile_live_codex_recovery(
+        &mut registry,
+        workstream_id,
+        revision,
+        &runtime,
+        &probe,
+        CodexRecoveryEvidence {
+            process_probe: &process_probe,
+            thread_reader: &reader,
+            revalidate: |_: &crate::state::RuntimeRecord,
+                         initial_probe: &RuntimeProbe,
+                         _: &crate::state::ProviderBinding| {
+                events.borrow_mut().push("revalidate");
+                let RuntimeProbe::Live {
+                    pane_id,
+                    pane_pid,
+                    cwd,
+                    process_birth,
+                } = initial_probe
+                else {
+                    panic!("fixture must be live");
+                };
+                Ok(RuntimeProbe::Live {
+                    pane_id: format!("{pane_id}-changed"),
+                    pane_pid: *pane_pid,
+                    cwd: cwd.clone(),
+                    process_birth: process_birth.clone(),
+                })
+            },
+        },
+    )
+    .unwrap_err();
+
+    assert!(matches!(error, ActionError::RuntimeProbeAmbiguous));
+    assert_eq!(reader.calls.get(), 1);
+    assert_eq!(
+        events.borrow().as_slice(),
+        [
+            "process_birth",
+            "process_command",
+            "thread_read",
+            "revalidate"
+        ]
+    );
+    assert_eq!(
+        registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap(),
+        runtime_before
+    );
+    assert_eq!(
+        registry
+            .workstream_overviews()
+            .unwrap()
+            .into_iter()
+            .find(|overview| overview.workstream_id == workstream_id)
+            .unwrap()
+            .lifecycle,
+        WorkstreamLifecycle::RecoveryRequired
+    );
+    assert_eq!(host_database_bytes(&root), state_before);
+}
+
+fn mutate_codex_recovery_fence(root: &crate::state::StateRoot, runtime_id: RuntimeId, case: &str) {
+    let connection = Connection::open(root.host_database_path()).unwrap();
+    let runtime_id = runtime_id.to_string();
+    match case {
+        "unbound" => connection
+            .execute(
+                "DELETE FROM provider_bindings WHERE runtime_id = ?1",
+                [&runtime_id],
+            )
+            .unwrap(),
+        "provider" => connection
+            .execute(
+                "UPDATE runtimes SET provider = 'opencode' WHERE runtime_id = ?1",
+                [&runtime_id],
+            )
+            .unwrap(),
+        "session" => connection
+            .execute(
+                "UPDATE provider_bindings SET native_session_id = 'other-session'
+                 WHERE runtime_id = ?1",
+                [&runtime_id],
+            )
+            .unwrap(),
+        "generation" => connection
+            .execute(
+                "UPDATE runtimes SET tmux_generation = 'other-generation'
+                 WHERE runtime_id = ?1",
+                [&runtime_id],
+            )
+            .unwrap(),
+        "binding-generation" => connection
+            .execute(
+                "UPDATE provider_bindings SET runtime_generation = 'current-generation'
+                 WHERE runtime_id = ?1",
+                [&runtime_id],
+            )
+            .unwrap(),
+        "runtime-status" => connection
+            .execute(
+                "UPDATE runtimes SET lifecycle = 'idle' WHERE runtime_id = ?1",
+                [&runtime_id],
+            )
+            .unwrap(),
+        "runtime-revision" => connection
+            .execute(
+                "UPDATE runtimes SET revision = revision + 1 WHERE runtime_id = ?1",
+                [&runtime_id],
+            )
+            .unwrap(),
+        "workstream-status" => connection
+            .execute(
+                "UPDATE workstreams SET lifecycle = 'open'
+                 WHERE workstream_id = (SELECT workstream_id FROM runtimes WHERE runtime_id = ?1)",
+                [&runtime_id],
+            )
+            .unwrap(),
+        "archived" => connection
+            .execute(
+                "UPDATE workstreams SET archived_at_millis = 1
+                 WHERE workstream_id = (SELECT workstream_id FROM runtimes WHERE runtime_id = ?1)",
+                [&runtime_id],
+            )
+            .unwrap(),
+        "workstream-revision" => connection
+            .execute(
+                "UPDATE workstreams SET revision = revision + 1
+                 WHERE workstream_id = (SELECT workstream_id FROM runtimes WHERE runtime_id = ?1)",
+                [&runtime_id],
+            )
+            .unwrap(),
+        "binding-revision" => connection
+            .execute(
+                "UPDATE provider_bindings SET revision = revision + 1
+                 WHERE runtime_id = ?1",
+                [&runtime_id],
+            )
+            .unwrap(),
+        _ => panic!("unknown recovery fence case: {case}"),
+    };
+}
+
+#[test]
+fn codex_recovery_state_fences_fail_closed_without_partial_mutation() {
+    for case in [
+        "unbound",
+        "provider",
+        "session",
+        "generation",
+        "binding-generation",
+        "runtime-status",
+        "runtime-revision",
+        "workstream-status",
+        "archived",
+        "workstream-revision",
+        "binding-revision",
+    ] {
+        let (
+            _temporary,
+            root,
+            mut registry,
+            workstream_id,
+            runtime,
+            binding,
+            _probe,
+            workstream_revision,
+        ) = codex_recovery_fixture();
+        mutate_codex_recovery_fence(&root, runtime.runtime_id, case);
+        let before = host_database_bytes(&root);
+        let result = registry.reconcile_codex_recovery(
+            workstream_id,
+            workstream_revision,
+            runtime.runtime_id,
+            runtime.revision,
+            &runtime.tmux_generation,
+            &binding,
+        );
+        assert!(result.is_err(), "fence unexpectedly accepted: {case}");
+        assert_eq!(host_database_bytes(&root), before, "mutated state: {case}");
+    }
 }
 
 #[test]

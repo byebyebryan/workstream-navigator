@@ -2,12 +2,12 @@
 
 Date: 2026-09-02
 
-Status: D21 implements provider-derived session-card attention on the unchanged
-direct, current-only schema-15 epoch. Checkpoint `868ee85` removes Navigator
-acknowledgment and the duplicate sticky `AttentionState`; Runtime and recovery
-lifecycle now directly own the displayed marker. It passes its full
-local/disposable gate and byte-identical per-host installation. No remote-CI or
-live-provider acceptance is claimed for D21. D18 checkpoint `c961c7e` and
+Status: D22 is active on the unchanged direct, current-only schema-15 epoch. It
+adds exact, read-only confirmation for a still-live Codex retained-session
+recovery whose native `SessionStart(source=resume)` was missed, without
+restarting or steering the provider. D21 checkpoint `868ee85` remains the
+completed provider-derived attention boundary. No remote-CI or live-provider
+acceptance is claimed for D22. D18 checkpoint `c961c7e` and
 installed artifact
 `f732e2b16344b038cd05996501ce77be42302f7403de9720d156dbf24777d124`
 remain the latest separately accepted destructive-reset, native-trust, and
@@ -1447,6 +1447,25 @@ second card. If legitimate transitions cannot be distinguished from an
 agent-shell invocation, WSNav fails closed and waits for exact native
 observation; it must not weaken the authority rule.
 
+An explicit Recover action has one narrower retry path for a retained Codex
+session whose replacement Runtime is already live. It applies only when the
+non-archived Workstream remains `recovery_required`, the Runtime remains
+`starting`, the retained ProviderBinding is still on the immediately prior
+generation, and the exact private tmux topology, pane PID, process birth, cwd,
+absolute Codex executable, and generated
+`codex --profile wsnav-observer -C <cwd> resume <retained-session>` argument
+vector all agree. WSNav then performs the same bounded read-only
+`thread/read(includeTurns=false)` for the retained ID, re-proves the live
+topology and process evidence after that provider read, and revalidates every
+Workstream, Runtime, binding, generation, session, and revision fence in one
+transaction. Success rotates only the existing binding to the current Runtime
+generation and reopens the Workstream; the Runtime stays `starting` until
+native lifecycle evidence advances it. Failure preserves recovery state and
+provider output. This does not synthesize a hook, accept an unbound/native
+picker recovery, list or infer sessions, authorize an initial binding or a
+changed-session transition, or stop, restart, signal, steer, or write into the
+live provider.
+
 #### Ephemeral App Server adapter
 
 Persisted thread metadata and bounded thread-store mutations use a separate,
@@ -1480,9 +1499,10 @@ persisted partial turn as interrupted while the native TUI's command is still
 running; this is expected evidence that helper status is non-authoritative.
 
 `thread/read` is safely repeatable and is used only to corroborate the exact
-native session selected by lifecycle evidence. WSNav never lists provider
-threads or attempts to infer, adopt, or reconcile a native branch; provider
-history and branching remain native.
+native session selected by lifecycle evidence or already retained for the
+exact live-recovery confirmation above. WSNav never lists provider threads or
+attempts to infer, adopt, or reconcile a native branch; provider history and
+branching remain native.
 
 The concrete Codex adapter extracts only approved fields from responses. It never
 returns or persists `preview`, turns, items, transcript paths, or the raw
@@ -1565,11 +1585,13 @@ be offered as an opt-in Codex skill or managed agent policy, where Codex already
 has conversation context. V1 does not read prompts or transcripts, invoke a
 second model, or derive a semantic name out of band.
 
-If the session identity hook was missed, a still-live Runtime remains
-attachable. After that process is lost, exact resume and native conversation
-branching remain provider-owned until the user selects a session through
-Codex's native resume picker and a later `SessionStart(source=resume)` rebinds
-it.
+If the initial session identity hook was missed, a still-live Runtime remains
+attachable but unbound. After that process is lost, exact resume and native
+conversation branching remain provider-owned until the user selects a session
+through Codex's native resume picker and a later
+`SessionStart(source=resume)` binds it. This unbound case is distinct from the
+exact retained-session recovery retry above and is never reconciled from
+process or session-list inference.
 
 ## Durable state
 
@@ -2728,7 +2750,8 @@ claim remote CI or real-provider acceptance. No partial D19 slice was installed.
 | Brokered promotion becomes ambiguous after an external-effect boundary | Keep the same Runtime-owned server and a visible recovery-required managed Workstream, reconcile its durable operation, and never hide it as a clean retry or issue a second OpenCode POST |
 | Exact private runtime tmux server is gone | Mark that Runtime `recovery_required`; exact native resume may create a new runtime generation |
 | Codex process exits normally | Keep Workstream and provider binding; offer exact native resume |
-| Observer hook is absent or missed | Show `unknown`; retain live attach; block exact native recovery if session identity is unknown |
+| Initial observer binding hook is absent or missed | Show `unknown`; retain live attach; block exact native recovery while session identity is unknown |
+| Retained-session Codex recovery hook is missed while its exact generated Runtime remains live | Keep `recovery_required` until explicit Recover re-proves the private topology, PID/birth/cwd/executable/argv, exact retained `thread/read`, and transactional state fences; then rotate only the binding generation and reopen the Workstream while Runtime remains `starting` |
 | Hook identity cannot be corroborated | Do not rotate the ProviderBinding; show `unknown` or `recovery required` |
 | Hook events race | Resolve by runtime generation, session ID, turn ID, and transactional state; conflicting evidence becomes `unknown` |
 | Exact name read returns empty | Record `known_empty` and compute the context-specific fallback |
@@ -2922,8 +2945,8 @@ categories, timings, and cleanup relationships; it contains no native IDs,
 paths, prompts, results, pane capture, credentials, transcript, or raw
 provider payload.
 
-A narrow test passing does not prove a broader gate. D18 completion requires
-the coherent matrix in the active roadmap. The reset establishes absence for
+A narrow test passing does not prove a broader gate. Checkpoint completion
+requires the coherent matrix in the active roadmap. The D18 reset established absence for
 exact WSNav-owned processes and private servers before quarantining discarded
 state; it does not claim authority over arbitrary filesystem holders.
 
@@ -2946,6 +2969,7 @@ roadmap and version-specific decisions remain in
 | D19 | Completed tmux-derived presentation navigation | [Acceptance](evidence/acceptance/d19-tmux-navigation.md) |
 | D20 | Native-owned conversation branching | [Acceptance](evidence/acceptance/d20-native-owned-branching.md) |
 | D21 | Provider-derived attention | [Acceptance](evidence/acceptance/d21-provider-derived-attention.md) |
+| D22 | Exact live retained-session recovery confirmation | Active; see [roadmap](roadmap.md#active-checkpoint-d22-exact-live-recovery-confirmation) |
 
 ## Current concrete provider boundary
 

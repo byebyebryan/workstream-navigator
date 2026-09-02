@@ -20,6 +20,25 @@ use super::{
     },
     providers::managed_codex_environment,
 };
+use crate::provider::codex::app_server::{AppServerError, EphemeralAppServer, ThreadMetadata};
+use crate::runtime::ProcessCommand;
+use std::ffi::OsStr;
+
+pub(super) trait CodexThreadReader {
+    fn read_thread(&self, thread_id: &str) -> Result<ThreadMetadata, AppServerError>;
+}
+
+pub(super) struct CodexRecoveryEvidence<'a, R: ?Sized, F> {
+    pub(super) process_probe: &'a dyn ProcessProbe,
+    pub(super) thread_reader: &'a R,
+    pub(super) revalidate: F,
+}
+
+impl CodexThreadReader for EphemeralAppServer {
+    fn read_thread(&self, thread_id: &str) -> Result<ThreadMetadata, AppServerError> {
+        EphemeralAppServer::read_thread(self, thread_id)
+    }
+}
 
 /// Starts or resumes exactly one Workstream using the host's owned Codex
 /// profile and private tmux Runtime.
@@ -164,13 +183,15 @@ fn start_opencode(
     Ok(StartOutcome::Started)
 }
 
-/// Starts a new private tmux generation only after a lost Runtime has been
-/// made visible as recovery-required. A known native session resumes exactly;
-/// an unbound Runtime opens Codex's native resume picker rather than creating
-/// an unrelated blank thread.
+/// Recovers a lost Runtime after it has been made visible as
+/// `recovery_required`. An exact live retained-session Runtime is reconciled
+/// without another provider launch; otherwise a new private tmux generation
+/// is started. A known native session resumes exactly, while an unbound
+/// Runtime opens Codex's native resume picker rather than creating an
+/// unrelated blank thread.
 ///
-/// The Workstream remains recovery-required until its verified
-/// `SessionStart(source=resume)` hook arrives.
+/// The Workstream remains recovery-required until exact live confirmation or
+/// its verified `SessionStart(source=resume)` hook arrives.
 ///
 /// # Errors
 ///
@@ -208,19 +229,6 @@ fn recover_codex(
     if overview.lifecycle != WorkstreamLifecycle::RecoveryRequired {
         return Err(ActionError::NativeRecoveryUnavailable);
     }
-    reconcile_observer_trust(root, registry)?;
-    let integration = registry
-        .codex_integration()?
-        .ok_or(ActionError::ObserverNotInstalled)?;
-    if integration.lifecycle != IntegrationLifecycle::Ready {
-        return Err(ActionError::ObserverNotReady);
-    }
-    let manager = observer_profile(root)?;
-    manager.install(
-        integration.ownership.owner_id.clone(),
-        Some(&integration.ownership),
-    )?;
-    manager.verify_native_trust(&integration.ownership)?;
     let prior_runtime = registry
         .runtime_for_workstream(workstream_id)?
         .ok_or(ActionError::NoRuntime(workstream_id))?;
@@ -237,8 +245,48 @@ fn recover_codex(
     );
     let prior_probe = prior.probe()?;
     if matches_recorded_runtime(&prior_runtime, &prior_probe, true) {
-        return Ok(StartOutcome::AlreadyLive);
+        prior.validate_exact_topology()?;
+        let thread_reader = EphemeralAppServer::default();
+        let revalidate = |runtime: &crate::state::RuntimeRecord,
+                          initial_probe: &RuntimeProbe,
+                          binding: &crate::state::ProviderBinding| {
+            let fresh_probe =
+                revalidate_live_codex_runtime(&prior, runtime, binding, &process_probe)?;
+            if fresh_probe != *initial_probe {
+                return Err(ActionError::RuntimeProbeAmbiguous);
+            }
+            Ok(fresh_probe)
+        };
+        let evidence = CodexRecoveryEvidence {
+            process_probe: &process_probe,
+            thread_reader: &thread_reader,
+            revalidate,
+        };
+        return reconcile_live_codex_recovery(
+            registry,
+            workstream_id,
+            overview.revision,
+            &prior_runtime,
+            &prior_probe,
+            evidence,
+        );
     }
+    if !matches!(prior_probe, RuntimeProbe::Missing) {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    reconcile_observer_trust(root, registry)?;
+    let integration = registry
+        .codex_integration()?
+        .ok_or(ActionError::ObserverNotInstalled)?;
+    if integration.lifecycle != IntegrationLifecycle::Ready {
+        return Err(ActionError::ObserverNotReady);
+    }
+    let manager = observer_profile(root)?;
+    manager.install(
+        integration.ownership.owner_id.clone(),
+        Some(&integration.ownership),
+    )?;
+    manager.verify_native_trust(&integration.ownership)?;
     match prior_probe {
         // The path is derived solely from this persisted Runtime ID. Once its
         // exact server is conclusively gone, `park` uses that same private
@@ -263,6 +311,126 @@ fn recover_codex(
         codex_recovery_program(&record.cwd, prior_binding.as_ref()),
     )?;
     Ok(StartOutcome::Started)
+}
+
+/// Reconciles one already-live Codex recovery Runtime without starting a
+/// second provider process. Every input is read-only evidence until the final
+/// revision-fenced state transaction.
+pub(super) fn reconcile_live_codex_recovery<R, F>(
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_workstream_revision: Revision,
+    runtime: &crate::state::RuntimeRecord,
+    probe: &RuntimeProbe,
+    evidence: CodexRecoveryEvidence<'_, R, F>,
+) -> Result<StartOutcome, ActionError>
+where
+    R: CodexThreadReader + ?Sized,
+    F: for<'a, 'b, 'c> FnOnce(
+        &'a crate::state::RuntimeRecord,
+        &'b RuntimeProbe,
+        &'c crate::state::ProviderBinding,
+    ) -> Result<RuntimeProbe, ActionError>,
+{
+    let CodexRecoveryEvidence {
+        process_probe,
+        thread_reader,
+        revalidate,
+    } = evidence;
+    let RuntimeProbe::Live {
+        pane_pid,
+        process_birth: Some(process_birth),
+        ..
+    } = probe
+    else {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    };
+    if !matches_recorded_runtime(runtime, probe, true) {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    if process_probe
+        .process_birth_checked(*pane_pid)
+        .map_err(|_| ActionError::RuntimeProbeAmbiguous)?
+        .as_deref()
+        != Some(process_birth)
+    {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    let retained_binding = registry.codex_recovery_binding(
+        workstream_id,
+        expected_workstream_revision,
+        runtime.runtime_id,
+        runtime.revision,
+        &runtime.tmux_generation,
+    )?;
+    let command = process_probe
+        .process_command_checked(*pane_pid)
+        .map_err(|_| ActionError::RuntimeProbeAmbiguous)?
+        .ok_or(ActionError::RuntimeProbeAmbiguous)?;
+    if !codex_recovery_process_matches(&command, &runtime.cwd, &retained_binding) {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    thread_reader.read_thread(retained_binding.native_session_id.native_id())?;
+    let fresh_probe = revalidate(runtime, probe, &retained_binding)?;
+    if fresh_probe != *probe {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    registry.reconcile_codex_recovery(
+        workstream_id,
+        expected_workstream_revision,
+        runtime.runtime_id,
+        runtime.revision,
+        &runtime.tmux_generation,
+        &retained_binding,
+    )?;
+    Ok(StartOutcome::Reconciled)
+}
+
+fn revalidate_live_codex_runtime(
+    runtime: &PrivateRuntime<'_>,
+    expected_runtime: &crate::state::RuntimeRecord,
+    binding: &crate::state::ProviderBinding,
+    process_probe: &dyn ProcessProbe,
+) -> Result<RuntimeProbe, ActionError> {
+    runtime.validate_exact_topology()?;
+    let fresh_probe = runtime.probe()?;
+    if !matches_recorded_runtime(expected_runtime, &fresh_probe, true) {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    let RuntimeProbe::Live {
+        pane_pid,
+        process_birth: Some(process_birth),
+        ..
+    } = &fresh_probe
+    else {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    };
+    if process_probe
+        .process_birth_checked(*pane_pid)
+        .map_err(|_| ActionError::RuntimeProbeAmbiguous)?
+        .as_deref()
+        != Some(process_birth)
+    {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    let command = process_probe
+        .process_command_checked(*pane_pid)
+        .map_err(|_| ActionError::RuntimeProbeAmbiguous)?
+        .ok_or(ActionError::RuntimeProbeAmbiguous)?;
+    if !codex_recovery_process_matches(&command, &expected_runtime.cwd, binding) {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    Ok(fresh_probe)
+}
+
+fn codex_recovery_process_matches(
+    command: &ProcessCommand,
+    cwd: &Path,
+    binding: &crate::state::ProviderBinding,
+) -> bool {
+    command.executable.is_absolute()
+        && command.executable.file_name() == Some(OsStr::new("codex"))
+        && command.argv == codex_recovery_program(cwd, Some(binding))
 }
 
 fn recover_opencode(

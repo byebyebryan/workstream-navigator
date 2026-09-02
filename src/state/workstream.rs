@@ -258,9 +258,10 @@ impl HostRegistry {
             Some(runtime) => match self.binding_for_runtime(runtime.runtime_id) {
                 Ok(binding) => binding,
                 // A resumed Runtime deliberately retains its old exact
-                // binding until the matching SessionStart corroborates the
-                // new generation. Do not project that stale binding into a
-                // snapshot while the Runtime is still starting.
+                // binding until exact live confirmation or the matching
+                // SessionStart corroborates the new generation. Do not
+                // project that stale binding into a snapshot while the
+                // Runtime is still starting.
                 Err(StateError::HookEvidenceMismatch)
                     if runtime.status == RuntimeStatus::Starting =>
                 {

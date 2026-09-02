@@ -2,13 +2,13 @@
 
 Date: 2026-09-02
 
-Status: D0-D21 are complete. D21 checkpoint `868ee85` retires explicit result
-acknowledgment plus the duplicated sticky-attention model in favor of provider
-Runtime and recovery lifecycle evidence; it is locally accepted and installed
-for operator inspection. No remote-CI or live-provider claim is transferred to
-D21. D18 checkpoint `c961c7e` remains the latest accepted artifact with
-separately authorized reset, native-trust, and disposable Codex/OpenCode
-lifecycle evidence.
+Status: D0-D21 are complete. D22 is active and closes the exact retained-session
+Codex recovery-confirmation gap exposed when a native `SessionStart` is missed.
+D21 checkpoint `868ee85` remains the completed provider-derived attention
+boundary. No remote-CI or live-provider claim is transferred to D22. D18
+checkpoint `c961c7e` remains the latest accepted artifact with separately
+authorized reset, native-trust, and disposable Codex/OpenCode lifecycle
+evidence.
 
 `docs/design.md` is the product and architecture contract. This file owns
 delivery order, implementation status, and exit gates. The complete prior
@@ -27,6 +27,64 @@ roadmap is preserved as
   ambiguity handling.
 - D18 is a clean state break. Schemas 12 through 14 are refusal evidence, not
   migration or adoption inputs.
+
+## Active checkpoint: D22 exact live recovery confirmation
+
+Implementation status: active; not yet accepted or installed.
+
+D22 makes an interrupted Codex recovery handshake retryable without stopping,
+restarting, steering, or otherwise mutating the live provider. A missed or
+rejected native `SessionStart(source=resume)` may leave an exact WSNav-launched
+Runtime alive while its Workstream remains `recovery_required` and its Runtime
+remains `starting`. Selecting Recover again must no longer return an inert
+`AlreadyLive`: it may reconcile only the retained session under a second exact,
+bounded evidence path.
+
+Scope:
+
+- recognize only a non-archived Codex Workstream in `recovery_required` with a
+  `starting` Runtime, a retained exact ProviderBinding, and an exact live
+  private-tmux/process identity;
+- on explicit Recover, prove that the live executable and argument vector are
+  the exact WSNav-generated `codex --profile wsnav-observer -C <cwd> resume
+  <retained-session>` invocation, then require bounded read-only
+  `thread/read(includeTurns=false)` to return that same retained native session;
+- revalidate Workstream, Runtime, binding, generation, session, and revision
+  evidence in one transaction, rotate only the existing binding to the current
+  Runtime generation, and reopen the Workstream while leaving the Runtime
+  `starting` until native lifecycle evidence advances it;
+- return a distinct successful action outcome so the controller can refresh the
+  card immediately; on unavailable or ambiguous proof, retain `!` and show
+  bounded retry guidance outside provider content; and
+- reconcile current product documentation and disposable acceptance evidence
+  without changing schema 15.
+
+Non-goals:
+
+- do not synthesize a hook, infer a provider session from inventory or order,
+  accept an unbound/native-picker recovery, or weaken `SessionStart` plus
+  `thread/read` corroboration for initial or changed-session binding;
+- do not read provider pane content or persist prompts, responses, terminal
+  capture, raw provider payloads, command output, or a new recovery journal;
+- do not automatically poll App Server from rendering, clear recovery from
+  process liveness alone, or change OpenCode recovery; and
+- do not stop, restart, signal, steer, or send input to a live provider while
+  confirming it.
+
+Exit gate:
+
+- focused tests prove exact live retained-session recovery succeeds and every
+  executable, argument, provider, session, generation, lifecycle, and revision
+  mismatch fails without mutation;
+- tests prove the successful transaction updates only the binding generation
+  and Workstream lifecycle/revision while Runtime status remains `starting`,
+  and that initial, changed-session, unbound, OpenCode, and ambiguous recovery
+  boundaries remain unchanged;
+- `scripts/check` passes against disposable state roots, repositories, provider
+  homes, fake App Servers/process metadata, and private tmux sockets; and
+- the locked release is built, atomically installed, and verified by version
+  and executable hash. Opening or mutating the currently live provider remains
+  separately authorized operator acceptance.
 
 ## Completed checkpoint: D21 provider-derived attention
 

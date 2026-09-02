@@ -154,8 +154,9 @@ impl HostRegistry {
     }
 
     /// Reserves a new private tmux generation for an explicitly recovering
-    /// Workstream. The Workstream remains `recovery_required` until a verified
-    /// native `SessionStart(source=resume)` binds the launched Codex process.
+    /// Workstream. The Workstream remains `recovery_required` until exact live
+    /// confirmation or a verified native `SessionStart(source=resume)` binds
+    /// the launched Codex process.
     ///
     /// # Errors
     ///
@@ -552,6 +553,121 @@ impl HostRegistry {
         }
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(Some(binding))
+    }
+
+    /// Reads the retained Codex binding for an exact live recovery attempt.
+    ///
+    /// Recovery reservation deliberately leaves the prior binding on the new
+    /// `starting` Runtime until exact live confirmation or native
+    /// `SessionStart(source=resume)` evidence arrives. This narrow reader is
+    /// the only path that may inspect that stale-generation binding while the
+    /// Runtime is still starting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Workstream, Runtime, or binding does not
+    /// match the exact recovery fence.
+    pub(crate) fn codex_recovery_binding(
+        &self,
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        runtime_id: RuntimeId,
+        expected_runtime_revision: Revision,
+        expected_generation: &str,
+    ) -> Result<ProviderBinding, StateError> {
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(StateError::Sqlite)?;
+        let binding = load_codex_recovery_binding(
+            &transaction,
+            workstream_id,
+            expected_workstream_revision,
+            runtime_id,
+            expected_runtime_revision,
+            expected_generation,
+        )?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        Ok(binding)
+    }
+
+    /// Atomically confirms an exact live Codex recovery and rotates only the
+    /// retained binding's Runtime generation plus the Workstream lifecycle.
+    /// The Runtime remains `starting` until native lifecycle evidence arrives.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any Workstream, Runtime, binding, generation, or
+    /// revision fence has changed, or when the transaction cannot commit.
+    pub(crate) fn reconcile_codex_recovery(
+        &mut self,
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        runtime_id: RuntimeId,
+        expected_runtime_revision: Revision,
+        expected_generation: &str,
+        retained_binding: &ProviderBinding,
+    ) -> Result<(), StateError> {
+        validate_registry_text("runtime generation", expected_generation)?;
+        if retained_binding.runtime_id != runtime_id
+            || retained_binding.provider != ProviderKind::Codex
+            || retained_binding.native_session_id.provider() != ProviderKind::Codex
+            || retained_binding.runtime_generation == expected_generation
+        {
+            return Err(StateError::HookEvidenceMismatch);
+        }
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let binding = load_codex_recovery_binding(
+            &transaction,
+            workstream_id,
+            expected_workstream_revision,
+            runtime_id,
+            expected_runtime_revision,
+            expected_generation,
+        )?;
+        if binding != *retained_binding || binding.runtime_generation == expected_generation {
+            return Err(StateError::HookEvidenceMismatch);
+        }
+        let binding_changed = transaction
+            .execute(
+                "UPDATE provider_bindings SET runtime_generation = ?1,
+                    revision = revision + 1
+                 WHERE runtime_id = ?2 AND provider = 'codex'
+                   AND native_session_id = ?3 AND runtime_generation = ?4
+                   AND revision = ?5",
+                params![
+                    expected_generation,
+                    runtime_id.to_string(),
+                    retained_binding.native_session_id.native_id(),
+                    retained_binding.runtime_generation,
+                    retained_binding.revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if binding_changed != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        let activity_sequence = next_activity_sequence(&transaction)?;
+        let workstream_changed = transaction
+            .execute(
+                "UPDATE workstreams SET lifecycle = 'open',
+                    last_activity_sequence = ?1, revision = revision + 1
+                 WHERE workstream_id = ?2 AND lifecycle = 'recovery_required'
+                   AND revision = ?3",
+                params![
+                    activity_sequence,
+                    workstream_id.to_string(),
+                    expected_workstream_revision.value(),
+                ],
+            )
+            .map_err(StateError::Sqlite)?;
+        if workstream_changed != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        transaction.commit().map_err(StateError::Sqlite)
     }
 
     /// Loads the host-private `OpenCode` endpoint and observer identity for one
@@ -1212,6 +1328,74 @@ impl HostRegistry {
         }
         transaction.commit().map_err(StateError::Sqlite)
     }
+}
+
+fn load_codex_recovery_binding(
+    transaction: &rusqlite::Transaction<'_>,
+    workstream_id: WorkstreamId,
+    expected_workstream_revision: Revision,
+    runtime_id: RuntimeId,
+    expected_runtime_revision: Revision,
+    expected_generation: &str,
+) -> Result<ProviderBinding, StateError> {
+    validate_registry_text("runtime generation", expected_generation)?;
+    let runtime: (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        String,
+        String,
+        i64,
+        Option<i64>,
+    ) = transaction
+        .query_row(
+            "SELECT runtimes.workstream_id, runtimes.provider,
+                    runtimes.tmux_generation, runtimes.lifecycle, runtimes.revision,
+                    workstreams.provider, workstreams.lifecycle, workstreams.revision,
+                    workstreams.archived_at_millis
+             FROM runtimes
+             JOIN workstreams ON workstreams.workstream_id = runtimes.workstream_id
+             WHERE runtimes.runtime_id = ?1",
+            [runtime_id.to_string()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?
+        .ok_or(StateError::UnknownRuntime(runtime_id))?;
+    if runtime.0 != workstream_id.to_string()
+        || provider_kind_from_text(&runtime.1)? != ProviderKind::Codex
+        || runtime.2 != expected_generation
+        || runtime_status_from_text(&runtime.3)? != RuntimeStatus::Starting
+        || Revision::try_from(runtime.4)? != expected_runtime_revision
+        || provider_kind_from_text(&runtime.5)? != ProviderKind::Codex
+        || workstream_lifecycle_from_text(&runtime.6)? != WorkstreamLifecycle::RecoveryRequired
+        || Revision::try_from(runtime.7)? != expected_workstream_revision
+        || runtime.8.is_some()
+    {
+        return Err(StateError::HookEvidenceMismatch);
+    }
+    let binding = load_binding(transaction, runtime_id)?.ok_or(StateError::HookEvidenceMismatch)?;
+    if binding.provider != ProviderKind::Codex
+        || binding.native_session_id.provider() != ProviderKind::Codex
+        || binding.runtime_generation == expected_generation
+    {
+        return Err(StateError::HookEvidenceMismatch);
+    }
+    Ok(binding)
 }
 
 pub(in crate::state) fn load_binding(

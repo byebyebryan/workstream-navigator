@@ -8,6 +8,7 @@ use super::{
 pub enum StartOutcome {
     Started,
     AlreadyLive,
+    Reconciled,
 }
 
 pub(super) fn ensure_workstream_revision(

@@ -346,7 +346,8 @@ pub struct ProviderBinding {
     /// The private Runtime generation in which this native session was
     /// corroborated. A binding from an older generation is retained for
     /// exact Codex resume, but cannot authorize lifecycle or metadata writes
-    /// until the matching `SessionStart` rotates it to the current generation.
+    /// until exact live confirmation or the matching `SessionStart` rotates
+    /// it to the current generation.
     pub runtime_generation: String,
     pub revision: Revision,
 }

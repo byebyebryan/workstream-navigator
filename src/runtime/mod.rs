@@ -10,6 +10,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(target_os = "linux")]
+use std::io::Read;
+
 use thiserror::Error;
 
 use crate::{
@@ -267,6 +270,19 @@ pub enum ProcessProbeError {
     Io(String),
     #[error("process metadata is malformed")]
     Malformed,
+    #[error("process command metadata exceeded the bound")]
+    TooLarge,
+}
+
+/// The executable and argument vector observed for one live process.
+///
+/// This is read-only host evidence. It is intentionally separate from the
+/// persisted process birth token: callers must corroborate both before using
+/// it for an ownership decision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProcessCommand {
+    pub executable: PathBuf,
+    pub argv: Vec<OsString>,
 }
 
 /// Platform process metadata used only to corroborate a private tmux pane.
@@ -306,6 +322,21 @@ pub trait ProcessProbe {
                 state: ProcessState::Running,
             })
         })
+    }
+
+    /// Returns the executable and argument vector for one live process.
+    /// Existing probes that expose only process birth remain conservative and
+    /// report unavailable command evidence.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when process command metadata cannot be read or
+    /// parsed with enough certainty for an ownership decision.
+    fn process_command_checked(
+        &self,
+        _pid: u32,
+    ) -> Result<Option<ProcessCommand>, ProcessProbeError> {
+        Ok(None)
     }
 }
 
@@ -1267,6 +1298,22 @@ impl ProcessProbe for LinuxProcessProbe {
             }),
         )
     }
+
+    #[cfg(target_os = "linux")]
+    fn process_command_checked(
+        &self,
+        pid: u32,
+    ) -> Result<Option<ProcessCommand>, ProcessProbeError> {
+        read_linux_process_command(pid)
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn process_command_checked(
+        &self,
+        _pid: u32,
+    ) -> Result<Option<ProcessCommand>, ProcessProbeError> {
+        Ok(None)
+    }
 }
 
 impl ProcessGroupProbe for LinuxProcessProbe {
@@ -1375,6 +1422,53 @@ struct LinuxProcessStat {
     birth: String,
     process_group_id: u32,
     session_id: u32,
+}
+
+#[cfg(target_os = "linux")]
+const MAX_PROCESS_COMMAND_BYTES: usize = 16 * 1024;
+
+#[cfg(target_os = "linux")]
+fn read_linux_process_command(pid: u32) -> Result<Option<ProcessCommand>, ProcessProbeError> {
+    use std::os::unix::ffi::OsStringExt;
+
+    let executable = match fs::read_link(format!("/proc/{pid}/exe")) {
+        Ok(executable) => executable,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(ProcessProbeError::Inaccessible);
+        }
+        Err(error) => return Err(ProcessProbeError::Io(error.to_string())),
+    };
+    let file = match fs::File::open(format!("/proc/{pid}/cmdline")) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err(ProcessProbeError::Inaccessible);
+        }
+        Err(error) => return Err(ProcessProbeError::Io(error.to_string())),
+    };
+    let mut bytes = Vec::new();
+    file.take((MAX_PROCESS_COMMAND_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .map_err(|error| ProcessProbeError::Io(error.to_string()))?;
+    if bytes.len() > MAX_PROCESS_COMMAND_BYTES {
+        return Err(ProcessProbeError::TooLarge);
+    }
+    let Some(last) = bytes.last() else {
+        return Err(ProcessProbeError::Malformed);
+    };
+    if *last != 0 {
+        return Err(ProcessProbeError::Malformed);
+    }
+    bytes.pop();
+    let argv = bytes
+        .split(|byte| *byte == 0)
+        .map(|argument| OsString::from_vec(argument.to_vec()))
+        .collect::<Vec<_>>();
+    if argv.is_empty() || argv.iter().any(|argument| argument.is_empty()) {
+        return Err(ProcessProbeError::Malformed);
+    }
+    Ok(Some(ProcessCommand { executable, argv }))
 }
 
 fn read_linux_process_stat(pid: u32) -> Result<Option<LinuxProcessStat>, ProcessProbeError> {

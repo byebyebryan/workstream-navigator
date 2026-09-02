@@ -45,6 +45,9 @@ use crate::{
 
 use super::view::{Command, Navigator, ObserverSetupKind, ShellLocation};
 
+const MANAGED_SESSION_RECONCILIATION_GUIDANCE: &str =
+    "Managed session reconciliation is unavailable; exact recovery required";
+
 /// Errors that prevent the pane from rendering its schema-15-only
 /// Workstreams view.
 #[derive(Debug, Error)]
@@ -215,23 +218,11 @@ pub(crate) fn run_navigator(
             break true;
         }
         if last_refresh.elapsed() >= Duration::from_millis(500) {
-            match refresh_provider_exec(root, &presentation) {
-                ProviderExecRefresh::Idle => {}
-                ProviderExecRefresh::RuntimeOwned {
-                    runtime_id,
-                    reconciled,
-                } => {
-                    promoted_runtime = Some(runtime_id);
-                    if !reconciled {
-                        navigator.set_guidance(
-                            "Managed session reconciliation is unavailable; exact recovery required",
-                        );
-                    }
-                }
-                ProviderExecRefresh::Unavailable => navigator.set_guidance(
-                    "Managed session reconciliation is unavailable; exact recovery required",
-                ),
+            let refresh = refresh_provider_exec(root, &presentation);
+            if let ProviderExecRefresh::RuntimeOwned { runtime_id, .. } = refresh {
+                promoted_runtime = Some(runtime_id);
             }
+            apply_provider_exec_refresh(&mut navigator, refresh);
             if let Ok(snapshot) = read_snapshot(root) {
                 navigator.replace_snapshot(snapshot);
                 sync_cycle_selection(&presentation, &mut navigator, &mut seen_cycle_attempt);
@@ -1715,6 +1706,27 @@ enum ProviderExecRefresh {
     Unavailable,
 }
 
+/// Applies only the reconciliation-owned presentation guidance. Recovery
+/// clears that exact message when proof succeeds or the completed marker has
+/// retired into the normal idle state; any newer unrelated guidance remains.
+fn apply_provider_exec_refresh(navigator: &mut Navigator, refresh: ProviderExecRefresh) {
+    match refresh {
+        ProviderExecRefresh::Idle => {
+            navigator.clear_guidance_if(MANAGED_SESSION_RECONCILIATION_GUIDANCE);
+        }
+        ProviderExecRefresh::RuntimeOwned { reconciled, .. } => {
+            if reconciled {
+                navigator.clear_guidance_if(MANAGED_SESSION_RECONCILIATION_GUIDANCE);
+            } else {
+                navigator.set_guidance(MANAGED_SESSION_RECONCILIATION_GUIDANCE);
+            }
+        }
+        ProviderExecRefresh::Unavailable => {
+            navigator.set_guidance(MANAGED_SESSION_RECONCILIATION_GUIDANCE);
+        }
+    }
+}
+
 /// Calls the post-exec controller only after the helper has transferred
 /// Runtime ownership. A missing marker is the normal idle-card state; all
 /// other valid provisional phases remain owned by the account shell or
@@ -1960,7 +1972,7 @@ mod tests {
 
     use super::{
         AccountShellInputs, ManagedAction, ProviderExecRefresh, apply_managed_action,
-        cycle_selection_attempt, describe_shell_location,
+        apply_provider_exec_refresh, cycle_selection_attempt, describe_shell_location,
         materialize_provisional_shell_with_inputs, observe_shell_cwd,
         reattach_materialized_provisional_shell, refresh_provider_exec, require_active_workstream,
         require_parkable_workstream, retry_default_navigator_width, start_same_location,
@@ -1968,9 +1980,9 @@ mod tests {
     use crate::{
         domain::{
             LocationId, ProjectId, ProviderKind, ProviderSessionId, RandomIdGenerator, Revision,
-            WorkstreamId, WorkstreamLifecycle,
+            RuntimeId, WorkstreamId, WorkstreamLifecycle,
         },
-        navigator::view::ShellLocation,
+        navigator::view::{Navigator, ShellLocation},
         presentation::INVALID_TOPOLOGY_RETRY_ATTEMPTS,
         presentation::{
             AttachmentPhase, AttachmentPurpose, AttachmentStatus, Presentation, PresentationError,
@@ -2114,6 +2126,74 @@ mod tests {
             ..status
         };
         assert_eq!(cycle_selection_attempt(&status, None), None);
+    }
+
+    #[test]
+    fn provider_exec_guidance_clears_after_exact_recovery_or_normal_idle() {
+        let (snapshot, _) = managed_snapshot(None);
+        let mut navigator = Navigator::new(snapshot);
+
+        apply_provider_exec_refresh(&mut navigator, ProviderExecRefresh::Unavailable);
+        assert_eq!(
+            navigator.model_mut().guidance(),
+            Some("Managed session reconciliation is unavailable; exact recovery required")
+        );
+
+        apply_provider_exec_refresh(
+            &mut navigator,
+            ProviderExecRefresh::RuntimeOwned {
+                runtime_id: RuntimeId::new(),
+                reconciled: true,
+            },
+        );
+        assert_eq!(navigator.model_mut().guidance(), None);
+
+        apply_provider_exec_refresh(
+            &mut navigator,
+            ProviderExecRefresh::RuntimeOwned {
+                runtime_id: RuntimeId::new(),
+                reconciled: false,
+            },
+        );
+        assert_eq!(
+            navigator.model_mut().guidance(),
+            Some("Managed session reconciliation is unavailable; exact recovery required")
+        );
+        apply_provider_exec_refresh(&mut navigator, ProviderExecRefresh::Idle);
+        assert_eq!(navigator.model_mut().guidance(), None);
+    }
+
+    #[test]
+    fn provider_exec_guidance_recovery_preserves_newer_unrelated_guidance() {
+        let (snapshot, _) = managed_snapshot(None);
+        let mut navigator = Navigator::new(snapshot);
+
+        apply_provider_exec_refresh(
+            &mut navigator,
+            ProviderExecRefresh::RuntimeOwned {
+                runtime_id: RuntimeId::new(),
+                reconciled: false,
+            },
+        );
+        navigator.set_guidance("another command failed");
+
+        apply_provider_exec_refresh(
+            &mut navigator,
+            ProviderExecRefresh::RuntimeOwned {
+                runtime_id: RuntimeId::new(),
+                reconciled: true,
+            },
+        );
+        assert_eq!(
+            navigator.model_mut().guidance(),
+            Some("another command failed")
+        );
+
+        apply_provider_exec_refresh(&mut navigator, ProviderExecRefresh::Idle);
+        assert_eq!(
+            navigator.model_mut().guidance(),
+            Some("another command failed")
+        );
     }
 
     #[test]

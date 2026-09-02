@@ -270,6 +270,12 @@ impl Navigator {
         self.model.set_guidance(guidance);
     }
 
+    /// Clears one exact presentation-local guidance message, if it is still
+    /// current. A newer unrelated message remains visible.
+    pub(crate) fn clear_guidance_if(&mut self, guidance: &'static str) {
+        self.model.clear_guidance_if(guidance);
+    }
+
     /// Shows the bounded readiness guide for a Codex observer action. The
     /// guide is presentation-local; native profile setup remains owned by the
     /// account-shell helper after the user explicitly consents there.
@@ -352,6 +358,14 @@ impl Model {
 
     pub(crate) fn set_guidance(&mut self, guidance: &'static str) {
         self.guidance = Some(guidance);
+    }
+
+    /// Clears one exact presentation-local guidance message, if it is still
+    /// current. A newer unrelated message remains visible.
+    pub(crate) fn clear_guidance_if(&mut self, guidance: &'static str) {
+        if self.guidance == Some(guidance) {
+            self.guidance = None;
+        }
     }
 
     pub(crate) fn request_observer_setup(&mut self, kind: ObserverSetupKind) {
@@ -2081,6 +2095,19 @@ mod tests {
         assert!(text.contains("native /hooks"));
         assert!(!text.contains("CODEX_HOME"));
         assert!(!text.contains("--profile"));
+    }
+
+    #[test]
+    fn guidance_clear_only_removes_the_exact_current_message() {
+        let (snapshot, _, _) = snapshot();
+        let mut model = Model::new(snapshot);
+        model.set_guidance("reconciliation unavailable");
+        model.clear_guidance_if("reconciliation unavailable");
+        assert_eq!(model.guidance(), None);
+
+        model.set_guidance("another command failed");
+        model.clear_guidance_if("reconciliation unavailable");
+        assert_eq!(model.guidance(), Some("another command failed"));
     }
 
     #[test]

@@ -20,40 +20,11 @@ use crate::process::{
 const MAX_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(1);
-const MAX_FORK_RECOVERY_CANDIDATES: usize = 20;
-const RECOVERY_THREAD_SOURCES: [&str; 10] = [
-    "cli",
-    "vscode",
-    "exec",
-    "appServer",
-    "subAgent",
-    "subAgentReview",
-    "subAgentCompact",
-    "subAgentThreadSpawn",
-    "subAgentOther",
-    "unknown",
-];
 
 /// The only persisted fields extracted from an exact Codex thread summary.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ThreadMetadata {
     pub name: Option<String>,
-}
-
-/// The one provider identifier retained from a confirmed settled-prefix fork.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ForkedThread {
-    pub native_session_id: String,
-}
-
-/// A deliberately narrow result of reconciling an interrupted fork request.
-/// No provider preview, cwd, name, prompt, response, or turn contents leave
-/// the App Server adapter.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ForkReconciliation {
-    Found(ForkedThread),
-    Absent,
-    Ambiguous,
 }
 
 /// Runs one fresh stdio server action and terminates the server before return.
@@ -120,99 +91,6 @@ impl EphemeralAppServer {
             response_timeout,
         )?;
         thread_metadata_from_result(&result, thread_id)
-    }
-
-    /// Creates one destination conversation from an exact completed source
-    /// turn. This is intentionally non-idempotent: callers must persist their
-    /// recovery plan before invoking it and must never retry an ambiguous call.
-    ///
-    /// The registered project root is passed only as the provider's requested
-    /// working directory. Native `codex -C … resume` remains authoritative for
-    /// the destination TUI cwd.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when an input is unsafe, Codex rejects the exact fork,
-    /// or the short-lived App Server cannot return one bounded destination ID.
-    pub fn fork_thread(
-        &self,
-        source_thread_id: &str,
-        last_settled_turn_id: &str,
-        destination_cwd: &std::path::Path,
-    ) -> Result<ForkedThread, AppServerError> {
-        validate_provider_id(source_thread_id)?;
-        validate_provider_id(last_settled_turn_id)?;
-        let cwd = destination_cwd
-            .to_str()
-            .filter(|cwd| !cwd.is_empty() && cwd.len() <= 4096 && !cwd.contains(['\n', '\r', '\0']))
-            .ok_or(AppServerError::InvalidForkInput)?;
-        let result = self.request_with_timeout(
-            "thread/fork",
-            &json!({
-                "threadId": source_thread_id,
-                "lastTurnId": last_settled_turn_id,
-                "cwd": cwd,
-                "threadSource": "appServer",
-            }),
-            RESPONSE_TIMEOUT,
-        )?;
-        forked_thread_from_result(&result)
-    }
-
-    /// Reconciles one previously-recorded, non-idempotent fork request without
-    /// ever sending another fork. A candidate must be provably newer than the
-    /// recorded request instant, retain the exact source lineage, and end at
-    /// the exact settled source turn. Seconds-only provider timestamps make a
-    /// same-second candidate ambiguous by design.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the inputs are unsafe or a bounded App Server
-    /// request cannot complete. `Absent` and `Ambiguous` are successful
-    /// observations that callers must convert into explicit recovery.
-    pub fn reconcile_fork(
-        &self,
-        source_thread_id: &str,
-        last_settled_turn_id: &str,
-        attempted_at_millis: i64,
-    ) -> Result<ForkReconciliation, AppServerError> {
-        validate_provider_id(source_thread_id)?;
-        validate_provider_id(last_settled_turn_id)?;
-        if attempted_at_millis < 0 {
-            return Err(AppServerError::InvalidForkInput);
-        }
-        let result = self.request_with_timeout(
-            "thread/list",
-            &json!({
-                "archived": false,
-                "limit": MAX_FORK_RECOVERY_CANDIDATES,
-                "sortDirection": "desc",
-                "sortKey": "created_at",
-                "useStateDbOnly": true,
-                "sourceKinds": RECOVERY_THREAD_SOURCES,
-            }),
-            RESPONSE_TIMEOUT,
-        )?;
-        let candidates = recovery_candidates_from_list(&result, attempted_at_millis)?;
-        let mut matches = Vec::new();
-        for candidate in candidates {
-            let result = self.request_with_timeout(
-                "thread/read",
-                &json!({"threadId": candidate, "includeTurns": true}),
-                RESPONSE_TIMEOUT,
-            )?;
-            if recovered_fork_matches(&result, source_thread_id, last_settled_turn_id, &candidate)?
-            {
-                matches.push(ForkedThread {
-                    native_session_id: candidate,
-                });
-            }
-        }
-        match matches.len() {
-            0 => Ok(ForkReconciliation::Absent),
-            1 => Ok(ForkReconciliation::Found(matches.remove(0))),
-            _ => Ok(ForkReconciliation::Ambiguous),
-        }
     }
 
     fn request_with_timeout(
@@ -494,82 +372,6 @@ fn thread_metadata_from_result(
     Ok(ThreadMetadata { name })
 }
 
-fn forked_thread_from_result(result: &Value) -> Result<ForkedThread, AppServerError> {
-    let native_session_id = result
-        .get("thread")
-        .and_then(Value::as_object)
-        .and_then(|thread| thread.get("id"))
-        .and_then(Value::as_str)
-        .ok_or(AppServerError::InvalidResponse)?;
-    validate_provider_id(native_session_id)?;
-    Ok(ForkedThread {
-        native_session_id: native_session_id.to_owned(),
-    })
-}
-
-fn validate_provider_id(value: &str) -> Result<(), AppServerError> {
-    if value.is_empty() || value.len() > 256 || value.contains(['\n', '\r']) {
-        return Err(AppServerError::InvalidForkInput);
-    }
-    Ok(())
-}
-
-fn recovery_candidates_from_list(
-    result: &Value,
-    attempted_at_millis: i64,
-) -> Result<Vec<String>, AppServerError> {
-    let threads = result
-        .get("data")
-        .and_then(Value::as_array)
-        .ok_or(AppServerError::InvalidResponse)?;
-    if threads.len() > MAX_FORK_RECOVERY_CANDIDATES {
-        return Err(AppServerError::InvalidResponse);
-    }
-    threads
-        .iter()
-        .filter_map(|thread| {
-            let created_at = thread.get("createdAt").and_then(Value::as_i64)?;
-            // Codex supplies whole seconds. A same-second candidate cannot be
-            // ordered safely around our millisecond request marker, so leave
-            // it out and require operator recovery instead of guessing.
-            (created_at.saturating_mul(1000) > attempted_at_millis)
-                .then(|| thread.get("id").and_then(Value::as_str))
-                .flatten()
-        })
-        .map(|id| {
-            validate_provider_id(id)?;
-            Ok(id.to_owned())
-        })
-        .collect()
-}
-
-fn recovered_fork_matches(
-    result: &Value,
-    source_thread_id: &str,
-    last_settled_turn_id: &str,
-    candidate_id: &str,
-) -> Result<bool, AppServerError> {
-    let thread = result
-        .get("thread")
-        .and_then(Value::as_object)
-        .ok_or(AppServerError::InvalidResponse)?;
-    if thread.get("id").and_then(Value::as_str) != Some(candidate_id)
-        || thread.get("forkedFromId").and_then(Value::as_str) != Some(source_thread_id)
-    {
-        return Ok(false);
-    }
-    let Some(turns) = thread.get("turns").and_then(Value::as_array) else {
-        return Err(AppServerError::InvalidResponse);
-    };
-    let Some(last_turn) = turns.last().and_then(Value::as_object) else {
-        return Ok(false);
-    };
-    Ok(
-        last_turn.get("id").and_then(Value::as_str) == Some(last_settled_turn_id)
-            && last_turn.get("status").and_then(Value::as_str) == Some("completed"),
-    )
-}
-
 fn read_action_result(stdout: impl Read) -> Result<Value, AppServerError> {
     let mut reader = BufReader::new(stdout);
     let mut line = Vec::with_capacity(4096);
@@ -627,8 +429,6 @@ pub enum AppServerError {
     InvalidJson(serde_json::Error),
     #[error("App Server response did not contain an approved result")]
     InvalidResponse,
-    #[error("fork input is empty, unsafe, or exceeds its bound")]
-    InvalidForkInput,
     #[error("App Server did not corroborate the requested exact thread")]
     ThreadIdentityMismatch,
     #[error("could not launch or inspect App Server")]
@@ -762,70 +562,6 @@ mod tests {
                 name: Some("Native name".to_owned())
             }
         );
-    }
-
-    #[test]
-    fn fork_result_keeps_only_the_exact_destination_identifier() {
-        let result = json!({
-            "thread": {
-                "id": "forked-session",
-                "preview": "discarded",
-                "cwd": "/discarded",
-                "turns": ["discarded"]
-            }
-        });
-
-        assert_eq!(
-            forked_thread_from_result(&result).unwrap(),
-            ForkedThread {
-                native_session_id: "forked-session".to_owned()
-            }
-        );
-    }
-
-    #[test]
-    fn fork_result_rejects_missing_or_unsafe_destination_identifiers() {
-        assert!(matches!(
-            forked_thread_from_result(&json!({"thread": {"id": ""}})),
-            Err(AppServerError::InvalidForkInput)
-        ));
-        assert!(matches!(
-            forked_thread_from_result(&json!({"thread": {}})),
-            Err(AppServerError::InvalidResponse)
-        ));
-    }
-
-    #[test]
-    fn fork_recovery_keeps_only_definitely_newer_bounded_identifiers() {
-        let result = json!({
-            "data": [
-                {"id": "same-second", "createdAt": 7, "preview": "discarded"},
-                {"id": "new", "createdAt": 8, "preview": "discarded"}
-            ]
-        });
-
-        assert_eq!(
-            recovery_candidates_from_list(&result, 7_500).unwrap(),
-            vec!["new"]
-        );
-    }
-
-    #[test]
-    fn fork_recovery_requires_exact_lineage_and_settled_boundary() {
-        let result = json!({
-            "thread": {
-                "id": "destination",
-                "forkedFromId": "source",
-                "preview": "discarded",
-                "turns": [
-                    {"id": "older", "status": "completed", "items": ["discarded"]},
-                    {"id": "settled", "status": "completed", "items": ["discarded"]}
-                ]
-            }
-        });
-        assert!(recovered_fork_matches(&result, "source", "settled", "destination").unwrap());
-        assert!(!recovered_fork_matches(&result, "other", "settled", "destination").unwrap());
-        assert!(!recovered_fork_matches(&result, "source", "older", "destination").unwrap());
     }
 
     #[test]

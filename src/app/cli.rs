@@ -20,8 +20,6 @@ pub(super) enum Commands {
     Doctor,
     /// Remove only the exact unchanged observer profile after runtimes stop.
     RemoveObserver,
-    /// Fork one live Workstream at its last completed native provider turn.
-    ForkWorkstream { source_workstream_id: String },
     /// Start the Workstream's native provider in its private tmux server.
     Start { workstream_id: String },
     /// Recover a lost private Runtime through its exact native resume flow.
@@ -42,10 +40,8 @@ pub(super) enum Commands {
     },
     /// Show one local runtime's durable host-registry record.
     Status { workstream_id: String },
-    /// List unresolved Fork operations without exposing request keys or provider data.
+    /// List unresolved native-session creation operations without exposing request keys or provider data.
     Operations,
-    /// Reopen one exact unresolved Fork operation.
-    RecoverOperation { operation_id: String },
     /// Clear one observed result/recovery attention revision without provider input.
     Acknowledge {
         workstream_id: String,

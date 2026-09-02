@@ -23,7 +23,7 @@ pub(super) use clap::{Parser, Subcommand};
 pub(super) use thiserror::Error;
 
 pub(super) use crate::{
-    domain::{OperationId, ProviderSessionId, Revision, RuntimeId, WorkstreamId},
+    domain::{ProviderSessionId, Revision, RuntimeId, WorkstreamId},
     navigator::{materialize_initial_provisional_shell, run_navigator},
     presentation::{AttachmentPhase, Presentation},
     provider::codex::app_server::EphemeralAppServer,

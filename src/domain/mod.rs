@@ -239,7 +239,6 @@ pub enum RuntimeStatus {
 pub enum OperationKind {
     Onboard,
     Start,
-    Fork,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -272,7 +271,7 @@ impl OperationPhase {
 
 /// The provider-exec lifecycle for one shell-promotion attempt.
 ///
-/// This is deliberately separate from the existing `Start` and `Fork`
+/// This is deliberately separate from the existing `Start`
 /// operation phases: promotion has a durable ownership boundary before a
 /// provider effect, and no ordinary action authority exists until exact exec
 /// proof or recovery resolves it.
@@ -515,11 +514,11 @@ impl CompoundOperation {
         Ok(())
     }
 
-    /// Returns the -specific phase only for an onboarding operation.
+    /// Returns the onboarding-specific phase only for an onboarding operation.
     ///
     /// # Errors
     ///
-    /// Returns an error when a Start/Fork operation is treated as onboarding
+    /// Returns an error when a Start operation is treated as onboarding
     /// state or the persisted phase is outside the onboarding lifecycle.
     pub fn onboarding_phase(&self) -> Result<OnboardingPhase, DomainError> {
         if self.kind != OperationKind::Onboard {
@@ -530,7 +529,7 @@ impl CompoundOperation {
     }
 
     /// Advances one onboarding operation through the ownership and
-    /// provider-exec state machine without permitting the generic Start/Fork
+    /// provider-exec state machine without permitting the generic Start
     /// transition graph to bypass it.
     ///
     /// # Errors
@@ -792,9 +791,12 @@ mod tests {
 
     #[test]
     fn recovery_required_operation_can_only_finish() {
-        let mut operation =
-            CompoundOperation::new("request-1".to_owned(), OperationKind::Fork, "{}".to_owned())
-                .unwrap();
+        let mut operation = CompoundOperation::new(
+            "request-1".to_owned(),
+            OperationKind::Start,
+            "{}".to_owned(),
+        )
+        .unwrap();
         operation
             .transition(OperationPhase::ExternalEffectStarted, None, None)
             .unwrap();
@@ -962,29 +964,29 @@ mod tests {
         assert!(confirmed.phase.is_terminal());
 
         let mut ambiguous = CompoundOperation::new(
-            "fork-lost-response".to_owned(),
-            OperationKind::Fork,
+            "start-lost-response".to_owned(),
+            OperationKind::Start,
             "{}".to_owned(),
         )
         .unwrap();
         ambiguous
             .transition(
                 OperationPhase::ExternalEffectStarted,
-                Some("provider-fork-issued".to_owned()),
+                Some("provider-effect-issued".to_owned()),
                 None,
             )
             .unwrap();
         ambiguous
             .transition(
                 OperationPhase::AwaitingReconciliation,
-                Some("provider-fork-issued".to_owned()),
+                Some("provider-effect-issued".to_owned()),
                 None,
             )
             .unwrap();
         ambiguous
             .transition(
                 OperationPhase::RecoveryRequired,
-                Some("provider-fork-issued".to_owned()),
+                Some("provider-effect-issued".to_owned()),
                 Some("{\"reason\":\"no_unique_candidate\"}".to_owned()),
             )
             .unwrap();
@@ -998,8 +1000,8 @@ mod tests {
     #[test]
     fn external_effect_can_terminally_record_an_unknown_provider_result() {
         let mut operation = CompoundOperation::new(
-            "fork-unknown".to_owned(),
-            OperationKind::Fork,
+            "start-unknown".to_owned(),
+            OperationKind::Start,
             "{}".to_owned(),
         )
         .unwrap();
@@ -1009,7 +1011,7 @@ mod tests {
         operation
             .transition(
                 OperationPhase::Failed,
-                Some("provider-fork-issued".to_owned()),
+                Some("provider-effect-issued".to_owned()),
                 Some("{\"code\":\"external_effect_unknown\"}".to_owned()),
             )
             .unwrap();

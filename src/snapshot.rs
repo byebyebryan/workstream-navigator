@@ -62,15 +62,15 @@ pub(crate) struct WorkstreamSnapshot {
     pub(crate) recovery_unseen: bool,
 }
 
-/// One unresolved non-onboarding creation operation. The Navigator shows
-/// it only as a recovery target; request keys, effect details, project paths,
-/// and provider payloads remain private to state.
+/// One unresolved non-onboarding creation operation retained for the public
+/// operations diagnostic. Navigator rows do not project it as a recovery
+/// target; request keys, effect details, project paths, and provider payloads
+/// remain private to state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct OperationSnapshot {
     pub(crate) operation_id: OperationId,
     pub(crate) kind: OperationKind,
     pub(crate) provider: ProviderKind,
-    pub(crate) source_workstream_id: Option<WorkstreamId>,
     pub(crate) phase: OperationPhase,
     pub(crate) revision: Revision,
 }
@@ -92,12 +92,15 @@ pub(crate) enum OnboardingStatus {
     RecoveryRequired,
 }
 
-/// Complete passive input to the Workstreams and Archived pages. The
-/// provisional shell card is derived by the Navigator, not persisted here.
+/// Complete passive input to the Workstreams and Archived pages plus the
+/// bounded unresolved-operation data used by the public `operations` command.
+/// Navigator rows omit that diagnostic data. The provisional shell card is
+/// derived by the Navigator, not persisted here.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct Snapshot {
     pub(crate) projects: Vec<ProjectSnapshot>,
     pub(crate) workstreams: Vec<WorkstreamSnapshot>,
+    /// Public diagnostic only; this is not a Navigator recovery-row source.
     pub(crate) unresolved_operations: Vec<OperationSnapshot>,
 }
 
@@ -115,8 +118,8 @@ pub(crate) enum SnapshotError {
     OnboardingOwnership,
 }
 
-/// Reads one passive schema-15 Workstreams projection. It neither opens a
-/// browser nor resolves a repository path, even internally.
+/// Reads one passive schema-15 Workstreams and operations projection. It
+/// neither opens a browser nor resolves a repository path, even internally.
 #[allow(
     clippy::too_many_lines,
     reason = "the one bounded projection keeps project, onboarding, and runtime cross-checks together"
@@ -134,7 +137,6 @@ pub(crate) fn read_snapshot(root: &StateRoot) -> Result<Snapshot, SnapshotError>
             operation_id: operation.operation_id,
             kind: operation.kind,
             provider: operation.provider,
-            source_workstream_id: operation.source_workstream_id,
             phase: operation.phase,
             revision: operation.revision,
         })

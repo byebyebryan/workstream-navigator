@@ -4,13 +4,14 @@ use std::io::Write;
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, params};
 use serde_json::Value;
 use tempfile::tempdir;
 use uuid::Uuid;
 
 use crate::domain::ProviderKind;
 use crate::domain::{IdGenerator, RandomIdGenerator};
+use crate::provider::lifecycle::{LifecycleEvent, LifecycleObservation};
 
 use super::current::{BootstrapCheckpoint, create_current_with_checkpoint_hook};
 use super::{
@@ -143,6 +144,235 @@ fn current_open_refuses_old_header_without_sqlite_open() {
         assert!(path.join(BOOTSTRAP_LOCK_FILE).is_file());
         assert!(path.join("provisional.lock").is_file());
     }
+}
+
+#[test]
+fn current_open_refuses_unresolved_retired_fork_without_mutation() {
+    for (index, phase) in [
+        "external_effect_started",
+        "awaiting_reconciliation",
+        "recovery_required",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let temporary = tempdir().unwrap();
+        let path = temporary.path().join("state");
+        drop(create_current(&path, &RandomIdGenerator).unwrap());
+        let operation_id = Uuid::from_u128(0x5000 + index as u128).to_string();
+        let database = path.join("host.sqlite");
+        {
+            let connection = Connection::open(&database).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO compound_operations (
+                        operation_id, request_key, kind, phase,
+                        expected_revisions_json, effect_watermark, outcome_json, revision
+                     ) VALUES (?1, ?2, 'fork', ?3, '{}', 'legacy-effect', NULL, 1)",
+                    params![operation_id, format!("legacy-fork-{index}"), phase],
+                )
+                .unwrap();
+        }
+        let before_bytes = fs::read(&database).unwrap();
+        let before_rows = {
+            let connection = Connection::open(&database).unwrap();
+            connection
+                .prepare(
+                    "SELECT operation_id, request_key, kind, phase,
+                            expected_revisions_json, effect_watermark,
+                            outcome_json, revision
+                     FROM compound_operations ORDER BY operation_id",
+                )
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+
+        let error = open_current(&StateRoot::select(&path)).unwrap_err();
+        assert!(matches!(error, StateError::RetiredForkRecoveryRequired));
+        assert!(error.to_string().contains("previous accepted build"));
+        assert_eq!(before_bytes, fs::read(&database).unwrap());
+        let after_rows = {
+            let connection = Connection::open(&database).unwrap();
+            connection
+                .prepare(
+                    "SELECT operation_id, request_key, kind, phase,
+                            expected_revisions_json, effect_watermark,
+                            outcome_json, revision
+                     FROM compound_operations ORDER BY operation_id",
+                )
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, Option<String>>(5)?,
+                        row.get::<_, Option<String>>(6)?,
+                        row.get::<_, i64>(7)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(before_rows, after_rows);
+    }
+}
+
+#[test]
+fn current_open_keeps_completed_fork_history_and_fork_origin_inert() {
+    let temporary = tempdir().unwrap();
+    let path = temporary.path().join("state");
+    let mut state = create_current(&path, &RandomIdGenerator).unwrap();
+    let checkout = temporary.path().join("checkout");
+    fs::create_dir(&checkout).unwrap();
+    let (_, workstream_id) = state
+        .seed_test_workstream(
+            &checkout,
+            "checkout",
+            ProviderKind::Codex,
+            &RandomIdGenerator,
+        )
+        .unwrap();
+    drop(state);
+
+    let database = path.join("host.sqlite");
+    let connection = Connection::open(&database).unwrap();
+    connection
+        .execute(
+            "UPDATE workstreams SET origin = 'fork' WHERE workstream_id = ?1",
+            [workstream_id.to_string()],
+        )
+        .unwrap();
+    for (index, phase) in ["committed", "failed"].into_iter().enumerate() {
+        connection
+            .execute(
+                "INSERT INTO compound_operations (
+                    operation_id, request_key, kind, phase,
+                    expected_revisions_json, effect_watermark, outcome_json, revision
+                 ) VALUES (?1, ?2, 'fork', ?3, '{}', 'legacy-effect', NULL, 1)",
+                params![
+                    Uuid::from_u128(0x6000 + index as u128).to_string(),
+                    format!("completed-legacy-fork-{index}"),
+                    phase,
+                ],
+            )
+            .unwrap();
+    }
+    drop(connection);
+
+    let state = open_current(&StateRoot::select(&path)).unwrap();
+    let registry = state.into_host_registry().unwrap();
+    assert_eq!(registry.workstream_overviews().unwrap().len(), 1);
+    assert!(
+        registry
+            .unresolved_operation_overviews()
+            .unwrap()
+            .is_empty()
+    );
+    let connection = Connection::open(&database).unwrap();
+    let origin: String = connection
+        .query_row(
+            "SELECT origin FROM workstreams WHERE workstream_id = ?1",
+            [workstream_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(origin, "fork");
+    let fork_rows: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM compound_operations WHERE kind = 'fork'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(fork_rows, 2);
+}
+
+#[test]
+fn native_session_rotation_reuses_one_workstream_and_rotates_its_binding() {
+    let temporary = tempdir().unwrap();
+    let path = temporary.path().join("state");
+    let mut state = create_current(&path, &RandomIdGenerator).unwrap();
+    let checkout = temporary.path().join("checkout");
+    fs::create_dir(&checkout).unwrap();
+    let (_, workstream_id) = state
+        .seed_test_workstream(
+            &checkout,
+            "checkout",
+            ProviderKind::Codex,
+            &RandomIdGenerator,
+        )
+        .unwrap();
+    let mut registry = state.into_host_registry().unwrap();
+    let runtime = registry.reserve_runtime(workstream_id).unwrap();
+    let cwd = runtime.cwd.to_string_lossy().into_owned();
+
+    registry
+        .apply_lifecycle_observation(
+            runtime.runtime_id,
+            &runtime.tmux_generation,
+            LifecycleObservation {
+                event: LifecycleEvent::SessionStart,
+                cwd: cwd.clone(),
+                native_session_id: "native-thread-a".to_owned(),
+                turn_id: None,
+                source: Some("startup".to_owned()),
+            },
+        )
+        .unwrap();
+    registry
+        .apply_lifecycle_observation(
+            runtime.runtime_id,
+            &runtime.tmux_generation,
+            LifecycleObservation {
+                event: LifecycleEvent::SessionStart,
+                cwd,
+                native_session_id: "native-thread-b".to_owned(),
+                turn_id: None,
+                source: Some("clear".to_owned()),
+            },
+        )
+        .unwrap();
+
+    let workstreams = registry.workstream_overviews().unwrap();
+    assert_eq!(workstreams.len(), 1);
+    assert_eq!(workstreams[0].workstream_id, workstream_id);
+    let runtime_after = registry
+        .runtime_for_workstream(workstream_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime_after.runtime_id, runtime.runtime_id);
+    assert_eq!(runtime_after.tmux_generation, runtime.tmux_generation);
+    let binding = registry
+        .binding_for_runtime(runtime.runtime_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(binding.native_session_id.native_id(), "native-thread-b");
+    assert_eq!(binding.start_source, "clear");
+    assert_eq!(
+        binding
+            .predecessor_native_session_id
+            .as_ref()
+            .map(crate::domain::ProviderSessionId::native_id),
+        Some("native-thread-a")
+    );
 }
 
 #[test]

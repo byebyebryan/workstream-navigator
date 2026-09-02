@@ -131,8 +131,9 @@ contains or captures provider-pane content.
 ### Included
 
 - Codex and contract-compatible OpenCode host-local operation through the
-  bounded provider-aware launch, exact resume, same-provider Fork, and
-  lost-Runtime recovery contract. Historical production acceptance covers
+  bounded provider-aware launch, exact resume, native conversation branching
+  within one Workstream, and lost-Runtime recovery contract. Historical
+  production acceptance covers
   OpenCode `1.18.11`; the provider contract was revalidated on `1.18.23`.
   Release numbers are diagnostic evidence, not compatibility authority.
 - A minimal terminal experience that defaults to the Navigator beside exactly
@@ -158,7 +159,9 @@ contains or captures provider-pane content.
 - Reversible Workstream archive and restore for removing inactive work from the
   ordinary navigator without deleting provider history or Git state.
 - Independent workstreams started at a registered project root.
-- Conversation-forked workstreams that retain the same registered project root.
+- Native provider conversation branching rotates the current tip within one
+  Workstream; it never creates a second WSNav card. `n` creates a separate
+  blank Workstream at the selected Location.
 - Read-only Git-root detection and credential-free origin metadata at brokered
   registration time for host-local Project grouping; no Git lifecycle
   ownership, passive retargeting, or association between separate execution
@@ -267,12 +270,12 @@ successive tasks and many native chats over time without becoming a task
 manager.
 
 The Workstream ID is stable; its ConversationTip moves. A verified native
-`/clear` or managed cutover may replace thread A with thread B without
-replacing the Workstream. Although Codex native `/new` creates a distinct
-thread, V1 cannot exact-bind that thread to a running Runtime; it is therefore
-unsupported in a managed WSNav provider pane and does not replace the tip. A
-Workstream fork creates a new Workstream ID, Runtime, and ConversationTip while
-retaining explicit ancestry at the same ProjectLocation root.
+`/clear` or provider-native conversation branch may replace thread A with
+thread B without replacing the Workstream. Although Codex native `/new`
+creates a distinct thread, V1 cannot exact-bind that thread to a running
+Runtime; it is therefore unsupported in a managed WSNav provider pane and does
+not replace the tip. The Navigator's `n` action instead creates one separate
+blank Workstream at the selected Location.
 
 There is no separate Workstream label in V1. The current tip's provider-owned
 native name is the canonical display name and exact resume still relies on the
@@ -551,7 +554,7 @@ The lifecycle therefore has these observable rules:
 Disposable acceptance must race close and presentation loss against lazy materialization,
 prepare and token issuance, helper consumption, OpenCode preparation and
 `POST /session`, and provider `exec`; it must also race passive snapshot,
-new attachment, Park/Resume/Fork/contextual `n`/archive/recovery/start retry,
+new attachment, Park/Resume/contextual `n`/archive/recovery/start retry,
 helper exit, exec error, exec success proof,
 immediate provider exit, and restart across every post-commit phase. The
 evidence must show one deterministic lease winner, no managed kill, no helper
@@ -635,7 +638,7 @@ detach through ordinary card switching; neither creates a new attachment to
 that Runtime. Selecting/materializing the fresh derived singleton card attaches
 only its separate provisional server under `provisional.lock` and grants no
 authority over the unproven Runtime. Every new attachment to that Runtime and
-ordinary Runtime action or mutation—Park, Resume, Fork, contextual
+ordinary Runtime action or mutation—Park, Resume, contextual
 `n` from this source, archive, recovery/start retry, and cleanup—refuses or
 waits with bounded `onboarding-in-progress` guidance.
 Passive snapshot/probe may render the managed Runtime as `starting`/`onboarding`
@@ -910,11 +913,11 @@ surface.
 The Workstreams page retains its accepted action muscle memory: `Enter`
 attaches a live Runtime, starts/resumes a parked or stopped one, or enters exact
 native recovery for an ordinary lost Runtime. Under D19 that action may replace
-the right-hand surface but never changes pane focus. `n` starts a sibling at
-the selected managed Workstream's exact ProjectLocation with the same provider;
-`f` forks; `p` parks; `x` opens the reversible archive confirmation; `a`
-acknowledges only result attention; `r` recovers the selected unresolved Fork;
-and `?` toggles the full reference. `u` on
+the right-hand surface but never changes pane focus. `n` creates a separate
+blank Workstream at the selected managed Workstream's exact ProjectLocation
+with the same provider; `p` parks; `x` opens the reversible archive
+confirmation; `a` acknowledges only result attention; and `?` toggles the full
+reference. Native provider branching stays within the current Workstream. `u` on
 Archived restores without starting. On the provisional shell card, `Enter`
 shows the shell without transferring focus and `n` has no separate meaning.
 Unprefixed `Left` and `Right` remain inert. There is no hard delete:
@@ -1067,7 +1070,7 @@ Every managed host owns:
 - one stable host identity;
 - zero or more runtime-private tmux sockets and server generations, one for
   each live Runtime;
-- the Workstream, ProjectLocation, onboarding/Fork recovery, binding, and
+- the Workstream, ProjectLocation, onboarding recovery, binding, and
   attention records for work physically running on that host.
 
 Every newly created Runtime derives its private tmux directory and session name
@@ -1083,7 +1086,7 @@ other value is ambiguous and no tmux action is attempted.
 
 The private tmux server owns the terminal container, while SQLite owns bounded
 Runtime metadata, exact provider-process authority, and recoverable
-onboarding/Start/Fork state. The native provider owns session history. A closed
+onboarding/Start state. The native provider owns session history. A closed
 tmux server is not proof that its former pane process exited: a provider may
 survive terminal hangup or spin on a deleted PTY.
 
@@ -1155,17 +1158,15 @@ All mutation commands use host-local SQLite transactions and optimistic
 revisions. Independent Start commits its Workstream and private Runtime
 reservation before launching the selected native provider, so reopening that
 Workstream automatically continues the normal start/resume path after a client
-loss. Fork additionally uses a durable request key and recovery phases because
-native provider session creation is non-idempotent. Concurrent observations
-and clients may race, but only one transaction can commit a particular record
-revision.
+loss. Concurrent observations and clients may race, but only one transaction
+can commit a particular record revision.
 
 Focus, attach, snapshot, and passive observation refresh are not durable
 operations. Thread naming remains a provider-owned setting that WSNav only
 observes. Park and Resume reconcile through the authoritative Runtime record
 plus live tmux/process probes.
-Brokered onboarding and Fork use the `CompoundOperation` journal, as does
-OpenCode's non-idempotent blank-session creation boundary.
+Brokered onboarding and OpenCode's non-idempotent blank-session creation
+boundary use the `CompoundOperation` journal.
 
 Resume transactionally reserves one new Runtime generation before launching
 tmux or the selected native provider. The launcher must match that exact
@@ -1271,7 +1272,7 @@ asks for explicit consent in that shell, opens the native review in place, and
 retries the exact argv only after readiness succeeds. No broker reservation,
 capability, Runtime, Workstream, or ProjectLocation exists before that success.
 
-When the user requests a Codex Start, Resume, Fork, or other managed operation
+When the user requests a Codex Start, Resume, or other managed operation
 that requires an unready observer, the Navigator instead captures that exact
 intent and its expected Workstream, Location, integration, and registry
 revisions in a typed process-local pending action, then offers contextual review
@@ -1418,8 +1419,8 @@ shell-wrapper ancestry fallback is allowed; that would admit an agent
 tool-shell forgery.
 
 Hook evidence can update status and bind an observed native session inside an
-already managed runtime. It cannot authorize workstream creation, fork,
-parking, provider input, Git mutation, or focus.
+already managed runtime. It cannot authorize Workstream creation, parking,
+provider input, Git mutation, or focus.
 
 A ProviderBinding is stronger than an untrusted hook claim. A `SessionStart`
 first agrees with a pending launch or the one accepted native transition, then
@@ -1439,12 +1440,13 @@ or unknown-source claims fail closed. Follow-up [Spikes
 [0013](evidence/spikes/0013-codex-new-thread-inventory.md) on Codex 0.146.0
 show that native `/new` creates a distinct thread but provides neither a
 changed `SessionStart` claim nor a changed first-prompt hook identity. It is
-unsupported in a managed Runtime; `thread/list` ordering must not be used to
-adopt a possible destination. Native `/fork` and `compact` remain provider
-workflow whose changed-binding visibility is deferred until separately
-validated. If legitimate transitions cannot be distinguished from an
-agent-shell invocation, V1 must require explicit native resume/fork selection
-and observe the resulting launch; it must not weaken the authority rule.
+unsupported in a managed Runtime; no session-list ordering may adopt a
+possible destination. Native `/fork` and `compact` remain provider workflows;
+when a native branch produces an exact `SessionStart(source=clear)` in the same
+Runtime, WSNav rotates that Workstream's current tip rather than creating a
+second card. If legitimate transitions cannot be distinguished from an
+agent-shell invocation, WSNav fails closed and waits for exact native
+observation; it must not weaken the authority rule.
 
 #### Ephemeral App Server adapter
 
@@ -1466,15 +1468,10 @@ socket, remain alive between operations, or become activity authority for a
 dedicated TUI. The concrete Codex adapter filters App Server responses before they
 reach any bounded Navigator state or status surface.
 
-V1 allowlists only:
+The current App Server adapter uses only this bounded request:
 
 - `thread/read` with `includeTurns: false` for exact managed thread IDs and
   `SessionStart` binding corroboration;
-- `thread/list` with `sourceKinds: ["cli"]` for ordinary bounded `doctor`
-  checks, or every documented source kind only while reconciling one unresolved
-  WSNav-owned Fork operation; both use `useStateDbOnly: true`;
-- `thread/fork` with an exact accepted `lastTurnId` and destination `cwd` for
-  an explicit Fork Workstream operation.
 
 V1 does not call App Server turn start, steer, interrupt, item injection,
 runtime configuration, shell, approval, or provider-input methods. App Server
@@ -1483,23 +1480,10 @@ the status of a separately running native TUI. Codex 0.145.0 can expose a
 persisted partial turn as interrupted while the native TUI's command is still
 running; this is expected evidence that helper status is non-authoritative.
 
-`thread/read` and setting an already-requested name are safely repeatable.
-`thread/fork` is not assumed idempotent: if the helper exits after Codex may
-have created a destination but before returning its ID, Workstream Navigator
-must reconcile exact provider lineage and recorded operation evidence. It must
-not retry and risk a duplicate destination while the effect remains ambiguous.
-
-Only an unresolved CompoundOperation with `kind=fork` may use `thread/list` for
-this reconciliation. Its recorded evidence includes the exact source session,
-accepted last-turn ID, requested destination cwd, and effect timing. Installed
-Codex 0.145.0 did not persist the requested fork cwd before native resume and
-did not place the fork in the CLI-only source-kind query. Recovery therefore
-queries all documented source kinds and matches exact source lineage, settled
-prefix, and effect time; requested cwd remains operation intent, not candidate
-proof. Recovery accepts only one matching destination; zero or multiple
-candidates remain `recovery_required` and are never guessed or automatically
-adopted. `doctor` may report the same bounded evidence but cannot turn broad
-discovery into ownership.
+`thread/read` is safely repeatable and is used only to corroborate the exact
+native session selected by lifecycle evidence. WSNav never lists provider
+threads or attempts to infer, adopt, or reconcile a native branch; provider
+history and branching remain native.
 
 The concrete Codex adapter extracts only approved fields from responses. It never
 returns or persists `preview`, turns, items, transcript paths, or the raw
@@ -1510,16 +1494,14 @@ Codex's native CLI and ephemeral App Server divide the action boundary:
 
 - fresh work uses `codex`;
 - recovery uses `codex -C <project-root> resume <session-id>`;
-- a Workstream fork uses App Server `thread/fork`, then starts the resulting
-  thread through `codex -C <project-root> resume <destination-id>`;
 - chat naming uses provider-native `/rename` or provider/agent naming policy;
   WSNav only reads the resulting Codex-owned field.
 
 #### Workstream display names
 
 The current tip's non-empty `thread.name` is canonical. When it is missing or
-cannot be refreshed, the navigator computes a context-specific display
-fallback without persisting a shadow label.
+cannot be refreshed, the navigator uses a bounded synthetic display fallback
+without persisting a shadow label.
 
 Name observation and transition context are separate:
 
@@ -1528,7 +1510,7 @@ NameState
   named | known_empty | unavailable
 
 EffectiveNameSource
-  native | cutover_fallback | fork_fallback | cached_stale | synthetic
+  native | cached_stale | synthetic
 ```
 
 `known_empty` means an exact App Server read returned no name. `unavailable`
@@ -1539,22 +1521,18 @@ name.
 | --- | --- |
 | New Workstream before thread binding | `starting` |
 | New or existing Workstream with a known-empty name | `untitled` |
-| Same-Workstream cutover from named A to unnamed B | `<A name> ↻ unnamed` |
-| Same-Workstream cutover when A was also unnamed | `untitled ↻` |
-| Fork to a new Workstream from a named source | `<source name> · fork` |
-| Fork from an unnamed source | `forked workstream` |
 | Metadata refresh unavailable with a current-tip cache | Last cached native name with a stale indicator |
-| Metadata refresh unavailable without a current-tip cache | The contextual transition display with `name unavailable`; otherwise `name unavailable` |
+| Metadata refresh unavailable without a current-tip cache | `name unavailable` |
 | Provider thread missing during recovery | Last cached native name with `recovery required`; otherwise `recovery required` |
 
 Resolution prefers a current non-empty native name, then a current-binding
-cache when refresh is unavailable, then transition context, and finally a
-synthetic lifecycle fallback. An unavailable observation never becomes
-`unnamed` or `untitled`; those displays require `known_empty`. The reduced
-navigator's last-resort row label is the stable short Workstream ID without a
-synthetic prefix; it never substitutes for exact identity or action authority.
-Fallbacks never expose a provider identifier or raw provider payload. Git
-state, host, and cwd remain secondary context rather than naming authority.
+cache when refresh is unavailable, and finally a synthetic lifecycle fallback.
+An unavailable observation never becomes `unnamed` or `untitled`; those
+displays require `known_empty`. The reduced navigator's last-resort row label
+is the stable short Workstream ID without a synthetic prefix; it never
+substitutes for exact identity or action authority. Fallbacks never expose a
+provider identifier or raw provider payload. Git state, host, and cwd remain
+secondary context rather than naming authority.
 
 An exact thread ID, not any displayed text, remains identity and action
 authority. Names and computed fallbacks need not be unique.
@@ -1578,12 +1556,9 @@ the authoritative lifecycle write, so name-read failure never turns into lost
 result or attention evidence. Ordinary navigator polling reads only the bounded
 cache and never opens an App Server on the input loop.
 
-After a native same-Workstream cutover, Workstream Navigator does not set
-`B.name = A.name`. The previous title remains a visibly provisional computed
-fallback until B obtains its own provider-owned canonical name.
-
-An explicit Fork Workstream action never sets the destination's native name.
-Until the provider or agent assigns one, the navigator uses the computed fork
+After a native same-Workstream cutover, Workstream Navigator does not copy the
+previous title into the new tip. The provider-owned name is refreshed from the
+new exact binding; until then the navigator uses only its bounded synthetic
 fallback without persisting it as provider metadata.
 
 Semantic automatic naming is not a lifecycle-hook responsibility. It may later
@@ -1591,10 +1566,11 @@ be offered as an opt-in Codex skill or managed agent policy, where Codex already
 has conversation context. V1 does not read prompts or transcripts, invoke a
 second model, or derive a semantic name out of band.
 
-If the session identity hook was missed, a still-live runtime remains
-attachable. After that process is lost, exact resume and conversation fork are
-blocked until the user selects a session through Codex's native resume picker
-and a later `SessionStart(source=resume)` rebinds it.
+If the session identity hook was missed, a still-live Runtime remains
+attachable. After that process is lost, exact resume and native conversation
+branching remain provider-owned until the user selects a session through
+Codex's native resume picker and a later `SessionStart(source=resume)` rebinds
+it.
 
 ## Durable state
 
@@ -1735,13 +1711,15 @@ AttentionState
   latest_native_session_provider?, latest_turn_id?, revision
 
 CompoundOperation
-  operation_id, request_key, kind=onboard|start|fork, phase,
+  operation_id, request_key, kind=onboard|start, phase,
   phase includes runtime_owned_launching, provider-specific preparation and
   external-effect phases, provider_exec_started, provider_exec_proven,
   exec_failed_known_absent, recovery_required, or unknown,
   expected_revisions_json, launch_token_id?, launch_token_verifier?,
   launch_token_expiry_monotonic?, launch_claims_digest?,
   effect_watermark?, outcome_json?, revision
+  (historical completed/failed kind=fork rows remain inert; an unresolved
+  external-effect row requires recovery with the previous accepted build)
 ```
 
 Paths and provider identifiers are private host fields. Public snapshots return
@@ -1809,11 +1787,12 @@ credential, or environment dump is persisted.
   user-authored name.
 - Codex may create native conversations sequentially inside one Workstream as
   the user uses native `/clear` or `/fork`. D1.5 observes only the separately
-  proven `/clear` binding replacement; other native actions remain canonical
+  proven exact binding replacement; other native actions remain canonical
   Codex workflow without an inferred WSNav transition. Native `/new` is not a
   supported managed action: Codex creates its destination thread, but WSNav
   retains the prior binding because no exact transition claim identifies that
-  destination.
+  destination. The Navigator's `n` action creates a separate blank Workstream
+  at the selected Location.
 - One sticky AttentionState exists per Workstream; it never changes
   presentation focus.
 - Runtime status and Workstream lifecycle are separate.
@@ -2137,8 +2116,9 @@ D18 is complete only when one coherent current-only acceptance matrix proves:
   foreign until the explicit setup/removal contract resolves it. Reset
   fixtures cover both complete profile removal and an explicitly quarantined
   provider-settings-only remainder without automatic adoption;
-- both providers pass the disposable Shell promotion, attach, `n`, Fork,
-  Park/Resume, archive/restore, observer/recovery, presentation restart, and
+- both providers pass the disposable Shell promotion, attach, `n`, native
+  conversation-tip rotation, Park/Resume, archive/restore, observer/recovery,
+  presentation restart, and
   complete-cleanup matrix without prompts, transcripts, or ordinary user
   state;
 - active current implementation identifiers, CLI help, internal routes,
@@ -2211,8 +2191,9 @@ origin identity remain valid and receive a host-local Project group.
 There is no passive or user-triggered metadata refresh in the current
 product. Snapshot, redraw, attachment, switching, resume, and provider cwd
 changes perform no Git subprocess and never retarget a Workstream. Same-location
-`n`, Resume, and Fork use the exact stored root. Later positive grouping
-evidence may be considered only as a separate revision-checked read-only
+`n` and Resume use the exact stored root. Native conversation branching stays
+inside the provider and does not change that Workstream/Location binding. Later
+positive grouping evidence may be considered only as a separate revision-checked read-only
 feature; it cannot change a Location or live Runtime.
 
 After registration, WSNav performs no Git lifecycle operation. It never creates
@@ -2223,10 +2204,10 @@ the user or provider creates, enters, and manages it through the native
 workflow. The Workstream remains pinned to its original ProjectLocation even
 if the provider subsequently works elsewhere.
 
-Conversation lineage remains explicit:
+Conversation lineage remains provider-owned:
 
 ```text
-source provider session -> forked provider session
+one Workstream -> successive native conversation tips
 ```
 
 It makes no claim about filesystem lineage. Parking and archiving stop or hide
@@ -2276,7 +2257,7 @@ user starts a fresh wsnav presentation
 -> selecting/materializing the fresh derived singleton card attaches only its
    separate provisional server under `provisional.lock` and grants no authority
    over the unproven Runtime; no new attachment to that Runtime is allowed
--> ordinary Park/Resume/Fork/contextual n, archive, recovery/start retry, and
+-> ordinary Park/Resume/contextual n, archive, recovery/start retry, and
    cleanup actions for that Runtime refuse or wait
    with bounded onboarding-in-progress guidance
 -> helper advances to `provider_exec_started` immediately before `execve`, then
@@ -2380,33 +2361,6 @@ manager-owned creation form. Before binding, the row shows
 provider/agent naming policy updates the one Codex-owned thread name, which
 WSNav passively observes.
 
-### Fork a running Workstream
-
-The action means “explore another approach from the latest settled conversation
-state.” It does not fork partial model output or current filesystem state.
-
-```text
-source provider turn may still be running
--> user explicitly selects Fork Workstream
--> host validates the source binding and last settled provider boundary
--> durable Fork operation records the provider-only cutover plan at the same project root
--> the provider adapter forks the source through its exact settled boundary
--> host leaves the destination name under provider/agent ownership
--> host launches the provider's exact resume shape for the returned destination
-   session ID at the same ProjectLocation
--> provider lifecycle evidence confirms the new native session
--> source runtime continues unchanged
--> navigator selects and may display destination without changing pane focus;
-   source completion only raises attention
-```
-
-If the selected provider contract cannot prove a settled-prefix fork for a live
-source, the action is unavailable. The user can still start an independent
-Workstream. Codex uses its ephemeral App Server and exact `lastTurnId`
-boundary; OpenCode uses the validated settled `messageID` boundary. These are
-adapter details, not a generic provider command or a source of provider
-identity.
-
 ### Native Codex thread management
 
 Inside the provider pane, the user continues to use Codex:
@@ -2420,15 +2374,16 @@ Inside the provider pane, the user continues to use Codex:
 
 Workstream Navigator observes a new session binding when possible. It does not
 infer that a native chat transition created a new task or Workstream. A
-verified D1.5 same-Workstream `/clear` cutover displays the prior effective
-name provisionally when the new thread is unnamed, but does not write that
-fallback into Codex. Native `/new` is unsupported inside a managed Runtime:
-although it creates a Codex thread, WSNav has no exact authority to bind it and
-retains the previous tip. The user must use `/clear` for the same Workstream or
-use WSNav Start/Fork for a separate Workstream. WSNav must not infer recovery
-from App Server inventory or `thread/list` ordering. Other native transitions
-remain visible in Codex history but do not replace the WSNav binding until their
-event contracts are separately validated.
+verified same-Workstream `/clear` or `/fork` cutover rotates the exact current
+tip and leaves naming with the provider; an unnamed new tip receives only the
+Navigator's bounded synthetic display until native metadata arrives. Native
+`/new` is unsupported inside a managed Runtime: although it creates a Codex
+thread, WSNav has no exact authority to bind it and retains the previous tip.
+The user can use the native provider workflow for same-Workstream branching or
+use WSNav `n` for a separate blank Workstream. WSNav must not infer recovery
+from provider session inventory or ordering. Other native transitions remain
+visible in Codex history but do not replace the WSNav binding until their event
+contracts are separately validated.
 
 ### Multi-host composition
 
@@ -2454,8 +2409,7 @@ Shell
   ~/c/wsnav
 Project
 ├── Tip thread name         working
-├── Prior name ↻ unnamed    working
-├── Source · fork           result ready
+├── Another native name     result ready
 └── untitled                parked
 
 ┌ navigator ┐┌────────────── native provider TUI ──────────────┐
@@ -2476,13 +2430,13 @@ Required interactions:
   with the first managed Workstream without a Project browser or path form;
 - Start another independent Workstream from a selected managed Workstream at
   its exact registered root and with its same provider;
-- Fork Workstream from an exact managed source;
+- observe provider-native conversation branching as a current-tip rotation
+  within the same Workstream, without creating a second card;
 - inspect bounded Workstream status and display the current provider-owned
   thread name;
 - park/resume without deleting provider history;
 - archive a Workstream out of the active list and restore it without starting
   Codex or deleting its retained state;
-- route a repeated Fork to its exact unresolved operation and reconcile it;
 - detect observer readiness without mutation and guide the user contextually
   through explicit-consent profile preparation and native trust review only
   when a requested Codex operation requires it;
@@ -2513,15 +2467,6 @@ they have no active Workstreams, while their archived Workstreams remain
 available through Archived. A dormant Location with no retained Workstream has
 no ordinary standalone navigator row. Archiving a working Runtime requires
 explicit confirmation because parking it interrupts the current provider turn.
-
-An unfinished Fork belongs to its already-visible source Workstream rather than
-a normal global management page. Pressing `f` on that source opens a focused
-choice to reconcile the exact saved operation or deliberately start another
-Fork. If several unfinished Forks share the source, a bounded chooser lists
-only those candidates. The source Workstream ID is transient routing metadata,
-never rendered; request keys, paths, provider identifiers, and raw evidence
-remain hidden. A recovered destination opens directly in the native provider
-pane without changing tmux pane focus.
 
 Projects remain durable presentation groups behind Workstream and Archived
 rows, but WSNav provides no Projects page or Project-level action surface.
@@ -2569,7 +2514,7 @@ the D18 controller partially combines:
 | Pane receiving keyboard input | The exact private presentation tmux server |
 | Highlighted Workstreams row | Navigator process-local selection |
 | Shell, review, or managed Runtime shown on the right | Presentation attachment controller |
-| Start, Fork, Park, archive, recovery, and other effects | Existing revision-fenced WSNav actions |
+| Start, Park, archive, recovery, and other effects | Existing revision-fenced WSNav actions |
 
 Changing one concern does not imply changing another. In particular, opening
 or replacing the right-hand surface never grants it keyboard focus.
@@ -2593,7 +2538,7 @@ resize do not move focus. No Navigator loop polls tmux to mirror focus.
 materialize or display Shell, attach an already-proven Runtime, or perform the
 selected row's existing primary action, but focus stays in Navigator. Mouse
 activation of a Navigator card follows the same action semantics after the
-primary-button press has focused Navigator. Start, Fork, recovery, and completed
+primary-button press has focused Navigator. Start, recovery, and completed
 observer review may replace the right surface but never steal focus. If the
 user is already focused right when an asynchronous replacement completes,
 tmux naturally keeps that pane focused; if the user moved left, it stays left.
@@ -2706,7 +2651,7 @@ remains in the right pane.
 An eligible destination is active, non-archived, free of onboarding and
 recovery fences, backed by an already-live Runtime, and accepted by the normal
 exact attachment preflight. Cycling skips every ineligible row. It never opens
-or materializes Shell and never starts, resumes, recovers, forks, parks, or
+or materializes Shell and never starts, resumes, recovers, parks, or
 otherwise mutates a provider, Runtime, lifecycle, or durable row. Shell,
 provider-wait, observer-review, onboarding, stopped, recovery-required,
 archived, and direct-attach surfaces reject the command without changing the
@@ -2770,7 +2715,7 @@ claim remote CI or real-provider acceptance. No partial D19 slice was installed.
 | Normal local tmux detach and reattach to the same owned presentation | Preserve the exact provisional shell server, pane, process, actual cwd, and pending request; never create a duplicate shell. Every managed host Runtime also continues |
 | Confirmed presentation close | Acquire the shared `provisional.lock` lease and revalidate marker, journal, and revisions. Before the helper successfully revalidates every bound marker/process/cwd/path/revision/token claim and atomically consumes the capability while committing durable `Runtime-owned` authority, close may win only by atomically revoking the unconsumed capability and proving pre-effect absence; then roll back attempt-only rows and terminate only exact provisional artifacts. After that exact helper commit, never signal that server; managed Runtime servers and provider processes continue |
 | Conclusive presentation loss | Under the same `provisional.lock` lease, clean only exact pre-handoff provisional artifacts whose ownership and pre-effect absence are proven; after the exact helper commit leave the Runtime-owned server untouched and let onboarding recovery reconcile. After conclusive cleanup, the next presentation's derived singleton card is available but unmaterialized; ambiguous evidence leaves it unavailable. Managed Runtime servers and provider processes continue |
-| Runtime-owned onboarding before `provider_exec_proven` | Fence attachment/action authority for that unproven Runtime. Its originating presentation may retain its existing tmux Runtime attachment/pane or detach through ordinary card switching, but no new attachment to that Runtime is allowed. Selecting/materializing the fresh derived singleton card attaches only its separate provisional server under `provisional.lock` and grants no authority over the unproven Runtime. Refuse or wait on ordinary Park, Resume, Fork, contextual `n`, archive, recovery/start retry, and cleanup for that Runtime with bounded `onboarding-in-progress` guidance. Passive snapshot/probe may show `starting`/`onboarding` and reconcile, but never adopts the helper/preparation process, marks the Runtime lost, or signals it |
+| Runtime-owned onboarding before `provider_exec_proven` | Fence attachment/action authority for that unproven Runtime. Its originating presentation may retain its existing tmux Runtime attachment/pane or detach through ordinary card switching, but no new attachment to that Runtime is allowed. Selecting/materializing the fresh derived singleton card attaches only its separate provisional server under `provisional.lock` and grants no authority over the unproven Runtime. Refuse or wait on ordinary Park, Resume, contextual `n`, archive, recovery/start retry, and cleanup for that Runtime with bounded `onboarding-in-progress` guidance. Passive snapshot/probe may show `starting`/`onboarding` and reconcile, but never adopts the helper/preparation process, marks the Runtime lost, or signals it |
 | Hidden helper exits before `provider_exec_started` | Reconcile the exact journal and classify a conclusive no-effect exit as known-absent; never infer provider identity or expose ordinary Runtime action from the helper process |
 | `execve` returns an exact error | Record terminal known-absent failure for the final provider TUI exec before helper exit when possible; the reconciler grants no action from that evidence alone and ends onboarding through guarded rollback only when provider-specific journal evidence proves no prior effect or binding, or through the exact stopped/recovery state when a known OpenCode binding must be preserved |
 | Crash after `provider_exec_started` without proof | Leave the Runtime and operation ambiguous/recovery-required; a possible live provider is never rolled back, and no second provider effect is attempted |
@@ -2791,17 +2736,17 @@ claim remote CI or real-provider acceptance. No partial D19 slice was installed.
 | Brokered promotion becomes ambiguous after an external-effect boundary | Keep the same Runtime-owned server and a visible recovery-required managed Workstream, reconcile its durable operation, and never hide it as a clean retry or issue a second OpenCode POST |
 | Exact private runtime tmux server is gone | Mark that Runtime `recovery_required`; exact native resume may create a new runtime generation |
 | Codex process exits normally | Keep Workstream and provider binding; offer exact native resume |
-| Observer hook is absent or missed | Show `unknown`; retain live attach; block exact fork/recovery if session identity is unknown |
+| Observer hook is absent or missed | Show `unknown`; retain live attach; block exact native recovery if session identity is unknown |
 | Hook identity cannot be corroborated | Do not rotate the ProviderBinding; show `unknown` or `recovery required` |
 | Hook events race | Resolve by runtime generation, session ID, turn ID, and transactional state; conflicting evidence becomes `unknown` |
 | Exact name read returns empty | Record `known_empty` and compute the context-specific fallback |
 | Name refresh is unavailable | Keep the dedicated TUI untouched and retain the cached native name with stale provenance |
-| Ephemeral App Server mutation is ambiguous | Reconcile exact persisted effects; never retry a non-idempotent fork unless absence is proven, otherwise require recovery |
+| Ephemeral provider effect is ambiguous | Reconcile exact persisted effects; never retry a non-idempotent effect unless absence is proven, otherwise require recovery |
 | Another client or direct tmux client attaches | Show the same tmux-managed screen; do not create a lease or detach either client; simultaneous input may interleave |
 | D19 Up/Down source, ordering, revision, attachment status, pane marker, or topology changes before commit | Fail closed under the presentation attachment claim; preserve the current provider output, right-pane focus, and Navigator page/selection; never fall through to Start, Resume, recovery, or another lifecycle action |
 | D19 table convergence cannot prove an exact owned presentation or Runtime server and its expected topology | Leave that server and provider untouched, expose no fallback default-table route, and return bounded diagnosis outside provider content; never mutate an ordinary or foreign tmux server |
 | Navigator crashes during focus switch | Focus is ephemeral; no durable runtime or Workstream mutation is implied |
-| Navigator disconnects during Start or Fork | Start is already committed locally; reopen the exact Fork operation only when provider cutover is unresolved |
+| Navigator disconnects during Start | Start is already committed locally; reopen only the exact Start operation when its provider effect is unresolved |
 | Provider changes directory or creates, enters, or removes a worktree | Leave Git and cwd state entirely to the provider or user; keep the Workstream pinned to its launch-time ProjectLocation and perform no passive Git inspection |
 | Host registry identity or generation evidence is ambiguous | Reject the affected mutation and require explicit local diagnosis or recovery |
 | Host database is absent beside any state-root artifact | Return typed `state recovery required`; never mint a HostIdentity, adopt or signal a Runtime, remove a presentation, or clean an unknown artifact |
@@ -2813,23 +2758,22 @@ Result completion and the sticky AttentionState update must commit in one host
 transaction. This directly avoids the Python prototype's split
 result/attention persistence gap.
 
-### Durable operation recovery
+### Durable operation diagnostics
 
-An unresolved Fork remains host-private until the user repeats `f` on its
-source Workstream. WSNav then routes to the exact saved operation using the
-already-known source Workstream ID, without rendering that ID, request keys,
-project paths, provider IDs, or raw operation evidence. `recover-operation
-<id>` remains direct-CLI parity for diagnostics and break-glass use. A Fork
-with no recorded provider-attempt marker may continue to the one permitted fork
-call; after that marker exists it may only reconcile exact provider lineage and
-can never call `thread/fork` again. Zero or multiple candidates remain
-recovery-required; multiple candidates get a bounded source-scoped chooser,
-never automatic selection.
+The public `operations` command exposes the bounded unresolved non-onboarding
+creation-operation diagnostic (currently unresolved `Start` journals). It is not
+a Navigator recovery surface and does not expose onboarding journals or provider
+effects.
 
-This recovery path is intentionally separate from native Runtime recovery:
-`recover <workstream>` resumes a known Codex thread after a lost private tmux
-Runtime, while `recover-operation <id>` resolves an incomplete external
-creation effect before a destination Workstream can safely exist.
+Current builds do not recover retired managed Fork operations. During schema-15
+open, an unresolved `compound_operations.kind='fork'` row in
+`external_effect_started`, `awaiting_reconciliation`, or `recovery_required`
+fails closed with the typed `RetiredForkRecoveryRequired` state error. The
+previous accepted build must resolve that legacy operation before a current
+build can open the state. The refusal is read-only: it does not retry, infer,
+adopt, delete, or otherwise mutate the row or provider. Prepared rows have no
+provider effect and remain inert; completed/failed historical Fork rows and
+`origin='fork'` Workstream provenance remain readable and inert.
 
 ## Security and privacy
 
@@ -2912,9 +2856,10 @@ creation effect before a destination Workstream can safely exist.
 - Explicit navigator actions or declared managed-session policies authorize
   mutation. Hooks, tmux metadata, screen text, agent shell commands, and
   same-user socket calls are observations only.
-- Provider identity used by a later explicit resume or fork must be
+- Provider identity used by a later explicit resume or native branch must be
   launch-correlated and corroborated; an untrusted observation cannot replace a
-  known binding.
+  known binding. Native branching remains provider-owned and rotates the
+  current Workstream tip only when exact observer evidence proves the change.
 - Every Runtime carries a generation and process-birth fingerprint so stale
   hooks and attachments cannot silently bind to a replacement process.
 - V1 exposes no Git mutation. Project registration is read-only discovery;
@@ -3001,7 +2946,7 @@ roadmap and version-specific decisions remain in
 | Checkpoint family | Durable outcome | Evidence |
 | --- | --- | --- |
 | D0-D7 | Core state, native Codex Runtime, Navigator, recovery, and operator beta | [Acceptance index](evidence/README.md#acceptance-records) |
-| D8 | Concrete Codex/OpenCode provider contract | [D8.1](evidence/acceptance/d8.1-multi-provider.md), [D8.2](evidence/acceptance/d8.2-opencode-fork-recovery.md) |
+| D8 | Concrete Codex/OpenCode provider contract | [D8.1](evidence/acceptance/d8.1-multi-provider.md), [D8.2](evidence/acceptance/d8.2-opencode-fork-recovery.md) (dated evidence) |
 | D9-D15 | Reliability, presentation, interaction, and terminal refinements | [Archived roadmap](roadmap-through-d18-design.md) |
 | D16 | Host-local clean break | [D16 acceptance](evidence/acceptance/d16-host-local.md) |
 | D17-D17.1 | Shell-first onboarding and correctness closure | [D17](evidence/acceptance/d17-shell-first.md), [D17.1](evidence/acceptance/d17.1-correctness-closure.md) |
@@ -3014,9 +2959,10 @@ roadmap and version-specific decisions remain in
 binding, and operation that needs it. Codex and OpenCode remain concrete
 adapters, not interchangeable protocol implementations. The provisional
 shell's native `codex` or `opencode` command selects the provider for a new
-Location; contextual `n` and Fork inherit the selected Workstream's exact
-provider and Location. There is no provider picker, default-provider setting,
-or fallback from one provider to another.
+Location; contextual `n` creates a separate blank Workstream at the selected
+Location. Native provider branching remains on the current Workstream and
+never creates a second WSNav card. There is no provider picker, default-provider
+setting, or fallback from one provider to another.
 
 Codex lifecycle identity comes from bounded passive hooks plus exact Runtime
 and App Server evidence. OpenCode uses its exact loopback Runtime handle and
@@ -3033,7 +2979,7 @@ observer is mutation authority.
 - [Spike 0005: native Codex two-pane terminal presentation](evidence/spikes/0005-codex-terminal-presentation.md)
 - [Spike 0006: scoped Codex observer profile](evidence/spikes/0006-codex-observer-profile.md)
 - [Spike 0007: ephemeral Codex metadata and naming](evidence/spikes/0007-codex-app-server-naming.md)
-- [Spike 0008: running-source settled-prefix fork](evidence/spikes/0008-codex-running-settled-fork.md)
+- [Spike 0008: running-source settled-prefix fork](evidence/spikes/0008-codex-running-settled-fork.md) (dated evidence)
 - [Spike 0015: OpenCode provider feasibility](evidence/spikes/0015-opencode-provider-feasibility.md)
 - [Spike 0016: OpenCode native Runtime contract](evidence/spikes/0016-opencode-runtime-contract.md)
 - [Spike 0017: OpenCode blank-session binding](evidence/spikes/0017-opencode-fresh-session.md)
@@ -3055,12 +3001,12 @@ observer is mutation authority.
   [Herdr assessment](https://github.com/byebyebryan/agent-switchboard-python-reference/blob/main/docs/herdr-assessment.md)
 
 The current Codex documentation confirms native `resume`, `/new`, `/clear`,
-and `/rename` flows; App Server `thread/read` and exact-turn `thread/fork`; plus
-lifecycle hook fields for session, turn, cwd, start source,
-prompt submission, and stop. The design uses those interfaces narrowly and
-treats installed behavioral spikes as the final capability authority. In
-particular, the documentation that `/new` starts a new chat does not establish
-an exact live-Runtime transition; [Spikes
+`/fork`, and `/rename` flows, the bounded App Server `thread/read` metadata
+surface, and lifecycle hook fields for session, turn, cwd, start source, prompt
+submission, and stop. The design uses those interfaces narrowly and treats
+installed behavioral spikes as the final capability authority. In particular,
+the documentation that `/new` starts a new chat does not establish an exact
+live-Runtime transition; [Spikes
 0011](evidence/spikes/0011-codex-native-new-rebinding.md),
 [0012](evidence/spikes/0012-codex-new-prompt-session-rotation.md), and
 [0013](evidence/spikes/0013-codex-new-thread-inventory.md) retain the

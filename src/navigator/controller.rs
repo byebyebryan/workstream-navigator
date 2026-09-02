@@ -29,7 +29,7 @@ use crate::{
         ObserverActivation, ObserverReadiness, ObserverReadinessEvidence,
         finalize_observer_trust_under_lease, observer_readiness, prepare_observer_activation,
     },
-    domain::{OperationId, ProviderKind, Revision, RuntimeId, WorkstreamId},
+    domain::{ProviderKind, Revision, RuntimeId, WorkstreamId},
     presentation::{AttachmentPhase, AttachmentPurpose, Presentation, PresentationError},
     provider_reconcile::ExpectedProviderExecutable,
     provisional::{
@@ -442,24 +442,6 @@ impl PendingObserverIntent {
                     expected_workstream_revision,
                     provider,
                 },
-                ManagedAction::Fork {
-                    source_workstream_id,
-                    expected_workstream_revision,
-                    provider,
-                } => Command::Fork {
-                    source_workstream_id,
-                    expected_workstream_revision,
-                    provider,
-                },
-                ManagedAction::RecoverOperation {
-                    operation_id,
-                    expected_operation_revision,
-                    provider,
-                } => Command::RecoverOperation {
-                    operation_id,
-                    expected_operation_revision,
-                    provider,
-                },
                 ManagedAction::Park {
                     workstream_id,
                     expected_workstream_revision,
@@ -709,46 +691,6 @@ fn execute_command(
             );
             false
         }
-        Command::Fork {
-            source_workstream_id,
-            expected_workstream_revision,
-            provider,
-        } => {
-            let action = ManagedAction::Fork {
-                source_workstream_id,
-                expected_workstream_revision,
-                provider,
-            };
-            execute_managed_action_or_request(
-                root,
-                navigator,
-                presentation,
-                provider,
-                action,
-                pending_observer,
-            );
-            false
-        }
-        Command::RecoverOperation {
-            operation_id,
-            expected_operation_revision,
-            provider,
-        } => {
-            let action = ManagedAction::RecoverOperation {
-                operation_id,
-                expected_operation_revision,
-                provider,
-            };
-            execute_managed_action_or_request(
-                root,
-                navigator,
-                presentation,
-                provider,
-                action,
-                pending_observer,
-            );
-            false
-        }
         Command::AcceptObserverSetup { kind } => {
             accept_observer_setup(root, navigator, presentation, kind, pending_observer);
             false
@@ -798,16 +740,6 @@ pub(crate) enum ManagedAction {
     AcknowledgeResult {
         workstream_id: WorkstreamId,
         expected_attention_revision: Revision,
-    },
-    Fork {
-        source_workstream_id: WorkstreamId,
-        expected_workstream_revision: Revision,
-        provider: ProviderKind,
-    },
-    RecoverOperation {
-        operation_id: OperationId,
-        expected_operation_revision: Revision,
-        provider: ProviderKind,
     },
 }
 
@@ -859,10 +791,9 @@ fn prepare_observer_or_request(
 ) -> Option<PendingObserverIntent> {
     let provider = match &intent {
         PendingObserverIntent::Managed(action) => match action {
-            ManagedAction::Start { provider, .. }
-            | ManagedAction::Recover { provider, .. }
-            | ManagedAction::Fork { provider, .. }
-            | ManagedAction::RecoverOperation { provider, .. } => *provider,
+            ManagedAction::Start { provider, .. } | ManagedAction::Recover { provider, .. } => {
+                *provider
+            }
             ManagedAction::Park { .. }
             | ManagedAction::Archive { .. }
             | ManagedAction::Restore { .. }
@@ -1447,52 +1378,6 @@ pub(crate) fn apply_managed_action(
                 .acknowledge_result_attention(workstream_id, expected_attention_revision)
                 .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             Ok(None)
-        }
-        ManagedAction::Fork {
-            source_workstream_id,
-            expected_workstream_revision,
-            provider,
-        } => {
-            require_active_workstream(
-                &snapshot,
-                source_workstream_id,
-                expected_workstream_revision,
-                Some(provider),
-            )?;
-            let request_key = uuid::Uuid::new_v4().simple().to_string();
-            let workstream_id = crate::actions::fork_workstream(
-                root,
-                &mut registry,
-                source_workstream_id,
-                Some(expected_workstream_revision),
-                request_key,
-            )
-            .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
-            Ok(Some(workstream_id))
-        }
-        ManagedAction::RecoverOperation {
-            operation_id,
-            expected_operation_revision,
-            provider,
-        } => {
-            snapshot
-                .unresolved_operations
-                .iter()
-                .find(|operation| {
-                    operation.operation_id == operation_id
-                        && operation.revision == expected_operation_revision
-                        && operation.provider == provider
-                        && operation.kind == crate::domain::OperationKind::Fork
-                })
-                .ok_or(NavigatorError::ManagedActionUnavailable)?;
-            let workstream_id = crate::actions::recover_managed_operation(
-                root,
-                &mut registry,
-                operation_id,
-                Some(expected_operation_revision),
-            )
-            .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
-            Ok(Some(workstream_id))
         }
     }
 }

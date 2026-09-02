@@ -1,4 +1,4 @@
-use super::{Error, FromStr, OperationId, PathBuf, Revision, StateError, WorkstreamId, env};
+use super::{Error, FromStr, PathBuf, Revision, StateError, WorkstreamId, env};
 
 pub(super) fn parse_workstream(value: &str) -> Result<WorkstreamId, AppError> {
     WorkstreamId::from_str(value).map_err(AppError::InvalidWorkstreamId)
@@ -8,10 +8,6 @@ pub(super) fn parse_provider(value: &str) -> Result<crate::domain::ProviderKind,
     value
         .parse()
         .map_err(|error| AppError::State(StateError::Domain(error)))
-}
-
-pub(super) fn parse_operation(value: &str) -> Result<OperationId, AppError> {
-    OperationId::from_str(value).map_err(AppError::InvalidOperationId)
 }
 
 pub(super) fn parse_revision(value: i64) -> Result<Revision, AppError> {
@@ -33,8 +29,6 @@ pub(crate) enum AppError {
     AttachFailed,
     #[error("invalid workstream ID")]
     InvalidWorkstreamId(uuid::Error),
-    #[error("invalid operation ID")]
-    InvalidOperationId(uuid::Error),
     #[error("workstream revision is invalid")]
     InvalidWorkstreamRevision,
     #[error("invalid runtime ID")]

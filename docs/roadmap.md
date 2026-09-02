@@ -2,14 +2,14 @@
 
 Date: 2026-08-31
 
-Status: D0-D19 are complete. D19 checkpoint `a0ec38b` implements the complete
-tmux-derived navigation contract. The current post-rename startup-ordering and
-reconciliation-guidance refinement passes its local/disposable repository and
-byte-identical installation gates. It adds no state epoch or provider lifecycle
-effect. No remote-CI or live-provider claim is transferred to D19. D18
-checkpoint `c961c7e` remains the latest accepted artifact with separately
-authorized reset, native-trust, and disposable Codex/OpenCode lifecycle
-evidence.
+Status: D0-D19 are complete. D20 is active and retires WSNav-managed
+conversation forking so native providers remain the sole conversation-branch
+authority. Provider-owned naming refinement `b3a58bb` is the clean starting
+point for this checkpoint. D19 checkpoint `a0ec38b` remains the completed
+tmux-derived navigation contract. No remote-CI or live-provider claim is
+transferred to D20. D18 checkpoint `c961c7e` remains the latest accepted
+artifact with separately authorized reset, native-trust, and disposable
+Codex/OpenCode lifecycle evidence.
 
 `docs/design.md` is the product and architecture contract. This file owns
 delivery order, implementation status, and exit gates. The complete prior
@@ -28,6 +28,51 @@ roadmap is preserved as
   ambiguity handling.
 - D18 is a clean state break. Schemas 12 through 14 are refusal evidence, not
   migration or adoption inputs.
+
+## Active checkpoint: D20 native-owned conversation branching
+
+Implementation status: active; not yet accepted or installed.
+
+D20 removes every ordinary and break-glass route by which WSNav creates,
+reconciles, or recovers a provider conversation Fork. A provider-native
+conversation cutover remains inside the same durable Workstream and rotates
+only its exact current provider binding when ordinary observer evidence proves
+the new native session. `n` remains the explicit route to a separate blank
+Workstream at the selected Location.
+
+Scope:
+
+- remove Navigator `f`/Fork and `r`/Fork-recovery controls, Fork operation
+  rows, public `fork-workstream` and `recover-operation`, and their controller
+  actions;
+- remove Codex `thread/fork`/fork-reconciliation and OpenCode fork mutation,
+  plus the Fork-specific action and durable-operation state machines;
+- keep the compound-operation journal required by onboarding and OpenCode
+  blank-session Start, but expose no provider-conversation mutation through it;
+- retain historical `WorkstreamOrigin::Fork` records and their ordinary
+  attach, park, archive, restore, and native-resume behavior without rewriting
+  or deleting provider history;
+- fail closed with explicit typed diagnosis when schema-15 state contains a
+  previously attempted unresolved Fork effect; never discard, retry, infer, or
+  adopt it;
+- keep completed historical Fork journal rows inert, and make no state epoch,
+  migration, reset, Git, worktree, prompt, transcript, provider-input, or
+  private-tmux topology change; and
+- reconcile current product documentation and generated CLI acceptance while
+  preserving dated evidence and prior checkpoint records as historical facts.
+
+Exit gate:
+
+- focused tests prove the removed CLI/key/action/provider surfaces are absent,
+  native same-Workstream session rotation remains exact, historical Fork-origin
+  Workstreams remain readable, and unresolved legacy Fork effects refuse
+  without mutation;
+- `scripts/check` passes against disposable state roots and private tmux
+  sockets;
+- the installed state root is inspected with the previously accepted binary
+  before replacement and contains no unresolved Fork operation; and
+- the locked release is built, atomically installed, and verified by version
+  and executable hash. Live provider interaction remains separately authorized.
 
 ## Completed checkpoint: D19 tmux-derived presentation navigation
 

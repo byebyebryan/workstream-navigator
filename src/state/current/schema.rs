@@ -61,6 +61,7 @@ pub(super) fn validate_schema15(connection: &Connection) -> Result<(), StateErro
             "provisional_lock_inode",
         ],
     )?;
+    reject_unresolved_retired_fork_effect(connection)?;
     let metadata: Option<BootstrapOperationalMetadata> = connection
         .query_row(
             "SELECT bootstrap_host_id, bootstrap_generation,
@@ -98,6 +99,32 @@ pub(super) fn validate_schema15(connection: &Connection) -> Result<(), StateErro
     validate_onboarding_operation_columns(connection)?;
     validate_schema15_onboarding_exec_targets(connection)?;
     validate_foreign_keys(connection)
+}
+
+/// Schema 15 can still contain Fork journal rows written by an accepted
+/// build, but no current code may interpret or retry an unresolved provider
+/// effect. Refuse the whole open before any state or provider action can
+/// observe that row; completed and failed historical rows remain inert.
+fn reject_unresolved_retired_fork_effect(connection: &Connection) -> Result<(), StateError> {
+    let unresolved: Option<String> = connection
+        .query_row(
+            "SELECT operation_id
+             FROM compound_operations
+             WHERE kind = 'fork'
+               AND phase IN ('external_effect_started',
+                             'awaiting_reconciliation',
+                             'recovery_required')
+             ORDER BY operation_id
+             LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?;
+    if unresolved.is_some() {
+        return Err(StateError::RetiredForkRecoveryRequired);
+    }
+    Ok(())
 }
 
 pub(super) fn validate_schema15_catalog(connection: &Connection) -> Result<(), StateError> {

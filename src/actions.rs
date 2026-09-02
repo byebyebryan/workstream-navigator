@@ -17,7 +17,7 @@ mod tests;
 
 pub use attachment::preflight_attachment;
 pub(crate) use attachment::preflight_attachment_read_only;
-pub use creation::{fork_workstream, recover_managed_operation, start_independent_workstream};
+pub use creation::start_independent_workstream;
 pub use lifecycle::{archive, await_deliberate_park, park, restore};
 pub use model::{ActionError, StartOutcome, reconcile_observer_trust};
 pub use providers::{codex_launch_program, codex_recovery_program};
@@ -37,10 +37,10 @@ pub(super) use thiserror::Error;
 
 pub(super) use crate::{
     domain::{
-        OperationId, OperationKind, OperationPhase, ProviderKind, ProviderSessionId, Revision,
-        RuntimeId, SystemClock, WorkstreamId, WorkstreamLifecycle,
+        ProviderKind, ProviderSessionId, Revision, RuntimeId, SystemClock, WorkstreamId,
+        WorkstreamLifecycle,
     },
-    provider::codex::app_server::{AppServerError, EphemeralAppServer, ForkReconciliation},
+    provider::codex::app_server::AppServerError,
     provider::codex::profile::{ObserverProfile, ProfileError},
     provider::opencode::{
         self, OpenCodeClient, OpenCodeEndpoint, OpenCodeError, endpoint_owned_by_process,

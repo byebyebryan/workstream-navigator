@@ -170,20 +170,10 @@ pub enum ActionError {
     WorkstreamAlreadyArchived,
     #[error("workstream revision changed; refresh before acting")]
     WorkstreamRevisionConflict,
-    #[error("managed operation revision changed; refresh before acting")]
-    OperationRevisionConflict,
-    #[error("managed Workstream fork requires provider recovery")]
-    ForkRecoveryRequired,
-    #[error(
-        "OpenCode fork external effect is unknown (external_effect_unknown); no retry was attempted; inspect or clean up the unmanaged provider session natively, then issue a new explicit Fork"
-    )]
-    OpenCodeForkExternalEffectUnknown,
     #[error(
         "OpenCode session creation external effect is unknown; no retry was attempted; this Workstream requires explicit cleanup"
     )]
     OpenCodeSessionCreationExternalEffectUnknown,
-    #[error("fork source is no longer the exact live settled Workstream")]
-    ForkSourceUnavailable,
     #[error(transparent)]
     Profile(#[from] ProfileError),
     #[error(transparent)]

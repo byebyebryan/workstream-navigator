@@ -6,10 +6,7 @@ use super::{
         presentation_mouse_validate, provider_attach, provider_wait, runtime_launch,
     },
     local::observe_hook,
-    model::{
-        AppError, default_state_root, parse_operation, parse_provider, parse_revision,
-        parse_workstream,
-    },
+    model::{AppError, default_state_root, parse_provider, parse_revision, parse_workstream},
     observer::{ObserverReadiness, doctor, observer_readiness, remove_observer},
 };
 use std::io::Write as _;
@@ -243,8 +240,7 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
         }
         Commands::Doctor => exceptional_observer(root, false),
         Commands::RemoveObserver => exceptional_observer(root, true),
-        Commands::ForkWorkstream { .. }
-        | Commands::Start { .. }
+        Commands::Start { .. }
         | Commands::Recover { .. }
         | Commands::Attach { .. }
         | Commands::Park { .. }
@@ -252,7 +248,6 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
         | Commands::Restore { .. }
         | Commands::Status { .. }
         | Commands::Operations
-        | Commands::RecoverOperation { .. }
         | Commands::Acknowledge { .. } => execute_local_command(root, command),
         Commands::Navigator
         | Commands::NavigatorPane { .. }
@@ -290,23 +285,6 @@ fn execute_local_command(root: &StateRoot, command: Commands) -> Result<(), AppE
     let snapshot =
         crate::snapshot::read_snapshot(root).map_err(|_| AppError::AttachmentUnavailable)?;
     match command {
-        Commands::ForkWorkstream {
-            source_workstream_id,
-        } => {
-            let source_workstream_id = parse_workstream(&source_workstream_id)?;
-            let source = workstream(&snapshot, source_workstream_id)?;
-            require_direct_codex_observer_ready(root, source.provider)?;
-            apply_managed_action(
-                root,
-                ManagedAction::Fork {
-                    source_workstream_id,
-                    expected_workstream_revision: source.revision,
-                    provider: source.provider,
-                },
-            )
-            .map_err(AppError::Navigator)?;
-            Ok(())
-        }
         Commands::Start { workstream_id } => {
             let workstream_id = parse_workstream(&workstream_id)?;
             let workstream = workstream(&snapshot, workstream_id)?;
@@ -420,25 +398,6 @@ fn execute_local_command(root: &StateRoot, command: Commands) -> Result<(), AppE
                     operation.revision.value(),
                 );
             }
-            Ok(())
-        }
-        Commands::RecoverOperation { operation_id } => {
-            let operation_id = parse_operation(&operation_id)?;
-            let operation = snapshot
-                .unresolved_operations
-                .iter()
-                .find(|operation| operation.operation_id == operation_id)
-                .ok_or(AppError::AttachmentUnavailable)?;
-            require_direct_codex_observer_ready(root, operation.provider)?;
-            apply_managed_action(
-                root,
-                ManagedAction::RecoverOperation {
-                    operation_id,
-                    expected_operation_revision: operation.revision,
-                    provider: operation.provider,
-                },
-            )
-            .map_err(AppError::Navigator)?;
             Ok(())
         }
         Commands::Acknowledge {

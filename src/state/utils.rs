@@ -2,7 +2,6 @@ use std::{fs, path::Path};
 
 use crate::domain::{
     OperationKind, OperationPhase, ProviderKind, RuntimeStatus, WorkstreamLifecycle,
-    WorkstreamOrigin,
 };
 use crate::provider::names::NameState;
 
@@ -18,7 +17,6 @@ pub(in crate::state) const fn operation_kind_text(kind: OperationKind) -> &'stat
     match kind {
         OperationKind::Onboard => "onboard",
         OperationKind::Start => "start",
-        OperationKind::Fork => "fork",
     }
 }
 
@@ -26,16 +24,7 @@ pub(in crate::state) fn operation_kind_from_text(value: &str) -> Result<Operatio
     match value {
         "onboard" => Ok(OperationKind::Onboard),
         "start" => Ok(OperationKind::Start),
-        "fork" => Ok(OperationKind::Fork),
         _ => Err(StateError::InvalidPersistedValue(value.to_owned())),
-    }
-}
-
-pub(in crate::state) const fn workstream_origin_text(origin: WorkstreamOrigin) -> &'static str {
-    match origin {
-        WorkstreamOrigin::External => "external",
-        WorkstreamOrigin::Independent => "independent",
-        WorkstreamOrigin::Fork => "fork",
     }
 }
 
@@ -94,10 +83,6 @@ pub(in crate::state) fn provider_kind_from_text(value: &str) -> Result<ProviderK
     value
         .parse::<ProviderKind>()
         .map_err(|_| StateError::InvalidPersistedValue(format!("provider kind {value}")))
-}
-
-pub(in crate::state) const fn default_provider_kind() -> ProviderKind {
-    ProviderKind::Codex
 }
 
 pub(in crate::state) fn workstream_lifecycle_from_text(

@@ -68,9 +68,11 @@ to reattach.
 
 The shell-first navigator has two direct pages: Workstreams and Archived. `.`
 opens Archived; `Esc` returns to Workstreams; `Left` and `Right` do not cycle
-views. Workstreams keeps `Enter`, `n`, `f`, `p`, `x`, `a`, and `?`; Archived
-uses `u` to restore without starting or attaching a provider. The installed
-`wsnav --help` output is the CLI reference for that exact binary.
+views. Workstreams keeps `Enter`, `n`, `p`, `x`, `a`, and `?`; `n` creates a
+separate blank Workstream at the selected Location, while native provider
+branching remains in the current Workstream. Archived uses `u` to restore
+without starting or attaching a provider. The installed `wsnav --help` output
+is the CLI reference for that exact binary.
 
 Tmux alone owns pane focus. `Ctrl+b Left`/`Right` and deliberate primary-button
 press are the only ordinary focus transitions; Navigator activation and
@@ -257,7 +259,7 @@ Runtime attachment/pane or detach through ordinary card switching, but no new
 attachment to that Runtime is allowed. Selecting/materializing the fresh derived
 singleton card attaches only its separate provisional server under
 `provisional.lock` and grants no authority over the unproven Runtime. Park,
-Resume, Fork, contextual `n`, archive, recovery/start retry, and cleanup
+Resume, contextual `n`, archive, recovery/start retry, and cleanup
 actions for that Runtime refuse or wait with bounded
 `onboarding-in-progress` guidance. Passive snapshot/probe may show
 `starting`/`onboarding` and reconcile, but never adopts the helper/preparation
@@ -299,10 +301,11 @@ shell's current cwd and registers it with the new Workstream; only this
 broker-time check creates ProjectLocation/launch authority. Linked worktrees
 remain distinct Locations. WSNav will not create, switch, remove, or follow
 worktrees, and the Workstream stays pinned to its launch root even if the
-provider later works elsewhere. `n` on a selected managed Workstream remains
-the direct same-provider, same-Location path for another blank session; a
-different provider or location begins through the shell card, while `f` remains
-a conversation Fork. WSNav does not persist arbitrary cwd history.
+provider later works elsewhere. `n` on a selected managed Workstream creates
+a separate blank Workstream at that exact Location; a different provider or
+location begins through the shell card. Native provider conversation branching
+rotates the current tip on the same Workstream and never creates a second card.
+WSNav does not persist arbitrary cwd history.
 
 Card and server state key off Runtime ownership, not provider success. A known
 helper `execve` error proves only absence of the final provider TUI exec;

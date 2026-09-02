@@ -234,44 +234,6 @@ impl OpenCodeClient {
             .map_err(|_| OpenCodeError::MalformedResponse)
     }
 
-    /// Forks one exact settled root session at the supplied assistant message
-    /// boundary.  The provider call is intentionally kept to the narrow
-    /// endpoint contract: only the destination session ID is returned.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the source/session identity, settled message ID,
-    /// HTTP response, or bounded destination payload is not exact.
-    pub fn fork_session(
-        &self,
-        source: &ProviderSessionId,
-        settled_message_id: &str,
-    ) -> Result<ProviderSessionId, OpenCodeError> {
-        if source.provider() != crate::domain::ProviderKind::OpenCode {
-            return Err(OpenCodeError::InvalidRequest);
-        }
-        let source_id = url_segment(source.native_id())?;
-        let settled_message_id = bounded_metadata(settled_message_id)?;
-        let body = serde_json::to_vec(&serde_json::json!({
-            "messageID": settled_message_id,
-        }))
-        .map_err(|_| OpenCodeError::InvalidRequest)?;
-        let path = format!("/session/{source_id}/fork");
-        let response = self.json_request("POST", &path, Some(&body))?;
-        let value: Value =
-            serde_json::from_slice(&response).map_err(|_| OpenCodeError::MalformedResponse)?;
-        let destination = value
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or(OpenCodeError::MalformedResponse)?;
-        let destination = bounded_url_segment(destination)?;
-        if destination == source.native_id() {
-            return Err(OpenCodeError::SessionIdentityMismatch);
-        }
-        ProviderSessionId::new(crate::domain::ProviderKind::OpenCode, destination)
-            .map_err(|_| OpenCodeError::MalformedResponse)
-    }
-
     /// Verifies that a newly-created session has no messages.  The response is
     /// discarded immediately and is never persisted or returned.
     ///
@@ -983,20 +945,6 @@ fn url_segment(value: &str) -> Result<String, OpenCodeError> {
     Ok(value.to_owned())
 }
 
-fn bounded_url_segment(value: &str) -> Result<String, OpenCodeError> {
-    if value.len() > 256 {
-        return Err(OpenCodeError::InvalidRequest);
-    }
-    url_segment(value)
-}
-
-fn bounded_metadata(value: &str) -> Result<String, OpenCodeError> {
-    if value.is_empty() || value.len() > 256 || value.contains(['\n', '\r']) {
-        return Err(OpenCodeError::InvalidRequest);
-    }
-    Ok(value.to_owned())
-}
-
 fn bounded_health_version(value: &str) -> Result<String, OpenCodeError> {
     if value.is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
         return Err(OpenCodeError::MalformedResponse);
@@ -1635,92 +1583,6 @@ mod tests {
             assert!(client.health().is_err());
             worker.join().unwrap();
         }
-    }
-
-    #[test]
-    fn fork_session_posts_exact_message_boundary_and_returns_distinct_id() {
-        let listener = TcpListener::bind((LOOPBACK_HOST, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let worker = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let count = stream.read(&mut chunk).unwrap();
-                request.extend_from_slice(&chunk[..count]);
-            }
-            let headers_end = request
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-                .unwrap()
-                + 4;
-            let body_len = String::from_utf8_lossy(&request)
-                .lines()
-                .find_map(|line| line.strip_prefix("Content-Length: "))
-                .unwrap()
-                .parse::<usize>()
-                .unwrap();
-            while request.len() < headers_end + body_len {
-                let count = stream.read(&mut chunk).unwrap();
-                request.extend_from_slice(&chunk[..count]);
-            }
-            let request_text = String::from_utf8_lossy(&request);
-            assert!(request_text.starts_with("POST /session/root/fork HTTP/1.1"));
-            let body = &request[headers_end..headers_end + body_len];
-            assert_eq!(
-                serde_json::from_slice::<Value>(body).unwrap(),
-                serde_json::json!({"messageID": "settled-message"})
-            );
-            let response_body = br#"{"id":"destination"}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                response_body.len()
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-            stream.write_all(response_body).unwrap();
-        });
-        let client = OpenCodeClient::new(OpenCodeEndpoint::loopback(port).unwrap());
-        let source = ProviderSessionId::new(crate::domain::ProviderKind::OpenCode, "root").unwrap();
-        let destination = client.fork_session(&source, "settled-message").unwrap();
-        assert_eq!(
-            destination.provider(),
-            crate::domain::ProviderKind::OpenCode
-        );
-        assert_eq!(destination.native_id(), "destination");
-        worker.join().unwrap();
-    }
-
-    #[test]
-    fn fork_session_rejects_same_destination_and_unsafe_boundary() {
-        let listener = TcpListener::bind((LOOPBACK_HOST, 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let worker = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut request = Vec::new();
-            let mut chunk = [0_u8; 1024];
-            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
-                let count = stream.read(&mut chunk).unwrap();
-                request.extend_from_slice(&chunk[..count]);
-            }
-            let response_body = br#"{"id":"root"}"#;
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                response_body.len()
-            );
-            stream.write_all(response.as_bytes()).unwrap();
-            stream.write_all(response_body).unwrap();
-        });
-        let client = OpenCodeClient::new(OpenCodeEndpoint::loopback(port).unwrap());
-        let source = ProviderSessionId::new(crate::domain::ProviderKind::OpenCode, "root").unwrap();
-        assert!(matches!(
-            client.fork_session(&source, "settled\nmessage"),
-            Err(OpenCodeError::InvalidRequest)
-        ));
-        assert!(matches!(
-            client.fork_session(&source, "settled-message").unwrap_err(),
-            OpenCodeError::SessionIdentityMismatch
-        ));
-        worker.join().unwrap();
     }
 
     #[test]

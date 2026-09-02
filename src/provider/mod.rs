@@ -59,8 +59,6 @@ pub struct ProviderCapability {
     pub exact_resume: bool,
     pub observe: bool,
     pub metadata_read: bool,
-    pub rename: bool,
-    pub fork: bool,
 }
 
 impl ProviderCapability {
@@ -97,8 +95,6 @@ pub fn default_provider_capabilities() -> Vec<ProviderCapability> {
             exact_resume: false,
             observe: false,
             metadata_read: false,
-            rename: false,
-            fork: false,
         })
         .collect()
 }
@@ -197,8 +193,6 @@ pub fn discover_capabilities_with_probe(
             exact_resume: true,
             observe: true,
             metadata_read: true,
-            rename: false,
-            fork: true,
         },
         opencode::InstallationProbe::Available => capability(
             ProviderKind::OpenCode,
@@ -299,8 +293,6 @@ fn codex_capability(
             exact_resume: true,
             observe: true,
             metadata_read: true,
-            rename: true,
-            fork: true,
         }
     })
 }
@@ -318,8 +310,6 @@ fn capability(
         exact_resume: false,
         observe: false,
         metadata_read: false,
-        rename: false,
-        fork: false,
     }
 }
 
@@ -444,8 +434,6 @@ fn select_provider(
                 exact_resume: false,
                 observe: false,
                 metadata_read: false,
-                rename: false,
-                fork: false,
             });
         return if capability.is_new_eligible() {
             Ok(kind)
@@ -474,10 +462,10 @@ fn capability_set_well_formed(capabilities: &[ProviderCapability]) -> bool {
                 .count()
                 == 1
         })
-        && capabilities.iter().all(capability_is_well_formed)
+        && capabilities.iter().copied().all(capability_is_well_formed)
 }
 
-fn capability_is_well_formed(capability: &ProviderCapability) -> bool {
+fn capability_is_well_formed(capability: ProviderCapability) -> bool {
     match (capability.status, capability.reason) {
         (ProviderCapabilityStatus::Available, ProviderCapabilityReason::None)
         | (
@@ -495,9 +483,7 @@ fn capability_is_well_formed(capability: &ProviderCapability) -> bool {
         || !(capability.fresh_launch
             || capability.exact_resume
             || capability.observe
-            || capability.metadata_read
-            || capability.rename
-            || capability.fork)
+            || capability.metadata_read)
 }
 
 /// Re-probes one provider immediately before a durable New/registration
@@ -511,43 +497,6 @@ pub fn require_new_eligible(
     kind: ProviderKind,
 ) -> Result<(), ProviderReadinessError> {
     require_new_eligible_from_capabilities(registry, kind, discover_capabilities(registry))
-}
-
-/// Requires the selected host/provider pair to expose exact Fork support.
-/// Fork capability is distinct from New eligibility, and the authoritative
-/// host is re-probed immediately before the durable provider boundary.
-///
-/// # Errors
-///
-/// Returns a typed readiness error when discovery is stale, unavailable, or
-/// does not advertise Fork for the exact provider.
-pub fn require_fork_eligible(
-    registry: &HostRegistry,
-    kind: ProviderKind,
-) -> Result<(), ProviderReadinessError> {
-    let capability = discover_capabilities(registry)
-        .ok()
-        .and_then(|capabilities| {
-            capabilities
-                .into_iter()
-                .find(|capability| capability.kind == kind)
-        })
-        .unwrap_or_else(|| {
-            capability(
-                kind,
-                ProviderCapabilityStatus::Unknown,
-                ProviderCapabilityReason::ProbeFailed,
-            )
-        });
-    if matches!(capability.status, ProviderCapabilityStatus::Available) && capability.fork {
-        Ok(())
-    } else {
-        Err(ProviderReadinessError {
-            kind: capability.kind,
-            status: capability.status,
-            reason: capability.reason,
-        })
-    }
 }
 
 fn require_new_eligible_from_capabilities(
@@ -639,8 +588,6 @@ mod tests {
             exact_resume: true,
             observe: true,
             metadata_read: true,
-            rename: true,
-            fork: true,
         }
     }
 
@@ -891,8 +838,6 @@ mod tests {
                 exact_resume: false,
                 observe: false,
                 metadata_read: false,
-                rename: false,
-                fork: false,
             }
         );
         assert_eq!(
@@ -923,8 +868,6 @@ mod tests {
         assert!(capabilities[1].exact_resume);
         assert!(capabilities[1].observe);
         assert!(capabilities[1].metadata_read);
-        assert!(!capabilities[1].rename);
-        assert!(capabilities[1].fork);
     }
 
     #[test]

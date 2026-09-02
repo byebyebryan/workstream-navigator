@@ -10,10 +10,9 @@ pub enum NameState {
 
 /// Context retained only for presentation while the current tip lacks a name.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum NameContext<'a> {
+pub enum NameContext {
     Normal,
     Starting,
-    Fork { source_native_name: Option<&'a str> },
 }
 
 /// Derived display text and provenance; neither is a persisted user-authored label.
@@ -26,7 +25,6 @@ pub struct EffectiveName {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EffectiveNameSource {
     Native,
-    ForkFallback,
     CachedStale,
     Synthetic,
 }
@@ -37,7 +35,7 @@ pub fn resolve_name(
     state: NameState,
     native_name: Option<&str>,
     cached_name: Option<&str>,
-    context: NameContext<'_>,
+    context: NameContext,
 ) -> EffectiveName {
     if state == NameState::Named
         && let Some(name) = native_name.filter(|name| !name.trim().is_empty())
@@ -59,19 +57,6 @@ pub fn resolve_name(
         NameContext::Starting => EffectiveName {
             text: "starting".to_owned(),
             source: EffectiveNameSource::Synthetic,
-        },
-        NameContext::Fork {
-            source_native_name: Some(source),
-            ..
-        } => EffectiveName {
-            text: format!("{source} · fork"),
-            source: EffectiveNameSource::ForkFallback,
-        },
-        NameContext::Fork {
-            source_native_name: None,
-        } => EffectiveName {
-            text: "forked workstream".to_owned(),
-            source: EffectiveNameSource::ForkFallback,
         },
         NameContext::Normal if state == NameState::Unavailable => EffectiveName {
             text: "name unavailable".to_owned(),
@@ -96,22 +81,6 @@ mod tests {
                 text: "Native".to_owned(),
                 source: EffectiveNameSource::Native
             }
-        );
-    }
-
-    #[test]
-    fn blank_fork_uses_context_not_a_shadow_label() {
-        assert_eq!(
-            resolve_name(
-                NameState::KnownEmpty,
-                None,
-                None,
-                NameContext::Fork {
-                    source_native_name: None,
-                },
-            )
-            .text,
-            "forked workstream"
         );
     }
 

@@ -40,8 +40,10 @@ and attach to the same Runtime.
 - A host-local catalog of registered Git Project Locations and Workstreams.
 - Project grouping by exact, credential-free Git-origin evidence on that
   host; it never groups records across hosts.
-- Starting, switching, parking, exact resume, same-provider fork, archive,
-  restore, and bounded lost-Runtime recovery.
+- Starting, switching, parking, exact resume, archive, restore, and bounded
+  lost-Runtime recovery.
+- Provider-native conversation branching remains inside the same Workstream;
+  observer evidence rotates its exact current conversation binding and name.
 - A contextual, read-only observer-readiness check for provider actions that
   require it.
 - One private tmux server per live Runtime. WSNav never uses or changes the
@@ -61,7 +63,7 @@ The Navigator has two direct pages. Page selection is process-local and is not p
 
 | Page | Purpose and direct controls |
 | --- | --- |
-| **Workstreams** | Default page with one pinned **Shell** card plus active Workstreams grouped by Project. `Enter` opens the selected shell or managed session; on a managed Workstream, `n` starts a same-provider session at its exact Location, `f` forks, `p` parks, `x` archives, `a` clears its unseen-result indicator, `r` recovers an unresolved operation, and `?` opens page help. |
+| **Workstreams** | Default page with one pinned **Shell** card plus active Workstreams grouped by Project. `Enter` opens the selected shell or managed session; on a managed Workstream, `n` creates a separate blank Workstream at its exact Location, `p` parks, `x` archives, `a` clears its unseen-result indicator, and `?` opens page help. Native provider branching stays within the current Workstream. |
 | **Archived** | Project-grouped archived Workstreams. `u` restores the selected Workstream and returns to Workstreams without launching or attaching a provider. |
 
 `.` opens or closes Archived; `Esc` returns to Workstreams. The compact footer
@@ -110,7 +112,7 @@ mode. Startup detects readiness read-only. Before a provisional shell can
 reserve a Codex launch, its process-local wrapper asks for explicit consent and
 opens native review; the original bounded argv remains only in shell memory and
 is retried only after exact readiness. If an existing managed Codex Start,
-Resume, Fork, or recovery action needs an unready observer, WSNav captures that
+Resume, or recovery action needs an unready observer, WSNav captures that
 exact intent and its revisions, then offers the same contextual review in the
 right pane.
 

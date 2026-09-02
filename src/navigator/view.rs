@@ -17,10 +17,10 @@ use ratatui::{
 
 use crate::{
     domain::{
-        Clock, OperationId, OperationKind, OperationPhase, ProviderKind, Revision, RuntimeId,
-        RuntimeStatus, SystemClock, WorkstreamId, WorkstreamLifecycle,
+        Clock, ProviderKind, Revision, RuntimeId, RuntimeStatus, SystemClock, WorkstreamId,
+        WorkstreamLifecycle,
     },
-    snapshot::{OnboardingStatus, OperationSnapshot, Snapshot, WorkstreamSnapshot},
+    snapshot::{OnboardingStatus, Snapshot, WorkstreamSnapshot},
 };
 
 /// The only ordinary Navigator pages.
@@ -63,7 +63,6 @@ impl Page {
 pub(crate) enum RowId {
     ProvisionalShell,
     Workstream(WorkstreamId),
-    Operation(OperationId),
 }
 
 /// One rendered Workstreams row. Project headings are context only and can
@@ -73,7 +72,6 @@ pub(crate) enum Row {
     ProvisionalShell { location: ShellLocation },
     ProjectHeader { display_name: String },
     Workstream(WorkstreamSnapshot),
-    Operation(OperationSnapshot),
 }
 
 /// The bounded setup variants that can be shown in a contextual readiness
@@ -92,7 +90,6 @@ impl Row {
             Self::ProvisionalShell { .. } => Some(RowId::ProvisionalShell),
             Self::ProjectHeader { .. } => None,
             Self::Workstream(workstream) => Some(RowId::Workstream(workstream.workstream_id)),
-            Self::Operation(operation) => Some(RowId::Operation(operation.operation_id)),
         }
     }
 
@@ -100,7 +97,7 @@ impl Row {
     pub(crate) fn render_height(&self) -> usize {
         match self {
             Self::ProjectHeader { .. } => 1,
-            Self::ProvisionalShell { .. } | Self::Workstream(_) | Self::Operation(_) => 2,
+            Self::ProvisionalShell { .. } | Self::Workstream(_) => 2,
         }
     }
 }
@@ -149,16 +146,6 @@ pub(crate) enum Command {
     AcknowledgeResult {
         workstream_id: WorkstreamId,
         expected_attention_revision: Revision,
-    },
-    Fork {
-        source_workstream_id: WorkstreamId,
-        expected_workstream_revision: Revision,
-        provider: ProviderKind,
-    },
-    RecoverOperation {
-        operation_id: OperationId,
-        expected_operation_revision: Revision,
-        provider: ProviderKind,
     },
     /// Opens the contextual setup guide before a Codex action can proceed.
     /// The guide carries no provider argv or profile path.
@@ -506,12 +493,10 @@ impl Model {
             }
             KeyCode::Enter => self.activate_selected(),
             KeyCode::Char('n') => self.new_from_selected(),
-            KeyCode::Char('f') => self.fork_selected(),
             KeyCode::Char('p') => self.park_selected(),
             KeyCode::Char('x') => self.archive_selected(),
             KeyCode::Char('u') => self.restore_selected(),
             KeyCode::Char('a') => self.acknowledge_selected(),
-            KeyCode::Char('r') => self.recover_selected_operation(),
             _ => Command::None,
         }
     }
@@ -621,29 +606,6 @@ impl Model {
         }
     }
 
-    fn fork_selected(&self) -> Command {
-        let Some(RowId::Workstream(workstream_id)) = self.selected else {
-            return Command::None;
-        };
-        let Some(workstream) = self.selected_workstream(workstream_id) else {
-            return Command::None;
-        };
-        match workstream.onboarding {
-            Some(OnboardingStatus::ActionFenced) => {
-                Command::ShowGuidance(ONBOARDING_IN_PROGRESS_GUIDANCE)
-            }
-            Some(OnboardingStatus::RecoveryRequired) => {
-                Command::ShowGuidance(ONBOARDING_RECOVERY_GUIDANCE)
-            }
-            None if !workstream.archived => Command::Fork {
-                source_workstream_id: workstream_id,
-                expected_workstream_revision: workstream.revision,
-                provider: workstream.provider,
-            },
-            None => Command::None,
-        }
-    }
-
     fn park_selected(&self) -> Command {
         let Some(RowId::Workstream(workstream_id)) = self.selected else {
             return Command::None;
@@ -722,21 +684,6 @@ impl Model {
             })
     }
 
-    fn recover_selected_operation(&self) -> Command {
-        let Some(RowId::Operation(operation_id)) = self.selected else {
-            return Command::None;
-        };
-        if self.page != Page::Workstreams {
-            return Command::None;
-        }
-        self.selected_operation(operation_id)
-            .map_or(Command::None, |operation| Command::RecoverOperation {
-                operation_id,
-                expected_operation_revision: operation.revision,
-                provider: operation.provider,
-            })
-    }
-
     fn handle_modal_key(&mut self, key: KeyCode) -> Command {
         if matches!(self.modal, Some(Modal::ObserverConsent { .. })) {
             return match key {
@@ -791,13 +738,6 @@ impl Model {
             .workstreams
             .iter()
             .find(|workstream| workstream.workstream_id == id)
-    }
-
-    fn selected_operation(&self, id: OperationId) -> Option<&OperationSnapshot> {
-        self.snapshot
-            .unresolved_operations
-            .iter()
-            .find(|operation| operation.operation_id == id)
     }
 }
 
@@ -867,15 +807,6 @@ fn rows_for(snapshot: &Snapshot, page: Page, shell_location: &ShellLocation) -> 
             });
         }
         rows.push(Row::Workstream(workstream.clone()));
-    }
-    if page == Page::Workstreams {
-        rows.extend(
-            snapshot
-                .unresolved_operations
-                .iter()
-                .copied()
-                .map(Row::Operation),
-        );
     }
     rows
 }
@@ -1045,54 +976,6 @@ fn row_lines_at(
                 )),
             ]
         }
-        Row::Operation(operation) => vec![
-            Line::from(vec![
-                Span::raw("  "),
-                Span::styled(
-                    operation_kind_label(operation.kind),
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" · ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    operation_phase_label(operation.phase),
-                    Style::default().fg(Color::Red),
-                ),
-            ]),
-            Line::from(vec![
-                Span::raw("  ! "),
-                Span::styled(
-                    operation.operation_id.short(),
-                    Style::default().fg(Color::White),
-                ),
-            ]),
-        ],
-    }
-}
-
-const fn operation_kind_label(kind: OperationKind) -> &'static str {
-    match kind {
-        OperationKind::Onboard => "Onboarding",
-        OperationKind::Start => "Start",
-        OperationKind::Fork => "Fork",
-    }
-}
-
-const fn operation_phase_label(phase: OperationPhase) -> &'static str {
-    match phase {
-        OperationPhase::Prepared => "prepared",
-        OperationPhase::CapabilityIssued => "issued",
-        OperationPhase::RuntimeOwnedLaunching | OperationPhase::ProviderExecStarted => "onboarding",
-        OperationPhase::ProviderPreparation => "preparing",
-        OperationPhase::ProviderExecProven => "proven",
-        OperationPhase::ExternalEffectStarted
-        | OperationPhase::ExecFailedKnownAbsent
-        | OperationPhase::AwaitingReconciliation
-        | OperationPhase::RecoveryRequired => "recovery",
-        OperationPhase::RolledBack => "rolled back",
-        OperationPhase::Committed => "committed",
-        OperationPhase::Failed => "failed",
     }
 }
 
@@ -1276,7 +1159,6 @@ fn control_bindings(model: &Model) -> &'static [(&'static str, &'static str)] {
             {
                 &[
                     ("n", "new here"),
-                    ("f", "fork"),
                     ("p", "park"),
                     ("x", "archive"),
                     (".", "archived"),
@@ -1299,12 +1181,6 @@ fn control_bindings(model: &Model) -> &'static [(&'static str, &'static str)] {
                     ("q", "quit"),
                 ]
             }
-            Some(RowId::Operation(_)) => &[
-                ("r", "recover"),
-                (".", "archived"),
-                ("?", "help"),
-                ("q", "quit"),
-            ],
             _ => &[(".", "archived"), ("?", "help"), ("q", "quit")],
         },
         Page::Archived => &[
@@ -1328,12 +1204,10 @@ fn help_lines() -> Vec<Line<'static>> {
         help_binding("w / Esc", "workstreams"),
         help_heading("Sessions"),
         help_binding("n", "new at location"),
-        help_binding("f", "fork session"),
         help_binding("p", "park session"),
         help_binding("x", "archive session"),
         help_binding("u", "restore session"),
         help_binding("a", "acknowledge result"),
-        help_binding("r", "recover Fork"),
         help_binding("?/Esc/q", "close help"),
     ]
 }
@@ -1649,12 +1523,12 @@ mod tests {
     };
     use crate::{
         domain::{
-            LocationId, OperationId, OperationKind, OperationPhase, ProjectId, ProviderKind,
-            Revision, RuntimeId, RuntimeStatus, WorkstreamId, WorkstreamLifecycle,
+            LocationId, ProjectId, ProviderKind, Revision, RuntimeId, RuntimeStatus, WorkstreamId,
+            WorkstreamLifecycle,
         },
         snapshot::{
-            LocationSnapshot, OnboardingStatus, OperationSnapshot, ProjectSnapshot,
-            RuntimeSnapshot, Snapshot, WorkstreamSnapshot,
+            LocationSnapshot, OnboardingStatus, ProjectSnapshot, RuntimeSnapshot, Snapshot,
+            WorkstreamSnapshot,
         },
     };
 
@@ -2245,14 +2119,14 @@ mod tests {
     #[test]
     fn help_is_full_width_colored_and_fits_its_content() {
         let overlay = super::help_overlay(Rect::new(0, 0, 32, 24));
-        assert_eq!(overlay, Rect::new(0, 4, 32, 15));
+        assert_eq!(overlay, Rect::new(0, 5, 32, 13));
         assert_eq!(
             super::help_overlay(Rect::new(0, 0, 32, 18)),
-            Rect::new(0, 1, 32, 15)
+            Rect::new(0, 2, 32, 13)
         );
 
         let lines = super::help_lines();
-        assert_eq!(lines.len(), 14);
+        assert_eq!(lines.len(), 12);
         assert!(lines.iter().all(|line| line.width() <= 30));
         let rendered = lines
             .iter()
@@ -2265,10 +2139,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(rendered[1], "↑↓      select");
         assert_eq!(rendered[6], "n       new at location");
-        assert_eq!(rendered[12], "r       recover Fork");
         assert_eq!(lines[0].spans[0].style.fg, Some(Color::Cyan));
         assert_eq!(lines[6].spans[0].style.fg, Some(Color::Yellow));
-        assert_eq!(lines[13].spans[0].style.fg, Some(Color::Yellow));
+        assert_eq!(lines[11].spans[0].style.fg, Some(Color::Yellow));
     }
 
     #[test]
@@ -2459,14 +2332,6 @@ mod tests {
             }
         );
         assert_eq!(
-            model.handle_key(crossterm::event::KeyCode::Char('f')),
-            Command::Fork {
-                source_workstream_id: active,
-                expected_workstream_revision: Revision::INITIAL,
-                provider: ProviderKind::Codex,
-            }
-        );
-        assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Char('a')),
             Command::AcknowledgeResult {
                 workstream_id: active,
@@ -2506,49 +2371,7 @@ mod tests {
     }
 
     #[test]
-    fn fork_recovery_help_and_onboarding_fences_are_explicit() {
-        {
-            let (mut snapshot, active, _) = snapshot();
-            let operation_id = OperationId::from(Uuid::from_u128(7));
-            snapshot.unresolved_operations = vec![OperationSnapshot {
-                operation_id,
-                kind: OperationKind::Fork,
-                provider: ProviderKind::Codex,
-                source_workstream_id: Some(active),
-                phase: OperationPhase::RecoveryRequired,
-                revision: Revision::INITIAL,
-            }];
-            let mut model = Model::new(snapshot);
-            model.select_next();
-            assert_eq!(
-                model.handle_key(crossterm::event::KeyCode::Char('r')),
-                Command::None
-            );
-            assert!(model.modal().is_none());
-            model.select_next();
-            assert_eq!(model.selected(), Some(RowId::Operation(operation_id)));
-            assert_eq!(
-                model.handle_key(crossterm::event::KeyCode::Char('r')),
-                Command::RecoverOperation {
-                    operation_id,
-                    expected_operation_revision: Revision::INITIAL,
-                    provider: ProviderKind::Codex,
-                }
-            );
-            assert_eq!(
-                model.handle_key(crossterm::event::KeyCode::Char('?')),
-                Command::None
-            );
-            assert!(model.help_visible());
-            model.select_previous();
-            assert_eq!(model.selected(), Some(RowId::Operation(operation_id)));
-            assert_eq!(
-                model.handle_key(crossterm::event::KeyCode::Char('q')),
-                Command::None
-            );
-            assert!(!model.help_visible());
-        }
-
+    fn onboarding_recovery_fence_only_allows_park() {
         let (mut snapshot, active, _) = snapshot();
         snapshot.workstreams[0].onboarding = Some(OnboardingStatus::RecoveryRequired);
         let mut model = Model::new(snapshot);
@@ -2562,7 +2385,7 @@ mod tests {
         );
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Char('f')),
-            Command::ShowGuidance(super::ONBOARDING_RECOVERY_GUIDANCE)
+            Command::None
         );
     }
 }

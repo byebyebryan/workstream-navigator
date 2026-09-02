@@ -1,29 +1,24 @@
-use std::path::PathBuf;
-
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
-use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::domain::{
-    Clock, CompoundOperation, DomainError, IdGenerator, LocationId, OperationId, OperationKind,
+    CompoundOperation, DomainError, IdGenerator, LocationId, OperationId, OperationKind,
     OperationPhase, ProjectId, ProviderKind, ProviderSessionId, RandomIdGenerator, Revision,
-    RuntimeId, SystemClock, WorkstreamId, WorkstreamOrigin,
+    RuntimeId, WorkstreamId, WorkstreamOrigin,
 };
 
 use super::attention::ensure_recovery_attention_in_transaction;
 use super::models::{
-    CreatedWorkstream, EXTERNAL_EFFECT_UNKNOWN_CODE, ForkPlan, ForkPreparation, HostRegistry,
-    OPENCODE_SESSION_CREATION_CLEANUP_UNKNOWN_CODE, OPENCODE_SESSION_CREATION_PLAN_SCHEMA_VERSION,
-    OPENCODE_SESSION_CREATION_UNKNOWN_CODE, OpenCodeSessionCreationOperation, OperationOverview,
-    OperationOverviewPage, PersistedForkPlan, PersistedOpenCodeSessionCreationPlan,
-    ProviderBinding, StateError,
+    CreatedWorkstream, HostRegistry, OPENCODE_SESSION_CREATION_CLEANUP_UNKNOWN_CODE,
+    OPENCODE_SESSION_CREATION_PLAN_SCHEMA_VERSION, OPENCODE_SESSION_CREATION_UNKNOWN_CODE,
+    OpenCodeSessionCreationOperation, OperationOverview, OperationOverviewPage,
+    PersistedOpenCodeSessionCreationPlan, ProviderBinding, StateError,
 };
 use super::runtime::load_binding;
 use super::schema::MAX_NAVIGATOR_WORKSTREAMS;
 use super::utils::{
     operation_kind_from_text, operation_kind_text, operation_phase_from_text, operation_phase_text,
-    provider_kind_from_text, to_from_sql_error, validate_provider_metadata, validate_registry_text,
-    workstream_origin_text,
+    provider_kind_from_text, to_from_sql_error, validate_registry_text,
 };
 use super::workstream::next_activity_sequence;
 
@@ -89,11 +84,12 @@ impl HostRegistry {
             return Ok(created);
         }
 
-        let source = load_fork_source(&transaction, source_workstream_id, true)?;
-        if source.revision != expected_source_revision {
+        let (source_location_id, source_revision) =
+            load_source_workstream(&transaction, source_workstream_id, true)?;
+        if source_revision != expected_source_revision {
             return Err(StateError::Domain(DomainError::RevisionConflict {
                 expected: expected_source_revision,
-                current: source.revision,
+                current: source_revision,
             }));
         }
         let workstream_id = WorkstreamId::new();
@@ -106,7 +102,7 @@ impl HostRegistry {
                  ) VALUES (?1, ?2, ?3, 'independent', ?4, 'open', ?5, 0, 1)",
                 params![
                     workstream_id.to_string(),
-                    source.location_id.to_string(),
+                    source_location_id.to_string(),
                     provider.as_str(),
                     source_workstream_id.to_string(),
                     activity_sequence,
@@ -128,7 +124,7 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?;
         let created = CreatedWorkstream {
             workstream_id,
-            location_id: source.location_id,
+            location_id: source_location_id,
             provider,
             origin: WorkstreamOrigin::Independent,
             source_workstream_id,
@@ -328,324 +324,10 @@ impl HostRegistry {
         Ok(created)
     }
 
-    /// Atomically records the exact native-fork plan before Codex is called.
-    /// Reusing a request key returns the original destination and cannot fork
-    /// a second provider thread.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error for a stale/unknown source, unavailable settled fork
-    /// boundary, request mismatch, or state failure.
-    pub fn prepare_fork_with_provider(
-        &mut self,
-        request_key: String,
-        kind: OperationKind,
-        source_workstream_id: WorkstreamId,
-        expected_source_revision: Revision,
-        provider: ProviderKind,
-    ) -> Result<ForkPreparation, StateError> {
-        if kind != OperationKind::Fork {
-            return Err(StateError::InvalidForkPlanShape);
-        }
-        let expected_revisions_json = serde_json::json!({
-            "source_workstream_id": source_workstream_id,
-            "source_workstream_revision": expected_source_revision,
-        })
-        .to_string();
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(StateError::Sqlite)?;
-
-        if let Some(operation) = load_operation_by_request_key(&transaction, &request_key)? {
-            if operation.kind != kind
-                || operation.expected_revisions_json != expected_revisions_json
-            {
-                return Err(StateError::OperationRequestMismatch);
-            }
-            let plan = PersistedForkPlan::decode(operation.effect_watermark.as_deref())?;
-            if plan.provider != provider {
-                return Err(StateError::OperationRequestMismatch);
-            }
-            transaction.commit().map_err(StateError::Sqlite)?;
-            return Ok(ForkPreparation {
-                plan: plan.public_plan(operation),
-                newly_prepared: false,
-            });
-        }
-
-        let plan =
-            fork_plan_for_source(&transaction, source_workstream_id, expected_source_revision)?;
-        if plan.provider != provider {
-            return Err(StateError::ProviderIdentityMismatch);
-        }
-        let mut operation = CompoundOperation::new(request_key, kind, expected_revisions_json)?;
-        operation.transition(
-            OperationPhase::ExternalEffectStarted,
-            Some(plan.encode()?),
-            None,
-        )?;
-        transaction
-            .execute(
-                "INSERT INTO compound_operations (
-                    operation_id, request_key, kind, phase, expected_revisions_json,
-                    effect_watermark, outcome_json, revision
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7)",
-                params![
-                    operation.id.to_string(),
-                    operation.request_key,
-                    operation_kind_text(operation.kind),
-                    operation_phase_text(operation.phase),
-                    operation.expected_revisions_json,
-                    operation.effect_watermark,
-                    operation.revision.value(),
-                ],
-            )
-            .map_err(StateError::Sqlite)?;
-        transaction.commit().map_err(StateError::Sqlite)?;
-        Ok(ForkPreparation {
-            plan: plan.public_plan(operation),
-            newly_prepared: true,
-        })
-    }
-
-    /// Commits a confirmed provider fork together with its destination
-    /// Workstream and an exact stopped Runtime binding. The ordinary start
-    /// path then launches `codex resume` from that durable binding.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the plan is not a fork, the provider identifier is
-    /// unsafe, or the combined durable commit cannot be completed exactly once.
-    pub fn commit_fork(
-        &mut self,
-        prepared: &ForkPlan,
-        destination_native_session_id: &str,
-    ) -> Result<CreatedWorkstream, StateError> {
-        if prepared.origin != WorkstreamOrigin::Fork {
-            return Err(StateError::ForkPlanMismatch);
-        }
-        let destination = ProviderSessionId::new(prepared.provider, destination_native_session_id)?;
-        self.commit_fork_with_destination(prepared, Some(&destination), false)
-    }
-
-    /// Commits a Fork plan only after explicit recovery has found exactly one
-    /// provider destination for the recorded attempt.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the destination identifier is invalid, the plan
-    /// is stale, or the exact recovered effect cannot be atomically committed.
-    pub fn commit_recovered_fork(
-        &mut self,
-        prepared: &ForkPlan,
-        destination_native_session_id: &str,
-    ) -> Result<CreatedWorkstream, StateError> {
-        if prepared.origin != WorkstreamOrigin::Fork {
-            return Err(StateError::ForkPlanMismatch);
-        }
-        let destination = ProviderSessionId::new(prepared.provider, destination_native_session_id)?;
-        self.commit_fork_with_destination(prepared, Some(&destination), true)
-    }
-
-    fn commit_fork_with_destination(
-        &mut self,
-        prepared: &ForkPlan,
-        destination_native_session_id: Option<&ProviderSessionId>,
-        allow_recovery_required: bool,
-    ) -> Result<CreatedWorkstream, StateError> {
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(StateError::Sqlite)?;
-        let mut operation = load_operation_by_id(&transaction, prepared.operation.id)?
-            .ok_or(StateError::UnknownOperation(prepared.operation.id))?;
-        let persisted = PersistedForkPlan::decode(operation.effect_watermark.as_deref())?;
-        if operation.id != prepared.operation.id
-            || operation.kind != prepared.operation.kind
-            || persisted.public_plan(prepared.operation.clone()) != *prepared
-        {
-            return Err(StateError::ForkPlanMismatch);
-        }
-        if operation.phase == OperationPhase::Committed {
-            let created = created_workstream_from_fork_outcome(
-                &transaction,
-                &operation,
-                &persisted,
-                destination_native_session_id,
-            )?;
-            transaction.commit().map_err(StateError::Sqlite)?;
-            return Ok(created);
-        }
-        if operation.phase != OperationPhase::ExternalEffectStarted
-            && !(allow_recovery_required && operation.phase == OperationPhase::RecoveryRequired)
-        {
-            return Err(StateError::ForkOperationUnavailable);
-        }
-        if persisted.origin != WorkstreamOrigin::Fork
-            || destination_native_session_id.is_none()
-            || destination_native_session_id.is_some_and(|id| id.provider() != persisted.provider)
-        {
-            return Err(StateError::ForkPlanMismatch);
-        }
-        insert_fork_records(&transaction, &persisted, destination_native_session_id)?;
-        commit_managed_operation(
-            &transaction,
-            &mut operation,
-            &persisted,
-            destination_native_session_id,
-        )?;
-        transaction.commit().map_err(StateError::Sqlite)?;
-        Ok(created_workstream_from_fork_plan(&persisted))
-    }
-
-    /// Marks an unresolved provider fork as recovery-required without changing
-    /// any existing project files or Workstream.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the prepared operation is stale, already terminal,
-    /// or cannot transition atomically.
-    pub fn mark_fork_recovery(&mut self, prepared: &ForkPlan) -> Result<(), StateError> {
-        if prepared.operation.phase == OperationPhase::RecoveryRequired {
-            return Ok(());
-        }
-        let operation = self.transition_operation(
-            prepared.operation.id,
-            prepared.operation.revision,
-            OperationPhase::RecoveryRequired,
-            prepared.operation.effect_watermark.clone(),
-            None,
-        )?;
-        if operation.kind != prepared.operation.kind {
-            return Err(StateError::ForkPlanMismatch);
-        }
-        Ok(())
-    }
-
-    /// Terminally records an unknown `OpenCode` fork effect after the exact
-    /// non-idempotent provider boundary has been crossed. No destination
-    /// Workstream is created and the original source state is untouched.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the plan is not an `OpenCode` fork, has no recorded
-    /// provider-attempt marker, is stale, or has already entered another
-    /// terminal state.
-    pub fn mark_fork_external_effect_unknown(
-        &mut self,
-        prepared: &ForkPlan,
-    ) -> Result<(), StateError> {
-        if prepared.provider != ProviderKind::OpenCode
-            || prepared.origin != WorkstreamOrigin::Fork
-            || prepared.fork_attempted_at_millis.is_none()
-        {
-            return Err(StateError::ForkOperationUnavailable);
-        }
-        let current = self.fork_plan(prepared.operation.id)?;
-        let terminal_outcome_is_exact = current.operation.phase == OperationPhase::Failed
-            && current
-                .operation
-                .outcome_json
-                .as_deref()
-                .and_then(|outcome| serde_json::from_str::<serde_json::Value>(outcome).ok())
-                .and_then(|outcome| {
-                    outcome
-                        .get("code")
-                        .and_then(serde_json::Value::as_str)
-                        .map(str::to_owned)
-                })
-                .as_deref()
-                == Some(EXTERNAL_EFFECT_UNKNOWN_CODE);
-        if terminal_outcome_is_exact && current == *prepared {
-            return Ok(());
-        }
-        if current != *prepared {
-            let mut expected = prepared.clone();
-            expected.operation = current.operation.clone();
-            if terminal_outcome_is_exact && current == expected {
-                return Ok(());
-            }
-            return Err(StateError::ForkOperationUnavailable);
-        }
-        if current.operation.phase == OperationPhase::Failed {
-            return Err(StateError::ForkOperationUnavailable);
-        }
-        if !matches!(
-            current.operation.phase,
-            OperationPhase::ExternalEffectStarted | OperationPhase::AwaitingReconciliation
-        ) {
-            return Err(StateError::ForkOperationUnavailable);
-        }
-        let outcome = serde_json::json!({"code": EXTERNAL_EFFECT_UNKNOWN_CODE}).to_string();
-        self.transition_operation(
-            current.operation.id,
-            current.operation.revision,
-            OperationPhase::Failed,
-            current.operation.effect_watermark.clone(),
-            Some(outcome),
-        )?;
-        Ok(())
-    }
-
-    /// Atomically records the exact instant at which a fork request may be
-    /// sent to Codex. Once this succeeds, callers must reconcile provider
-    /// evidence and must never issue another `thread/fork` request.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the prepared plan is stale, not a pending fork,
-    /// already has a provider attempt marker, or cannot be updated exactly.
-    pub fn record_fork_attempt(&mut self, prepared: &ForkPlan) -> Result<ForkPlan, StateError> {
-        if prepared.origin != WorkstreamOrigin::Fork {
-            return Err(StateError::ForkPlanMismatch);
-        }
-        let transaction = self
-            .connection
-            .transaction_with_behavior(TransactionBehavior::Immediate)
-            .map_err(StateError::Sqlite)?;
-        let operation = load_operation_by_id(&transaction, prepared.operation.id)?
-            .ok_or(StateError::UnknownOperation(prepared.operation.id))?;
-        let mut persisted = PersistedForkPlan::decode(operation.effect_watermark.as_deref())?;
-        if operation != prepared.operation
-            || persisted.public_plan(operation.clone()) != *prepared
-            || !matches!(
-                operation.phase,
-                OperationPhase::ExternalEffectStarted | OperationPhase::RecoveryRequired
-            )
-            || persisted.fork_attempted_at_millis.is_some()
-        {
-            return Err(StateError::ForkOperationUnavailable);
-        }
-        persisted.fork_attempted_at_millis = Some(SystemClock.now_millis()?);
-        let next_revision = operation.revision.next();
-        let updated = transaction
-            .execute(
-                "UPDATE compound_operations
-                 SET effect_watermark = ?1, revision = ?2
-                 WHERE operation_id = ?3 AND revision = ?4
-                   AND phase IN ('external_effect_started', 'recovery_required')",
-                params![
-                    persisted.encode()?,
-                    next_revision.value(),
-                    operation.id.to_string(),
-                    operation.revision.value(),
-                ],
-            )
-            .map_err(StateError::Sqlite)?;
-        if updated != 1 {
-            return Err(StateError::ConcurrentWrite);
-        }
-        transaction.commit().map_err(StateError::Sqlite)?;
-        let mut next_operation = operation;
-        next_operation.revision = next_revision;
-        next_operation.effect_watermark = Some(persisted.encode()?);
-        Ok(persisted.public_plan(next_operation))
-    }
-
-    /// Lists only durable creation operations that still require an explicit
-    /// operator decision. This is presentation metadata, not provider or
-    /// project-root discovery.
+    /// Lists only durable non-onboarding creation operations that still
+    /// require an explicit operator decision for the public operations
+    /// diagnostic. This is presentation metadata, not Navigator recovery or
+    /// provider/project-root discovery.
     ///
     /// # Errors
     ///
@@ -727,22 +409,10 @@ impl HostRegistry {
                     OperationKind::Onboard => {
                         return Err(StateError::OnboardingOperationUnavailable);
                     }
-                    OperationKind::Fork => {
-                        PersistedForkPlan::decode(effect_watermark.as_deref())?.provider
-                    }
                     OperationKind::Start => {
                         PersistedOpenCodeSessionCreationPlan::decode(effect_watermark.as_deref())?
                             .provider
                     }
-                };
-                let source_workstream_id = if kind == OperationKind::Fork {
-                    effect_watermark
-                        .as_deref()
-                        .map(|effect| PersistedForkPlan::decode(Some(effect)))
-                        .transpose()?
-                        .map(|plan| plan.source_workstream_id)
-                } else {
-                    None
                 };
                 Ok(OperationOverview {
                     operation_id: Uuid::parse_str(&operation_id)
@@ -750,7 +420,6 @@ impl HostRegistry {
                         .map_err(StateError::InvalidPersistedUuid)?,
                     kind,
                     provider,
-                    source_workstream_id,
                     phase: operation_phase_from_text(&phase)?,
                     revision: Revision::try_from(revision)?,
                 })
@@ -769,30 +438,6 @@ impl HostRegistry {
             operations,
             next_cursor,
         })
-    }
-
-    /// Loads the one host-private provider-fork plan owned by an explicit
-    /// operation ID. It never scans Git state or provider history.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the operation is unknown, has no valid managed
-    /// plan, or contains malformed persisted state.
-    pub fn fork_plan(&self, operation_id: OperationId) -> Result<ForkPlan, StateError> {
-        let operation = self
-            .connection
-            .query_row(
-                "SELECT operation_id, request_key, kind, phase, expected_revisions_json,
-                        effect_watermark, outcome_json, revision
-                 FROM compound_operations WHERE operation_id = ?1",
-                [operation_id.to_string()],
-                row_to_operation,
-            )
-            .optional()
-            .map_err(StateError::Sqlite)?
-            .ok_or(StateError::UnknownOperation(operation_id))?;
-        let plan = PersistedForkPlan::decode(operation.effect_watermark.as_deref())?;
-        Ok(plan.public_plan(operation))
     }
 
     /// Creates a durable operation or returns the operation for the request key.
@@ -1284,49 +929,36 @@ impl HostRegistry {
     }
 }
 
-pub(in crate::state) struct ForkSource {
-    location_id: LocationId,
-    provider: ProviderKind,
-    revision: Revision,
-    project_root: PathBuf,
-    runtime_id: Option<RuntimeId>,
-    runtime_lifecycle: Option<String>,
-    native_session_id: Option<String>,
-    last_settled_turn_id: Option<String>,
-    native_name: Option<String>,
-}
-
-pub(in crate::state) fn fork_plan_for_source(
+fn load_source_workstream(
     transaction: &rusqlite::Transaction<'_>,
-    source_workstream_id: WorkstreamId,
-    expected_source_revision: Revision,
-) -> Result<PersistedForkPlan, StateError> {
-    let source = load_fork_source(transaction, source_workstream_id, false)?;
-    if source.revision != expected_source_revision {
-        return Err(StateError::Domain(DomainError::RevisionConflict {
-            expected: expected_source_revision,
-            current: source.revision,
-        }));
+    workstream_id: WorkstreamId,
+    include_archived: bool,
+) -> Result<(LocationId, Revision), StateError> {
+    let row = transaction
+        .query_row(
+            "SELECT location_id, archived_at_millis, revision
+             FROM workstreams WHERE workstream_id = ?1",
+            [workstream_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(StateError::Sqlite)?
+        .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
+    if row.1.is_some() && !include_archived {
+        return Err(StateError::WorkstreamArchived(workstream_id));
     }
-    if source.project_root.as_os_str().is_empty() {
-        return Err(StateError::InvalidForkPlanShape);
-    }
-    let (source_native_session_id, last_settled_turn_id) = fork_boundary(&source)?;
-    let workstream_id = WorkstreamId::new();
-    Ok(PersistedForkPlan {
-        schema_version: 1,
-        provider: source.provider,
-        workstream_id,
-        location_id: source.location_id,
-        origin: WorkstreamOrigin::Fork,
-        source_workstream_id,
-        project_root: source.project_root,
-        source_runtime_id: source.runtime_id,
-        source_native_session_id,
-        last_settled_turn_id,
-        source_native_name: source.native_name,
-        fork_attempted_at_millis: None,
-    })
+    Ok((
+        Uuid::parse_str(&row.0)
+            .map(LocationId::from)
+            .map_err(StateError::InvalidPersistedUuid)?,
+        Revision::try_from(row.2)?,
+    ))
 }
 
 pub(in crate::state) fn created_workstream_from_record(
@@ -1350,7 +982,7 @@ pub(in crate::state) fn created_workstream_from_record(
         )
         .optional()
         .map_err(StateError::Sqlite)?
-        .ok_or(StateError::ForkCommitMissing)?;
+        .ok_or(StateError::MalformedHostSchema)?;
     let location_id = Uuid::parse_str(&record.0)
         .map(LocationId::from)
         .map_err(StateError::InvalidPersistedUuid)?;
@@ -1358,7 +990,7 @@ pub(in crate::state) fn created_workstream_from_record(
     let source_workstream_id = record
         .3
         .as_deref()
-        .ok_or(StateError::ForkPlanMismatch)
+        .ok_or(StateError::MalformedHostSchema)
         .and_then(|value| {
             Uuid::parse_str(value)
                 .map(WorkstreamId::from)
@@ -1366,8 +998,10 @@ pub(in crate::state) fn created_workstream_from_record(
         })?;
     let origin = match record.2.as_str() {
         "independent" => WorkstreamOrigin::Independent,
+        // Retained solely so historical Fork-origin records continue to
+        // decode as inert provenance. No Fork operation can be created.
         "fork" => WorkstreamOrigin::Fork,
-        _ => return Err(StateError::ForkPlanMismatch),
+        _ => return Err(StateError::MalformedHostSchema),
     };
     Ok(CreatedWorkstream {
         workstream_id,
@@ -1378,248 +1012,6 @@ pub(in crate::state) fn created_workstream_from_record(
         revision: Revision::try_from(record.4)?,
     })
 }
-
-pub(in crate::state) fn load_fork_source(
-    transaction: &rusqlite::Transaction<'_>,
-    workstream_id: WorkstreamId,
-    include_archived: bool,
-) -> Result<ForkSource, StateError> {
-    let source = transaction
-        .query_row(
-            "SELECT workstreams.location_id, workstreams.provider, workstreams.revision,
-                    project_locations.repository_path,
-                    workstreams.archived_at_millis,
-                    runtimes.runtime_id, runtimes.provider, runtimes.lifecycle,
-                    runtimes.tmux_generation,
-                    provider_bindings.provider, provider_bindings.native_session_id,
-                    provider_bindings.runtime_generation,
-                    provider_bindings.last_settled_turn_id,
-                    provider_bindings.observed_thread_name
-             FROM workstreams
-             JOIN project_locations ON project_locations.location_id = workstreams.location_id
-             LEFT JOIN runtimes ON runtimes.workstream_id = workstreams.workstream_id
-             LEFT JOIN provider_bindings ON provider_bindings.runtime_id = runtimes.runtime_id
-             WHERE workstreams.workstream_id = ?1",
-            [workstream_id.to_string()],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, Option<i64>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
-                    row.get::<_, Option<String>>(8)?,
-                    row.get::<_, Option<String>>(9)?,
-                    row.get::<_, Option<String>>(10)?,
-                    row.get::<_, Option<String>>(11)?,
-                    row.get::<_, Option<String>>(12)?,
-                    row.get::<_, Option<String>>(13)?,
-                ))
-            },
-        )
-        .optional()
-        .map_err(StateError::Sqlite)?
-        .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
-    if source.4.is_some() && !include_archived {
-        return Err(StateError::WorkstreamArchived(workstream_id));
-    }
-    let provider = provider_kind_from_text(&source.1)?;
-    let runtime_provider = source
-        .6
-        .as_deref()
-        .map(provider_kind_from_text)
-        .transpose()?;
-    let binding_provider = source
-        .9
-        .as_deref()
-        .map(provider_kind_from_text)
-        .transpose()?;
-    if let (Some(runtime_generation), Some(binding_generation)) =
-        (source.8.as_deref(), source.11.as_deref())
-    {
-        validate_registry_text("runtime generation", runtime_generation)?;
-        validate_registry_text("runtime generation", binding_generation)?;
-        if runtime_generation != binding_generation {
-            return Err(StateError::HookEvidenceMismatch);
-        }
-    }
-    if runtime_provider.is_some_and(|value| value != provider)
-        || binding_provider.is_some_and(|value| value != provider)
-    {
-        return Err(StateError::ProviderIdentityMismatch);
-    }
-    Ok(ForkSource {
-        location_id: Uuid::parse_str(&source.0)
-            .map(LocationId::from)
-            .map_err(StateError::InvalidPersistedUuid)?,
-        provider,
-        revision: Revision::try_from(source.2)?,
-        project_root: PathBuf::from(source.3),
-        runtime_id: source
-            .5
-            .as_deref()
-            .map(Uuid::parse_str)
-            .transpose()
-            .map_err(StateError::InvalidPersistedUuid)?
-            .map(RuntimeId::from),
-        runtime_lifecycle: source.7,
-        native_session_id: source.10,
-        last_settled_turn_id: source.12,
-        native_name: source.13,
-    })
-}
-
-pub(in crate::state) fn fork_boundary(
-    source: &ForkSource,
-) -> Result<(Option<ProviderSessionId>, Option<String>), StateError> {
-    let runtime_is_live = matches!(
-        source.runtime_lifecycle.as_deref(),
-        Some("idle" | "working" | "attention")
-    );
-    let session_id = source
-        .native_session_id
-        .clone()
-        .ok_or(StateError::ForkBoundaryUnavailable)?;
-    let settled_turn_id = source
-        .last_settled_turn_id
-        .clone()
-        .ok_or(StateError::ForkBoundaryUnavailable)?;
-    if !runtime_is_live || source.runtime_id.is_none() {
-        return Err(StateError::ForkBoundaryUnavailable);
-    }
-    let session_id = ProviderSessionId::new(source.provider, session_id)?;
-    validate_provider_metadata(&settled_turn_id)?;
-    Ok((Some(session_id), Some(settled_turn_id)))
-}
-
-pub(in crate::state) fn insert_fork_records(
-    transaction: &rusqlite::Transaction<'_>,
-    plan: &PersistedForkPlan,
-    destination_native_session_id: Option<&ProviderSessionId>,
-) -> Result<(), StateError> {
-    let activity_sequence = next_activity_sequence(transaction)?;
-    transaction
-        .execute(
-            "INSERT INTO workstreams (
-                workstream_id, location_id, provider, origin, source_workstream_id,
-                lifecycle, last_activity_sequence,
-                last_activity_at_millis, revision
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'open', ?6, 0, 1)",
-            params![
-                plan.workstream_id.to_string(),
-                plan.location_id.to_string(),
-                plan.provider.as_str(),
-                workstream_origin_text(plan.origin),
-                plan.source_workstream_id.to_string(),
-                activity_sequence,
-            ],
-        )
-        .map_err(StateError::Sqlite)?;
-    if let Some(destination_native_session_id) = destination_native_session_id {
-        insert_pending_fork_runtime(transaction, plan, destination_native_session_id)?;
-    }
-    Ok(())
-}
-
-pub(in crate::state) fn insert_pending_fork_runtime(
-    transaction: &rusqlite::Transaction<'_>,
-    plan: &PersistedForkPlan,
-    destination_native_session_id: &ProviderSessionId,
-) -> Result<(), StateError> {
-    let runtime_id = RuntimeId::new();
-    let runtime_generation = format!("pending-fork-{}", Uuid::new_v4());
-    let tmux_session = format!("wsnav-{runtime_id}");
-    transaction
-        .execute(
-            "INSERT INTO runtimes (
-                runtime_id, workstream_id, provider, tmux_generation, tmux_session,
-                cwd, provider_pid, process_birth, lifecycle, revision
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, 'stopped', 1)",
-            params![
-                runtime_id.to_string(),
-                plan.workstream_id.to_string(),
-                plan.provider.as_str(),
-                runtime_generation,
-                tmux_session,
-                plan.project_root.to_string_lossy(),
-            ],
-        )
-        .map_err(StateError::Sqlite)?;
-    transaction
-        .execute(
-            "INSERT INTO provider_bindings (
-                binding_id, runtime_id, provider, native_session_id, start_source,
-                last_settled_turn_id, observed_thread_name, name_state,
-                name_observed_at, predecessor_native_session_id,
-                predecessor_effective_name, runtime_generation, revision
-             ) VALUES (?1, ?2, ?3, ?4, 'resume', NULL, NULL, 'unavailable', NULL,
-                NULL, NULL, ?5, 1)",
-            params![
-                Uuid::new_v4().to_string(),
-                runtime_id.to_string(),
-                plan.provider.as_str(),
-                destination_native_session_id.native_id(),
-                runtime_generation,
-            ],
-        )
-        .map_err(StateError::Sqlite)?;
-    Ok(())
-}
-
-pub(in crate::state) fn commit_managed_operation(
-    transaction: &rusqlite::Transaction<'_>,
-    operation: &mut CompoundOperation,
-    plan: &PersistedForkPlan,
-    destination_native_session_id: Option<&ProviderSessionId>,
-) -> Result<(), StateError> {
-    let outcome = serde_json::json!({
-        "workstream_id": plan.workstream_id,
-        "destination_native_session_id": destination_native_session_id,
-    })
-    .to_string();
-    let prior_revision = operation.revision;
-    operation.transition(
-        OperationPhase::Committed,
-        operation.effect_watermark.clone(),
-        Some(outcome),
-    )?;
-    let updated = transaction
-        .execute(
-            "UPDATE compound_operations
-             SET phase = ?1, effect_watermark = ?2, outcome_json = ?3, revision = ?4
-             WHERE operation_id = ?5 AND revision = ?6",
-            params![
-                operation_phase_text(operation.phase),
-                operation.effect_watermark,
-                operation.outcome_json,
-                operation.revision.value(),
-                operation.id.to_string(),
-                prior_revision.value(),
-            ],
-        )
-        .map_err(StateError::Sqlite)?;
-    if updated != 1 {
-        return Err(StateError::ConcurrentWrite);
-    }
-    Ok(())
-}
-
-pub(in crate::state) fn created_workstream_from_fork_plan(
-    plan: &PersistedForkPlan,
-) -> CreatedWorkstream {
-    CreatedWorkstream {
-        workstream_id: plan.workstream_id,
-        location_id: plan.location_id,
-        provider: plan.provider,
-        origin: plan.origin,
-        source_workstream_id: plan.source_workstream_id,
-        revision: Revision::INITIAL,
-    }
-}
-
 pub(in crate::state) fn load_operation_by_request_key(
     transaction: &rusqlite::Transaction<'_>,
     request_key: &str,
@@ -1852,41 +1244,6 @@ pub(in crate::state) fn bind_opencode_session_in_transaction(
         load_binding(transaction, runtime_id)?.ok_or(StateError::ConcurrentWrite)?
     };
     Ok(binding)
-}
-
-#[derive(Deserialize)]
-
-pub(in crate::state) struct ForkOutcome {
-    workstream_id: WorkstreamId,
-    destination_native_session_id: Option<ProviderSessionId>,
-}
-
-pub(in crate::state) fn created_workstream_from_fork_outcome(
-    transaction: &rusqlite::Transaction<'_>,
-    operation: &CompoundOperation,
-    plan: &PersistedForkPlan,
-    expected_destination_native_session_id: Option<&ProviderSessionId>,
-) -> Result<CreatedWorkstream, StateError> {
-    let outcome = operation
-        .outcome_json
-        .as_deref()
-        .ok_or(StateError::MissingForkOutcome)?;
-    let outcome: ForkOutcome =
-        serde_json::from_str(outcome).map_err(StateError::InvalidForkOutcome)?;
-    if outcome.workstream_id != plan.workstream_id
-        || outcome.destination_native_session_id.as_ref() != expected_destination_native_session_id
-    {
-        return Err(StateError::ForkPlanMismatch);
-    }
-    let created = created_workstream_from_record(transaction, plan.workstream_id)?;
-    if created.location_id != plan.location_id
-        || created.provider != plan.provider
-        || created.source_workstream_id != plan.source_workstream_id
-        || created.origin != plan.origin
-    {
-        return Err(StateError::ForkPlanMismatch);
-    }
-    Ok(created)
 }
 
 pub(in crate::state) fn row_to_operation(

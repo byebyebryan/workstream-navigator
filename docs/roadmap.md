@@ -3,12 +3,13 @@
 Date: 2026-08-31
 
 Status: D0-D19 are complete. D19 checkpoint `a0ec38b` implements the complete
-tmux-derived navigation contract. The current focus-cue refinement passes its
-local/disposable repository, Rust 1.88, private-tmux, and byte-identical
-installation gates. It adds no state epoch or provider lifecycle effect. No
-remote-CI or live-provider claim is transferred to D19. D18 checkpoint
-`c961c7e` remains the latest accepted artifact with separately authorized
-reset, native-trust, and disposable Codex/OpenCode lifecycle evidence.
+tmux-derived navigation contract. The current post-rename startup-ordering and
+reconciliation-guidance refinement passes its local/disposable repository and
+byte-identical installation gates. It adds no state epoch or provider lifecycle
+effect. No remote-CI or live-provider claim is transferred to D19. D18
+checkpoint `c961c7e` remains the latest accepted artifact with separately
+authorized reset, native-trust, and disposable Codex/OpenCode lifecycle
+evidence.
 
 `docs/design.md` is the product and architecture contract. This file owns
 delivery order, implementation status, and exit gates. The complete prior
@@ -165,9 +166,10 @@ current attachment.
   authority, or provider-pane write; a real disposable client proves the
   initial and both directional focus transitions from Navigator-only output;
 - repeated fresh starts prove the exact two-pane roles and closed presentation
-  controls are published before startup returns; only the bounded transient
-  `InvalidTopology` observation may retry, while persistent or unrelated
-  failures remain closed; and
+  controls are published before startup returns; the private socket identity is
+  committed before the exact Navigator pane is launched, only the bounded
+  transient provider-topology `InvalidTopology` observation may retry, and
+  persistent or unrelated failures remain closed; and
 - `scripts/check`, the declared MSRV job, nested terminal input/fidelity tests,
   and staged/unstaged diff checks pass before the locked release is installed
   for operator inspection.
@@ -198,6 +200,23 @@ Rust 1.88.0/Debian/tmux 3.3a container passes the same 382 locked tests,
 including 16 consecutive fresh detached starts and the real-client
 green/dark-gray/green focus proof, before its locked release is installed
 byte-identically for operator inspection.
+
+The post-rename documentation review then exposed a second, independent
+fresh-start race on tmux 3.3a: Navigator could inspect the ownership marker
+while its parent rewrote that marker with the new private socket identity. The
+failure stayed closed as a dead Navigator pane and `InvalidTopology`. The
+current correction starts pane `0.0` inert, captures the socket identity, and
+only then launches Navigator in that exact pane; it preserves the existing
+20-by-5-ms provider-topology retry. In the exact Rust 1.88.0/Debian/tmux 3.3a
+environment, five focused startup fixtures and five uninterrupted full locked
+matrices pass serially, covering 160 fresh starts in that environment.
+
+An operator capture then exposed presentation-local guidance that outlived the
+transient reconciliation failure which created it. The correction preserves the
+fail-closed warning while proof is unavailable, then clears only that exact
+warning after successful provider-exec proof or normal completed-marker
+retirement. Later unrelated guidance remains visible. This changes no durable
+state, provider process, pane content, or reconciliation authority.
 
 The same refinement replaces the stacked list/footer outlines with one
 continuous green frame around the entire Navigator. The adjacent tmux boundary
@@ -405,6 +424,7 @@ historical evidence rather than current delivery authority.
 | D17 | Shell-first managed-session onboarding | [D17 acceptance](evidence/acceptance/d17-shell-first.md) |
 | D17.1 | Correctness and release closure | [D17.1 acceptance](evidence/acceptance/d17.1-correctness-closure.md) |
 | D18 | Current-only consolidation and release acceptance complete; source correction locally verified | [Acceptance evidence](evidence/acceptance/d18-current-source-candidate.md) |
+| D19 | Tmux-derived presentation navigation; locally accepted for operator inspection | [D19 acceptance](evidence/acceptance/d19-tmux-navigation.md) |
 
 ## Deferred product decisions
 

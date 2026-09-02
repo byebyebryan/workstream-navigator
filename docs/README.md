@@ -3,12 +3,13 @@
 ## Status and authority
 
 D0-D19 are complete. D19 checkpoint `a0ec38b` implements the tmux-derived
-navigation contract, and the current focus-cue refinement passes the full
-local/disposable gate, the declared Rust 1.88 matrix, and byte-identical
-per-host installation. It adds no state epoch or provider lifecycle effect.
-This result does not claim remote CI or live Codex/OpenCode acceptance. D18
-checkpoint `c961c7e` remains the latest artifact with separately authorized
-destructive-reset, native-trust, and disposable live-provider release evidence.
+navigation contract. The current post-rename startup-ordering and
+reconciliation-guidance refinement passes the full local/disposable gate and
+byte-identical per-host installation. It adds no state epoch or provider
+lifecycle effect. This result does not claim remote CI or live Codex/OpenCode
+acceptance. D18 checkpoint `c961c7e` remains the latest artifact with separately
+authorized destructive-reset, native-trust, and disposable live-provider
+release evidence.
 
 - [Product and architecture design](design.md) is the V1 contract.
 - [Delivery roadmap](roadmap.md) owns delivery order, checkpoint status, and

@@ -5,11 +5,11 @@ Date: 2026-08-31
 Status: D19 implements the shell-first product on the unchanged direct,
 current-only schema-15 epoch. Checkpoint `a0ec38b` completes tmux-owned pane
 focus, closed private-tmux controls, and bounded provider-pane Workstream
-switching. The current focus-cue refinement and its full local/disposable gate,
-Rust 1.88/tmux 3.3a matrix, and byte-identical per-host installation pass. It
-adds no provider lifecycle effect or durable focus/selection state. No remote-CI
-or live-provider acceptance is claimed for D19. D18 checkpoint `c961c7e` and
-installed artifact
+switching. The current post-rename startup-ordering and
+reconciliation-guidance refinement passes its full local/disposable gate and
+byte-identical per-host installation. It adds no provider lifecycle effect or
+durable focus/selection state. No remote-CI or live-provider acceptance is
+claimed for D19. D18 checkpoint `c961c7e` and installed artifact
 `f732e2b16344b038cd05996501ce77be42302f7403de9720d156dbf24777d124`
 remain the latest separately accepted destructive-reset, native-trust, and
 disposable Codex/OpenCode lifecycle evidence.
@@ -2669,10 +2669,18 @@ Runtime server without restarting its provider. It does so only after
 exact ownership/topology proof and never by reading, sourcing, or mutating the
 operator's ordinary tmux configuration or server.
 
-Fresh presentation startup treats pane publication as one bounded tmux
-observation boundary. After creating and role-marking the provider pane, but
-before changing any presentation option or key table, it reopens the exact
-owned context and requires the complete two-pane topology. Only
+Fresh presentation startup publishes private ownership before launching the
+interactive Navigator. It creates pane `0.0` with an inert internal wait
+command, captures the new private socket identity into the ownership marker,
+role-marks that exact pane, and only then replaces its command with the hidden
+Navigator. This prevents the child from proving the marker while its parent is
+rewriting the socket identity; a failed exact replacement follows owned startup
+cleanup and is never treated as a reusable Navigator.
+
+Provider-pane publication remains one bounded tmux observation boundary. After
+creating and role-marking the provider pane, but before changing any
+presentation option or key table, startup reopens the exact owned context and
+requires the complete two-pane topology. Only
 `InvalidTopology` at this fresh-start boundary may be retried, for at most 20
 observations separated by 5 ms. Every other error refuses immediately, and a
 persistent incomplete or ambiguous topology still fails closed and follows

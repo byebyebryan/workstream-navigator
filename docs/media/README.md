@@ -21,5 +21,5 @@ is captured or committed.
 The SVG sources, PNG previews, and GIF tour remain committed only as historical
 design evidence. Their pre-D16 generator was deliberately removed with the
 retired navigator. Do not refresh or present these assets as current UI;
-replacement D16 captures belong to a later, explicitly scoped documentation
-or UI checkpoint.
+replacement captures belong to a later, explicitly scoped UI/documentation
+checkpoint after the current interaction design is settled.

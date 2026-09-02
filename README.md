@@ -7,9 +7,11 @@ around the provider's native terminal UI.
 
 > **D19 status:** implemented and locally accepted for operator inspection.
 > Checkpoint `a0ec38b` completes the tmux-derived navigation contract; the
-> current focus-and-frame refinement passes the full repository gate and the Rust
-> 1.88/tmux 3.3a matrix and is installed byte-identically at SHA-256
-> `46365fe25fe0edacc728f4f1269487a24671a4ad90695264db2e70ed55e26b2c`.
+> current post-rename startup-ordering and reconciliation-guidance refinement
+> passes the full local/disposable repository gate and is installed
+> byte-identically for operator inspection. The startup falsification and its
+> fail-closed correction remain in the
+> [D19 acceptance record](docs/evidence/acceptance/d19-tmux-navigation.md#post-rename-startup-falsification-and-closure).
 > This is local/disposable acceptance, not remote-CI or live-provider
 > acceptance. D18 checkpoint `c961c7e` remains the latest artifact with
 > separately authorized Codex/OpenCode lifecycle evidence. See the
@@ -150,10 +152,11 @@ migration, state rollback, automatic downgrade, or compatibility launcher.
 
 ## Build, install, and CLI
 
-WSNav remains source-installed. This host runs the byte-identical D19 candidate
-identified above; the D18 acceptance record separately identifies the exact
-artifact used for live-provider release acceptance. Build and validate any
-replacement before atomically installing its exact release artifact:
+WSNav remains source-installed. This host runs the byte-identical current D19
+candidate recorded in the D19 acceptance document; the D18 acceptance record
+separately identifies the exact artifact used for live-provider release
+acceptance. Build and validate any replacement before atomically installing
+its exact release artifact:
 
 ```console
 cargo build --locked --release
@@ -177,14 +180,15 @@ for the locally installed D19 candidate.
 
 The [historical product captures](docs/media/README.md) show a retired two-pane
 baseline with privacy-safe fixture data. They are retained design history, not
-current UI or acceptance evidence.
+current UI or acceptance evidence. A new current-product capture is deferred
+until the next UI/UX pass settles the interaction being demonstrated.
 
 ## Documentation
 
 - [Product and architecture design](docs/design.md)
 - [Delivery roadmap and acceptance gates](docs/roadmap.md)
 - [Documentation map and current operator contract](docs/README.md)
-- [Product captures](docs/media/README.md)
+- [Historical product captures](docs/media/README.md)
 - [Historical acceptance, spike, and study evidence](docs/evidence/README.md)
 
 ## License

@@ -2,12 +2,13 @@
 
 Date: 2026-08-31
 
-Status: implemented and locally accepted checkpoint `a0ec38b`, with a current
-focus-and-frame refinement. The full repository gate, a clean Rust 1.88/tmux 3.3a
-compatibility run, the locked release build, and byte-identical per-host
-installation passed for the current source. This record does not claim remote
-CI or real Codex/OpenCode acceptance; D18 remains the latest checkpoint with
-separately authorized live-provider lifecycle evidence.
+Status: implemented and locally accepted checkpoint `a0ec38b`, with the
+`fd9db8a` focus-and-frame refinement and current post-rename startup-ordering
+and reconciliation-guidance corrections. The current source passes the full
+local/disposable repository gate and byte-identical per-host installation. This
+record does not claim remote CI or real Codex/OpenCode acceptance; D18 remains
+the latest checkpoint with separately authorized live-provider lifecycle
+evidence.
 
 The current follow-up removes the visually heavy `ACTIVE`/`INACTIVE` pane
 header. The presentation instead forwards tmux focus events, and the Navigator
@@ -38,9 +39,12 @@ and `a` acknowledge-result hints while the complete `?` reference retains them.
   are absent from WSNav-owned interaction tables.
 - Fresh presentation startup retries only the exact transient
   `InvalidTopology` observation while tmux publishes its second pane, for at
-  most 20 observations separated by 5 ms. Each attempt revalidates the owned
-  context and complete two-pane topology before the first control mutation;
-  every other error and persistent ambiguity remains a refusal.
+  most 20 observations separated by 5 ms. Before Navigator can run, startup
+  creates its pane with an inert internal command, captures the private socket
+  identity into the ownership marker, role-marks the exact pane, and replaces
+  its command with Navigator. Each provider-topology attempt revalidates the
+  owned context and complete two-pane topology before the first control
+  mutation; every other error and persistent ambiguity remains a refusal.
 - Provider-pane `Ctrl+b Up`/`Down` selects the adjacent eligible already-live
   Workstream in the same activity-based visual order as Navigator. It skips
   ineligible rows, does not wrap, preserves right-pane focus, and causes no
@@ -135,19 +139,110 @@ Representative deterministic proof includes:
 - real presentation precommit rollback and success seams preserving status,
   marker, and focus at the outer-pane replacement boundary.
 
+## Post-rename documentation reconciliation
+
+After repository rename `7651c12`, the current documentation pass removes the
+stale duplicated pre-rename artifact identity and adds D19 to the roadmap's
+completed-checkpoint index. A proposed fixed-illustration current hero was
+reviewed and rejected before publication because it no longer matched the
+chosen real-terminal capture direction. No generated current hero or capture
+tool is part of this candidate; the committed pre-D16 media remains explicitly
+historical while current-product capture waits for the next UI/UX checkpoint.
+
+### Post-rename startup falsification and closure
+
+Before the startup-ordering correction, the exact post-rename source passed
+ordinary non-interactive `scripts/check` with 373 library and 10 presentation
+integration tests, formatting, strict Clippy, packaging, dependency policy,
+source/CLI and presentation/state acceptance, Markdown links, and
+staged/unstaged diff checks.
+
+The required source-read-only `rust:1.88-bookworm` matrix did not pass. With
+Rust 1.88.0, tmux 3.3a, and zsh 5.9, two serial locked
+all-targets/all-features runs each passed all 373 library tests, then failed the
+same `repeated_fresh_presentations_publish_exact_controls_before_returning`
+integration test at fresh start 12 and fresh start 0 respectively. Both
+failures were `StartupFailed { stage: "provider pane setup", source:
+InvalidTopology }`. A fresh container running only that exact 16-start test
+passed twice, then reproduced the same failure at fresh start 5 on its third
+run.
+
+The failures were fail-closed and used only disposable state plus private tmux
+sockets, but they contradicted the bounded startup-retry acceptance claim. A
+longer provisional retry was tested and rejected: even after 100 observations
+over roughly 500 ms, a later exact run showed the complete 32/96 two-pane
+geometry and correct roles while Navigator was dead with normal status 1. The
+provider-topology observation was therefore downstream evidence, not the
+cause.
+
+The exact cause was a separate ownership publication race. Tmux launched
+`_navigator` as part of `new-session`, while the parent immediately rewrote the
+private ownership marker to bind the newly created socket identity. Navigator
+could perform its first context proof during that rewrite, correctly refuse
+the changing marker, and exit. The correction starts pane `0.0` with the inert
+internal `_provider_wait`, captures the socket identity, sets the exact
+Navigator role and `remain-on-exit`, and then uses exact-target `respawn-pane`
+to launch `_navigator`. It does not retry marker ambiguity, adopt or accept a
+dead pane, weaken topology, or write into the provider pane. The independent
+20-observation provider-pane publication retry remains unchanged.
+
+Deterministic tests prove Navigator launch observes the already-published
+socket identity and that respawn targets only the bootstrap pane. On tmux 3.7c,
+five focused fixtures passed 80 fresh starts before the full repository gate.
+In a fresh `rust:1.88-bookworm` environment with Rust 1.88.0, tmux 3.3a, and
+zsh 5.9, five focused fixtures passed 80 starts and five uninterrupted serial
+locked all-targets/all-features matrices passed, including another 80 fresh
+starts. No failed or interrupted run is counted. The ordinary final gate also
+passed formatting, strict Clippy, packaging, dependency policy, source/CLI and
+presentation/state acceptance, Markdown links, and staged/unstaged diff checks.
+The earlier fail-closed failures remain historical and are not reclassified. No
+new remote-CI or live-provider claim is made.
+
+### Reconciliation-guidance recovery
+
+An operator capture exposed a separate presentation-local defect: one transient
+post-exec reconciliation failure set `Managed session reconciliation is
+unavailable; exact recovery required`, but later exact success and completed
+marker retirement did not clear it. Durable state and provider-exec proof had
+already converged; only the Navigator's process-local guidance remained stale.
+
+The correction centralizes the bounded message and applies exact
+compare-and-clear behavior. Reconciliation failure still shows the fail-closed
+warning. Successful exact proof or the following normal idle state clears only
+that same warning, while newer unrelated guidance remains visible. Deterministic
+tests cover unavailable and failed refreshes, successful recovery, completed
+marker retirement, and unrelated-guidance preservation. The change adds no
+provider I/O, durable field, retry, compatibility behavior, or broader recovery
+authority.
+
+The final local `scripts/check` passes 377 library and 10 presentation
+integration tests, formatting, strict Clippy, packaging, dependency policy,
+source/CLI and presentation/state acceptance, 54 Markdown files, and both diff
+checks. The exact Rust 1.88 startup evidence above remains bound to the source
+that produced it; no renewed compatibility-matrix or live-provider claim is
+transferred to the guidance-only follow-up.
+
 ## Artifact and installation
 
-`cargo build --locked --release` produced `wsnav 0.1.0`. The release was
-copied to a temporary file in `~/.local/bin` and atomically renamed into place.
-Source and installed artifacts compare byte-for-byte, are executable mode
-`0755`, and share SHA-256:
+The final pre-rename D19 focus-and-frame candidate produced `wsnav 0.1.0` at
+SHA-256
+`46365fe25fe0edacc728f4f1269487a24671a4ad90695264db2e70ed55e26b2c`.
+That value remains historical evidence for that exact source; it no longer
+describes the post-rename installation.
+
+### Current startup-ordering and reconciliation-guidance artifact
+
+`cargo build --locked --release` produced `wsnav 0.1.0`. The release was copied
+to a temporary file in `~/.local/bin` and atomically renamed into place. Source
+and installed artifacts compare byte-for-byte, are executable mode `0755`, are
+7,463,184 bytes, and share SHA-256:
 
 ```text
-46365fe25fe0edacc728f4f1269487a24671a4ad90695264db2e70ed55e26b2c
+ea5a6711476919bdd47aa9834e9dc6ed8529f02f2229b08db2931cc21cebed6c
 ```
 
-Installation is operator-inspection evidence, not publication or an accepted
-live-provider release. No branch was pushed as part of this checkpoint.
+Installation and source publication are operator-inspection evidence, not an
+accepted live-provider release.
 
 ## Evidence limits
 

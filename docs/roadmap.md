@@ -2,13 +2,13 @@
 
 Date: 2026-09-02
 
-Status: D0-D20 are complete. D21 is active and retires explicit result
+Status: D0-D21 are complete. D21 checkpoint `868ee85` retires explicit result
 acknowledgment plus the duplicated sticky-attention model in favor of provider
-Runtime and recovery lifecycle evidence. D20 checkpoint `00a4937` remains the
-completed provider-native conversation-branch boundary. No remote-CI or
-live-provider claim is transferred to D21. D18 checkpoint `c961c7e` remains
-the latest accepted artifact with separately authorized reset, native-trust,
-and disposable Codex/OpenCode lifecycle evidence.
+Runtime and recovery lifecycle evidence; it is locally accepted and installed
+for operator inspection. No remote-CI or live-provider claim is transferred to
+D21. D18 checkpoint `c961c7e` remains the latest accepted artifact with
+separately authorized reset, native-trust, and disposable Codex/OpenCode
+lifecycle evidence.
 
 `docs/design.md` is the product and architecture contract. This file owns
 delivery order, implementation status, and exit gates. The complete prior
@@ -28,9 +28,11 @@ roadmap is preserved as
 - D18 is a clean state break. Schemas 12 through 14 are refusal evidence, not
   migration or adoption inputs.
 
-## Active checkpoint: D21 provider-derived attention
+## Completed checkpoint: D21 provider-derived attention
 
-Implementation status: active; not yet accepted or installed.
+Implementation status: complete in `868ee85`; locally accepted and installed
+for operator inspection. See the
+[D21 acceptance record](evidence/acceptance/d21-provider-derived-attention.md).
 
 D21 makes the session card a projection of provider and recovery lifecycle,
 not a second inbox whose read state the operator must manage. A completed turn
@@ -524,6 +526,7 @@ historical evidence rather than current delivery authority.
 | D18 | Current-only consolidation and release acceptance complete; source correction locally verified | [Acceptance evidence](evidence/acceptance/d18-current-source-candidate.md) |
 | D19 | Tmux-derived presentation navigation; locally accepted for operator inspection | [D19 acceptance](evidence/acceptance/d19-tmux-navigation.md) |
 | D20 | Provider-native conversation branching; managed Fork creation and recovery retired | [D20 acceptance](evidence/acceptance/d20-native-owned-branching.md) |
+| D21 | Provider-derived attention; Navigator acknowledgment and duplicate sticky state retired | [D21 acceptance](evidence/acceptance/d21-provider-derived-attention.md) |
 
 ## Deferred product decisions
 

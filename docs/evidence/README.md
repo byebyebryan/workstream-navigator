@@ -49,6 +49,7 @@ to make their old procedures appear current.
   correction](acceptance/d18-current-source-candidate.md)
 - [D19 tmux-derived navigation](acceptance/d19-tmux-navigation.md)
 - [D20 native-owned conversation branching](acceptance/d20-native-owned-branching.md)
+- [D21 provider-derived attention](acceptance/d21-provider-derived-attention.md)
 
 ## Design spikes
 

@@ -1,15 +1,14 @@
 # Workstream Navigator V1 Design
 
-Date: 2026-08-31
+Date: 2026-09-02
 
-Status: D19 implements the shell-first product on the unchanged direct,
-current-only schema-15 epoch. Checkpoint `a0ec38b` completes tmux-owned pane
-focus, closed private-tmux controls, and bounded provider-pane Workstream
-switching. The current post-rename startup-ordering and
-reconciliation-guidance refinement passes its full local/disposable gate and
-byte-identical per-host installation. It adds no provider lifecycle effect or
-durable focus/selection state. No remote-CI or live-provider acceptance is
-claimed for D19. D18 checkpoint `c961c7e` and installed artifact
+Status: D21 implements provider-derived session-card attention on the unchanged
+direct, current-only schema-15 epoch. Checkpoint `868ee85` removes Navigator
+acknowledgment and the duplicate sticky `AttentionState`; Runtime and recovery
+lifecycle now directly own the displayed marker. It passes its full
+local/disposable gate and byte-identical per-host installation. No remote-CI or
+live-provider acceptance is claimed for D21. D18 checkpoint `c961c7e` and
+installed artifact
 `f732e2b16344b038cd05996501ce77be42302f7403de9720d156dbf24777d124`
 remain the latest separately accepted destructive-reset, native-trust, and
 disposable Codex/OpenCode lifecycle evidence.
@@ -2946,6 +2945,7 @@ roadmap and version-specific decisions remain in
 | D18 | Current-only schema-15 consolidation | [Completed roadmap](roadmap.md#completed-checkpoint-d18-current-only-consolidation) |
 | D19 | Completed tmux-derived presentation navigation | [Acceptance](evidence/acceptance/d19-tmux-navigation.md) |
 | D20 | Native-owned conversation branching | [Acceptance](evidence/acceptance/d20-native-owned-branching.md) |
+| D21 | Provider-derived attention | [Acceptance](evidence/acceptance/d21-provider-derived-attention.md) |
 
 ## Current concrete provider boundary
 

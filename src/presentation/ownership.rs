@@ -32,7 +32,11 @@ impl Presentation {
             "-n".into(),
             NAVIGATOR_WINDOW.into(),
         ];
-        arguments.extend(self.navigator_command());
+        // Keep the first pane alive but inert until the ownership marker has
+        // captured the private socket identity.  Starting `_navigator` here
+        // would let it prove the marker while that same marker is being
+        // rewritten by `capture_ownership_socket_identity`.
+        arguments.extend(self.provider_wait_command());
         arguments
     }
 
@@ -56,6 +60,17 @@ impl Presentation {
             self.state_root.clone().into_os_string(),
             "_provider_wait".into(),
         ]
+    }
+
+    pub(super) fn navigator_respawn_arguments(&self) -> Vec<OsString> {
+        let mut arguments = vec![
+            "respawn-pane".into(),
+            "-k".into(),
+            "-t".into(),
+            self.pane_target(NAVIGATOR_PANE).into(),
+        ];
+        arguments.extend(self.navigator_command());
+        arguments
     }
 }
 
@@ -539,6 +554,8 @@ impl Presentation {
             .set_pane_role(NAVIGATOR_PANE, PresentationPaneRole::Navigator, None)
             .and_then(|()| self.set_pane_remain_on_exit(NAVIGATOR_PANE, true));
         self.complete_start_stage("navigator pane setup", result)?;
+        let result = self.invoke(None, self.navigator_respawn_arguments());
+        self.complete_start_stage("navigator pane launch", result)?;
         let wait = self.provider_wait_command();
         let result = self.invoke(
             None,

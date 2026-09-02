@@ -1972,7 +1972,50 @@ mod tests {
         assert_eq!(arguments[6], "-s");
         assert_eq!(arguments[8], "-n");
         assert_eq!(arguments[9], NAVIGATOR_WINDOW);
-        assert_eq!(arguments[13], "_navigator");
+        assert_eq!(arguments[13], "_provider_wait");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn navigator_launch_waits_for_socket_identity_capture() {
+        let temporary = tempfile::tempdir().unwrap();
+        let fixture = temporary.path().join("presentation-helper");
+        fs::write(
+            &fixture,
+            r#"#!/bin/sh
+case "$3" in
+  _provider_wait)
+    exec sleep 60
+    ;;
+  _navigator)
+    marker="${5%/*}/ownership.json"
+    grep -q '"socket_identity":{' "$marker" || exit 42
+    touch "$2/navigator-saw-socket-identity"
+    exec sleep 60
+    ;;
+esac
+exit 0
+"#,
+        )
+        .unwrap();
+        set_mode(&fixture, 0o700).unwrap();
+
+        let presentation = Presentation::fresh_with_executable(temporary.path(), fixture);
+        presentation
+            .start_with_context(uuid::Uuid::from_u128(0x1709), temporary.path())
+            .unwrap();
+        let _guard = DisposableTmuxServerGuard::new(
+            presentation.paths().socket.clone(),
+            Some(presentation.paths().directory.clone()),
+        );
+
+        assert!(
+            temporary
+                .path()
+                .join("navigator-saw-socket-identity")
+                .exists()
+        );
+        assert!(!presentation.navigator_pane_is_dead().unwrap());
     }
 
     #[test]
@@ -1991,6 +2034,33 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(command[3], "_navigator");
+    }
+
+    #[test]
+    fn navigator_respawn_targets_the_bootstrap_pane_exactly() {
+        let temporary = tempfile::tempdir().unwrap();
+        let presentation = Presentation {
+            paths: PresentationPaths::fresh(temporary.path()),
+            executable: PathBuf::from("/workspace/wsnav"),
+            state_root: temporary.path().to_path_buf(),
+        };
+
+        let arguments = presentation
+            .navigator_respawn_arguments()
+            .into_iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(arguments[0], "respawn-pane");
+        assert_eq!(arguments[1], "-k");
+        assert_eq!(arguments[2], "-t");
+        assert!(arguments[3].starts_with("wsnav-presentation-"));
+        assert!(arguments[3].ends_with(":0.0"));
+        assert_eq!(arguments[4], "/workspace/wsnav");
+        assert_eq!(arguments[5], "--state-root");
+        assert_eq!(arguments[7], "_navigator");
+        assert_eq!(arguments[8], "--presentation-socket");
+        assert_eq!(arguments[10], "--presentation-session");
     }
 
     #[test]

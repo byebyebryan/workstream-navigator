@@ -7,9 +7,6 @@ use crate::domain::{
 };
 use crate::provider::lifecycle::{LifecycleEvent, LifecycleHint, LifecycleObservation};
 
-use super::attention::{
-    clear_recovery_attention_in_transaction, mark_result_attention_in_transaction,
-};
 use super::models::{
     HostRegistry, OpenCodeLifecycleObservation, OpenCodeObserverStatus, ProviderBinding, StateError,
 };
@@ -26,7 +23,7 @@ impl HostRegistry {
     /// runtime is `starting`. The one proven native same-TUI replacement is a
     /// distinct `SessionStart(source=clear)` after an idle or attention state;
     /// all other replacement claims fail closed. A settled result and its
-    /// sticky attention state commit in the same `SQLite` transaction.
+    /// exact provider binding commit in the same `SQLite` transaction.
     ///
     /// # Errors
     ///
@@ -212,7 +209,6 @@ pub(in crate::state) fn apply_opencode_lifecycle_transition(
                     return Err(StateError::HookEvidenceMismatch);
                 }
                 reopen_recovery_workstream(transaction, workstream_id)?;
-                clear_recovery_attention_in_transaction(transaction, workstream_id)?;
             }
             Ok(true)
         }
@@ -236,7 +232,7 @@ pub(in crate::state) fn apply_opencode_lifecycle_transition(
             validate_provider_metadata(message_id)?;
             if !record_opencode_settled_message(transaction, runtime_id, observation, message_id)? {
                 // A delayed duplicate must not touch the binding, Runtime,
-                // Workstream activity, or sticky attention revision.
+                // Workstream activity or provider binding.
                 return Ok(false);
             }
             let changed = transaction
@@ -257,12 +253,6 @@ pub(in crate::state) fn apply_opencode_lifecycle_transition(
                 return Err(StateError::ConcurrentWrite);
             }
             update_runtime_lifecycle(transaction, runtime_id, runtime_revision, "attention")?;
-            mark_result_attention_in_transaction(
-                transaction,
-                workstream_id,
-                observation.session.clone(),
-                message_id.to_owned(),
-            )?;
             Ok(true)
         }
         LifecycleHint::Ended => {
@@ -393,6 +383,7 @@ pub(in crate::state) fn apply_lifecycle_event(
                 &observation.native_session_id,
                 generation,
             )?;
+            validate_provider_metadata(&turn_id)?;
             let changed = transaction
                 .execute(
                     "UPDATE provider_bindings SET last_settled_turn_id = ?1, revision = revision + 1
@@ -404,12 +395,7 @@ pub(in crate::state) fn apply_lifecycle_event(
                 return Err(StateError::ConcurrentWrite);
             }
             update_runtime_lifecycle(transaction, runtime_id, runtime_revision, "attention")?;
-            mark_result_attention_in_transaction(
-                transaction,
-                workstream_id,
-                observed_session,
-                turn_id,
-            )
+            Ok(())
         }
         LifecycleEvent::SessionEnd => {
             require_matching_binding(
@@ -576,7 +562,6 @@ pub(in crate::state) fn complete_session_start(
     )?;
     if context.workstream_lifecycle == WorkstreamLifecycle::RecoveryRequired {
         reopen_recovery_workstream(transaction, context.workstream_id)?;
-        clear_recovery_attention_in_transaction(transaction, context.workstream_id)?;
     }
     Ok(())
 }

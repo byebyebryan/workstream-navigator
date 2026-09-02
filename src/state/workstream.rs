@@ -140,7 +140,7 @@ impl HostRegistry {
     }
 
     /// Hides one exact Workstream from the active navigator scope without
-    /// deleting its Runtime, provider binding, attention, project files, or
+    /// deleting its Runtime, provider binding, project files, or
     /// lineage. The caller is responsible for any necessary Runtime park
     /// before this durable visibility transition.
     ///
@@ -269,14 +269,6 @@ impl HostRegistry {
                 Err(error) => return Err(error),
             },
         };
-        let attention = self.attention(workstream_id)?;
-        if attention
-            .as_ref()
-            .and_then(|state| state.latest_native_session_id.as_ref())
-            .is_some_and(|session| session.provider() != provider)
-        {
-            return Err(StateError::ProviderIdentityMismatch);
-        }
         Ok(WorkstreamOverview {
             workstream_id,
             location_id,
@@ -297,7 +289,6 @@ impl HostRegistry {
             revision,
             runtime,
             binding,
-            attention,
         })
     }
 }

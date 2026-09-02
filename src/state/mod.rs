@@ -1,4 +1,3 @@
-mod attention;
 mod compound;
 pub(crate) mod current;
 mod host;

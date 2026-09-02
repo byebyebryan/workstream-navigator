@@ -7,7 +7,6 @@ use crate::domain::{
     RuntimeId, WorkstreamId, WorkstreamOrigin,
 };
 
-use super::attention::ensure_recovery_attention_in_transaction;
 use super::models::{
     CreatedWorkstream, HostRegistry, OPENCODE_SESSION_CREATION_CLEANUP_UNKNOWN_CODE,
     OPENCODE_SESSION_CREATION_PLAN_SCHEMA_VERSION, OPENCODE_SESSION_CREATION_UNKNOWN_CODE,
@@ -713,8 +712,8 @@ impl HostRegistry {
     }
 
     /// Terminally records that the crossed provider boundary is unknown. The
-    /// exact Starting Runtime is moved to `unknown`, its Workstream and
-    /// attention become recovery-required, and the operation is no longer
+    /// exact Starting Runtime is moved to `unknown`, its Workstream becomes
+    /// recovery-required, and the operation is no longer
     /// eligible for retry. All state changes commit in one `SQLite` transaction.
     ///
     /// # Errors
@@ -799,7 +798,6 @@ impl HostRegistry {
                 return Err(StateError::ConcurrentWrite);
             }
         }
-        ensure_recovery_attention_in_transaction(&transaction, plan.workstream_id)?;
         operation.transition(
             OperationPhase::Failed,
             Some(plan.encode()?),

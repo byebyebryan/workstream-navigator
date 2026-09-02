@@ -463,13 +463,6 @@ impl PendingObserverIntent {
                     workstream_id,
                     expected_workstream_revision,
                 },
-                ManagedAction::AcknowledgeResult {
-                    workstream_id,
-                    expected_attention_revision,
-                } => Command::AcknowledgeResult {
-                    workstream_id,
-                    expected_attention_revision,
-                },
             },
             Self::NewAtSameLocation {
                 source_workstream_id,
@@ -676,21 +669,6 @@ fn execute_command(
             );
             false
         }
-        Command::AcknowledgeResult {
-            workstream_id,
-            expected_attention_revision,
-        } => {
-            execute_managed_action(
-                root,
-                navigator,
-                presentation,
-                ManagedAction::AcknowledgeResult {
-                    workstream_id,
-                    expected_attention_revision,
-                },
-            );
-            false
-        }
         Command::AcceptObserverSetup { kind } => {
             accept_observer_setup(root, navigator, presentation, kind, pending_observer);
             false
@@ -736,10 +714,6 @@ pub(crate) enum ManagedAction {
     Restore {
         workstream_id: WorkstreamId,
         expected_workstream_revision: Revision,
-    },
-    AcknowledgeResult {
-        workstream_id: WorkstreamId,
-        expected_attention_revision: Revision,
     },
 }
 
@@ -796,8 +770,7 @@ fn prepare_observer_or_request(
             }
             ManagedAction::Park { .. }
             | ManagedAction::Archive { .. }
-            | ManagedAction::Restore { .. }
-            | ManagedAction::AcknowledgeResult { .. } => ProviderKind::Codex,
+            | ManagedAction::Restore { .. } => ProviderKind::Codex,
         },
         PendingObserverIntent::NewAtSameLocation { provider, .. } => *provider,
     };
@@ -1243,7 +1216,7 @@ fn navigator_attachment_for(
 /// Executes against the schema-15 registry only after the current
 /// snapshot has revalidated the exact action target. The short preflight is a
 /// fence against stale navigator commands; durable action routines repeat
-/// their own Workstream/attention revision checks before mutation.
+/// their own Workstream revision checks before mutation.
 #[allow(
     clippy::too_many_lines,
     reason = "one schema-15 action boundary keeps every lifecycle preflight and post-action attachment outcome auditable"
@@ -1357,25 +1330,6 @@ pub(crate) fn apply_managed_action(
                 return Err(NavigatorError::ManagedActionUnavailable);
             }
             crate::actions::restore(&mut registry, workstream_id, expected_workstream_revision)
-                .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
-            Ok(None)
-        }
-        ManagedAction::AcknowledgeResult {
-            workstream_id,
-            expected_attention_revision,
-        } => {
-            snapshot
-                .workstreams
-                .iter()
-                .find(|workstream| {
-                    workstream.workstream_id == workstream_id
-                        && workstream.onboarding.is_none()
-                        && workstream.result_unseen
-                        && workstream.attention_revision == expected_attention_revision
-                })
-                .ok_or(NavigatorError::ManagedActionUnavailable)?;
-            registry
-                .acknowledge_result_attention(workstream_id, expected_attention_revision)
                 .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             Ok(None)
         }
@@ -1810,8 +1764,8 @@ mod tests {
     };
     use crate::{
         domain::{
-            LocationId, ProjectId, ProviderKind, ProviderSessionId, RandomIdGenerator, Revision,
-            RuntimeId, WorkstreamId, WorkstreamLifecycle,
+            LocationId, ProjectId, ProviderKind, RandomIdGenerator, Revision, RuntimeId,
+            WorkstreamId, WorkstreamLifecycle,
         },
         navigator::view::{Navigator, ShellLocation},
         presentation::INVALID_TOPOLOGY_RETRY_ATTEMPTS,
@@ -1920,9 +1874,6 @@ mod tests {
                     runtime: None,
                     onboarding,
                     native_name: None,
-                    attention_revision: Revision::INITIAL,
-                    result_unseen: false,
-                    recovery_unseen: false,
                 }],
                 unresolved_operations: vec![],
             },
@@ -2067,7 +2018,7 @@ mod tests {
     }
 
     #[test]
-    fn current_restore_and_acknowledge_use_only_exact_durable_revisions() {
+    fn current_restore_uses_only_exact_durable_revisions() {
         let temporary = tempfile::tempdir().unwrap();
         let state_path = temporary.path().join("state");
         let checkout = temporary.path().join("checkout");
@@ -2109,30 +2060,6 @@ mod tests {
         );
         let restored = crate::snapshot::read_snapshot(&root).unwrap();
         assert!(!restored.workstreams[0].archived);
-
-        let state = open_current(&root).unwrap();
-        let mut registry = state.into_host_registry().unwrap();
-        let attention = registry
-            .mark_result_attention(
-                workstream_id,
-                ProviderSessionId::new(ProviderKind::OpenCode, "session-a").unwrap(),
-                "turn-a".to_owned(),
-            )
-            .unwrap();
-        drop(registry);
-        assert_eq!(
-            apply_managed_action(
-                &root,
-                ManagedAction::AcknowledgeResult {
-                    workstream_id,
-                    expected_attention_revision: attention.revision,
-                },
-            )
-            .unwrap(),
-            None
-        );
-        let acknowledged = crate::snapshot::read_snapshot(&root).unwrap();
-        assert!(!acknowledged.workstreams[0].result_unseen);
     }
 
     fn wait_for_private_client(socket: &Path) {

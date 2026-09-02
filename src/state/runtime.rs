@@ -8,7 +8,6 @@ use crate::domain::{
     WorkstreamId, WorkstreamLifecycle,
 };
 
-use super::attention::ensure_recovery_attention_in_transaction;
 use super::compound::bind_opencode_session_in_transaction;
 use super::lifecycle::{apply_opencode_lifecycle_transition, validate_opencode_observation};
 use super::models::{
@@ -1107,7 +1106,7 @@ impl HostRegistry {
     /// # Errors
     ///
     /// Returns an error for an unknown or stale runtime, or a failed atomic
-    /// transition of the Runtime, Workstream, and attention state.
+    /// transition of the Runtime and Workstream lifecycle state.
     pub fn mark_runtime_recovery_required(
         &mut self,
         runtime_id: RuntimeId,
@@ -1161,7 +1160,6 @@ impl HostRegistry {
                 return Err(StateError::ConcurrentWrite);
             }
         }
-        ensure_recovery_attention_in_transaction(&transaction, workstream_id)?;
         transaction.commit().map_err(StateError::Sqlite)
     }
 

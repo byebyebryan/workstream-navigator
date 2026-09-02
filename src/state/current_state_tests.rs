@@ -1,5 +1,6 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
+use std::path::{Path, PathBuf};
 
 #[cfg(unix)]
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -10,13 +11,13 @@ use tempfile::tempdir;
 use uuid::Uuid;
 
 use crate::domain::ProviderKind;
-use crate::domain::{IdGenerator, RandomIdGenerator};
+use crate::domain::{IdGenerator, RandomIdGenerator, WorkstreamId};
 use crate::provider::lifecycle::{LifecycleEvent, LifecycleObservation};
 
 use super::current::{BootstrapCheckpoint, create_current_with_checkpoint_hook};
 use super::{
-    BOOTSTRAP_LOCK_FILE, HOST_APPLICATION_ID, HOST_SCHEMA_VERSION, StateError, StateRoot,
-    create_current, open_current,
+    BOOTSTRAP_LOCK_FILE, HOST_APPLICATION_ID, HOST_SCHEMA_VERSION, HostRegistry, RuntimeRecord,
+    StateError, StateRoot, create_current, open_current,
 };
 
 fn raw_identity(path: &std::path::Path) -> (u32, u32) {
@@ -26,6 +27,136 @@ fn raw_identity(path: &std::path::Path) -> (u32, u32) {
         u32::from_be_bytes(bytes[60..64].try_into().unwrap()),
         u32::from_be_bytes(bytes[68..72].try_into().unwrap()),
     )
+}
+
+struct CodexLifecycleFixture {
+    _temporary: tempfile::TempDir,
+    path: PathBuf,
+    workstream_id: WorkstreamId,
+    cwd: String,
+}
+
+type LegacyAttentionRow = (
+    Option<i64>,
+    Option<i64>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    i64,
+);
+
+fn codex_lifecycle_fixture() -> CodexLifecycleFixture {
+    let temporary = tempdir().unwrap();
+    let path = temporary.path().join("state");
+    let checkout = temporary.path().join("checkout");
+    fs::create_dir(&checkout).unwrap();
+    let mut state = create_current(&path, &RandomIdGenerator).unwrap();
+    let (_, workstream_id) = state
+        .seed_test_workstream(
+            &checkout,
+            "checkout",
+            ProviderKind::Codex,
+            &RandomIdGenerator,
+        )
+        .unwrap();
+    let mut registry = state.into_host_registry().unwrap();
+    let runtime = registry.reserve_runtime(workstream_id).unwrap();
+    let cwd = runtime.cwd.to_string_lossy().into_owned();
+    registry
+        .apply_lifecycle_observation(
+            runtime.runtime_id,
+            &runtime.tmux_generation,
+            LifecycleObservation {
+                event: LifecycleEvent::SessionStart,
+                cwd: cwd.clone(),
+                native_session_id: "native-thread".to_owned(),
+                turn_id: None,
+                source: Some("startup".to_owned()),
+            },
+        )
+        .unwrap();
+    drop(registry);
+    CodexLifecycleFixture {
+        _temporary: temporary,
+        path,
+        workstream_id,
+        cwd,
+    }
+}
+
+fn observe_codex(
+    registry: &mut HostRegistry,
+    fixture: &CodexLifecycleFixture,
+    runtime: &RuntimeRecord,
+    event: LifecycleEvent,
+    turn_id: Option<String>,
+    source: Option<&str>,
+) -> Result<(), StateError> {
+    registry.apply_lifecycle_observation(
+        runtime.runtime_id,
+        &runtime.tmux_generation,
+        LifecycleObservation {
+            event,
+            cwd: fixture.cwd.clone(),
+            native_session_id: "native-thread".to_owned(),
+            turn_id,
+            source: source.map(str::to_owned),
+        },
+    )
+}
+
+fn insert_legacy_attention(path: &Path, workstream_id: WorkstreamId) -> LegacyAttentionRow {
+    let legacy = (
+        Some(17_i64),
+        Some(18_i64),
+        Some("legacy-session".to_owned()),
+        Some("codex".to_owned()),
+        Some("legacy-turn".to_owned()),
+        19_i64,
+    );
+    let connection = Connection::open(path.join("host.sqlite")).unwrap();
+    connection
+        .execute(
+            "INSERT INTO attention_states (
+                workstream_id, result_unseen_since_revision,
+                recovery_unseen_since_revision, latest_native_session_id,
+                latest_native_session_provider, latest_turn_id, revision
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                workstream_id.to_string(),
+                legacy.0,
+                legacy.1,
+                legacy.2,
+                legacy.3,
+                legacy.4,
+                legacy.5,
+            ],
+        )
+        .unwrap();
+    legacy
+}
+
+fn read_legacy_attention(path: &Path, workstream_id: WorkstreamId) -> LegacyAttentionRow {
+    let connection = Connection::open(path.join("host.sqlite")).unwrap();
+    connection
+        .query_row(
+            "SELECT result_unseen_since_revision,
+                    recovery_unseen_since_revision, latest_native_session_id,
+                    latest_native_session_provider, latest_turn_id, revision
+             FROM attention_states WHERE workstream_id = ?1",
+            [workstream_id.to_string()],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
+        )
+        .unwrap()
 }
 
 #[test]
@@ -373,6 +504,174 @@ fn native_session_rotation_reuses_one_workstream_and_rotates_its_binding() {
             .map(crate::domain::ProviderSessionId::native_id),
         Some("native-thread-a")
     );
+}
+
+#[test]
+fn legacy_attention_rows_are_ignored_by_snapshots_and_lifecycle_observations() {
+    let fixture = codex_lifecycle_fixture();
+    let legacy = insert_legacy_attention(&fixture.path, fixture.workstream_id);
+
+    let root = StateRoot::select(&fixture.path);
+    let initial = crate::snapshot::read_snapshot(&root).unwrap();
+    assert_eq!(
+        initial.workstreams[0]
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.status),
+        Some(crate::domain::RuntimeStatus::Idle)
+    );
+
+    let state = open_current(&root).unwrap();
+    let mut registry = state.into_host_registry().unwrap();
+    let runtime = registry
+        .runtime_for_workstream(fixture.workstream_id)
+        .unwrap()
+        .unwrap();
+    observe_codex(
+        &mut registry,
+        &fixture,
+        &runtime,
+        LifecycleEvent::Stop,
+        Some("observed-turn".to_owned()),
+        None,
+    )
+    .unwrap();
+    let runtime = registry
+        .runtime_for_workstream(fixture.workstream_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime.status, crate::domain::RuntimeStatus::Attention);
+    observe_codex(
+        &mut registry,
+        &fixture,
+        &runtime,
+        LifecycleEvent::UserPromptSubmit,
+        None,
+        None,
+    )
+    .unwrap();
+    let runtime = registry
+        .runtime_for_workstream(fixture.workstream_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime.status, crate::domain::RuntimeStatus::Working);
+    registry
+        .mark_runtime_recovery_required(runtime.runtime_id, runtime.revision)
+        .unwrap();
+    drop(registry);
+
+    let after = crate::snapshot::read_snapshot(&root).unwrap();
+    assert_eq!(
+        after.workstreams[0].lifecycle,
+        crate::domain::WorkstreamLifecycle::RecoveryRequired
+    );
+    assert_eq!(
+        after.workstreams[0]
+            .runtime
+            .as_ref()
+            .map(|runtime| runtime.status),
+        Some(crate::domain::RuntimeStatus::Unknown)
+    );
+
+    assert_eq!(
+        read_legacy_attention(&fixture.path, fixture.workstream_id),
+        legacy
+    );
+}
+
+#[test]
+fn malformed_codex_stop_turn_id_preserves_all_durable_state() {
+    let fixture = codex_lifecycle_fixture();
+    insert_legacy_attention(&fixture.path, fixture.workstream_id);
+    let root = StateRoot::select(&fixture.path);
+    let state = open_current(&root).unwrap();
+    let mut registry = state.into_host_registry().unwrap();
+    let runtime = registry
+        .runtime_for_workstream(fixture.workstream_id)
+        .unwrap()
+        .unwrap();
+    observe_codex(
+        &mut registry,
+        &fixture,
+        &runtime,
+        LifecycleEvent::Stop,
+        Some("prior-turn".to_owned()),
+        None,
+    )
+    .unwrap();
+    let runtime = registry
+        .runtime_for_workstream(fixture.workstream_id)
+        .unwrap()
+        .unwrap();
+    observe_codex(
+        &mut registry,
+        &fixture,
+        &runtime,
+        LifecycleEvent::UserPromptSubmit,
+        None,
+        None,
+    )
+    .unwrap();
+
+    let runtime_before = registry
+        .runtime_for_workstream(fixture.workstream_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime_before.status, crate::domain::RuntimeStatus::Working);
+    let overview_before = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == fixture.workstream_id)
+        .unwrap();
+    let binding_before = registry
+        .binding_for_runtime(runtime_before.runtime_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        binding_before.last_settled_turn_id.as_deref(),
+        Some("prior-turn")
+    );
+    let attention_before = read_legacy_attention(&fixture.path, fixture.workstream_id);
+
+    for turn_id in ["malformed\nturn".to_owned(), "x".repeat(257)] {
+        let error = observe_codex(
+            &mut registry,
+            &fixture,
+            &runtime_before,
+            LifecycleEvent::Stop,
+            Some(turn_id),
+            None,
+        );
+        assert!(matches!(error, Err(StateError::InvalidProviderMetadata)));
+        assert_eq!(
+            registry
+                .runtime_for_workstream(fixture.workstream_id)
+                .unwrap()
+                .unwrap(),
+            runtime_before
+        );
+        assert_eq!(
+            registry
+                .workstream_overviews()
+                .unwrap()
+                .into_iter()
+                .find(|overview| overview.workstream_id == fixture.workstream_id)
+                .unwrap(),
+            overview_before
+        );
+        assert_eq!(
+            registry
+                .binding_for_runtime(runtime_before.runtime_id)
+                .unwrap()
+                .unwrap(),
+            binding_before
+        );
+        assert_eq!(
+            read_legacy_attention(&fixture.path, fixture.workstream_id),
+            attention_before
+        );
+    }
 }
 
 #[test]

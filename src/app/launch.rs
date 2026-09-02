@@ -611,9 +611,6 @@ mod tests {
             runtime: None,
             onboarding: None,
             native_name: None,
-            attention_revision: Revision::INITIAL,
-            result_unseen: false,
-            recovery_unseen: false,
         }
     }
 

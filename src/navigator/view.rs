@@ -143,10 +143,6 @@ pub(crate) enum Command {
         workstream_id: WorkstreamId,
         expected_workstream_revision: Revision,
     },
-    AcknowledgeResult {
-        workstream_id: WorkstreamId,
-        expected_attention_revision: Revision,
-    },
     /// Opens the contextual setup guide before a Codex action can proceed.
     /// The guide carries no provider argv or profile path.
     AcceptObserverSetup {
@@ -496,7 +492,6 @@ impl Model {
             KeyCode::Char('p') => self.park_selected(),
             KeyCode::Char('x') => self.archive_selected(),
             KeyCode::Char('u') => self.restore_selected(),
-            KeyCode::Char('a') => self.acknowledge_selected(),
             _ => Command::None,
         }
     }
@@ -664,23 +659,6 @@ impl Model {
             .map_or(Command::None, |workstream| Command::Restore {
                 workstream_id,
                 expected_workstream_revision: workstream.revision,
-            })
-    }
-
-    fn acknowledge_selected(&self) -> Command {
-        if self.page != Page::Workstreams {
-            return Command::None;
-        }
-        let Some(RowId::Workstream(workstream_id)) = self.selected else {
-            return Command::None;
-        };
-        self.selected_workstream(workstream_id)
-            .filter(|workstream| {
-                !workstream.archived && workstream.onboarding.is_none() && workstream.result_unseen
-            })
-            .map_or(Command::None, |workstream| Command::AcknowledgeResult {
-                workstream_id,
-                expected_attention_revision: workstream.attention_revision,
             })
     }
 
@@ -1004,11 +982,8 @@ fn workstream_marker(workstream: &WorkstreamSnapshot) -> (&'static str, Style) {
         ("p", Style::default().fg(PARKED_INDICATOR_COLOR))
     } else if workstream.onboarding == Some(OnboardingStatus::RecoveryRequired)
         || workstream.lifecycle == WorkstreamLifecycle::RecoveryRequired
-        || workstream.recovery_unseen
     {
         ("!", Style::default().fg(Color::Red))
-    } else if workstream.result_unseen {
-        ("✓", Style::default().fg(Color::Green))
     } else if workstream.onboarding == Some(OnboardingStatus::ActionFenced) {
         ("…", Style::default().fg(Color::Cyan))
     } else {
@@ -1016,8 +991,8 @@ fn workstream_marker(workstream: &WorkstreamSnapshot) -> (&'static str, Style) {
             Some(RuntimeStatus::Working) => ("●", Style::default().fg(Color::Yellow)),
             Some(RuntimeStatus::Starting) => ("…", Style::default().fg(Color::Cyan)),
             Some(RuntimeStatus::Unknown) => ("?", Style::default().fg(Color::Red)),
-            Some(RuntimeStatus::Stopped | RuntimeStatus::Attention | RuntimeStatus::Idle)
-            | None => (" ", Style::default()),
+            Some(RuntimeStatus::Attention) => ("✓", Style::default().fg(Color::Green)),
+            Some(RuntimeStatus::Stopped | RuntimeStatus::Idle) | None => (" ", Style::default()),
         }
     }
 }
@@ -1207,7 +1182,6 @@ fn help_lines() -> Vec<Line<'static>> {
         help_binding("p", "park session"),
         help_binding("x", "archive session"),
         help_binding("u", "restore session"),
-        help_binding("a", "acknowledge result"),
         help_binding("?/Esc/q", "close help"),
     ]
 }
@@ -1563,9 +1537,6 @@ mod tests {
                         runtime: None,
                         onboarding: None,
                         native_name: None,
-                        attention_revision: Revision::INITIAL,
-                        result_unseen: false,
-                        recovery_unseen: false,
                     },
                     WorkstreamSnapshot {
                         project_id,
@@ -1580,9 +1551,6 @@ mod tests {
                         runtime: None,
                         onboarding: None,
                         native_name: None,
-                        attention_revision: Revision::INITIAL,
-                        result_unseen: false,
-                        recovery_unseen: false,
                     },
                 ],
                 unresolved_operations: vec![],
@@ -1616,9 +1584,6 @@ mod tests {
                     runtime: None,
                     onboarding: None,
                     native_name: None,
-                    attention_revision: Revision::INITIAL,
-                    result_unseen: false,
-                    recovery_unseen: false,
                 }
             };
         (
@@ -1843,8 +1808,6 @@ mod tests {
         };
 
         workstream.lifecycle = WorkstreamLifecycle::Parked;
-        workstream.result_unseen = true;
-        workstream.recovery_unseen = true;
         workstream.onboarding = Some(OnboardingStatus::RecoveryRequired);
         assert_eq!(marker(&workstream), ("p", Some(Color::Indexed(110))));
 
@@ -1852,19 +1815,18 @@ mod tests {
         assert_eq!(marker(&workstream), ("!", Some(Color::Red)));
 
         workstream.onboarding = None;
-        workstream.recovery_unseen = false;
+        workstream.runtime = Some(RuntimeSnapshot {
+            runtime_id,
+            status: RuntimeStatus::Attention,
+            revision: Revision::INITIAL,
+        });
         assert_eq!(marker(&workstream), ("✓", Some(Color::Green)));
 
-        workstream.result_unseen = false;
         workstream.onboarding = Some(OnboardingStatus::ActionFenced);
         assert_eq!(marker(&workstream), ("…", Some(Color::Cyan)));
 
         workstream.onboarding = None;
-        workstream.runtime = Some(RuntimeSnapshot {
-            runtime_id,
-            status: RuntimeStatus::Starting,
-            revision: Revision::INITIAL,
-        });
+        workstream.runtime.as_mut().unwrap().status = RuntimeStatus::Starting;
         assert_eq!(marker(&workstream), ("…", Some(Color::Cyan)));
 
         workstream.runtime.as_mut().unwrap().status = RuntimeStatus::Working;
@@ -1873,11 +1835,7 @@ mod tests {
         workstream.runtime.as_mut().unwrap().status = RuntimeStatus::Unknown;
         assert_eq!(marker(&workstream), ("?", Some(Color::Red)));
 
-        for status in [
-            RuntimeStatus::Idle,
-            RuntimeStatus::Attention,
-            RuntimeStatus::Stopped,
-        ] {
+        for status in [RuntimeStatus::Idle, RuntimeStatus::Stopped] {
             workstream.runtime.as_mut().unwrap().status = status;
             assert_eq!(marker(&workstream), (" ", None));
         }
@@ -2082,7 +2040,6 @@ mod tests {
         }
         assert!(!rendered.contains("↑↓ select"));
         assert!(!rendered.contains("Enter open"));
-        assert!(!rendered.contains("a acknowledge"));
         assert!(lines.iter().all(|line| line.width() <= 32));
         assert_eq!(
             super::controls_height(&model, 32),
@@ -2107,7 +2064,6 @@ mod tests {
             },
         ] {
             assert!(!bindings.iter().any(|(key, _)| *key == "↑↓"));
-            assert!(!bindings.iter().any(|(key, _)| *key == "a"));
             assert!(
                 !bindings
                     .iter()
@@ -2119,14 +2075,14 @@ mod tests {
     #[test]
     fn help_is_full_width_colored_and_fits_its_content() {
         let overlay = super::help_overlay(Rect::new(0, 0, 32, 24));
-        assert_eq!(overlay, Rect::new(0, 5, 32, 13));
+        assert_eq!(overlay, Rect::new(0, 6, 32, 12));
         assert_eq!(
             super::help_overlay(Rect::new(0, 0, 32, 18)),
-            Rect::new(0, 2, 32, 13)
+            Rect::new(0, 3, 32, 12)
         );
 
         let lines = super::help_lines();
-        assert_eq!(lines.len(), 12);
+        assert_eq!(lines.len(), 11);
         assert!(lines.iter().all(|line| line.width() <= 30));
         let rendered = lines
             .iter()
@@ -2141,7 +2097,7 @@ mod tests {
         assert_eq!(rendered[6], "n       new at location");
         assert_eq!(lines[0].spans[0].style.fg, Some(Color::Cyan));
         assert_eq!(lines[6].spans[0].style.fg, Some(Color::Yellow));
-        assert_eq!(lines[11].spans[0].style.fg, Some(Color::Yellow));
+        assert_eq!(lines[10].spans[0].style.fg, Some(Color::Yellow));
     }
 
     #[test]
@@ -2318,9 +2274,7 @@ mod tests {
 
     #[test]
     fn lifecycle_keys_emit_exact_reversible_action_revisions() {
-        let (mut snapshot, active, archived) = snapshot();
-        snapshot.workstreams[0].result_unseen = true;
-        snapshot.workstreams[0].attention_revision = Revision::INITIAL.next();
+        let (snapshot, active, archived) = snapshot();
         let mut model = Model::new(snapshot);
         model.select_next();
 
@@ -2333,10 +2287,7 @@ mod tests {
         );
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Char('a')),
-            Command::AcknowledgeResult {
-                workstream_id: active,
-                expected_attention_revision: Revision::INITIAL.next(),
-            }
+            Command::None
         );
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Char('x')),

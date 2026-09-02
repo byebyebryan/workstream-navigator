@@ -688,7 +688,7 @@ impl CurrentState {
     /// `SQLite` connection and records the exact generation-scoped degraded
     /// marker on bounded contention or a non-retryable write failure.  The
     /// operation remains a narrow state-owned closure until the provider
-    /// adapter supplies typed lifecycle/binding/attention calls;
+    /// adapter supplies typed lifecycle and binding calls;
     /// it cannot accidentally open a second registry connection.
     pub fn observer_write_with_degraded_marker<T, F>(
         &mut self,

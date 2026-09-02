@@ -68,11 +68,17 @@ to reattach.
 
 The shell-first navigator has two direct pages: Workstreams and Archived. `.`
 opens Archived; `Esc` returns to Workstreams; `Left` and `Right` do not cycle
-views. Workstreams keeps `Enter`, `n`, `p`, `x`, `a`, and `?`; `n` creates a
-separate blank Workstream at the selected Location, while native provider
-branching remains in the current Workstream. Archived uses `u` to restore
+views. Workstreams keeps `Enter`, `n`, `p`, `x`, and `?`; `n` creates a separate
+blank Workstream at the selected Location, while native provider branching
+remains in the current Workstream. Archived uses `u` to restore
 without starting or attaching a provider. The installed `wsnav --help` output
 is the CLI reference for that exact binary.
+
+Session-card markers project current provider and recovery lifecycle: `p` is
+parked, `!` is Workstream or onboarding recovery, `…` is starting, `●` is
+working, `✓` is Runtime attention, and idle or stopped sessions are blank. A
+subsequent provider prompt changes the marker back to working; presentation
+selection and focus never acknowledge or persist a separate result state.
 
 Tmux alone owns pane focus. `Ctrl+b Left`/`Right` and deliberate primary-button
 press are the only ordinary focus transitions; Navigator activation and

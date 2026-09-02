@@ -9,9 +9,9 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::domain::{
-    AttentionState, CompoundOperation, DomainError, HostId, LocationId, OperationId, OperationKind,
-    OperationPhase, ProviderKind, ProviderSessionId, Revision, RuntimeId, RuntimeStatus,
-    WorkstreamId, WorkstreamLifecycle, WorkstreamOrigin,
+    CompoundOperation, DomainError, HostId, LocationId, OperationId, OperationKind, OperationPhase,
+    ProviderKind, ProviderSessionId, Revision, RuntimeId, RuntimeStatus, WorkstreamId,
+    WorkstreamLifecycle, WorkstreamOrigin,
 };
 use crate::provider::codex::profile::ProfileOwnership;
 use crate::provider::lifecycle::LifecycleHint;
@@ -418,7 +418,7 @@ pub struct WorkstreamOverview {
     pub remote_identity_display: Option<String>,
     pub lifecycle: WorkstreamLifecycle,
     /// Archive is an independent visibility state. It preserves all lifecycle,
-    /// Runtime, binding, attention, project, and lineage records.
+    /// Runtime, binding, project, and lineage records.
     pub archived_at_millis: Option<i64>,
     pub last_activity_sequence: i64,
     /// Wall-clock time of the most recent observed native conversation activity.
@@ -427,7 +427,6 @@ pub struct WorkstreamOverview {
     pub revision: Revision,
     pub runtime: Option<RuntimeRecord>,
     pub binding: Option<ProviderBinding>,
-    pub attention: Option<AttentionState>,
 }
 
 /// One deterministic bounded page of navigator-safe host state.

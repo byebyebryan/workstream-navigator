@@ -166,8 +166,8 @@ contains or captures provider-pane content.
   registration time for host-local Project grouping; no Git lifecycle
   ownership, passive retargeting, or association between separate execution
   hosts.
-- Activity and durable result attention for Workstream Navigator-started
-  provider sessions.
+- Activity age and provider/runtime lifecycle markers for provider sessions
+  started by Workstream Navigator.
 - Automatic read-only observer readiness detection and contextual Codex
   onboarding when a requested action actually requires an unready observer.
   The guide requires explicit consent before installing or updating one exact
@@ -244,7 +244,7 @@ contains or captures provider-pane content.
 
 The former cross-host behavior is retired by D16. Each host's own
 `HostRegistry`, `ProjectLocations`, Workstreams, Runtime generations, provider
-bindings, attention, private tmux servers, and provider-owned history remain
+bindings, private tmux servers, and provider-owned history remain
 authoritative on that host. No workstream, session, project, or provider state
 migrates or is copied between hosts.
 
@@ -262,7 +262,6 @@ migrates or is copied between hosts.
 | `ProviderSession` | A provider chat/session referenced by its namespaced native identifier | Native provider |
 | `ConversationTip` | The current native session plus its latest accepted settled turn | Workstream Navigator binding plus native provider identities |
 | `ThreadName` | The current tip's provider-owned user-facing name; the navigator observes but never writes it | Native provider |
-| `AttentionState` | One durable, sticky indication per Workstream that a result or recovery state remains unseen | Workstream Navigator |
 
 V1 deliberately has no `Task` record. Tasks remain what the user asks a
 provider to do inside a provider session. A workstream may carry many
@@ -888,7 +887,7 @@ content. The reduced navigator does not repeat it in ordinary cards or pages;
 each instance is structurally host-local and the containing terminal or SSH
 window supplies machine context. Workstream titles remain neutral white,
 provider and Project identity use distinct stable accents,
-lifecycle/attention/recovery indicators retain their reserved state colors,
+lifecycle and recovery indicators retain their reserved state colors,
 and activity ages use a neutral brightness ramp. Selection changes only the
 row background. Chromeless direct attach likewise relies on operator terminal
 context. No page creates a tmux popup, overlays the provider pane, or replaces
@@ -896,8 +895,8 @@ the native TUI.
 
 Direct page-local keys are the canonical control path. The compact footer
 shows the most relevant bindings for the current page and state, deliberately
-omitting the baseline `↑↓` selection, `Enter` open/shell, and `a`
-acknowledge-result hints; `?` reveals the complete list. The management lists
+omitting the baseline `↑↓` selection and `Enter` open/shell hints; `?` reveals
+the complete list. The management lists
 provide bounded status and context
 inline, but D7 does not require a menu-driven action system. A later clickable action menu may
 augment the same operations without replacing or delaying the direct keys.
@@ -916,8 +915,8 @@ native recovery for an ordinary lost Runtime. Under D19 that action may replace
 the right-hand surface but never changes pane focus. `n` creates a separate
 blank Workstream at the selected managed Workstream's exact ProjectLocation
 with the same provider; `p` parks; `x` opens the reversible archive
-confirmation; `a` acknowledges only result attention; and `?` toggles the full
-reference. Native provider branching stays within the current Workstream. `u` on
+confirmation; and `?` toggles the full reference. Native provider branching
+stays within the current Workstream. `u` on
 Archived restores without starting. On the provisional shell card, `Enter`
 shows the shell without transferring focus and `n` has no separate meaning.
 Unprefixed `Left` and `Right` remain inert. There is no hard delete:
@@ -948,11 +947,12 @@ pathologically narrow widths without allowing a card to overflow. Every
 display line in a card is one selectable and mouse-actionable Workstream row.
 Archived uses the same compact row shape as Workstreams.
 
-A Parked Workstream always renders the muted `p` lifecycle marker; sticky
-result or recovery attention remains durable but does not mask the parked
-lifecycle. Bounded prose in status and guidance panels word-wraps by terminal
-cell width. The status area reserves the wrapped line count, and the renderer
-and mouse hit-testing use the same resulting list geometry.
+A Parked Workstream always renders the muted `p` lifecycle marker. Recovery
+markers derive from the actual Workstream or onboarding recovery lifecycle;
+there is no separate sticky result or recovery notification to mask it.
+Bounded prose in status and guidance panels word-wraps by terminal cell width.
+The status area reserves the wrapped line count, and the renderer and mouse
+hit-testing use the same resulting list geometry.
 
 Project group headers use the accented Project name alone: no disclosure
 marker, Location count, active count, or archived count consumes that line.
@@ -1052,8 +1052,8 @@ Independent presentations may select different Workstreams without racing over
 a global `current` record. Multiple clients attached to one presentation share
 that tmux session's active pane and the single Navigator process's page and
 selection; D19 does not pretend they have per-client focus or selection.
-Durable state records activity and attention, never an authoritative focused
-pane.
+Durable state records activity and lifecycle status, never an authoritative
+focused pane.
 
 A provider Runtime may have more than one same-user tmux attachment, including
 another Workstream Navigator client or a deliberate direct attachment to its
@@ -1070,8 +1070,8 @@ Every managed host owns:
 - one stable host identity;
 - zero or more runtime-private tmux sockets and server generations, one for
   each live Runtime;
-- the Workstream, ProjectLocation, onboarding recovery, binding, and
-  attention records for work physically running on that host.
+- the Workstream, ProjectLocation, and onboarding recovery records, plus
+  provider bindings for work physically running on that host.
 
 Every newly created Runtime derives its private tmux directory and session name
 from the complete opaque Runtime UUID. Lazy provisional materialization
@@ -1114,8 +1114,8 @@ are removed, Park commits `Runtime=stopped` and `Workstream=parked` atomically.
 That convergence also applies when the Workstream was already
 `recovery_required`: an explicit Park after a failed cleanup resolves the
 retained Runtime to a safely resumable parked state instead of persisting the
-invalid `recovery_required + stopped` pair. Provider binding and sticky
-attention remain retained; no provider session is deleted or replaced.
+invalid `recovery_required + stopped` pair. Provider binding remains retained;
+no provider session is deleted or replaced.
 The host registry, not tmux's own session list, is the host-local Workstream
 catalog. This contains server failure, terminal sizing, attachment, and
 `tmux ls` visibility to one Workstream at a time.
@@ -1189,7 +1189,7 @@ The navigator and public CLI call one typed in-process local application
 facade:
 
 ```text
-snapshot() -> derived host display, projects, locations, workstreams, dynamic provider capabilities, runtime probes, attention
+snapshot() -> derived host display, projects, locations, workstreams, dynamic provider capabilities, runtime probes, lifecycle status
 apply(action, expected revisions) -> deterministic outcome
 attach(runtime_id) -> native terminal attachment
 ```
@@ -1213,9 +1213,9 @@ terminal captures, credentials, and raw provider payloads.
 External probes and finite helper calls retain bounded process deadlines.
 Runtime-creating and recovery mutations retain the longer bounded deadline
 needed for provider readiness barriers; no generic control process exists.
-Host-local observer hooks commit status and AttentionState before a snapshot or
-action result exposes them, and optimistic revisions still reject stale
-mutations.
+Host-local observer hooks commit Runtime status, Workstream lifecycle, and
+provider binding evidence before a snapshot or action result exposes them, and
+optimistic revisions still reject stale mutations.
 
 ### Codex adapter
 
@@ -1391,7 +1391,7 @@ The observer consumes these native events:
 - `SessionStart` to bind the runtime to the exact Codex session and record
   `startup`, `resume`, `clear`, or `compact`;
 - `UserPromptSubmit` to mark the exact session/turn as working;
-- `Stop` to atomically mark the turn settled and create background result
+- `Stop` to atomically record the settled turn and mark the Runtime as awaiting
   attention; and
 - `SessionEnd` to mark the provider runtime stopped when available.
 
@@ -1432,8 +1432,8 @@ connection and requires the returned `thread.id` to equal the hooked ID. Events
 that cannot be corroborated may leave status `unknown`, but cannot replace a
 known binding. The installed Codex 0.145.0 contract proved exactly one changed
 binding rule: a distinct `SessionStart(source=clear)` in the same live TUI may
-replace an `idle` or `attention` tip. Its predecessor ID/name metadata and
-sticky result attention remain; all other changed, racing, replayed, working,
+replace an `idle` or `attention` tip. Its predecessor ID/name metadata remain;
+all other changed, racing, replayed, working,
 or unknown-source claims fail closed. Follow-up [Spikes
 0011](evidence/spikes/0011-codex-native-new-rebinding.md),
 [0012](evidence/spikes/0012-codex-new-prompt-session-rotation.md), and
@@ -1553,7 +1553,7 @@ keep a shared server alive to receive name notifications and never calls
 The passive Codex observer reads exact name metadata when a session binds and
 again, best-effort, when a turn settles. The settled refresh reserves time for
 the authoritative lifecycle write, so name-read failure never turns into lost
-result or attention evidence. Ordinary navigator polling reads only the bounded
+provider lifecycle evidence. Ordinary navigator polling reads only the bounded
 cache and never opens an App Server on the input loop.
 
 After a native same-Workstream cutover, Workstream Navigator does not copy the
@@ -1705,11 +1705,6 @@ ProviderBinding
   predecessor_native_session_id?, predecessor_effective_name?,
   runtime_generation, revision
 
-AttentionState
-  workstream_id, result_unseen_since_revision?,
-  recovery_unseen_since_revision?, latest_native_session_id?,
-  latest_native_session_provider?, latest_turn_id?, revision
-
 CompoundOperation
   operation_id, request_key, kind=onboard|start, phase,
   phase includes runtime_owned_launching, provider-specific preparation and
@@ -1793,23 +1788,21 @@ credential, or environment dump is persisted.
   retains the prior binding because no exact transition claim identifies that
   destination. The Navigator's `n` action creates a separate blank Workstream
   at the selected Location.
-- One sticky AttentionState exists per Workstream; it never changes
-  presentation focus.
 - Runtime status and Workstream lifecycle are separate.
 - Archive visibility is separate from Workstream lifecycle. An archived
   Workstream retains `parked` or `recovery_required`, its exact binding,
-  AttentionState, ProjectLocation, and lineage; restore never starts a Runtime
-  automatically.
+  ProjectLocation, and lineage; restore never starts a Runtime automatically.
 
-Every accepted settled turn marks the Workstream's AttentionState as unseen
-independent of focus, updates its latest exact identifiers, and leaves
-`result_unseen_since_revision` unchanged if an earlier result was already
-unseen. Recovery evidence similarly makes its unseen flag sticky and dominates
-ordinary result presentation. Acknowledge uses the exact observed AttentionState
-revision and clears only that kind of notification, so a concurrent newer event
-cannot be lost. Acknowledging recovery attention does not clear the Workstream's
-`recovery_required` lifecycle; only successful recovery does. The row is not an
-event history: provider results remain canonical in Codex.
+Session-card markers are a direct projection of the current bounded state, not
+a second notification inbox: `p` is a parked Workstream, `!` is actual
+Workstream or onboarding recovery, `…` is starting, `●` is working, `✓` is a
+Runtime in `attention`, and idle or stopped is blank. A later observed provider
+prompt changes `attention` to `working` without a user acknowledgment action.
+Selection, activation, focus, attachment, and provider cycling retain their
+existing lifecycle and attachment semantics, but none writes an
+acknowledgment or separate attention state. The schema-15 `attention_states`
+table and its legacy columns may remain in historical state, but current
+snapshots and lifecycle observers neither read nor write those rows.
 
 Suggested CodexIntegration lifecycle values:
 
@@ -2442,7 +2435,7 @@ Required interactions:
   when a requested Codex operation requires it;
 - show the derived current-host label outside provider content, with exact
   visual treatment deferred to a later UX checkpoint; and
-- acknowledge result or recovery attention without injecting provider traffic.
+- project provider/runtime lifecycle markers without injecting provider traffic.
 
 The normal human workflow begins with bare `wsnav` and requires no later
 `wsnav` command typed by the user. The apparent `codex` and `opencode` shell
@@ -2754,9 +2747,9 @@ claim remote CI or real-provider acceptance. No partial D19 slice was installed.
 | `wsnav-observer` is foreign, modified, disabled, or ambiguous | Preserve it and existing Runtime attachment; refuse the observer-dependent request with exact contextual diagnosis and retry guidance |
 | Profile update or exceptional removal is requested while a managed Runtime is live | Refuse the integration change until all WSNav-managed Codex Runtimes on that host are parked or stopped; do not block attachment |
 
-Result completion and the sticky AttentionState update must commit in one host
-transaction. This directly avoids the Python prototype's split
-result/attention persistence gap.
+Result completion and its exact provider binding plus Runtime status commit in
+one host transaction. Current state has no separate result-acknowledgment
+write; provider history remains canonical in the provider.
 
 ### Durable operation diagnostics
 

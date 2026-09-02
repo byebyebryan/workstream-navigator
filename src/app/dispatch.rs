@@ -247,8 +247,7 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
         | Commands::Archive { .. }
         | Commands::Restore { .. }
         | Commands::Status { .. }
-        | Commands::Operations
-        | Commands::Acknowledge { .. } => execute_local_command(root, command),
+        | Commands::Operations => execute_local_command(root, command),
         Commands::Navigator
         | Commands::NavigatorPane { .. }
         | Commands::PresentationControl { .. }
@@ -398,20 +397,6 @@ fn execute_local_command(root: &StateRoot, command: Commands) -> Result<(), AppE
                     operation.revision.value(),
                 );
             }
-            Ok(())
-        }
-        Commands::Acknowledge {
-            workstream_id,
-            attention_revision,
-        } => {
-            apply_managed_action(
-                root,
-                ManagedAction::AcknowledgeResult {
-                    workstream_id: parse_workstream(&workstream_id)?,
-                    expected_attention_revision: parse_revision(attention_revision)?,
-                },
-            )
-            .map_err(AppError::Navigator)?;
             Ok(())
         }
         _ => Err(AppError::AttachmentUnavailable),

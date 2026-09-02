@@ -42,11 +42,6 @@ pub(super) enum Commands {
     Status { workstream_id: String },
     /// List unresolved native-session creation operations without exposing request keys or provider data.
     Operations,
-    /// Clear one observed result/recovery attention revision without provider input.
-    Acknowledge {
-        workstream_id: String,
-        attention_revision: i64,
-    },
     /// Internal schema-15 Ratatui process run inside a presentation pane.
     #[command(name = "_navigator", hide = true)]
     NavigatorPane {

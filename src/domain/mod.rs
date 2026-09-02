@@ -576,88 +576,6 @@ const fn permits_transition(from: OperationPhase, to: OperationPhase) -> bool {
     )
 }
 
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub struct AttentionState {
-    pub workstream_id: WorkstreamId,
-    pub result_unseen_since_revision: Option<Revision>,
-    pub recovery_unseen_since_revision: Option<Revision>,
-    pub latest_native_session_id: Option<ProviderSessionId>,
-    pub latest_turn_id: Option<String>,
-    pub revision: Revision,
-}
-
-impl AttentionState {
-    #[must_use]
-    pub fn new(workstream_id: WorkstreamId) -> Self {
-        Self {
-            workstream_id,
-            result_unseen_since_revision: None,
-            recovery_unseen_since_revision: None,
-            latest_native_session_id: None,
-            latest_turn_id: None,
-            revision: Revision::INITIAL,
-        }
-    }
-
-    /// Records a settled native result without clearing an existing unseen one.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when either provider identifier is empty, oversized, or
-    /// contains a line break.
-    pub fn mark_result(
-        &mut self,
-        session_id: ProviderSessionId,
-        turn_id: String,
-    ) -> Result<(), DomainError> {
-        validate_provider_identifier(&turn_id)?;
-        let next = self.revision.next();
-        if self.result_unseen_since_revision.is_none() {
-            self.result_unseen_since_revision = Some(next);
-        }
-        self.latest_native_session_id = Some(session_id);
-        self.latest_turn_id = Some(turn_id);
-        self.revision = next;
-        Ok(())
-    }
-
-    pub fn mark_recovery_required(&mut self) {
-        let next = self.revision.next();
-        if self.recovery_unseen_since_revision.is_none() {
-            self.recovery_unseen_since_revision = Some(next);
-        }
-        self.revision = next;
-    }
-
-    /// Clears only the recovery-required signal while preserving any unseen
-    /// native result. A verified native resume is the sole caller: ordinary
-    /// navigator acknowledgement must not make an uncertain Runtime look
-    /// healthy.
-    pub fn clear_recovery_required(&mut self) {
-        if self.recovery_unseen_since_revision.is_some() {
-            self.recovery_unseen_since_revision = None;
-            self.revision = self.revision.next();
-        }
-    }
-
-    /// Clears result attention only when the caller saw the current revision.
-    ///
-    /// # Errors
-    ///
-    /// Returns a revision conflict when a newer observation has arrived.
-    pub fn acknowledge_result(&mut self, expected: Revision) -> Result<(), DomainError> {
-        if self.revision != expected {
-            return Err(DomainError::RevisionConflict {
-                expected,
-                current: self.revision,
-            });
-        }
-        self.result_unseen_since_revision = None;
-        self.revision = self.revision.next();
-        Ok(())
-    }
-}
-
 fn validate_provider_identifier(value: &str) -> Result<(), DomainError> {
     if value.is_empty() || value.len() > 256 || value.contains('\n') || value.contains('\r') {
         return Err(DomainError::InvalidProviderIdentifier);
@@ -912,30 +830,6 @@ mod tests {
                 .unwrap()
                 .onboarding_phase(),
             Err(DomainError::OnboardingOperationRequired)
-        ));
-    }
-
-    #[test]
-    fn result_attention_is_sticky_and_revision_guarded() {
-        let mut attention = AttentionState::new(WorkstreamId::new());
-        attention
-            .mark_result(
-                ProviderSessionId::codex("session-a").unwrap(),
-                "turn-a".to_owned(),
-            )
-            .unwrap();
-        let first_unseen = attention.result_unseen_since_revision;
-        attention
-            .mark_result(
-                ProviderSessionId::codex("session-a").unwrap(),
-                "turn-b".to_owned(),
-            )
-            .unwrap();
-
-        assert_eq!(attention.result_unseen_since_revision, first_unseen);
-        assert!(matches!(
-            attention.acknowledge_result(Revision::INITIAL),
-            Err(DomainError::RevisionConflict { .. })
         ));
     }
 

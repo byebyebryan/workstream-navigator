@@ -55,11 +55,6 @@ pub(crate) struct WorkstreamSnapshot {
     pub(crate) runtime: Option<RuntimeSnapshot>,
     pub(crate) onboarding: Option<OnboardingStatus>,
     pub(crate) native_name: Option<String>,
-    /// Exact revision required to acknowledge sticky result attention. It is
-    /// bounded state only; the snapshot never carries attention content.
-    pub(crate) attention_revision: Revision,
-    pub(crate) result_unseen: bool,
-    pub(crate) recovery_unseen: bool,
 }
 
 /// One unresolved non-onboarding creation operation retained for the public
@@ -226,18 +221,6 @@ pub(crate) fn read_snapshot(root: &StateRoot) -> Result<Snapshot, SnapshotError>
                     .binding
                     .and_then(|binding| binding.observed_thread_name)
                     .filter(|name| !name.is_empty()),
-                attention_revision: workstream
-                    .attention
-                    .as_ref()
-                    .map_or(Revision::INITIAL, |attention| attention.revision),
-                result_unseen: workstream
-                    .attention
-                    .as_ref()
-                    .is_some_and(|attention| attention.result_unseen_since_revision.is_some()),
-                recovery_unseen: workstream
-                    .attention
-                    .as_ref()
-                    .is_some_and(|attention| attention.recovery_unseen_since_revision.is_some()),
             }))
         })
         .collect::<Result<Vec<Option<_>>, SnapshotError>>()?
@@ -264,10 +247,7 @@ mod tests {
 
     use super::{OnboardingStatus, read_snapshot};
     use crate::{
-        domain::{
-            ProviderKind, ProviderSessionId, RandomIdGenerator, Revision, RuntimeId,
-            WorkstreamLifecycle,
-        },
+        domain::{ProviderKind, RandomIdGenerator, Revision, RuntimeId, WorkstreamLifecycle},
         onboarding::{ShellCommandDecision, classify_shell_command},
         presentation::{ProvisionalInventory, ProvisionalInventoryError},
         provisional::{HostInventoryError, classify_host_inventory},
@@ -309,10 +289,6 @@ mod tests {
         assert_eq!(snapshot.workstreams[0].lifecycle, WorkstreamLifecycle::Open);
         assert!(!snapshot.workstreams[0].archived);
         assert!(snapshot.workstreams[0].runtime.is_none());
-        assert_eq!(
-            snapshot.workstreams[0].attention_revision,
-            Revision::INITIAL
-        );
         assert!(snapshot.unresolved_operations.is_empty());
         assert_eq!(snapshot.workstreams[0].last_activity_at_millis, None);
 
@@ -329,24 +305,6 @@ mod tests {
         assert_eq!(
             snapshot.workstreams[0].last_activity_at_millis,
             Some(1_700_000_000_000)
-        );
-
-        let state = open_current(&root).unwrap();
-        let mut registry = state.into_host_registry().unwrap();
-        registry
-            .mark_result_attention(
-                workstream_id,
-                ProviderSessionId::new(ProviderKind::OpenCode, "session-a").unwrap(),
-                "turn-a".to_owned(),
-            )
-            .unwrap();
-        drop(registry);
-
-        let snapshot = read_snapshot(&root).unwrap();
-        assert!(snapshot.workstreams[0].result_unseen);
-        assert_eq!(
-            snapshot.workstreams[0].attention_revision,
-            Revision::INITIAL.next()
         );
     }
 

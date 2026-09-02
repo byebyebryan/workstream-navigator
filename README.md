@@ -63,14 +63,21 @@ The Navigator has two direct pages. Page selection is process-local and is not p
 
 | Page | Purpose and direct controls |
 | --- | --- |
-| **Workstreams** | Default page with one pinned **Shell** card plus active Workstreams grouped by Project. `Enter` opens the selected shell or managed session; on a managed Workstream, `n` creates a separate blank Workstream at its exact Location, `p` parks, `x` archives, `a` clears its unseen-result indicator, and `?` opens page help. Native provider branching stays within the current Workstream. |
+| **Workstreams** | Default page with one pinned **Shell** card plus active Workstreams grouped by Project. `Enter` opens the selected shell or managed session; on a managed Workstream, `n` creates a separate blank Workstream at its exact Location, `p` parks, `x` archives, and `?` opens page help. Native provider branching stays within the current Workstream. |
 | **Archived** | Project-grouped archived Workstreams. `u` restores the selected Workstream and returns to Workstreams without launching or attaching a provider. |
 
 `.` opens or closes Archived; `Esc` returns to Workstreams. The compact footer
-omits the baseline `↑↓` selection, `Enter` open/shell, and `a` acknowledge-result
-hints; those remain in the complete `?` reference. Remaining footer hints pack
-into complete key/action pairs at the available width. Actions always resolve
-an exact Workstream ID or the presentation-local shell singleton.
+omits the baseline `↑↓` selection and `Enter` open/shell hints; those remain in
+the complete `?` reference. Remaining footer hints pack into complete
+key/action pairs at the available width. Actions always resolve an exact
+Workstream ID or the presentation-local shell singleton.
+
+Session-card markers are projections of current lifecycle evidence: `p` means
+parked, `!` means Workstream or onboarding recovery is required, `…` means
+starting, `●` means working, `✓` means the Runtime is awaiting attention, and
+idle or stopped sessions are blank. A later provider prompt naturally changes
+the marker to working; selecting, opening, focusing, attaching, or cycling a
+card never acknowledges or writes a separate result state.
 
 Pane focus is tmux-owned and separate from Navigator row selection. Use
 `Ctrl+b Left` and `Ctrl+b Right`, or deliberately press the primary mouse

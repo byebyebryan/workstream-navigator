@@ -2,13 +2,13 @@
 
 Date: 2026-09-02
 
-Status: D0-D20 are complete. D20 checkpoint `00a4937` retires WSNav-managed
-conversation forking so native providers remain the sole conversation-branch
-authority; it is locally accepted and installed for operator inspection.
-Provider-owned naming refinement `b3a58bb` is its clean starting point. No
-remote-CI or live-provider claim is transferred to D20. D18 checkpoint
-`c961c7e` remains the latest accepted artifact with separately authorized
-reset, native-trust, and disposable Codex/OpenCode lifecycle evidence.
+Status: D0-D20 are complete. D21 is active and retires explicit result
+acknowledgment plus the duplicated sticky-attention model in favor of provider
+Runtime and recovery lifecycle evidence. D20 checkpoint `00a4937` remains the
+completed provider-native conversation-branch boundary. No remote-CI or
+live-provider claim is transferred to D21. D18 checkpoint `c961c7e` remains
+the latest accepted artifact with separately authorized reset, native-trust,
+and disposable Codex/OpenCode lifecycle evidence.
 
 `docs/design.md` is the product and architecture contract. This file owns
 delivery order, implementation status, and exit gates. The complete prior
@@ -27,6 +27,58 @@ roadmap is preserved as
   ambiguity handling.
 - D18 is a clean state break. Schemas 12 through 14 are refusal evidence, not
   migration or adoption inputs.
+
+## Active checkpoint: D21 provider-derived attention
+
+Implementation status: active; not yet accepted or installed.
+
+D21 makes the session card a projection of provider and recovery lifecycle,
+not a second inbox whose read state the operator must manage. A completed turn
+renders from the Runtime's observed `attention` status and naturally yields to
+the next observed provider transition. Displaying, selecting, or focusing a
+Workstream never writes an acknowledgment.
+
+Scope:
+
+- remove Navigator `a`, public `acknowledge`, their help/footer entries,
+  controller action, revision fence, and result-seen mutation;
+- render the completion marker directly from `RuntimeStatus::Attention`, so a
+  subsequent provider prompt correctly renders `Working` without an unrelated
+  manual clear;
+- derive recovery presentation only from Workstream/onboarding recovery state,
+  which can be cleared only by the existing exact recovery lifecycle;
+- remove `AttentionState` from the current domain, snapshot, registry, and
+  lifecycle-write paths, including its duplicated native session/turn
+  identities; the exact current provider binding remains the sole retained
+  conversation-tip authority;
+- preserve schema 15 without reset or migration by retaining the existing
+  `attention_states` table and columns as ignored historical storage until a
+  future intentional state epoch removes them; and
+- reconcile current product documentation and generated CLI acceptance while
+  preserving dated evidence and prior checkpoint records as historical facts.
+
+Non-goals:
+
+- do not auto-acknowledge on Enter, mouse activation, tmux focus, attachment,
+  or provider cycling;
+- do not change Runtime/Workstream recovery transitions, activity ordering,
+  provider binding, last-settled-turn evidence, archive/park semantics,
+  private-tmux topology, or provider hooks; and
+- do not remove or fold the diagnostic `operations` command in this
+  checkpoint.
+
+Exit gate:
+
+- focused tests prove the acknowledgment CLI/key/action surfaces are absent,
+  completion and Working markers follow exact Runtime state, recovery markers
+  follow exact recovery lifecycle, and legacy attention rows neither affect
+  snapshots nor receive lifecycle writes;
+- `scripts/check` passes against disposable state roots and private tmux
+  sockets;
+- the installed schema-15 state is inspected before replacement and the new
+  build opens it without rewriting or requiring a reset; and
+- the locked release is built, atomically installed, and verified by version
+  and executable hash. Live provider interaction remains separately authorized.
 
 ## Completed checkpoint: D20 native-owned conversation branching
 

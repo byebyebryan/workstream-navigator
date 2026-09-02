@@ -447,10 +447,12 @@ fn normal_help_and_parser_exclude_retired_surfaces() {
     assert!(!help.contains("live private-tmux probe"));
     assert!(!help.contains("Register one existing Git project"));
     assert!(!help.contains("Create and start an independent Workstream"));
+    assert!(!help.contains("acknowledge"));
     for retired in [
         "register",
         "new-workstream",
         "register-remote",
+        "acknowledge",
         "host",
         "_remote",
         "_probe",

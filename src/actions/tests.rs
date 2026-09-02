@@ -475,13 +475,6 @@ fn conclusive_private_runtime_loss_becomes_recovery_required_before_snapshot() {
         overview.runtime.as_ref().map(|runtime| runtime.status),
         Some(crate::domain::RuntimeStatus::Unknown)
     );
-    assert!(
-        overview
-            .attention
-            .as_ref()
-            .and_then(|attention| attention.recovery_unseen_since_revision)
-            .is_some()
-    );
 }
 
 #[test]

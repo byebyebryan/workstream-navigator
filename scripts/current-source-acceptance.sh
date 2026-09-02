@@ -12,7 +12,7 @@ help_text="$("${wsnav_bin}" --help)"
 
 public_commands=(
     navigator doctor remove-observer fork-workstream start recover attach park
-    archive restore status operations recover-operation rename acknowledge
+    archive restore status operations recover-operation acknowledge
 )
 for command in "${public_commands[@]}"; do
     if ! rg -q "^  ${command}( |$)" <<<"${help_text}"; then
@@ -23,7 +23,7 @@ done
 
 retired_commands=(
     setup trust-observer update-observer register-remote host register
-    new-workstream navigator_d17 _remote _probe _attach _presentation_shell
+    new-workstream rename navigator_d17 _remote _probe _attach _presentation_shell
     _observer_review _presentation_ssh_shell _provider_remote_attach
 )
 for command in "${retired_commands[@]}"; do

@@ -207,8 +207,8 @@ contains or captures provider-pane content.
   automatic thread rollover.
 - A replacement implementation or altered semantics for Codex `/new`,
   `/clear`, `/fork`, `/rename`, Plan mode, history, settings, permissions, or
-  model selection. Navigator Rename is a thin call to the same Codex-owned name
-  field, not a separate naming system.
+  model selection. Thread naming remains entirely provider-owned; the
+  navigator observes names but never writes them.
 - Composing the WSNav observer with another user-selected Codex `--profile`.
   V1 managed launches preserve the normal base and trusted project
   configuration layers but reserve the one selected profile slot.
@@ -258,7 +258,7 @@ migrates or is copied between hosts.
 | `Runtime` | One provider process in one private tmux server, session, window, and pane | tmux and live process evidence |
 | `ProviderSession` | A provider chat/session referenced by its namespaced native identifier | Native provider |
 | `ConversationTip` | The current native session plus its latest accepted settled turn | Workstream Navigator binding plus native provider identities |
-| `ThreadName` | The current tip's provider-owned user-facing name; navigator Rename exists only when the adapter exposes that capability | Native provider |
+| `ThreadName` | The current tip's provider-owned user-facing name; the navigator observes but never writes it | Native provider |
 | `AttentionState` | One durable, sticky indication per Workstream that a result or recovery state remains unseen | Workstream Navigator |
 
 V1 deliberately has no `Task` record. Tasks remain what the user asks a
@@ -277,8 +277,8 @@ retaining explicit ancestry at the same ProjectLocation root.
 There is no separate Workstream label in V1. The current tip's provider-owned
 native name is the canonical display name and exact resume still relies on the
 namespaced native session ID. The navigator may cache the last observed name
-for availability, but it never creates a second naming authority or claims
-Rename support when the provider adapter lacks it.
+for availability, but it never creates a second naming authority or exposes a
+name mutation action.
 
 ## Architecture
 
@@ -551,8 +551,8 @@ The lifecycle therefore has these observable rules:
 Disposable acceptance must race close and presentation loss against lazy materialization,
 prepare and token issuance, helper consumption, OpenCode preparation and
 `POST /session`, and provider `exec`; it must also race passive snapshot,
-new attachment, Park/Resume/Fork/contextual `n`/archive/
-rename/recovery/start retry, helper exit, exec error, exec success proof,
+new attachment, Park/Resume/Fork/contextual `n`/archive/recovery/start retry,
+helper exit, exec error, exec success proof,
 immediate provider exit, and restart across every post-commit phase. The
 evidence must show one deterministic lease winner, no managed kill, no helper
 adoption, no premature signal or action, no stuck operation, no blind rollback,
@@ -636,8 +636,8 @@ that Runtime. Selecting/materializing the fresh derived singleton card attaches
 only its separate provisional server under `provisional.lock` and grants no
 authority over the unproven Runtime. Every new attachment to that Runtime and
 ordinary Runtime action or mutation—Park, Resume, Fork, contextual
-`n` from this source, archive, Rename, recovery/start retry,
-and cleanup—refuses or waits with bounded `onboarding-in-progress` guidance.
+`n` from this source, archive, recovery/start retry, and cleanup—refuses or
+waits with bounded `onboarding-in-progress` guidance.
 Passive snapshot/probe may render the managed Runtime as `starting`/`onboarding`
 and run exact reconciliation, but it must not treat the hidden helper or
 OpenCode preparation process as provider identity, mark the Runtime lost from
@@ -913,8 +913,8 @@ native recovery for an ordinary lost Runtime. Under D19 that action may replace
 the right-hand surface but never changes pane focus. `n` starts a sibling at
 the selected managed Workstream's exact ProjectLocation with the same provider;
 `f` forks; `p` parks; `x` opens the reversible archive confirmation; `a`
-acknowledges only result attention; `r` opens bounded Codex Rename or recovers
-the selected unresolved Fork; and `?` toggles the full reference. `u` on
+acknowledges only result attention; `r` recovers the selected unresolved Fork;
+and `?` toggles the full reference. `u` on
 Archived restores without starting. On the provisional shell card, `Enter`
 shows the shell without transferring focus and `n` has no separate meaning.
 Unprefixed `Left` and `Right` remain inert. There is no hard delete:
@@ -1161,8 +1161,9 @@ and clients may race, but only one transaction can commit a particular record
 revision.
 
 Focus, attach, snapshot, and passive observation refresh are not durable
-operations. Rename is a repeatable provider setting. Park and Resume reconcile
-through the authoritative Runtime record plus live tmux/process probes.
+operations. Thread naming remains a provider-owned setting that WSNav only
+observes. Park and Resume reconcile through the authoritative Runtime record
+plus live tmux/process probes.
 Brokered onboarding and Fork use the `CompoundOperation` journal, as does
 OpenCode's non-idempotent blank-session creation boundary.
 
@@ -1472,8 +1473,6 @@ V1 allowlists only:
 - `thread/list` with `sourceKinds: ["cli"]` for ordinary bounded `doctor`
   checks, or every documented source kind only while reconciling one unresolved
   WSNav-owned Fork operation; both use `useStateDbOnly: true`;
-- `thread/name/set` for an explicit Rename action or a provisional fork name
-  set before its destination TUI starts; and
 - `thread/fork` with an exact accepted `lastTurnId` and destination `cwd` for
   an explicit Fork Workstream operation.
 
@@ -1513,8 +1512,8 @@ Codex's native CLI and ephemeral App Server divide the action boundary:
 - recovery uses `codex -C <project-root> resume <session-id>`;
 - a Workstream fork uses App Server `thread/fork`, then starts the resulting
   thread through `codex -C <project-root> resume <destination-id>`;
-- chat naming uses native `/rename` or App Server `thread/name/set`, both
-  changing the same Codex-owned field.
+- chat naming uses provider-native `/rename` or provider/agent naming policy;
+  WSNav only reads the resulting Codex-owned field.
 
 #### Workstream display names
 
@@ -1567,23 +1566,25 @@ ordering or combined client view. The wall-clock value survives start, resume,
 and park. A migrated Workstream or one with no observed turn visibly reports
 `activity unknown` until its first prompt submission or settled result.
 
-Native `/rename` and navigator Rename both update the current Codex thread
-name. The navigator action calls `thread/name/set`; a later bounded metadata
-refresh observes either route. One ephemeral App Server process may read
-several exact managed thread IDs before it exits, but Workstream Navigator does
-not keep a shared server alive to receive name notifications.
+Native `/rename` and provider/agent naming policy update the current Codex
+thread name. A later bounded metadata refresh observes either route. Each
+refresh uses a short-lived App Server process; Workstream Navigator does not
+keep a shared server alive to receive name notifications and never calls
+`thread/name/set`.
 
-After a native same-Workstream cutover, Workstream Navigator must not
-automatically set `B.name = A.name`. App Server `thread/name/set` has no
-compare-and-set field, so a read-then-write could overwrite a fast native or
-skill-driven rename. The previous title remains a visibly provisional computed
-fallback until B obtains its own canonical name.
+The passive Codex observer reads exact name metadata when a session binds and
+again, best-effort, when a turn settles. The settled refresh reserves time for
+the authoritative lifecycle write, so name-read failure never turns into lost
+result or attention evidence. Ordinary navigator polling reads only the bounded
+cache and never opens an App Server on the input loop.
 
-An explicit Fork Workstream action may set a bounded provisional native name
-derived from a non-empty source thread name after `thread/fork` returns and
-before the destination TUI starts. That ordering prevents a user rename race.
-If the source has no native name, the navigator uses the computed fork fallback
-and leaves the destination name empty.
+After a native same-Workstream cutover, Workstream Navigator does not set
+`B.name = A.name`. The previous title remains a visibly provisional computed
+fallback until B obtains its own provider-owned canonical name.
+
+An explicit Fork Workstream action never sets the destination's native name.
+Until the provider or agent assigns one, the navigator uses the computed fork
+fallback without persisting it as provider metadata.
 
 Semantic automatic naming is not a lifecycle-hook responsibility. It may later
 be offered as an opt-in Codex skill or managed agent policy, where Codex already
@@ -2275,8 +2276,8 @@ user starts a fresh wsnav presentation
 -> selecting/materializing the fresh derived singleton card attaches only its
    separate provisional server under `provisional.lock` and grants no authority
    over the unproven Runtime; no new attachment to that Runtime is allowed
--> ordinary Park/Resume/Fork/contextual n, archive, Rename,
-   recovery/start retry, and cleanup actions for that Runtime refuse or wait
+-> ordinary Park/Resume/Fork/contextual n, archive, recovery/start retry, and
+   cleanup actions for that Runtime refuse or wait
    with bounded onboarding-in-progress guidance
 -> helper advances to `provider_exec_started` immediately before `execve`, then
    constructs provider argv internally and attempts provider exec at the
@@ -2375,9 +2376,9 @@ archived Workstream must be restored before it can be the source of `n`.
 
 No workstream name, model, branch, session ID, or first prompt is required in a
 manager-owned creation form. Before binding, the row shows
-`starting`; a bound but unnamed tip shows `untitled`. Later native `/rename`,
-navigator Rename, or an opt-in Codex naming skill updates the one
-Codex-owned thread name.
+`starting`; a bound but unnamed tip shows `untitled`. Later native `/rename` or
+provider/agent naming policy updates the one Codex-owned thread name, which
+WSNav passively observes.
 
 ### Fork a running Workstream
 
@@ -2390,7 +2391,7 @@ source provider turn may still be running
 -> host validates the source binding and last settled provider boundary
 -> durable Fork operation records the provider-only cutover plan at the same project root
 -> the provider adapter forks the source through its exact settled boundary
--> if the provider exposes a native name, host sets a bounded provisional fork name
+-> host leaves the destination name under provider/agent ownership
 -> host launches the provider's exact resume shape for the returned destination
    session ID at the same ProjectLocation
 -> provider lifecycle evidence confirms the new native session
@@ -2476,8 +2477,8 @@ Required interactions:
 - Start another independent Workstream from a selected managed Workstream at
   its exact registered root and with its same provider;
 - Fork Workstream from an exact managed source;
-- inspect bounded Workstream status and rename the current tip through Codex's
-  canonical thread-name field;
+- inspect bounded Workstream status and display the current provider-owned
+  thread name;
 - park/resume without deleting provider history;
 - archive a Workstream out of the active list and restore it without starting
   Codex or deleting its retained state;
@@ -2769,7 +2770,7 @@ claim remote CI or real-provider acceptance. No partial D19 slice was installed.
 | Normal local tmux detach and reattach to the same owned presentation | Preserve the exact provisional shell server, pane, process, actual cwd, and pending request; never create a duplicate shell. Every managed host Runtime also continues |
 | Confirmed presentation close | Acquire the shared `provisional.lock` lease and revalidate marker, journal, and revisions. Before the helper successfully revalidates every bound marker/process/cwd/path/revision/token claim and atomically consumes the capability while committing durable `Runtime-owned` authority, close may win only by atomically revoking the unconsumed capability and proving pre-effect absence; then roll back attempt-only rows and terminate only exact provisional artifacts. After that exact helper commit, never signal that server; managed Runtime servers and provider processes continue |
 | Conclusive presentation loss | Under the same `provisional.lock` lease, clean only exact pre-handoff provisional artifacts whose ownership and pre-effect absence are proven; after the exact helper commit leave the Runtime-owned server untouched and let onboarding recovery reconcile. After conclusive cleanup, the next presentation's derived singleton card is available but unmaterialized; ambiguous evidence leaves it unavailable. Managed Runtime servers and provider processes continue |
-| Runtime-owned onboarding before `provider_exec_proven` | Fence attachment/action authority for that unproven Runtime. Its originating presentation may retain its existing tmux Runtime attachment/pane or detach through ordinary card switching, but no new attachment to that Runtime is allowed. Selecting/materializing the fresh derived singleton card attaches only its separate provisional server under `provisional.lock` and grants no authority over the unproven Runtime. Refuse or wait on ordinary Park, Resume, Fork, contextual `n`, archive, Rename, recovery/start retry, and cleanup for that Runtime with bounded `onboarding-in-progress` guidance. Passive snapshot/probe may show `starting`/`onboarding` and reconcile, but never adopts the helper/preparation process, marks the Runtime lost, or signals it |
+| Runtime-owned onboarding before `provider_exec_proven` | Fence attachment/action authority for that unproven Runtime. Its originating presentation may retain its existing tmux Runtime attachment/pane or detach through ordinary card switching, but no new attachment to that Runtime is allowed. Selecting/materializing the fresh derived singleton card attaches only its separate provisional server under `provisional.lock` and grants no authority over the unproven Runtime. Refuse or wait on ordinary Park, Resume, Fork, contextual `n`, archive, recovery/start retry, and cleanup for that Runtime with bounded `onboarding-in-progress` guidance. Passive snapshot/probe may show `starting`/`onboarding` and reconcile, but never adopts the helper/preparation process, marks the Runtime lost, or signals it |
 | Hidden helper exits before `provider_exec_started` | Reconcile the exact journal and classify a conclusive no-effect exit as known-absent; never infer provider identity or expose ordinary Runtime action from the helper process |
 | `execve` returns an exact error | Record terminal known-absent failure for the final provider TUI exec before helper exit when possible; the reconciler grants no action from that evidence alone and ends onboarding through guarded rollback only when provider-specific journal evidence proves no prior effect or binding, or through the exact stopped/recovery state when a known OpenCode binding must be preserved |
 | Crash after `provider_exec_started` without proof | Leave the Runtime and operation ambiguous/recovery-required; a possible live provider is never rolled back, and no second provider effect is attempted |
@@ -3054,8 +3055,8 @@ observer is mutation authority.
   [Herdr assessment](https://github.com/byebyebryan/agent-switchboard-python-reference/blob/main/docs/herdr-assessment.md)
 
 The current Codex documentation confirms native `resume`, `/new`, `/clear`,
-and `/rename` flows; App Server `thread/read`, `thread/name/set`, and exact-turn
-`thread/fork`; plus lifecycle hook fields for session, turn, cwd, start source,
+and `/rename` flows; App Server `thread/read` and exact-turn `thread/fork`; plus
+lifecycle hook fields for session, turn, cwd, start source,
 prompt submission, and stop. The design uses those interfaces narrowly and
 treats installed behavioral spikes as the final capability authority. In
 particular, the documentation that `/new` starts a new chat does not establish

@@ -108,7 +108,7 @@ impl Row {
 /// The only effects a terminal controller may request. Provider kind and
 /// location are carried only for contextual same-session actions; a new shell
 /// deliberately has neither field because the native command owns both.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum Command {
     None,
     Quit,
@@ -167,26 +167,16 @@ pub(crate) enum Command {
     },
     /// Dismisses the contextual observer setup guide without any mutation.
     CancelObserverSetup,
-    Rename {
-        workstream_id: WorkstreamId,
-        expected_workstream_revision: Revision,
-        name: String,
-    },
     ShowGuidance(&'static str),
 }
 
-/// Process-local action confirmation/input state. It deliberately retains
-/// only one exact Workstream revision and bounded display text.
+/// Process-local action confirmation state. It deliberately retains only the
+/// exact bounded context required by the selected action.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Modal {
     ConfirmArchive {
         workstream_id: WorkstreamId,
         expected_workstream_revision: Revision,
-    },
-    Rename {
-        workstream_id: WorkstreamId,
-        expected_workstream_revision: Revision,
-        value: String,
     },
     ObserverConsent {
         kind: ObserverSetupKind,
@@ -521,7 +511,7 @@ impl Model {
             KeyCode::Char('x') => self.archive_selected(),
             KeyCode::Char('u') => self.restore_selected(),
             KeyCode::Char('a') => self.acknowledge_selected(),
-            KeyCode::Char('r') => self.rename_or_recover_selected(),
+            KeyCode::Char('r') => self.recover_selected_operation(),
             _ => Command::None,
         }
     }
@@ -732,37 +722,19 @@ impl Model {
             })
     }
 
-    fn rename_or_recover_selected(&mut self) -> Command {
-        match self.selected {
-            Some(RowId::Operation(operation_id)) if self.page == Page::Workstreams => self
-                .selected_operation(operation_id)
-                .map_or(Command::None, |operation| Command::RecoverOperation {
-                    operation_id,
-                    expected_operation_revision: operation.revision,
-                    provider: operation.provider,
-                }),
-            Some(RowId::Workstream(workstream_id)) if self.page == Page::Workstreams => {
-                let Some(workstream) = self.selected_workstream(workstream_id) else {
-                    return Command::None;
-                };
-                if workstream.onboarding == Some(OnboardingStatus::ActionFenced) {
-                    return Command::ShowGuidance(ONBOARDING_IN_PROGRESS_GUIDANCE);
-                }
-                if workstream.onboarding == Some(OnboardingStatus::RecoveryRequired) {
-                    return Command::ShowGuidance(ONBOARDING_RECOVERY_GUIDANCE);
-                }
-                if workstream.archived || workstream.provider != ProviderKind::Codex {
-                    return Command::ShowGuidance(RENAME_UNAVAILABLE_GUIDANCE);
-                }
-                self.modal = Some(Modal::Rename {
-                    workstream_id,
-                    expected_workstream_revision: workstream.revision,
-                    value: workstream.native_name.clone().unwrap_or_default(),
-                });
-                Command::None
-            }
-            _ => Command::None,
+    fn recover_selected_operation(&self) -> Command {
+        let Some(RowId::Operation(operation_id)) = self.selected else {
+            return Command::None;
+        };
+        if self.page != Page::Workstreams {
+            return Command::None;
         }
+        self.selected_operation(operation_id)
+            .map_or(Command::None, |operation| Command::RecoverOperation {
+                operation_id,
+                expected_operation_revision: operation.revision,
+                provider: operation.provider,
+            })
     }
 
     fn handle_modal_key(&mut self, key: KeyCode) -> Command {
@@ -794,20 +766,6 @@ impl Model {
                 self.confirm_modal()
             }
             KeyCode::Enter => self.confirm_modal(),
-            KeyCode::Backspace => {
-                if let Some(Modal::Rename { value, .. }) = self.modal.as_mut() {
-                    value.pop();
-                }
-                Command::None
-            }
-            KeyCode::Char(character) if !character.is_control() => {
-                if let Some(Modal::Rename { value, .. }) = self.modal.as_mut()
-                    && value.chars().count() < 256
-                {
-                    value.push(character);
-                }
-                Command::None
-            }
             _ => Command::None,
         }
     }
@@ -825,19 +783,6 @@ impl Model {
                 workstream_id,
                 expected_workstream_revision,
             },
-            Modal::Rename {
-                workstream_id,
-                expected_workstream_revision,
-                value,
-            } if !value.trim().is_empty() => Command::Rename {
-                workstream_id,
-                expected_workstream_revision,
-                name: value,
-            },
-            modal @ Modal::Rename { .. } => {
-                self.modal = Some(modal);
-                Command::ShowGuidance("Rename requires a non-empty native thread name")
-            }
         }
     }
 
@@ -860,8 +805,6 @@ const ONBOARDING_IN_PROGRESS_GUIDANCE: &str =
     "Managed session onboarding is still in progress; wait for exact provider proof";
 const ONBOARDING_RECOVERY_GUIDANCE: &str =
     "Managed session requires onboarding recovery; only Park is currently available";
-const RENAME_UNAVAILABLE_GUIDANCE: &str = "The selected provider does not support navigator Rename";
-
 /// Returns the single semantic Workstream order shared by Navigator rows and
 /// provider-pane cycling. Projects are ordered by the newest included member;
 /// children then use their own activity sequence and stable ID tie-breakers.
@@ -1317,7 +1260,6 @@ fn control_bindings(model: &Model) -> &'static [(&'static str, &'static str)] {
     if let Some(modal) = model.modal() {
         return match modal {
             Modal::ConfirmArchive { .. } => &[("Enter / y", "archive"), ("n / Esc", "cancel")],
-            Modal::Rename { .. } => &[("Enter", "rename"), ("Esc", "cancel")],
             Modal::ObserverConsent { .. } => &[("Enter / y", "continue"), ("n / Esc", "cancel")],
         };
     }
@@ -1337,7 +1279,6 @@ fn control_bindings(model: &Model) -> &'static [(&'static str, &'static str)] {
                     ("f", "fork"),
                     ("p", "park"),
                     ("x", "archive"),
-                    ("r", "rename"),
                     (".", "archived"),
                     ("?", "help"),
                     ("q", "quit"),
@@ -1392,7 +1333,7 @@ fn help_lines() -> Vec<Line<'static>> {
         help_binding("x", "archive session"),
         help_binding("u", "restore session"),
         help_binding("a", "acknowledge result"),
-        help_binding("r", "rename / recover Fork"),
+        help_binding("r", "recover Fork"),
         help_binding("?/Esc/q", "close help"),
     ]
 }
@@ -1466,10 +1407,6 @@ fn render_modal(frame: &mut Frame<'_>, area: Rect, modal: &Modal) {
         Modal::ConfirmArchive { .. } => (
             " Archive session ",
             "Archive this managed session? Its live Runtime will be parked first.\n\nEnter or y confirms; n or Esc cancels.".to_owned(),
-        ),
-        Modal::Rename { value, .. } => (
-            " Rename Codex session ",
-            format!("Native thread name:\n\n{value}\n\nEnter confirms; Esc cancels."),
         ),
     };
     let overlay = centered_rect(94, 52, area);
@@ -2328,7 +2265,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(rendered[1], "↑↓      select");
         assert_eq!(rendered[6], "n       new at location");
-        assert_eq!(rendered[12], "r       rename / recover Fork");
+        assert_eq!(rendered[12], "r       recover Fork");
         assert_eq!(lines[0].spans[0].style.fg, Some(Color::Cyan));
         assert_eq!(lines[6].spans[0].style.fg, Some(Color::Yellow));
         assert_eq!(lines[13].spans[0].style.fg, Some(Color::Yellow));
@@ -2569,7 +2506,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_operation_rename_help_and_onboarding_fences_are_explicit() {
+    fn fork_recovery_help_and_onboarding_fences_are_explicit() {
         {
             let (mut snapshot, active, _) = snapshot();
             let operation_id = OperationId::from(Uuid::from_u128(7));
@@ -2587,8 +2524,7 @@ mod tests {
                 model.handle_key(crossterm::event::KeyCode::Char('r')),
                 Command::None
             );
-            assert!(matches!(model.modal(), Some(Modal::Rename { .. })));
-            let _ = model.handle_key(crossterm::event::KeyCode::Esc);
+            assert!(model.modal().is_none());
             model.select_next();
             assert_eq!(model.selected(), Some(RowId::Operation(operation_id)));
             assert_eq!(

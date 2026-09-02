@@ -1017,21 +1017,6 @@ impl HostRegistry {
         process_birth.ok_or(StateError::HookEvidenceMismatch)
     }
 
-    /// Caches an exact managed thread name after a successful canonical provider mutation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the binding is missing, changed, or cannot be
-    /// transactionally updated.
-    pub fn record_thread_name(
-        &mut self,
-        runtime_id: RuntimeId,
-        native_session_id: &ProviderSessionId,
-        name: &str,
-    ) -> Result<(), StateError> {
-        self.record_thread_metadata(runtime_id, native_session_id, Some(name))
-    }
-
     /// Records only the bounded canonical name from an exact provider metadata
     /// read. A missing native name is distinct from an unavailable read; the
     /// latter leaves the existing cached value untouched.

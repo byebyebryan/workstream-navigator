@@ -46,12 +46,6 @@ pub(super) enum Commands {
     Operations,
     /// Reopen one exact unresolved Fork operation.
     RecoverOperation { operation_id: String },
-    /// Rename the current managed provider thread when canonically supported.
-    Rename {
-        workstream_id: String,
-        revision: i64,
-        name: String,
-    },
     /// Clear one observed result/recovery attention revision without provider input.
     Acknowledge {
         workstream_id: String,

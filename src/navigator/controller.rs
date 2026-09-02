@@ -488,15 +488,6 @@ impl PendingObserverIntent {
                     workstream_id,
                     expected_attention_revision,
                 },
-                ManagedAction::Rename {
-                    workstream_id,
-                    expected_workstream_revision,
-                    name,
-                } => Command::Rename {
-                    workstream_id,
-                    expected_workstream_revision,
-                    name,
-                },
             },
             Self::NewAtSameLocation {
                 source_workstream_id,
@@ -769,23 +760,6 @@ fn execute_command(
             );
             false
         }
-        Command::Rename {
-            workstream_id,
-            expected_workstream_revision,
-            name,
-        } => {
-            execute_managed_action(
-                root,
-                navigator,
-                presentation,
-                ManagedAction::Rename {
-                    workstream_id,
-                    expected_workstream_revision,
-                    name,
-                },
-            );
-            false
-        }
         Command::ShowGuidance(guidance) => {
             navigator.set_guidance(guidance);
             false
@@ -797,6 +771,7 @@ fn execute_command(
 /// Schema-15-native managed lifecycle intent. This deliberately bypasses the
 /// retired application facade: each variant carries only the exact
 /// durable IDs/revisions supplied by the passive snapshot.
+#[derive(Clone, Copy)]
 pub(crate) enum ManagedAction {
     Start {
         workstream_id: WorkstreamId,
@@ -833,11 +808,6 @@ pub(crate) enum ManagedAction {
         operation_id: OperationId,
         expected_operation_revision: Revision,
         provider: ProviderKind,
-    },
-    Rename {
-        workstream_id: WorkstreamId,
-        expected_workstream_revision: Revision,
-        name: String,
     },
 }
 
@@ -896,8 +866,7 @@ fn prepare_observer_or_request(
             ManagedAction::Park { .. }
             | ManagedAction::Archive { .. }
             | ManagedAction::Restore { .. }
-            | ManagedAction::AcknowledgeResult { .. }
-            | ManagedAction::Rename { .. } => ProviderKind::Codex,
+            | ManagedAction::AcknowledgeResult { .. } => ProviderKind::Codex,
         },
         PendingObserverIntent::NewAtSameLocation { provider, .. } => *provider,
     };
@@ -1524,29 +1493,6 @@ pub(crate) fn apply_managed_action(
             )
             .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             Ok(Some(workstream_id))
-        }
-        ManagedAction::Rename {
-            workstream_id,
-            expected_workstream_revision,
-            name,
-        } => {
-            require_active_workstream(
-                &snapshot,
-                workstream_id,
-                expected_workstream_revision,
-                Some(ProviderKind::Codex),
-            )?;
-            if name.trim().is_empty() {
-                return Err(NavigatorError::ManagedActionUnavailable);
-            }
-            crate::actions::rename(
-                &mut registry,
-                workstream_id,
-                expected_workstream_revision,
-                &name,
-            )
-            .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
-            Ok(None)
         }
     }
 }

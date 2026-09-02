@@ -3,12 +3,53 @@ use super::{
     PrivateRuntime, ProviderSessionId, RuntimePaths, RuntimeProbe, StateRoot, SystemTmux, env,
     is_direct_provider_hook,
 };
+use crate::provider::codex::app_server::ThreadMetadata;
 use crate::provider::codex::hooks::drain_stdin_and_parse_until;
 use crate::state::{ObserverDatabaseDeadline, open_current};
 use std::time::{Duration, Instant};
 
 const CODEX_HOOK_PREPARATION_BUDGET: Duration = Duration::from_millis(1_750);
 const CODEX_HOOK_DATABASE_BUDGET: Duration = Duration::from_millis(750);
+const CODEX_HOOK_METADATA_RESERVE: Duration = Duration::from_millis(500);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ThreadMetadataRefresh {
+    Required,
+    BestEffort,
+    None,
+}
+
+const fn thread_metadata_refresh(event: LifecycleEvent) -> ThreadMetadataRefresh {
+    match event {
+        LifecycleEvent::SessionStart => ThreadMetadataRefresh::Required,
+        LifecycleEvent::Stop => ThreadMetadataRefresh::BestEffort,
+        LifecycleEvent::UserPromptSubmit | LifecycleEvent::SessionEnd => {
+            ThreadMetadataRefresh::None
+        }
+    }
+}
+
+fn read_thread_metadata_for_hook(
+    event: LifecycleEvent,
+    native_session_id: &str,
+    preparation_deadline: Instant,
+) -> Result<Option<ThreadMetadata>, ()> {
+    match thread_metadata_refresh(event) {
+        ThreadMetadataRefresh::Required => EphemeralAppServer::default()
+            .read_thread_for_hook(native_session_id, preparation_deadline)
+            .map(Some)
+            .map_err(|_| ()),
+        ThreadMetadataRefresh::BestEffort => Ok(preparation_deadline
+            .checked_sub(CODEX_HOOK_METADATA_RESERVE)
+            .filter(|deadline| Instant::now() < *deadline)
+            .and_then(|deadline| {
+                EphemeralAppServer::default()
+                    .read_thread_for_hook(native_session_id, deadline)
+                    .ok()
+            })),
+        ThreadMetadataRefresh::None => Ok(None),
+    }
+}
 
 pub(super) fn observer_profile(
     root: &StateRoot,
@@ -90,15 +131,12 @@ pub(super) fn observe_hook(state_root: Option<PathBuf>) {
     if Instant::now() >= preparation_deadline {
         return;
     }
-    let metadata = if matches!(observation.event, LifecycleEvent::SessionStart) {
-        match EphemeralAppServer::default()
-            .read_thread_for_hook(&observation.native_session_id, preparation_deadline)
-        {
-            Ok(metadata) => Some(metadata),
-            Err(_) => return,
-        }
-    } else {
-        None
+    let Ok(metadata) = read_thread_metadata_for_hook(
+        observation.event,
+        &observation.native_session_id,
+        preparation_deadline,
+    ) else {
+        return;
     };
     let Ok(session_id) = ProviderSessionId::codex(observation.native_session_id.clone()) else {
         return;
@@ -126,6 +164,31 @@ pub(super) fn observe_hook(state_root: Option<PathBuf>) {
             &session_id,
             metadata.name.as_deref(),
             database_deadline,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{LifecycleEvent, ThreadMetadataRefresh, thread_metadata_refresh};
+
+    #[test]
+    fn thread_names_refresh_at_binding_and_after_settled_agent_work() {
+        assert_eq!(
+            thread_metadata_refresh(LifecycleEvent::SessionStart),
+            ThreadMetadataRefresh::Required
+        );
+        assert_eq!(
+            thread_metadata_refresh(LifecycleEvent::Stop),
+            ThreadMetadataRefresh::BestEffort
+        );
+        assert_eq!(
+            thread_metadata_refresh(LifecycleEvent::UserPromptSubmit),
+            ThreadMetadataRefresh::None
+        );
+        assert_eq!(
+            thread_metadata_refresh(LifecycleEvent::SessionEnd),
+            ThreadMetadataRefresh::None
         );
     }
 }

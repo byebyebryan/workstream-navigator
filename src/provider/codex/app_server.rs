@@ -122,24 +122,6 @@ impl EphemeralAppServer {
         thread_metadata_from_result(&result, thread_id)
     }
 
-    /// Sets the canonical Codex-owned name of an exact managed thread.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the name is unsafe or the bounded one-shot request
-    /// is rejected by Codex.
-    pub fn set_thread_name(&self, thread_id: &str, name: &str) -> Result<(), AppServerError> {
-        if name.trim().is_empty() || name.len() > 512 || name.contains(['\n', '\r']) {
-            return Err(AppServerError::InvalidName);
-        }
-        let _ = self.request_with_timeout(
-            "thread/name/set",
-            &json!({"threadId": thread_id, "name": name}),
-            RESPONSE_TIMEOUT,
-        )?;
-        Ok(())
-    }
-
     /// Creates one destination conversation from an exact completed source
     /// turn. This is intentionally non-idempotent: callers must persist their
     /// recovery plan before invoking it and must never retry an ambiguous call.
@@ -645,8 +627,6 @@ pub enum AppServerError {
     InvalidJson(serde_json::Error),
     #[error("App Server response did not contain an approved result")]
     InvalidResponse,
-    #[error("thread name is empty or unsafe")]
-    InvalidName,
     #[error("fork input is empty, unsafe, or exceeds its bound")]
     InvalidForkInput,
     #[error("App Server did not corroborate the requested exact thread")]

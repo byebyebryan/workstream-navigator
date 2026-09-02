@@ -285,7 +285,6 @@ struct FakeForkEffects {
     source_checks: usize,
     provider_ready_calls: usize,
     codex_fork_calls: usize,
-    codex_name_calls: usize,
     codex_reconcile_calls: usize,
     opencode_fork_calls: usize,
     start_calls: Vec<Option<Revision>>,
@@ -301,7 +300,6 @@ impl FakeForkEffects {
             source_checks: 0,
             provider_ready_calls: 0,
             codex_fork_calls: 0,
-            codex_name_calls: 0,
             codex_reconcile_calls: 0,
             opencode_fork_calls: 0,
             start_calls: Vec::new(),
@@ -391,12 +389,6 @@ impl ForkActionEffects for FakeForkEffects {
             }
             _ => panic!("Codex effect was called for {:?}", self.mode),
         }
-    }
-
-    fn codex_set_provisional_name(&mut self, _destination: &ProviderSessionId, name: &str) {
-        self.events.push("codex_name");
-        self.codex_name_calls += 1;
-        assert_eq!(name, "source-thread · fork");
     }
 
     fn codex_reconcile(
@@ -1149,17 +1141,9 @@ fn codex_fork_commits_before_start_and_reuses_the_request_without_a_second_fork(
 
     assert_eq!(
         effects.events,
-        [
-            "ready",
-            "source",
-            "source",
-            "codex_fork",
-            "codex_name",
-            "start"
-        ]
+        ["ready", "source", "source", "codex_fork", "start"]
     );
     assert_eq!(effects.codex_fork_calls, 1);
-    assert_eq!(effects.codex_name_calls, 1);
     assert_eq!(effects.codex_reconcile_calls, 0);
     assert_eq!(effects.start_calls, vec![Some(Revision::INITIAL)]);
     assert_eq!(
@@ -1184,7 +1168,6 @@ fn codex_fork_commits_before_start_and_reuses_the_request_without_a_second_fork(
     .unwrap();
     assert_eq!(replay, destination);
     assert_eq!(effects.codex_fork_calls, 1);
-    assert_eq!(effects.codex_name_calls, 1);
     assert_eq!(effects.source_checks, 2);
     assert_eq!(effects.start_calls, vec![Some(Revision::INITIAL), None]);
 }
@@ -1265,7 +1248,6 @@ fn codex_fork_reconciles_a_lost_result_without_retrying_the_provider() {
         ]
     );
     assert_eq!(effects.codex_fork_calls, 1);
-    assert_eq!(effects.codex_name_calls, 0);
     assert_eq!(effects.codex_reconcile_calls, 1);
     assert_eq!(effects.start_calls.len(), 1);
 }
@@ -1289,7 +1271,6 @@ fn codex_fork_absent_reconciliation_enters_recovery_and_recovers_exactly_once() 
     ));
     assert_eq!(effects.codex_fork_calls, 1);
     assert_eq!(effects.codex_reconcile_calls, 1);
-    assert_eq!(effects.codex_name_calls, 0);
     assert!(effects.start_calls.is_empty());
 
     let operation = registry
@@ -1319,7 +1300,6 @@ fn codex_fork_absent_reconciliation_enters_recovery_and_recovers_exactly_once() 
         "recovery must not retry thread/fork"
     );
     assert_eq!(effects.codex_reconcile_calls, 2);
-    assert_eq!(effects.codex_name_calls, 0);
     assert_eq!(effects.start_calls.len(), 1);
     assert!(
         registry

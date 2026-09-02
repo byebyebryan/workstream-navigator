@@ -257,8 +257,8 @@ Runtime attachment/pane or detach through ordinary card switching, but no new
 attachment to that Runtime is allowed. Selecting/materializing the fresh derived
 singleton card attaches only its separate provisional server under
 `provisional.lock` and grants no authority over the unproven Runtime. Park,
-Resume, Fork, contextual `n`, archive, Rename, recovery/start retry, and
-cleanup actions for that Runtime refuse or wait with bounded
+Resume, Fork, contextual `n`, archive, recovery/start retry, and cleanup
+actions for that Runtime refuse or wait with bounded
 `onboarding-in-progress` guidance. Passive snapshot/probe may show
 `starting`/`onboarding` and reconcile, but never adopts the helper/preparation
 process as provider identity, marks the Runtime lost, or signals it. Once

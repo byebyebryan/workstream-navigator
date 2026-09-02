@@ -1,7 +1,7 @@
 use super::{
-    ActionError, EphemeralAppServer, HostRegistry, Instant, LinuxProcessProbe, PrivateRuntime,
-    ProviderKind, Revision, RuntimeId, RuntimePaths, RuntimeProbe, StateError, SystemClock,
-    SystemTmux, WorkstreamId, WorkstreamLifecycle, terminate_owned_observer_process, thread,
+    ActionError, HostRegistry, Instant, LinuxProcessProbe, PrivateRuntime, ProviderKind, Revision,
+    RuntimeId, RuntimePaths, RuntimeProbe, StateError, SystemClock, SystemTmux, WorkstreamId,
+    WorkstreamLifecycle, terminate_owned_observer_process, thread,
 };
 use super::{
     cleanup::{
@@ -10,8 +10,8 @@ use super::{
         stop_recorded_provider_if_present,
     },
     model::{
-        active_workstream_overview, ensure_workstream_revision, require_codex_provider,
-        workstream_overview, workstream_revision,
+        active_workstream_overview, ensure_workstream_revision, workstream_overview,
+        workstream_revision,
     },
 };
 use crate::domain::Clock;
@@ -174,35 +174,6 @@ pub fn restore(
     registry
         .restore_workstream(workstream_id, expected_revision)
         .map_err(Into::into)
-}
-
-/// Renames the exact current Codex conversation through Codex's canonical
-/// name field, then refreshes only `WSNav`'s bounded name cache.
-///
-/// # Errors
-///
-/// Returns an error when the Workstream is archived, stale, unbound, or the
-/// provider rejects the bounded canonical name change.
-pub fn rename(
-    registry: &mut HostRegistry,
-    workstream_id: WorkstreamId,
-    expected_revision: Revision,
-    name: &str,
-) -> Result<(), ActionError> {
-    let overview = active_workstream_overview(registry, workstream_id)?;
-    require_codex_provider(overview.provider)?;
-    if overview.revision != expected_revision {
-        return Err(ActionError::WorkstreamRevisionConflict);
-    }
-    let runtime = registry
-        .runtime_for_workstream(workstream_id)?
-        .ok_or(ActionError::NoRuntime(workstream_id))?;
-    let binding = registry
-        .binding_for_runtime(runtime.runtime_id)?
-        .ok_or(ActionError::NoProviderBinding(workstream_id))?;
-    EphemeralAppServer::default().set_thread_name(binding.native_session_id.native_id(), name)?;
-    registry.record_thread_name(runtime.runtime_id, &binding.native_session_id, name)?;
-    Ok(())
 }
 
 /// Waits briefly for the durable outcome of a concurrently requested park.

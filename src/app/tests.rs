@@ -63,6 +63,13 @@ fn retained_observer_commands_use_the_schema15_boundary() {
 }
 
 #[test]
+fn provider_owned_naming_has_no_wsnav_command() {
+    assert!(
+        Cli::try_parse_from(["wsnav", "rename", "workstream", "1", "provider-owned name"]).is_err()
+    );
+}
+
+#[test]
 fn direct_codex_start_refuses_unready_observer_without_mutating_schema15_state() {
     let (temporary, root, workstream_id) = current_workstream_fixture();
     let codex_home = temporary.path().join("codex");

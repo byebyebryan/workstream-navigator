@@ -253,7 +253,6 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
         | Commands::Status { .. }
         | Commands::Operations
         | Commands::RecoverOperation { .. }
-        | Commands::Rename { .. }
         | Commands::Acknowledge { .. } => execute_local_command(root, command),
         Commands::Navigator
         | Commands::NavigatorPane { .. }
@@ -437,22 +436,6 @@ fn execute_local_command(root: &StateRoot, command: Commands) -> Result<(), AppE
                     operation_id,
                     expected_operation_revision: operation.revision,
                     provider: operation.provider,
-                },
-            )
-            .map_err(AppError::Navigator)?;
-            Ok(())
-        }
-        Commands::Rename {
-            workstream_id,
-            revision,
-            name,
-        } => {
-            apply_managed_action(
-                root,
-                ManagedAction::Rename {
-                    workstream_id: parse_workstream(&workstream_id)?,
-                    expected_workstream_revision: parse_revision(revision)?,
-                    name,
                 },
             )
             .map_err(AppError::Navigator)?;

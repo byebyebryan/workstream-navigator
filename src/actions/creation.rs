@@ -58,12 +58,6 @@ pub(super) trait ForkActionEffects {
         plan: &crate::state::ForkPlan,
     ) -> Result<ProviderSessionId, ActionError>;
 
-    /// Best-effort native title used only after an ordinary immediate Fork
-    /// returned one exact destination. Recovery and reconciliation deliberately
-    /// do not call this effect because the destination may already be user
-    /// renamed or may have been found after an uncertain provider response.
-    fn codex_set_provisional_name(&mut self, destination: &ProviderSessionId, name: &str);
-
     fn codex_reconcile(
         &mut self,
         root: &crate::state::StateRoot,
@@ -143,12 +137,6 @@ impl ForkActionEffects for NativeForkEffects {
             .map_err(ActionError::AppServer)?;
         ProviderSessionId::codex(destination.native_session_id)
             .map_err(|error| ActionError::State(crate::state::StateError::from(error)))
-    }
-
-    fn codex_set_provisional_name(&mut self, destination: &ProviderSessionId, name: &str) {
-        let _ = self
-            .app_server
-            .set_thread_name(destination.native_id(), name);
     }
 
     fn codex_reconcile(
@@ -395,14 +383,7 @@ pub(super) fn fork_workstream_with_effects(
         effects.codex_reconcile(root, registry, &prepared_plan)
     } else {
         match effects.codex_fork(root, registry, &prepared_plan) {
-            Ok(destination) => {
-                if let Some(name) =
-                    provisional_fork_name(prepared_plan.source_native_name.as_deref())
-                {
-                    effects.codex_set_provisional_name(&destination, &name);
-                }
-                Ok(ForkReconciliationResult::Found(destination))
-            }
+            Ok(destination) => Ok(ForkReconciliationResult::Found(destination)),
             Err(_) => effects.codex_reconcile(root, registry, &prepared_plan),
         }
     };
@@ -719,14 +700,6 @@ fn ensure_live_fork_source(
             Err(ActionError::ForkSourceUnavailable)
         }
     }
-}
-
-fn provisional_fork_name(source_native_name: Option<&str>) -> Option<String> {
-    let source_native_name = source_native_name?.trim();
-    (!source_native_name.is_empty()
-        && source_native_name.len() <= 505
-        && !source_native_name.contains(['\n', '\r']))
-    .then(|| format!("{source_native_name} · fork"))
 }
 
 fn require_fork_recovery(registry: &mut HostRegistry, prepared: &crate::state::ForkPlan) {

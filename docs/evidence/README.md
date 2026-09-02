@@ -48,6 +48,7 @@ to make their old procedures appear current.
 - [D18 current-only consolidation and post-acceptance source
   correction](acceptance/d18-current-source-candidate.md)
 - [D19 tmux-derived navigation](acceptance/d19-tmux-navigation.md)
+- [D20 native-owned conversation branching](acceptance/d20-native-owned-branching.md)
 
 ## Design spikes
 

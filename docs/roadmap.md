@@ -1,15 +1,14 @@
 # Workstream Navigator V1 Roadmap
 
-Date: 2026-08-31
+Date: 2026-09-02
 
-Status: D0-D19 are complete. D20 is active and retires WSNav-managed
+Status: D0-D20 are complete. D20 checkpoint `00a4937` retires WSNav-managed
 conversation forking so native providers remain the sole conversation-branch
-authority. Provider-owned naming refinement `b3a58bb` is the clean starting
-point for this checkpoint. D19 checkpoint `a0ec38b` remains the completed
-tmux-derived navigation contract. No remote-CI or live-provider claim is
-transferred to D20. D18 checkpoint `c961c7e` remains the latest accepted
-artifact with separately authorized reset, native-trust, and disposable
-Codex/OpenCode lifecycle evidence.
+authority; it is locally accepted and installed for operator inspection.
+Provider-owned naming refinement `b3a58bb` is its clean starting point. No
+remote-CI or live-provider claim is transferred to D20. D18 checkpoint
+`c961c7e` remains the latest accepted artifact with separately authorized
+reset, native-trust, and disposable Codex/OpenCode lifecycle evidence.
 
 `docs/design.md` is the product and architecture contract. This file owns
 delivery order, implementation status, and exit gates. The complete prior
@@ -29,9 +28,11 @@ roadmap is preserved as
 - D18 is a clean state break. Schemas 12 through 14 are refusal evidence, not
   migration or adoption inputs.
 
-## Active checkpoint: D20 native-owned conversation branching
+## Completed checkpoint: D20 native-owned conversation branching
 
-Implementation status: active; not yet accepted or installed.
+Implementation status: complete in `00a4937`; locally accepted and installed
+for operator inspection. See the
+[D20 acceptance record](evidence/acceptance/d20-native-owned-branching.md).
 
 D20 removes every ordinary and break-glass route by which WSNav creates,
 reconciles, or recovers a provider conversation Fork. A provider-native
@@ -470,6 +471,7 @@ historical evidence rather than current delivery authority.
 | D17.1 | Correctness and release closure | [D17.1 acceptance](evidence/acceptance/d17.1-correctness-closure.md) |
 | D18 | Current-only consolidation and release acceptance complete; source correction locally verified | [Acceptance evidence](evidence/acceptance/d18-current-source-candidate.md) |
 | D19 | Tmux-derived presentation navigation; locally accepted for operator inspection | [D19 acceptance](evidence/acceptance/d19-tmux-navigation.md) |
+| D20 | Provider-native conversation branching; managed Fork creation and recovery retired | [D20 acceptance](evidence/acceptance/d20-native-owned-branching.md) |
 
 ## Deferred product decisions
 

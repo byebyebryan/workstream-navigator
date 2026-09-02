@@ -2952,6 +2952,7 @@ roadmap and version-specific decisions remain in
 | D17-D17.1 | Shell-first onboarding and correctness closure | [D17](evidence/acceptance/d17-shell-first.md), [D17.1](evidence/acceptance/d17.1-correctness-closure.md) |
 | D18 | Current-only schema-15 consolidation | [Completed roadmap](roadmap.md#completed-checkpoint-d18-current-only-consolidation) |
 | D19 | Completed tmux-derived presentation navigation | [Acceptance](evidence/acceptance/d19-tmux-navigation.md) |
+| D20 | Native-owned conversation branching | [Acceptance](evidence/acceptance/d20-native-owned-branching.md) |
 
 ## Current concrete provider boundary
 

@@ -2,12 +2,12 @@
 
 Date: 2026-09-02
 
-Status: D0-D22 are complete. D22 checkpoint `ed74b0b` closes the exact
-retained-session Codex recovery-confirmation gap exposed when a native
-`SessionStart(source=resume)` is missed. It is locally accepted and installed
-for operator inspection. D21 checkpoint `868ee85` remains the completed
-provider-derived attention boundary. No remote-CI or live-provider claim is
-transferred to D22. D18
+Status: D0-D21 are complete. The D22 correction is active after operator
+inspection falsified checkpoint `ed74b0b`: Linux reports the still-running
+Codex executable as `codex (deleted)` after an on-disk Codex upgrade, and the
+first D22 matcher rejected that exact kernel tombstone. D21 checkpoint
+`868ee85` remains the completed provider-derived attention boundary. No
+remote-CI or live-provider success claim is transferred to D22. D18
 checkpoint `c961c7e` remains the latest accepted artifact with separately
 authorized reset, native-trust, and disposable Codex/OpenCode lifecycle
 evidence.
@@ -30,11 +30,12 @@ roadmap is preserved as
 - D18 is a clean state break. Schemas 12 through 14 are refusal evidence, not
   migration or adoption inputs.
 
-## Completed checkpoint: D22 exact live recovery confirmation
+## Active checkpoint: D22 exact live recovery confirmation
 
-Implementation status: complete in `ed74b0b`; locally accepted and installed
-with executable SHA-256
-`1bbf53aa5ca1a02930140cca1ad8358e8f9b0b632311bd18ceee82017c084fe1`.
+Implementation status: correction active. The first candidate in `ed74b0b`
+passed its local/disposable gate and was installed with executable SHA-256
+`1bbf53aa5ca1a02930140cca1ad8358e8f9b0b632311bd18ceee82017c084fe1`,
+but subsequent operator inspection falsified its executable-name proof.
 
 D22 makes an interrupted Codex recovery handshake retryable without stopping,
 restarting, steering, or otherwise mutating the live provider. A missed or
@@ -80,6 +81,9 @@ Exit gate:
 - focused tests prove exact live retained-session recovery succeeds and every
   executable, argument, provider, session, generation, lifecycle, and revision
   mismatch fails without mutation;
+- executable tests accept only the ordinary absolute `codex` name or Linux's
+  exact `codex (deleted)` `/proc/<pid>/exe` tombstone while rejecting relative,
+  alternate, and suffixed lookalikes;
 - tests prove the successful transaction updates only the binding generation
   and Workstream lifecycle/revision while Runtime status remains `starting`,
   and that initial, changed-session, unbound, OpenCode, and ambiguous recovery
@@ -90,7 +94,20 @@ Exit gate:
   and executable hash. Opening or mutating the currently live provider remains
   separately authorized operator acceptance.
 
-Completed evidence:
+Falsification and correction boundary:
+
+- after closing and reopening WSNav, explicit Recover against the retained live
+  session still refused without state mutation;
+- read-only inspection proved the exact Runtime topology, recorded PID/birth,
+  cwd, and generated resume argv still matched, while `/proc/<pid>/exe`
+  reported `/usr/bin/codex (deleted)` because the executable had been replaced
+  during a Codex upgrade; and
+- the correction recognizes only that exact Linux kernel suffix and retains all
+  other D22 proof and transaction fences. It does not resolve an ambient PATH,
+  adopt the replacement file, or compare against the obsolete executable inode
+  retained from an earlier Runtime generation.
+
+Evidence record:
 
 - [D22 exact live recovery acceptance](evidence/acceptance/d22-exact-live-recovery.md)
 

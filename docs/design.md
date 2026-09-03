@@ -2,13 +2,13 @@
 
 Date: 2026-09-02
 
-Status: D22 checkpoint `ed74b0b` implements exact, read-only confirmation for a
-still-live Codex retained-session recovery whose native
-`SessionStart(source=resume)` was missed, without restarting or steering the
-provider. It passes its full local/disposable gate and byte-identical per-host
-installation on the unchanged direct, current-only schema-15 epoch. No
-remote-CI or live-provider acceptance is claimed for D22. D18 checkpoint
-`c961c7e` and
+Status: the D22 correction is active on the unchanged direct, current-only
+schema-15 epoch. Operator inspection falsified checkpoint `ed74b0b` after a
+Codex upgrade left the exact still-running executable represented by Linux as
+`codex (deleted)`, which the first matcher rejected. The correction recognizes
+only that exact kernel tombstone while retaining every Runtime, argv, provider,
+session, and revision fence. No remote-CI or live-provider success acceptance
+is claimed for D22. D18 checkpoint `c961c7e` and
 installed artifact
 `f732e2b16344b038cd05996501ce77be42302f7403de9720d156dbf24777d124`
 remain the latest separately accepted destructive-reset, native-trust, and
@@ -1453,7 +1453,8 @@ session whose replacement Runtime is already live. It applies only when the
 non-archived Workstream remains `recovery_required`, the Runtime remains
 `starting`, the retained ProviderBinding is still on the immediately prior
 generation, and the exact private tmux topology, pane PID, process birth, cwd,
-absolute Codex executable, and generated
+absolute Codex executable (including Linux's exact `codex (deleted)` marker for
+a still-executing unlinked or replaced file), and generated
 `codex --profile wsnav-observer -C <cwd> resume <retained-session>` argument
 vector all agree. WSNav then performs the same bounded read-only
 `thread/read(includeTurns=false)` for the retained ID, re-proves the live
@@ -2970,7 +2971,7 @@ roadmap and version-specific decisions remain in
 | D19 | Completed tmux-derived presentation navigation | [Acceptance](evidence/acceptance/d19-tmux-navigation.md) |
 | D20 | Native-owned conversation branching | [Acceptance](evidence/acceptance/d20-native-owned-branching.md) |
 | D21 | Provider-derived attention | [Acceptance](evidence/acceptance/d21-provider-derived-attention.md) |
-| D22 | Exact live retained-session recovery confirmation | [Acceptance](evidence/acceptance/d22-exact-live-recovery.md) |
+| D22 | Exact live retained-session recovery confirmation | Correction active; see [evidence](evidence/acceptance/d22-exact-live-recovery.md) |
 
 ## Current concrete provider boundary
 

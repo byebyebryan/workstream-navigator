@@ -2,10 +2,11 @@
 
 Date: 2026-09-02
 
-Status: implemented in checkpoint `ed74b0b`, locally accepted, and installed
-for operator inspection. D21 checkpoint `868ee85` is the starting boundary for
-this checkpoint. This record claims no remote-CI or live Codex/OpenCode
-interaction.
+Status: correction active. The first candidate in checkpoint `ed74b0b` passed
+its local/disposable gate and was installed for operator inspection, but that
+inspection falsified its executable-name proof. D21 checkpoint `868ee85` is the
+starting boundary for this checkpoint. This record claims no remote-CI or
+successful live Codex/OpenCode recovery.
 
 ## Accepted boundary
 
@@ -13,8 +14,8 @@ interaction.
   `recovery_required` whose exact retained ProviderBinding belongs to an older
   generation of the same `starting` Runtime.
 - Before any durable mutation, recovery proves the exact private tmux topology,
-  pane PID, process birth, cwd, an absolute executable ending in `codex`, and
-  the complete generated
+  pane PID, process birth, cwd, an absolute executable ending in `codex` or
+  Linux's exact `codex (deleted)` marker, and the complete generated
   `codex --profile wsnav-observer -C <cwd> resume <retained-session>` argument
   vector.
 - One bounded ephemeral App Server performs only
@@ -59,7 +60,7 @@ bounded provider read. The accepted candidate re-proves topology, PID, birth,
 cwd, executable, and argv after that read and before its transactional state
 fence.
 
-## Installed-artifact evidence
+## Initial installed-artifact evidence
 
 Before replacement, the installed `wsnav 0.1.0` had executable hash
 `3a83ddca0cbc67f048d5e0229c509b0f3548fda9fa47ca620c04c684e3b210a6`,
@@ -83,15 +84,28 @@ The locked release was built and atomically installed to
 
 The installed binary reports `wsnav 0.1.0`, opens the existing state with an
 empty `operations` result, and leaves the schema, lifecycle counts, retained
-generation mismatch, and database hash byte-identical. The already-open
-Navigator deliberately remains the prior D21 process until the operator closes
-and reopens that presentation; installation did not restart it or alter its
-live provider.
+generation mismatch, and database hash byte-identical.
+
+## Operator falsification
+
+After the operator closed and reopened WSNav, explicit Recover still returned
+bounded unavailable guidance and left the recovery marker intact. Read-only
+inspection found that the exact private topology, pane PID, recorded process
+birth, cwd, and full generated resume argv all matched. The sole rejected fact
+was `/proc/<pid>/exe`: it reported `/usr/bin/codex (deleted)` because the Codex
+binary had been replaced on disk after this process started.
+
+The onboarding executable identity cannot authorize this recovery generation:
+it correctly identifies an older provider generation and does not match the
+live deleted executable. The correction instead accepts only Linux's exact
+`codex (deleted)` kernel spelling alongside every existing D22 corroboration
+fact. Relative names, alternate names, arbitrary suffixes, and doubled deleted
+markers remain rejected.
 
 ## Unclaimed evidence
 
-- Recover was not invoked against the ordinary state, so the currently live
-  provider, retained binding, and recovery marker remain unchanged.
+- The failed Recover attempt did not reconcile or otherwise mutate the
+  currently live provider, retained binding, or recovery marker.
 - No provider command, pane content, native lifecycle action, observer
   installation, trust change, ordinary tmux server, or provider input was
   exercised.

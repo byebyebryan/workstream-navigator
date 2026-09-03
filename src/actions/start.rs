@@ -423,14 +423,28 @@ fn revalidate_live_codex_runtime(
     Ok(fresh_probe)
 }
 
-fn codex_recovery_process_matches(
+pub(super) fn codex_recovery_process_matches(
     command: &ProcessCommand,
     cwd: &Path,
     binding: &crate::state::ProviderBinding,
 ) -> bool {
     command.executable.is_absolute()
-        && command.executable.file_name() == Some(OsStr::new("codex"))
+        && codex_executable_name_matches(&command.executable)
         && command.argv == codex_recovery_program(cwd, Some(binding))
+}
+
+fn codex_executable_name_matches(executable: &Path) -> bool {
+    let Some(file_name) = executable.file_name() else {
+        return false;
+    };
+    if file_name == OsStr::new("codex") {
+        return true;
+    }
+    // Linux appends this exact marker to `/proc/<pid>/exe` after an executing
+    // file is unlinked or replaced. The recorded PID/birth, private topology,
+    // cwd, and complete argv remain mandatory corroboration; no other suffix
+    // or executable name is accepted.
+    cfg!(target_os = "linux") && file_name == OsStr::new("codex (deleted)")
 }
 
 fn recover_opencode(

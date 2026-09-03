@@ -15,7 +15,8 @@ use super::{
     reconcile_lost_runtimes, restore, start,
     start::{
         CodexRecoveryEvidence, CodexThreadReader, backfill_live_runtime_provider_pid,
-        opencode_recovery_handle_matches, reconcile_live_codex_recovery, runtime_launch_program,
+        codex_recovery_process_matches, opencode_recovery_handle_matches,
+        reconcile_live_codex_recovery, runtime_launch_program,
     },
 };
 use crate::provider::codex::app_server::{AppServerError, ThreadMetadata};
@@ -650,6 +651,60 @@ fn exact_live_codex_recovery_reconciles_the_retained_binding_only() {
         binding.observed_thread_name
     );
     assert_eq!(binding_after.name_state, binding.name_state);
+}
+
+#[test]
+fn codex_recovery_executable_accepts_only_the_live_or_linux_deleted_name() {
+    let (
+        _temporary,
+        _root,
+        _registry,
+        _workstream_id,
+        runtime,
+        binding,
+        _probe,
+        _workstream_revision,
+    ) = codex_recovery_fixture();
+    let argv = codex_recovery_program(&runtime.cwd, Some(&binding));
+
+    for executable in ["/usr/bin/codex", "/usr/bin/codex (deleted)"] {
+        let command = ProcessCommand {
+            executable: PathBuf::from(executable),
+            argv: argv.clone(),
+        };
+        let expected = executable.ends_with("/codex") || cfg!(target_os = "linux");
+        assert_eq!(
+            codex_recovery_process_matches(&command, &runtime.cwd, &binding),
+            expected,
+            "unexpected executable classification: {executable}"
+        );
+    }
+
+    for executable in [
+        "codex",
+        "/usr/bin/other",
+        "/usr/bin/codex.old",
+        "/usr/bin/codex (deleted) (deleted)",
+    ] {
+        let command = ProcessCommand {
+            executable: PathBuf::from(executable),
+            argv: argv.clone(),
+        };
+        assert!(
+            !codex_recovery_process_matches(&command, &runtime.cwd, &binding),
+            "unexpected executable acceptance: {executable}"
+        );
+    }
+
+    let command = ProcessCommand {
+        executable: PathBuf::from("/usr/bin/codex"),
+        argv: codex_recovery_program(Path::new("/different/cwd"), Some(&binding)),
+    };
+    assert!(!codex_recovery_process_matches(
+        &command,
+        &runtime.cwd,
+        &binding
+    ));
 }
 
 #[test]

@@ -1,15 +1,16 @@
 # Workstream Navigator V1 Design
 
-Date: 2026-09-02
+Date: 2026-09-03
 
-Status: the D22 correction is implemented in `8338a04`, passes its full
-local/disposable gate, and is installed for operator re-test on the unchanged
-direct, current-only schema-15 epoch. Operator inspection falsified checkpoint
-`ed74b0b` after a Codex upgrade left the exact still-running executable
-represented by Linux as `codex (deleted)`, which the first matcher rejected.
-The correction recognizes only that exact kernel tombstone while retaining
-every Runtime, argv, provider, session, and revision fence. No remote-CI or
-successful live-provider recovery acceptance is claimed for D22. D18
+Status: the D22 correction in `8338a04` passes its full local/disposable gate,
+is byte-identically installed, and is operator-accepted on the unchanged
+direct, current-only schema-15 epoch. Operator inspection first falsified
+checkpoint `ed74b0b` after a Codex upgrade left the exact still-running
+executable represented by Linux as `codex (deleted)`, which its matcher
+rejected. The corrected build recognizes only that exact kernel tombstone
+while retaining every Runtime, argv, provider, session, and revision fence;
+explicit Recover then reconciled the retained binding without restarting or
+advancing the `starting` Runtime. No remote-CI claim is made for D22. D18
 checkpoint `c961c7e` and
 installed artifact
 `f732e2b16344b038cd05996501ce77be42302f7403de9720d156dbf24777d124`
@@ -2973,7 +2974,7 @@ roadmap and version-specific decisions remain in
 | D19 | Completed tmux-derived presentation navigation | [Acceptance](evidence/acceptance/d19-tmux-navigation.md) |
 | D20 | Native-owned conversation branching | [Acceptance](evidence/acceptance/d20-native-owned-branching.md) |
 | D21 | Provider-derived attention | [Acceptance](evidence/acceptance/d21-provider-derived-attention.md) |
-| D22 | Exact live retained-session recovery confirmation | Correction active; see [evidence](evidence/acceptance/d22-exact-live-recovery.md) |
+| D22 | Exact live retained-session recovery confirmation | [Acceptance](evidence/acceptance/d22-exact-live-recovery.md) |
 
 ## Current concrete provider boundary
 

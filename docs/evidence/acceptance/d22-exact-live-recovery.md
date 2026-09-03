@@ -1,13 +1,14 @@
 # D22 exact live recovery confirmation acceptance
 
-Date: 2026-09-02
+Date: 2026-09-03
 
-Status: corrected in checkpoint `8338a04`, locally accepted, and installed for
-operator re-test. The first candidate in checkpoint `ed74b0b` passed its
-local/disposable gate and was installed for operator inspection, but that
-inspection falsified its executable-name proof. D21 checkpoint `868ee85` is the
-starting boundary for this checkpoint. This record claims no remote-CI or
-successful live Codex/OpenCode recovery.
+Status: corrected in checkpoint `8338a04`, locally accepted, byte-identically
+installed, and accepted by an explicit operator re-test against the retained
+live Codex recovery that falsified the first candidate. Checkpoint `ed74b0b`
+passed its local/disposable gate and was installed for operator inspection, but
+that inspection exposed its executable-name refusal. D21 checkpoint `868ee85`
+is the starting boundary for this checkpoint. This record claims no remote-CI
+or OpenCode acceptance.
 
 ## Accepted boundary
 
@@ -117,15 +118,47 @@ executable-name test. Its locked release was atomically installed to
 The corrected installed binary reports `wsnav 0.1.0`, reports no unresolved
 operations, and leaves the schema-15 database byte-identical at
 `2813e355f051e337b154eab741616917cec2ac6f5254e5702d4e392b1e03ccf2`.
-The open Navigator still runs the preceding installed candidate until the
-operator closes and reopens the presentation; no process was restarted by
-installation.
+The open Navigator still ran the preceding installed candidate until the
+operator closed and reopened the presentation; installation itself restarted
+no process.
+
+## Corrected live operator acceptance
+
+The operator closed and reopened WSNav after the corrected installation, then
+selected the same `lazy-serializable` recovery card. The reopened Navigator's
+executing image matched the corrected installed SHA-256, and explicit Recover
+succeeded while the live provider executable continued to report Linux's exact
+`/usr/bin/codex (deleted)` tombstone.
+
+Sanitized state evidence before and after the successful action was:
+
+| Fact | Before | After |
+| --- | --- | --- |
+| Workstream lifecycle / revision | `recovery_required` / 8 | `open` / 9 |
+| Runtime lifecycle / revision | `starting` / 11 | `starting` / 11 |
+| Binding generation / revision | retained prior generation / 3 | current generation / 4 |
+| Unresolved operations | none | none |
+| Schema | 15 | 15 |
+
+The database changed only at the accepted reconciliation boundary, from
+SHA-256
+`2813e355f051e337b154eab741616917cec2ac6f5254e5702d4e392b1e03ccf2`
+to
+`d0ece9e3e2a65573b66638887036bc7082d5fe829d629b41424776f338af32c9`.
+Read-only process inspection after success confirmed the same recorded Runtime
+process remained live with the same private topology and deleted executable;
+no provider restart, signal, input, pane capture, transcript access, or schema
+migration occurred.
 
 ## Unclaimed evidence
 
-- The failed Recover attempt did not reconcile or otherwise mutate the
-  currently live provider, retained binding, or recovery marker.
-- No provider command, pane content, native lifecycle action, observer
-  installation, trust change, ordinary tmux server, or provider input was
-  exercised.
+- The first failed Recover attempt did not reconcile or otherwise mutate the
+  live provider, retained binding, or recovery marker.
+- Live acceptance covers only this exact Codex retained-session recovery; it
+  does not transfer to initial/unbound binding, changed-session transition, or
+  OpenCode recovery.
+- No provider-TUI command/input, pane content, observer installation or trust
+  change, ordinary tmux server, restart, or signal was exercised. The only
+  provider-side operation was the designed bounded
+  `thread/read(includeTurns=false)` corroboration.
 - No remote CI or alternate Rust/tmux compatibility run is claimed.

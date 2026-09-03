@@ -2,8 +2,9 @@
 
 Date: 2026-09-02
 
-Status: correction active. The first candidate in checkpoint `ed74b0b` passed
-its local/disposable gate and was installed for operator inspection, but that
+Status: corrected in checkpoint `8338a04`, locally accepted, and installed for
+operator re-test. The first candidate in checkpoint `ed74b0b` passed its
+local/disposable gate and was installed for operator inspection, but that
 inspection falsified its executable-name proof. D21 checkpoint `868ee85` is the
 starting boundary for this checkpoint. This record claims no remote-CI or
 successful live Codex/OpenCode recovery.
@@ -37,8 +38,8 @@ successful live Codex/OpenCode recovery.
 
 ## Repository evidence
 
-The final `scripts/check` passed on Rust 1.98.0 and tmux 3.7c. It ran strict
-formatting and Clippy, 380 library tests, 10 presentation integration tests,
+The corrected `scripts/check` passed on Rust 1.98.0 and tmux 3.7c. It ran strict
+formatting and Clippy, 381 library tests, 10 presentation integration tests,
 locked packaging, dependency advisory/license/source policy, shell and Python
 checks, fixture validation, current-source and CLI acceptance, 43 focused
 presentation tests, 32 focused current-state tests, validation of links in 57
@@ -101,6 +102,24 @@ live deleted executable. The correction instead accepts only Linux's exact
 `codex (deleted)` kernel spelling alongside every existing D22 corroboration
 fact. Relative names, alternate names, arbitrary suffixes, and doubled deleted
 markers remain rejected.
+
+## Corrected installed-artifact evidence
+
+Checkpoint `8338a04` passed the complete repository gate with the added exact
+executable-name test. Its locked release was atomically installed to
+`~/.local/bin/wsnav`; the release and installed executable are byte-identical:
+
+```text
+30fd8bf0c6ac220b9c10088ddd623eec7dc301ffd77f1a5a4d4f36fccdfa5784  target/release/wsnav
+30fd8bf0c6ac220b9c10088ddd623eec7dc301ffd77f1a5a4d4f36fccdfa5784  ~/.local/bin/wsnav
+```
+
+The corrected installed binary reports `wsnav 0.1.0`, reports no unresolved
+operations, and leaves the schema-15 database byte-identical at
+`2813e355f051e337b154eab741616917cec2ac6f5254e5702d4e392b1e03ccf2`.
+The open Navigator still runs the preceding installed candidate until the
+operator closes and reopens the presentation; no process was restarted by
+installation.
 
 ## Unclaimed evidence
 

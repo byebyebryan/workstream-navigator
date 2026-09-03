@@ -2,13 +2,15 @@
 
 Date: 2026-09-02
 
-Status: the D22 correction is active on the unchanged direct, current-only
-schema-15 epoch. Operator inspection falsified checkpoint `ed74b0b` after a
-Codex upgrade left the exact still-running executable represented by Linux as
-`codex (deleted)`, which the first matcher rejected. The correction recognizes
-only that exact kernel tombstone while retaining every Runtime, argv, provider,
-session, and revision fence. No remote-CI or live-provider success acceptance
-is claimed for D22. D18 checkpoint `c961c7e` and
+Status: the D22 correction is implemented in `8338a04`, passes its full
+local/disposable gate, and is installed for operator re-test on the unchanged
+direct, current-only schema-15 epoch. Operator inspection falsified checkpoint
+`ed74b0b` after a Codex upgrade left the exact still-running executable
+represented by Linux as `codex (deleted)`, which the first matcher rejected.
+The correction recognizes only that exact kernel tombstone while retaining
+every Runtime, argv, provider, session, and revision fence. No remote-CI or
+successful live-provider recovery acceptance is claimed for D22. D18
+checkpoint `c961c7e` and
 installed artifact
 `f732e2b16344b038cd05996501ce77be42302f7403de9720d156dbf24777d124`
 remain the latest separately accepted destructive-reset, native-trust, and

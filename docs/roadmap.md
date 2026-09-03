@@ -2,12 +2,13 @@
 
 Date: 2026-09-02
 
-Status: D0-D21 are complete. The D22 correction is active after operator
-inspection falsified checkpoint `ed74b0b`: Linux reports the still-running
-Codex executable as `codex (deleted)` after an on-disk Codex upgrade, and the
-first D22 matcher rejected that exact kernel tombstone. D21 checkpoint
-`868ee85` remains the completed provider-derived attention boundary. No
-remote-CI or live-provider success claim is transferred to D22. D18
+Status: D0-D21 are complete. The D22 correction is implemented in `8338a04`,
+locally accepted, and installed for an operator re-test after inspection
+falsified checkpoint `ed74b0b`: Linux reports the still-running Codex
+executable as `codex (deleted)` after an on-disk Codex upgrade, and the first
+D22 matcher rejected that exact kernel tombstone. D21 checkpoint `868ee85`
+remains the completed provider-derived attention boundary. No remote-CI or
+successful live-provider recovery claim is transferred to D22. D18
 checkpoint `c961c7e` remains the latest accepted artifact with separately
 authorized reset, native-trust, and disposable Codex/OpenCode lifecycle
 evidence.
@@ -32,8 +33,11 @@ roadmap is preserved as
 
 ## Active checkpoint: D22 exact live recovery confirmation
 
-Implementation status: correction active. The first candidate in `ed74b0b`
-passed its local/disposable gate and was installed with executable SHA-256
+Implementation status: correction implemented in `8338a04`, locally accepted,
+and installed with executable SHA-256
+`30fd8bf0c6ac220b9c10088ddd623eec7dc301ffd77f1a5a4d4f36fccdfa5784`;
+operator recovery re-test pending. The first candidate in `ed74b0b` passed its
+local/disposable gate and was installed with executable SHA-256
 `1bbf53aa5ca1a02930140cca1ad8358e8f9b0b632311bd18ceee82017c084fe1`,
 but subsequent operator inspection falsified its executable-name proof.
 

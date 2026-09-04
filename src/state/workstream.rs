@@ -3,14 +3,21 @@ use std::path::PathBuf;
 use rusqlite::{OptionalExtension, TransactionBehavior, params};
 use uuid::Uuid;
 
-use crate::domain::{DomainError, LocationId, ProviderKind, Revision, RuntimeStatus, WorkstreamId};
-
-use super::models::{
-    HostRegistry, PersistedWorkstreamOverview, StateError, WorkstreamOverview,
-    WorkstreamOverviewPage,
+use crate::domain::{
+    DomainError, LocationId, OperationKind, OperationPhase, ProviderKind, Revision, RuntimeId,
+    RuntimeStatus, WorkstreamId,
 };
-use super::schema::MAX_NAVIGATOR_WORKSTREAMS;
-use super::utils::{provider_kind_from_text, workstream_lifecycle_from_text};
+
+use super::current::PARKED_RECOVERY_RESOLVED_OUTCOME;
+use super::models::{
+    CatalogAuthorization, HostRegistry, PersistedOpenCodeSessionCreationPlan,
+    PersistedWorkstreamOverview, StateError, WorkstreamOverview, WorkstreamOverviewPage,
+};
+use super::schema::{MAX_NAVIGATOR_WORKSTREAMS, validate_foreign_keys};
+use super::utils::{
+    operation_kind_from_text, operation_phase_from_text, provider_kind_from_text,
+    workstream_lifecycle_from_text,
+};
 
 impl HostRegistry {
     /// Returns the bounded state needed by one local navigator snapshot.
@@ -179,6 +186,216 @@ impl HostRegistry {
         self.transition_workstream_archive(workstream_id, expected_revision, None)
     }
 
+    /// Performs the read-only ownership/revision checks required before an
+    /// exact Runtime stop for [`Self::forget_workstream`].
+    pub(crate) fn validate_forget_workstream(
+        &self,
+        workstream_id: WorkstreamId,
+        expected_revision: Revision,
+    ) -> Result<(), StateError> {
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(StateError::Sqlite)?;
+        let existing: Option<(i64, Option<i64>)> = transaction
+            .query_row(
+                "SELECT revision, archived_at_millis
+                 FROM workstreams WHERE workstream_id = ?1",
+                [workstream_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?;
+        let Some((revision, archived_at_millis)) = existing else {
+            return Err(StateError::UnknownOpenWorkstream(workstream_id));
+        };
+        let revision = Revision::try_from(revision)?;
+        if revision != expected_revision {
+            return Err(StateError::Domain(DomainError::RevisionConflict {
+                expected: expected_revision,
+                current: revision,
+            }));
+        }
+        if archived_at_millis.is_none() {
+            return Err(StateError::WorkstreamNotArchived(workstream_id));
+        }
+        let runtime_id = transaction
+            .query_row(
+                "SELECT runtime_id FROM runtimes WHERE workstream_id = ?1",
+                [workstream_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .map(|value| {
+                Uuid::parse_str(&value)
+                    .map(RuntimeId::from)
+                    .map_err(|_| StateError::MalformedHostSchema)
+            })
+            .transpose()?;
+        let _ = forget_operation_ids(&transaction, workstream_id, runtime_id)?;
+        transaction.commit().map_err(StateError::Sqlite)
+    }
+
+    /// Permanently removes one archived Workstream from the `WSNav` catalog.
+    ///
+    /// This is deliberately narrower than a general record purge.  The
+    /// caller must have already completed any exact Runtime stop; this one
+    /// transaction then revalidates the archived/revision boundary, refuses
+    /// unresolved or shared provider-effect journal rows, removes only the
+    /// selected Workstream's WSNav-owned graph, and severs nullable child
+    /// lineage. Provider-native history, Project/Location rows, and child
+    /// Workstreams remain untouched.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Workstream is unknown, stale, active, or has
+    /// ambiguous/unresolved operation ownership. In every error case the
+    /// transaction is rolled back and the Workstream is retained.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "destructive graph ownership checks and deletes stay in one auditable transaction"
+    )]
+    pub fn forget_workstream(
+        &mut self,
+        workstream_id: WorkstreamId,
+        expected_revision: Revision,
+    ) -> Result<(), StateError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(StateError::Sqlite)?;
+        let existing: Option<(i64, Option<i64>)> = transaction
+            .query_row(
+                "SELECT revision, archived_at_millis
+                 FROM workstreams WHERE workstream_id = ?1",
+                [workstream_id.to_string()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?;
+        let Some((revision, archived_at_millis)) = existing else {
+            return Err(StateError::UnknownOpenWorkstream(workstream_id));
+        };
+        let revision = Revision::try_from(revision)?;
+        if revision != expected_revision {
+            return Err(StateError::Domain(DomainError::RevisionConflict {
+                expected: expected_revision,
+                current: revision,
+            }));
+        }
+        if archived_at_millis.is_none() {
+            return Err(StateError::WorkstreamNotArchived(workstream_id));
+        }
+
+        let runtime_id = transaction
+            .query_row(
+                "SELECT runtime_id FROM runtimes WHERE workstream_id = ?1",
+                [workstream_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?
+            .map(|value| {
+                Uuid::parse_str(&value)
+                    .map(RuntimeId::from)
+                    .map_err(|_| StateError::MalformedHostSchema)
+            })
+            .transpose()?;
+        let operation_ids = forget_operation_ids(&transaction, workstream_id, runtime_id)?;
+
+        // A child may outlive its source Workstream.  Remove only the nullable
+        // lineage edge, and advance that child's revision so stale snapshots
+        // cannot silently act on the changed provenance.
+        transaction
+            .execute(
+                "UPDATE workstreams SET source_workstream_id = NULL,
+                        revision = revision + 1
+                 WHERE source_workstream_id = ?1",
+                [workstream_id.to_string()],
+            )
+            .map_err(StateError::Sqlite)?;
+
+        if let Some(runtime_id) = runtime_id {
+            transaction
+                .execute(
+                    "DELETE FROM opencode_settled_messages WHERE runtime_id = ?1",
+                    [runtime_id.to_string()],
+                )
+                .map_err(StateError::Sqlite)?;
+            transaction
+                .execute(
+                    "DELETE FROM opencode_runtime_handles WHERE runtime_id = ?1",
+                    [runtime_id.to_string()],
+                )
+                .map_err(StateError::Sqlite)?;
+            transaction
+                .execute(
+                    "DELETE FROM provider_bindings WHERE runtime_id = ?1",
+                    [runtime_id.to_string()],
+                )
+                .map_err(StateError::Sqlite)?;
+            let deleted = transaction
+                .execute(
+                    "DELETE FROM runtimes
+                     WHERE runtime_id = ?1 AND workstream_id = ?2",
+                    params![runtime_id.to_string(), workstream_id.to_string()],
+                )
+                .map_err(StateError::Sqlite)?;
+            if deleted != 1 {
+                return Err(StateError::WorkstreamForgetRefused);
+            }
+        }
+
+        transaction
+            .execute(
+                "DELETE FROM attention_states WHERE workstream_id = ?1",
+                [workstream_id.to_string()],
+            )
+            .map_err(StateError::Sqlite)?;
+
+        // The selected row's own creation request is catalog metadata. Any
+        // requests that named it as a source must also be removed because the
+        // schema-15 source FK is non-null; their child lineage was severed
+        // above, while the child Workstreams themselves remain.
+        transaction
+            .execute(
+                "DELETE FROM independent_creation_requests
+                 WHERE workstream_id = ?1 OR source_workstream_id = ?1",
+                [workstream_id.to_string()],
+            )
+            .map_err(StateError::Sqlite)?;
+
+        for operation_id in operation_ids {
+            transaction
+                .execute(
+                    "DELETE FROM onboarding_exec_targets WHERE operation_id = ?1",
+                    [operation_id.as_str()],
+                )
+                .map_err(StateError::Sqlite)?;
+            transaction
+                .execute(
+                    "DELETE FROM compound_operations WHERE operation_id = ?1",
+                    [operation_id.as_str()],
+                )
+                .map_err(StateError::Sqlite)?;
+        }
+
+        let deleted = transaction
+            .execute(
+                "DELETE FROM workstreams
+                 WHERE workstream_id = ?1 AND archived_at_millis IS NOT NULL
+                   AND revision = ?2",
+                params![workstream_id.to_string(), expected_revision.value()],
+            )
+            .map_err(StateError::Sqlite)?;
+        if deleted != 1 {
+            return Err(StateError::ConcurrentWrite);
+        }
+        validate_foreign_keys(&transaction)?;
+        transaction.commit().map_err(StateError::Sqlite)
+    }
+
     fn transition_workstream_archive(
         &mut self,
         workstream_id: WorkstreamId,
@@ -310,11 +527,171 @@ impl HostRegistry {
     }
 }
 
+/// Finds every operation whose exact durable plan belongs to the selected
+/// Workstream.  The operation payloads remain private; this helper only
+/// returns opaque operation IDs to the deletion transaction.  Any malformed,
+/// unresolved, or cross-Workstream Runtime relationship is a closed refusal.
+fn forget_operation_ids(
+    transaction: &rusqlite::Transaction<'_>,
+    workstream_id: WorkstreamId,
+    runtime_id: Option<RuntimeId>,
+) -> Result<Vec<String>, StateError> {
+    let mut statement = transaction
+        .prepare(
+            "SELECT operation_id, kind, phase, expected_revisions_json,
+                    effect_watermark, outcome_json
+             FROM compound_operations ORDER BY operation_id",
+        )
+        .map_err(StateError::Sqlite)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+            ))
+        })
+        .map_err(StateError::Sqlite)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(StateError::Sqlite)?;
+    drop(statement);
+
+    let mut operation_ids = Vec::new();
+    for (
+        operation_id,
+        kind_text,
+        phase_text,
+        expected_revisions_json,
+        effect_watermark,
+        outcome_json,
+    ) in rows
+    {
+        let operation_id =
+            Uuid::parse_str(&operation_id).map_err(|_| StateError::MalformedHostSchema)?;
+        let phase = operation_phase_from_text(&phase_text)?;
+        // Schema 15 retains only completed/failed Fork rows as inert history.
+        // Any other retired Fork phase is unresolved provider-effect evidence,
+        // so retain the selected Workstream rather than guessing ownership.
+        let kind = match kind_text.as_str() {
+            "onboard" | "start" => operation_kind_from_text(&kind_text)?,
+            "fork" if matches!(phase, OperationPhase::Committed | OperationPhase::Failed) => {
+                continue;
+            }
+            _ => return Err(StateError::WorkstreamForgetRefused),
+        };
+        let (operation_workstream_id, operation_runtime_id) = match kind {
+            OperationKind::Onboard => {
+                let intent: serde_json::Value = serde_json::from_str(&expected_revisions_json)
+                    .map_err(|_| StateError::MalformedHostSchema)?;
+                let operation_workstream_id = WorkstreamId::from(persisted_uuid_field(
+                    &intent,
+                    "workstream_id",
+                    StateError::MalformedHostSchema,
+                )?);
+                let operation_runtime_id = RuntimeId::from(persisted_uuid_field(
+                    &intent,
+                    "candidate_runtime_id",
+                    StateError::MalformedHostSchema,
+                )?);
+                (operation_workstream_id, operation_runtime_id)
+            }
+            OperationKind::Start => {
+                let plan =
+                    PersistedOpenCodeSessionCreationPlan::decode(effect_watermark.as_deref())?;
+                (plan.workstream_id, plan.runtime_id)
+            }
+        };
+
+        let targets_workstream = operation_workstream_id == workstream_id;
+        let targets_runtime = runtime_id.is_some_and(|runtime| runtime == operation_runtime_id);
+        if targets_runtime && !targets_workstream {
+            // A Runtime ID shared by a different Workstream would make the
+            // provider effect ownership ambiguous.  Do not delete anything.
+            return Err(StateError::WorkstreamForgetRefused);
+        }
+        if !targets_workstream {
+            continue;
+        }
+
+        // A stale operation plan must never be treated as selected merely by
+        // matching its Workstream field when its Runtime has been reassigned.
+        let runtime_owner: Option<String> = transaction
+            .query_row(
+                "SELECT workstream_id FROM runtimes WHERE runtime_id = ?1",
+                [operation_runtime_id.to_string()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(StateError::Sqlite)?;
+        if runtime_owner.is_some_and(|owner| owner != workstream_id.to_string()) {
+            return Err(StateError::WorkstreamForgetRefused);
+        }
+        if !forget_operation_is_terminal(kind, phase, outcome_json.as_deref()) {
+            return Err(StateError::WorkstreamForgetRefused);
+        }
+        operation_ids.push(operation_id.to_string());
+    }
+    Ok(operation_ids)
+}
+
+fn persisted_uuid_field(
+    value: &serde_json::Value,
+    field: &str,
+    error: StateError,
+) -> Result<Uuid, StateError> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or(error)
+        .and_then(|value| Uuid::parse_str(value).map_err(|_| StateError::MalformedHostSchema))
+}
+
+fn forget_operation_is_terminal(
+    kind: OperationKind,
+    phase: OperationPhase,
+    outcome_json: Option<&str>,
+) -> bool {
+    match kind {
+        OperationKind::Onboard => match phase {
+            OperationPhase::Committed => {
+                // `Committed` is reserved for the exact parked-recovery
+                // resolution. A generic committed onboarding row would leave
+                // provider-effect ownership ambiguous, so refuse it.
+                outcome_json == Some(PARKED_RECOVERY_RESOLVED_OUTCOME)
+            }
+            OperationPhase::ProviderExecProven | OperationPhase::RolledBack => true,
+            _ => false,
+        },
+        OperationKind::Start => match phase {
+            OperationPhase::Committed => true,
+            // OpenCode's known-absent pre-effect failure is safe to remove;
+            // crossed-boundary unknown outcomes are deliberately refused.
+            OperationPhase::Failed => {
+                outcome_json
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                    .and_then(|value| {
+                        value
+                            .get("code")
+                            .and_then(serde_json::Value::as_str)
+                            .map(str::to_owned)
+                    })
+                    .as_deref()
+                    == Some("provider_effect_not_started")
+            }
+            _ => false,
+        },
+    }
+}
+
 pub(in crate::state) fn open_workstream_project_root(
     transaction: &rusqlite::Transaction<'_>,
     workstream_id: WorkstreamId,
+    authorization: CatalogAuthorization,
 ) -> Result<(String, String, Option<i64>), StateError> {
-    transaction
+    let row = transaction
         .query_row(
             "SELECT project_locations.repository_path,
                     workstreams.lifecycle, workstreams.archived_at_millis
@@ -324,11 +701,15 @@ pub(in crate::state) fn open_workstream_project_root(
              WHERE workstreams.workstream_id = ?1
                AND workstreams.lifecycle IN ('open', 'parked')",
             [workstream_id.to_string()],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, Option<i64>>(2)?)),
         )
         .optional()
         .map_err(StateError::Sqlite)?
-        .ok_or(StateError::UnknownOpenWorkstream(workstream_id))
+        .ok_or(StateError::UnknownOpenWorkstream(workstream_id))?;
+    if row.2.is_some() && !authorization.permits_archived() {
+        return Err(StateError::WorkstreamArchived(workstream_id));
+    }
+    Ok(row)
 }
 
 pub(in crate::state) fn next_activity_sequence(

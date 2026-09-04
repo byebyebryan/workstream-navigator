@@ -1,6 +1,7 @@
 use super::{
-    AppServerError, Error, HostRegistry, IntegrationLifecycle, ObserverProfile, OpenCodeError,
-    PathBuf, ProfileError, ProviderKind, Revision, StateError, WorkstreamId, env,
+    AppServerError, CatalogAuthorization, Error, HostRegistry, IntegrationLifecycle,
+    ObserverProfile, OpenCodeError, PathBuf, ProfileError, ProviderKind, Revision, StateError,
+    WorkstreamId, env,
 };
 
 /// The durable outcome of a start-or-resume request.
@@ -46,22 +47,28 @@ pub(super) fn workstream_revision(
         .ok_or(ActionError::UnknownWorkstream)
 }
 
-pub(super) fn workstream_overview(
+pub(super) fn workstream_overview_authorized(
     registry: &HostRegistry,
     workstream_id: WorkstreamId,
+    authorization: CatalogAuthorization,
 ) -> Result<crate::state::WorkstreamOverview, ActionError> {
-    registry
+    let overview = registry
         .workstream_overviews()?
         .into_iter()
         .find(|overview| overview.workstream_id == workstream_id)
-        .ok_or(ActionError::UnknownWorkstream)
+        .ok_or(ActionError::UnknownWorkstream)?;
+    if overview.archived_at_millis.is_some() && !authorization.permits_archived() {
+        return Err(ActionError::WorkstreamArchived);
+    }
+    Ok(overview)
 }
 
 pub(super) fn active_workstream_overview(
     registry: &HostRegistry,
     workstream_id: WorkstreamId,
 ) -> Result<crate::state::WorkstreamOverview, ActionError> {
-    let overview = workstream_overview(registry, workstream_id)?;
+    let overview =
+        workstream_overview_authorized(registry, workstream_id, CatalogAuthorization::ActiveOnly)?;
     if overview.archived_at_millis.is_some() {
         return Err(ActionError::WorkstreamArchived);
     }
@@ -149,6 +156,8 @@ pub enum ActionError {
     ObserverNotReady,
     #[error("private runtime probe is ambiguous; refusing to create another provider process")]
     RuntimeProbeAmbiguous,
+    #[error("provider exited normally; its private runtime was stopped")]
+    ProviderExited,
     #[error("OpenCode provider did not become ready before the bounded startup deadline")]
     OpenCodeProviderReadinessTimeout,
     #[error("OpenCode observer did not become ready before the bounded startup deadline")]
@@ -169,6 +178,8 @@ pub enum ActionError {
     WorkstreamArchived,
     #[error("workstream is already archived")]
     WorkstreamAlreadyArchived,
+    #[error("workstream is not archived")]
+    WorkstreamNotArchived,
     #[error("workstream revision changed; refresh before acting")]
     WorkstreamRevisionConflict,
     #[error(

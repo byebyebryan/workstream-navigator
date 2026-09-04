@@ -28,10 +28,12 @@ Codex/OpenCode lifecycle interaction.
   preserving the stopped Runtime and provider binding. Archived
   `recovery_required` state remains recovery-required.
 - Workstreams and Archived have separate footer and floating-Help surfaces, so
-  Archive and Restore are never advertised together. The compact Workstreams
-  footer says `n new`; the full-inner-width, fully bordered Help panel says
-  `Enter open` and `Esc back`, omits the old self-closing reminder and footer,
-  and accepts `Esc` or `q` while open.
+  Archive and Restore are never advertised together. The footer keeps
+  `. view`, `? help`, and `q quit` stable on its bottom row, with `n new` plus
+  `x archive` or `u restore` on a contextual row above it. `.` toggles both
+  directions. The full-inner-width, fully bordered Help panel says `Enter open`
+  and `Esc back`, omits the old self-closing reminder and footer, and accepts
+  `Esc` or `q` while open.
 - Schema 15, private-tmux ownership, provider-native history/output, attention,
   naming, and native branching remain unchanged.
 
@@ -75,7 +77,7 @@ Before the final UI-refinement replacement, the installed `wsnav 0.1.0`
 executable hash was:
 
 ```text
-978905447c2fc7a7c80ad4eea72e03d78cf1f14b0169e5f9db51b105b1b02ea3  ~/.local/bin/wsnav
+08023657e5b7c81eb48bf5e3cee7d5741f52b1d9c63f74a37a567563c1994191  ~/.local/bin/wsnav
 ```
 
 The locked release was built and atomically installed to
@@ -83,8 +85,8 @@ The locked release was built and atomically installed to
 the same size, and byte-identical:
 
 ```text
-08023657e5b7c81eb48bf5e3cee7d5741f52b1d9c63f74a37a567563c1994191  target/release/wsnav
-08023657e5b7c81eb48bf5e3cee7d5741f52b1d9c63f74a37a567563c1994191  ~/.local/bin/wsnav
+012cfcfbbb5addf896d718176f13616df7538cd05f9d5d49c38f97569121ce82  target/release/wsnav
+012cfcfbbb5addf896d718176f13616df7538cd05f9d5d49c38f97569121ce82  ~/.local/bin/wsnav
 ```
 
 The installed binary reports `wsnav 0.1.0`, opens the existing schema-15 root,

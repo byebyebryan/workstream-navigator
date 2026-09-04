@@ -70,6 +70,22 @@ fn provider_owned_naming_has_no_wsnav_command() {
 }
 
 #[test]
+fn forget_cli_is_public_and_carries_an_explicit_revision_fence() {
+    let parsed = Cli::try_parse_from([
+        "wsnav",
+        "forget",
+        "00000000-0000-0000-0000-000000000001",
+        "7",
+    ])
+    .unwrap();
+    assert!(matches!(
+        parsed.command,
+        Some(Commands::Forget { workstream_id, revision })
+            if workstream_id == "00000000-0000-0000-0000-000000000001" && revision == 7
+    ));
+}
+
+#[test]
 fn direct_codex_start_refuses_unready_observer_without_mutating_schema15_state() {
     let (temporary, root, workstream_id) = current_workstream_fixture();
     let codex_home = temporary.path().join("codex");

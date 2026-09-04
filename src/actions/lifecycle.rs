@@ -1,7 +1,7 @@
 use super::{
-    ActionError, HostRegistry, Instant, LinuxProcessProbe, PrivateRuntime, ProviderKind, Revision,
-    RuntimeId, RuntimePaths, RuntimeProbe, StateError, SystemClock, SystemTmux, WorkstreamId,
-    WorkstreamLifecycle, terminate_owned_observer_process, thread,
+    ActionError, CatalogAuthorization, HostRegistry, Instant, LinuxProcessProbe, PrivateRuntime,
+    ProviderKind, Revision, RuntimeId, RuntimePaths, RuntimeProbe, StateError, SystemClock,
+    SystemTmux, WorkstreamId, WorkstreamLifecycle, terminate_owned_observer_process, thread,
 };
 use super::{
     cleanup::{
@@ -9,10 +9,7 @@ use super::{
         fail_runtime_cleanup, matches_recorded_runtime, recorded_provider_identity,
         stop_recorded_provider_if_present,
     },
-    model::{
-        active_workstream_overview, ensure_workstream_revision, workstream_overview,
-        workstream_revision,
-    },
+    model::{ensure_workstream_revision, workstream_overview_authorized, workstream_revision},
 };
 use crate::domain::Clock;
 
@@ -30,7 +27,26 @@ pub(crate) fn park(
     workstream_id: WorkstreamId,
     expected_revision: Option<Revision>,
 ) -> Result<Revision, ActionError> {
-    let overview = active_workstream_overview(registry, workstream_id)?;
+    park_authorized(
+        root,
+        registry,
+        workstream_id,
+        expected_revision,
+        CatalogAuthorization::ActiveOnly,
+    )
+}
+
+/// Stops one exact Runtime under an explicit catalog authorization. Archived
+/// Forget and native-exit reconciliation need the secondary scope; the
+/// active-only `park` wrapper preserves the ordinary public boundary.
+pub(crate) fn park_authorized(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: Option<Revision>,
+    authorization: CatalogAuthorization,
+) -> Result<Revision, ActionError> {
+    let overview = workstream_overview_authorized(registry, workstream_id, authorization)?;
     if expected_revision.is_some_and(|expected| expected != overview.revision) {
         return Err(ActionError::WorkstreamRevisionConflict);
     }
@@ -44,8 +60,11 @@ pub(crate) fn park(
         &process_probe,
         RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
     );
-    match runtime.probe()? {
+    let probe = runtime.probe()?;
+    let clean_provider_exit = clean_provider_exit_status(&runtime, &record, &probe)? == Some(0);
+    match probe {
         probe @ RuntimeProbe::Live { .. } if matches_recorded_runtime(&record, &probe, false) => {}
+        RuntimeProbe::Live { .. } | RuntimeProbe::Unknown { .. } if clean_provider_exit => {}
         RuntimeProbe::Live {
             pane_pid,
             cwd,
@@ -108,6 +127,86 @@ pub(crate) fn park(
     workstream_revision(registry, workstream_id)
 }
 
+/// Reconciles the return from one native tmux attachment. `false` means the
+/// exact provider remains live and the client merely detached. `true` means
+/// the exact provider pane exited normally and its Runtime was parked.
+///
+/// # Errors
+///
+/// Returns an error when Runtime identity, generation, topology, process
+/// birth, exit status, or the final revision-fenced stop cannot be proven.
+pub(crate) fn reconcile_provider_attachment_end(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_runtime_id: RuntimeId,
+    expected_runtime_generation: &str,
+) -> Result<bool, ActionError> {
+    let overview = workstream_overview_authorized(
+        registry,
+        workstream_id,
+        CatalogAuthorization::ArchivedAllowed,
+    )?;
+    let record = overview
+        .runtime
+        .ok_or(ActionError::NoRuntime(workstream_id))?;
+    if record.runtime_id != expected_runtime_id
+        || record.tmux_generation != expected_runtime_generation
+    {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(
+        &tmux,
+        &process_probe,
+        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
+    );
+    let probe = runtime.probe()?;
+    if matches_recorded_runtime(&record, &probe, false) {
+        return Ok(false);
+    }
+    if clean_provider_exit_status(&runtime, &record, &probe)? != Some(0) {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    park_authorized(
+        root,
+        registry,
+        workstream_id,
+        Some(overview.revision),
+        CatalogAuthorization::ArchivedAllowed,
+    )?;
+    Ok(true)
+}
+
+pub(super) fn clean_provider_exit_status(
+    runtime: &PrivateRuntime<'_>,
+    record: &crate::state::RuntimeRecord,
+    probe: &RuntimeProbe,
+) -> Result<Option<i32>, ActionError> {
+    let pane_pid = match probe {
+        RuntimeProbe::Live {
+            process_birth: Some(_),
+            ..
+        }
+        | RuntimeProbe::Missing => return Ok(None),
+        RuntimeProbe::Live {
+            pane_pid,
+            process_birth: None,
+            ..
+        } => Some(*pane_pid),
+        // A retained dead pane can make ordinary live-pane fields unavailable
+        // on some tmux versions. The independent dead-topology proof below is
+        // the authority for this otherwise unknown observation.
+        RuntimeProbe::Unknown { .. } => None,
+    };
+    let (recorded_pid, _) = recorded_provider_identity(record)?;
+    if pane_pid.is_some_and(|pane_pid| pane_pid != recorded_pid) {
+        return Ok(None);
+    }
+    Ok(runtime.provider_exit_status(recorded_pid, &record.cwd).ok())
+}
+
 pub(super) fn stop_opencode_observer(
     handle: &crate::state::OpenCodeRuntimeHandle,
 ) -> Result<(), ActionError> {
@@ -141,7 +240,11 @@ pub fn archive(
     workstream_id: WorkstreamId,
     expected_revision: Revision,
 ) -> Result<Revision, ActionError> {
-    let overview = workstream_overview(registry, workstream_id)?;
+    let overview = workstream_overview_authorized(
+        registry,
+        workstream_id,
+        CatalogAuthorization::ArchivedAllowed,
+    )?;
     if overview.revision != expected_revision {
         return Err(ActionError::WorkstreamRevisionConflict);
     }
@@ -161,7 +264,7 @@ pub fn archive(
 }
 
 /// Restores an archived Workstream to the active navigator scope without
-/// starting or resuming Codex.
+/// starting, resuming, or stopping its provider Runtime.
 ///
 /// # Errors
 ///
@@ -176,6 +279,56 @@ pub fn restore(
     registry
         .restore_workstream(workstream_id, expected_revision)
         .map_err(Into::into)
+}
+
+/// Permanently forgets one archived Workstream from `WSNav`'s catalog. Provider
+/// history, Project/Location/Git state, and unrelated Workstreams remain
+/// outside this action's ownership boundary.
+///
+/// # Errors
+///
+/// Returns an error when the Workstream is not archived, its revision is stale,
+/// its exact Runtime cannot be stopped, its operation effects are ambiguous or
+/// unresolved, or the owned graph cannot be removed transactionally.
+pub fn forget(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: Revision,
+) -> Result<(), ActionError> {
+    let overview = workstream_overview_authorized(
+        registry,
+        workstream_id,
+        CatalogAuthorization::ArchivedAllowed,
+    )?;
+    if overview.archived_at_millis.is_none() {
+        return Err(ActionError::WorkstreamNotArchived);
+    }
+
+    // Refuse before any external stop if the retained graph has an unresolved
+    // or shared provider-effect operation. The final state transaction repeats
+    // this fence after exact cleanup in case another participant raced us.
+    if overview.revision != expected_revision {
+        return Err(ActionError::WorkstreamRevisionConflict);
+    }
+    registry
+        .validate_forget_workstream(workstream_id, expected_revision)
+        .map_err(ActionError::State)?;
+
+    let revision = if overview.runtime.is_some() {
+        park_authorized(
+            root,
+            registry,
+            workstream_id,
+            Some(expected_revision),
+            CatalogAuthorization::ArchivedAllowed,
+        )?
+    } else {
+        expected_revision
+    };
+    registry
+        .forget_workstream(workstream_id, revision)
+        .map_err(ActionError::State)
 }
 
 /// Waits briefly for the durable outcome of a concurrently requested exact

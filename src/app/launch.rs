@@ -422,8 +422,8 @@ pub(super) fn provider_attach(
                 )
             },
         );
-        let mut command = match prepared {
-            Ok(command) => command,
+        let (mut command, record) = match prepared {
+            Ok(prepared) => prepared,
             Err(error) => {
                 let _ = presentation.report_attachment_phase(attempt_id, AttachmentPhase::Failed);
                 return Err(error);
@@ -441,7 +441,7 @@ pub(super) fn provider_attach(
         command
             .status()
             .map_err(AppError::Io)
-            .and_then(|status| status.success().then_some(()).ok_or(AppError::AttachFailed))
+            .and_then(|status| finish_runtime_attachment(root, &record, status))
     } else {
         presentation.report_attachment_phase(attempt_id, AttachmentPhase::Running)?;
         parsed.and_then(
@@ -451,7 +451,7 @@ pub(super) fn provider_attach(
                 expected_runtime_id,
                 expected_runtime_revision,
             )| {
-                attach_runtime(
+                attach_runtime_with_outcome(
                     root,
                     workstream_id,
                     expected_workstream_revision,
@@ -467,6 +467,9 @@ pub(super) fn provider_attach(
         AttachmentPhase::Failed
     };
     presentation.report_attachment_phase(attempt_id, phase)?;
+    if matches!(outcome, Ok(RuntimeAttachmentEnd::Stopped)) {
+        let _ = clear_stopped_provider_surface();
+    }
     provider_wait()
 }
 
@@ -481,6 +484,23 @@ pub(super) fn attach_runtime(
     expected_runtime_id: RuntimeId,
     expected_runtime_revision: Revision,
 ) -> Result<(), AppError> {
+    attach_runtime_with_outcome(
+        root,
+        workstream_id,
+        expected_workstream_revision,
+        expected_runtime_id,
+        expected_runtime_revision,
+    )
+    .map(|_| ())
+}
+
+fn attach_runtime_with_outcome(
+    root: &StateRoot,
+    workstream_id: crate::domain::WorkstreamId,
+    expected_workstream_revision: Revision,
+    expected_runtime_id: RuntimeId,
+    expected_runtime_revision: Revision,
+) -> Result<RuntimeAttachmentEnd, AppError> {
     let state = crate::state::open_current(&StateRoot::select(root.base()))?;
     if state
         .onboarding_workstream_projections()?
@@ -504,7 +524,13 @@ pub(super) fn attach_runtime(
     {
         return Err(AppError::AttachmentUnavailable);
     }
-    let record = crate::actions::preflight_attachment(root, &mut registry, workstream_id)?;
+    let record = match crate::actions::preflight_attachment(root, &mut registry, workstream_id) {
+        Ok(record) => record,
+        Err(crate::actions::ActionError::ProviderExited) => {
+            return Ok(RuntimeAttachmentEnd::Stopped);
+        }
+        Err(error) => return Err(error.into()),
+    };
     if record.runtime_id != expected_runtime_id || record.revision != expected_runtime_revision {
         return Err(AppError::AttachmentUnavailable);
     }
@@ -519,13 +545,74 @@ pub(super) fn attach_runtime(
     let mut command = runtime.attach_command();
     command.stderr(Stdio::null());
     let status = command.status().map_err(AppError::Io)?;
-    if status.success()
-        || crate::actions::await_deliberate_park(root, record.runtime_id, record.workstream_id)?
-    {
-        Ok(())
-    } else {
-        Err(AppError::AttachFailed)
+    finish_runtime_attachment(root, &record, status)
+}
+
+/// Classifies the end of one native tmux attachment without confusing a
+/// client detach with provider exit. A deliberate concurrent stop is accepted
+/// only after its durable Runtime/Workstream outcome is visible; otherwise the
+/// exact retained pane must prove either a still-live provider or a clean
+/// native exit.
+fn finish_runtime_attachment(
+    root: &StateRoot,
+    record: &crate::state::RuntimeRecord,
+    status: std::process::ExitStatus,
+) -> Result<RuntimeAttachmentEnd, AppError> {
+    let reconciliation = (|| {
+        let state = crate::state::open_current(&StateRoot::select(root.base()))?;
+        let mut registry = state.into_host_registry()?;
+        crate::actions::reconcile_provider_attachment_end(
+            root,
+            &mut registry,
+            record.workstream_id,
+            record.runtime_id,
+            &record.tmux_generation,
+        )
+        .map_err(AppError::from)
+    })();
+
+    match reconciliation {
+        Ok(true) => Ok(RuntimeAttachmentEnd::Stopped),
+        Ok(false) if status.success() => Ok(RuntimeAttachmentEnd::Detached),
+        Ok(false) => {
+            if crate::actions::await_deliberate_park(root, record.runtime_id, record.workstream_id)?
+            {
+                Ok(RuntimeAttachmentEnd::Stopped)
+            } else {
+                Err(AppError::AttachFailed)
+            }
+        }
+        Err(error) => {
+            if crate::actions::await_deliberate_park(root, record.runtime_id, record.workstream_id)?
+            {
+                Ok(RuntimeAttachmentEnd::Stopped)
+            } else {
+                Err(error)
+            }
+        }
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RuntimeAttachmentEnd {
+    Detached,
+    Stopped,
+}
+
+fn clear_stopped_provider_surface() -> std::io::Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    clear_stopped_provider_surface_to(&mut stdout)
+}
+
+fn clear_stopped_provider_surface_to(writer: &mut impl std::io::Write) -> std::io::Result<()> {
+    crossterm::queue!(
+        writer,
+        crossterm::style::ResetColor,
+        crossterm::terminal::Clear(crossterm::terminal::ClearType::All),
+        crossterm::cursor::MoveTo(0, 0),
+        crossterm::cursor::Show,
+    )?;
+    writer.flush()
 }
 
 /// Prepares the read-only provider-cycle attach command. No native process is
@@ -537,7 +624,7 @@ fn prepare_runtime_attach_read_only(
     expected_workstream_revision: Revision,
     expected_runtime_id: RuntimeId,
     expected_runtime_revision: Revision,
-) -> Result<Command, AppError> {
+) -> Result<(Command, crate::state::RuntimeRecord), AppError> {
     let state = crate::state::open_current(&StateRoot::select(root.base()))?;
     if state
         .onboarding_workstream_projections()?
@@ -575,7 +662,7 @@ fn prepare_runtime_attach_read_only(
     runtime.prepare_attach()?;
     let mut command = runtime.attach_command();
     command.stderr(Stdio::null());
-    Ok(command)
+    Ok((command, record))
 }
 
 pub(super) fn provider_wait() -> Result<(), AppError> {
@@ -588,7 +675,7 @@ pub(super) fn provider_wait() -> Result<(), AppError> {
 mod tests {
     use uuid::Uuid;
 
-    use super::adjacent_cycle_candidate;
+    use super::{adjacent_cycle_candidate, clear_stopped_provider_surface_to};
     use crate::{
         domain::{
             LocationId, ProjectId, ProviderKind, Revision, WorkstreamId, WorkstreamLifecycle,
@@ -612,6 +699,15 @@ mod tests {
             onboarding: None,
             native_name: None,
         }
+    }
+
+    #[test]
+    fn stopped_provider_surface_emits_only_terminal_reset_and_clear_controls() {
+        let mut output = Vec::new();
+
+        clear_stopped_provider_surface_to(&mut output).unwrap();
+
+        assert_eq!(output, b"\x1b[0m\x1b[2J\x1b[1;1H\x1b[?25h");
     }
 
     #[test]

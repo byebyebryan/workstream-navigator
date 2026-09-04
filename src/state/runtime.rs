@@ -11,8 +11,8 @@ use crate::domain::{
 use super::compound::bind_opencode_session_in_transaction;
 use super::lifecycle::{apply_opencode_lifecycle_transition, validate_opencode_observation};
 use super::models::{
-    HostRegistry, OpenCodeLifecycleObservation, OpenCodeObserverStatus, OpenCodeRuntimeHandle,
-    ProviderBinding, RuntimeRecord, StateError,
+    CatalogAuthorization, HostRegistry, OpenCodeLifecycleObservation, OpenCodeObserverStatus,
+    OpenCodeRuntimeHandle, ProviderBinding, RuntimeRecord, StateError,
 };
 use super::utils::{
     name_state_from_text, provider_kind_from_text, runtime_status_from_text, to_from_sql_error,
@@ -36,12 +36,32 @@ impl HostRegistry {
         workstream_id: WorkstreamId,
         provider: ProviderKind,
     ) -> Result<RuntimeRecord, StateError> {
+        self.reserve_runtime_with_provider_authorized(
+            workstream_id,
+            provider,
+            CatalogAuthorization::ActiveOnly,
+        )
+    }
+
+    /// Reserves a Runtime for an exact Workstream in the requested catalog
+    /// scope. Archived authorization is used only by explicit secondary-view
+    /// actions; ordinary callers retain the active-only wrapper above.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "reservation and revision fences stay in one auditable transaction"
+    )]
+    pub(crate) fn reserve_runtime_with_provider_authorized(
+        &mut self,
+        workstream_id: WorkstreamId,
+        provider: ProviderKind,
+        authorization: CatalogAuthorization,
+    ) -> Result<RuntimeRecord, StateError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(StateError::Sqlite)?;
         let (project_root, workstream_lifecycle, archived_at_millis) =
-            open_workstream_project_root(&transaction, workstream_id)?;
+            open_workstream_project_root(&transaction, workstream_id, authorization)?;
         let workstream_provider: String = transaction
             .query_row(
                 "SELECT provider FROM workstreams WHERE workstream_id = ?1",
@@ -53,7 +73,7 @@ impl HostRegistry {
         if workstream_provider != provider {
             return Err(StateError::ProviderIdentityMismatch);
         }
-        if archived_at_millis.is_some() {
+        if archived_at_millis.is_some() && !authorization.permits_archived() {
             return Err(StateError::WorkstreamArchived(workstream_id));
         }
         let current: Option<RuntimeRecord> = transaction
@@ -167,6 +187,22 @@ impl HostRegistry {
         workstream_id: WorkstreamId,
         provider: ProviderKind,
     ) -> Result<RuntimeRecord, StateError> {
+        self.reserve_runtime_recovery_with_provider_authorized(
+            workstream_id,
+            provider,
+            CatalogAuthorization::ActiveOnly,
+        )
+    }
+
+    /// Reserves a replacement Runtime for a recovery-required Workstream in
+    /// an explicit catalog scope. The archived form preserves visibility
+    /// while allowing the same exact recovery fences as an active row.
+    pub(crate) fn reserve_runtime_recovery_with_provider_authorized(
+        &mut self,
+        workstream_id: WorkstreamId,
+        provider: ProviderKind,
+        authorization: CatalogAuthorization,
+    ) -> Result<RuntimeRecord, StateError> {
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -187,7 +223,7 @@ impl HostRegistry {
                 .optional()
                 .map_err(StateError::Sqlite)?
                 .ok_or(StateError::RecoveryUnavailable(workstream_id))?;
-        if archived_at_millis.is_some() {
+        if archived_at_millis.is_some() && !authorization.permits_archived() {
             return Err(StateError::WorkstreamArchived(workstream_id));
         }
         let workstream_provider = provider_kind_from_text(&workstream_provider)?;
@@ -429,11 +465,11 @@ impl HostRegistry {
     /// Confirms that one exact Runtime ended through deliberate exact-stop
     /// cleanup.
     ///
-    /// This is intentionally stricter than a stopped runtime alone: an
-    /// unexpected native-process exit also leaves a Runtime stopped, but does
-    /// not transition its Workstream to the retained stopped state. Attachment
-    /// helpers use this distinction after their private tmux client exits
-    /// unexpectedly.
+    /// This is intentionally stricter than a stopped Runtime alone: a provider
+    /// `SessionEnd` observation can stop the Runtime before the attachment owner
+    /// proves and records the paired retained Workstream outcome. Attachment
+    /// helpers use this distinction when an exact-stop action concurrently
+    /// makes their private tmux client return.
     ///
     /// # Errors
     ///
@@ -569,6 +605,10 @@ impl HostRegistry {
     ///
     /// Returns an error when the Workstream, Runtime, or binding does not
     /// match the exact recovery fence.
+    #[allow(
+        dead_code,
+        reason = "tests exercise the active-only recovery fence directly"
+    )]
     pub(crate) fn codex_recovery_binding(
         &self,
         workstream_id: WorkstreamId,
@@ -576,6 +616,25 @@ impl HostRegistry {
         runtime_id: RuntimeId,
         expected_runtime_revision: Revision,
         expected_generation: &str,
+    ) -> Result<ProviderBinding, StateError> {
+        self.codex_recovery_binding_authorized(
+            workstream_id,
+            expected_workstream_revision,
+            runtime_id,
+            expected_runtime_revision,
+            expected_generation,
+            CatalogAuthorization::ActiveOnly,
+        )
+    }
+
+    pub(crate) fn codex_recovery_binding_authorized(
+        &self,
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        runtime_id: RuntimeId,
+        expected_runtime_revision: Revision,
+        expected_generation: &str,
+        authorization: CatalogAuthorization,
     ) -> Result<ProviderBinding, StateError> {
         let transaction = self
             .connection
@@ -588,6 +647,7 @@ impl HostRegistry {
             runtime_id,
             expected_runtime_revision,
             expected_generation,
+            authorization,
         )?;
         transaction.commit().map_err(StateError::Sqlite)?;
         Ok(binding)
@@ -601,6 +661,10 @@ impl HostRegistry {
     ///
     /// Returns an error when any Workstream, Runtime, binding, generation, or
     /// revision fence has changed, or when the transaction cannot commit.
+    #[allow(
+        dead_code,
+        reason = "tests exercise the active-only recovery fence directly"
+    )]
     pub(crate) fn reconcile_codex_recovery(
         &mut self,
         workstream_id: WorkstreamId,
@@ -609,6 +673,31 @@ impl HostRegistry {
         expected_runtime_revision: Revision,
         expected_generation: &str,
         retained_binding: &ProviderBinding,
+    ) -> Result<(), StateError> {
+        self.reconcile_codex_recovery_authorized(
+            workstream_id,
+            expected_workstream_revision,
+            runtime_id,
+            expected_runtime_revision,
+            expected_generation,
+            retained_binding,
+            CatalogAuthorization::ActiveOnly,
+        )
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "each exact recovery identity and revision fence stays explicit"
+    )]
+    pub(crate) fn reconcile_codex_recovery_authorized(
+        &mut self,
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+        runtime_id: RuntimeId,
+        expected_runtime_revision: Revision,
+        expected_generation: &str,
+        retained_binding: &ProviderBinding,
+        authorization: CatalogAuthorization,
     ) -> Result<(), StateError> {
         validate_registry_text("runtime generation", expected_generation)?;
         if retained_binding.runtime_id != runtime_id
@@ -629,6 +718,7 @@ impl HostRegistry {
             runtime_id,
             expected_runtime_revision,
             expected_generation,
+            authorization,
         )?;
         if binding != *retained_binding || binding.runtime_generation == expected_generation {
             return Err(StateError::HookEvidenceMismatch);
@@ -1343,6 +1433,7 @@ fn load_codex_recovery_binding(
     runtime_id: RuntimeId,
     expected_runtime_revision: Revision,
     expected_generation: &str,
+    authorization: CatalogAuthorization,
 ) -> Result<ProviderBinding, StateError> {
     validate_registry_text("runtime generation", expected_generation)?;
     let runtime: (
@@ -1390,7 +1481,7 @@ fn load_codex_recovery_binding(
         || provider_kind_from_text(&runtime.5)? != ProviderKind::Codex
         || workstream_lifecycle_from_text(&runtime.6)? != WorkstreamLifecycle::RecoveryRequired
         || Revision::try_from(runtime.7)? != expected_workstream_revision
-        || runtime.8.is_some()
+        || (runtime.8.is_some() && !authorization.permits_archived())
     {
         return Err(StateError::HookEvidenceMismatch);
     }

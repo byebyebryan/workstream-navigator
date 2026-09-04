@@ -12,7 +12,7 @@ help_text="$("${wsnav_bin}" --help)"
 
 public_commands=(
     navigator doctor remove-observer start recover attach
-    archive restore status operations
+    archive restore forget status operations
 )
 for command in "${public_commands[@]}"; do
     if ! rg -q "^  ${command}( |$)" <<<"${help_text}"; then

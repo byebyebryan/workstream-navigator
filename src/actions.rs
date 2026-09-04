@@ -18,8 +18,8 @@ mod tests;
 pub use attachment::preflight_attachment;
 pub(crate) use attachment::preflight_attachment_read_only;
 pub use creation::start_independent_workstream;
-pub use lifecycle::{archive, restore};
-pub(crate) use lifecycle::{await_deliberate_park, park};
+pub use lifecycle::{archive, forget, restore};
+pub(crate) use lifecycle::{await_deliberate_park, park, reconcile_provider_attachment_end};
 pub use model::{ActionError, StartOutcome, reconcile_observer_trust};
 pub use providers::{codex_launch_program, codex_recovery_program};
 pub(crate) use start::spawn_runtime_opencode_observer;
@@ -51,5 +51,7 @@ pub(super) use crate::{
         SystemTmux, prove_owned_process_group, terminate_owned_observer_process,
         terminate_owned_provider_process,
     },
-    state::{HostRegistry, IntegrationLifecycle, ProviderBinding, StateError},
+    state::{
+        CatalogAuthorization, HostRegistry, IntegrationLifecycle, ProviderBinding, StateError,
+    },
 };

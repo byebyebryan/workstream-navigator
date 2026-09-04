@@ -53,6 +53,8 @@ to make their old procedures appear current.
 - [D22 exact live recovery confirmation](acceptance/d22-exact-live-recovery.md)
 - [D23 provider-native stop and contextual
   visibility](acceptance/d23-native-stop-contextual-visibility.md)
+- [D24 archived secondary catalog and WSNav-owned
+  Forget](acceptance/d24-archived-catalog-forget.md)
 
 ## Design spikes
 

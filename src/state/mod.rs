@@ -19,6 +19,7 @@ pub use current::{
     observer_degraded_marker_path, open_current, read_observer_degraded_marker,
     run_observer_write_with_degraded_marker, write_observer_degraded_marker,
 };
+pub(crate) use models::CatalogAuthorization;
 pub use models::{
     CodexIntegration, CreatedWorkstream, HostIdentity, HostRegistry, IntegrationLifecycle,
     OpenCodeLifecycleObservation, OpenCodeObserverStatus, OpenCodeRuntimeHandle,

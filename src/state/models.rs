@@ -103,7 +103,9 @@ pub enum StateError {
     WorkstreamAlreadyArchived(WorkstreamId),
     #[error("workstream {0} is not archived")]
     WorkstreamNotArchived(WorkstreamId),
-    #[error("workstream {0} is archived; restore it before starting")]
+    #[error("workstream cannot be forgotten; exact retained state is unavailable")]
+    WorkstreamForgetRefused,
+    #[error("workstream {0} is archived; this action requires the active catalog")]
     WorkstreamArchived(WorkstreamId),
     #[error("workstream {0} already has a live runtime")]
     RuntimeAlreadyLive(WorkstreamId),
@@ -209,6 +211,25 @@ impl StateRoot {
 #[derive(Debug)]
 pub struct HostRegistry {
     pub(in crate::state) connection: Connection,
+}
+
+/// Catalog authorization for a Workstream-targeted lifecycle operation.
+///
+/// Most state transitions are intentionally active-Workstream-only.  A small
+/// set of explicit secondary-catalog actions (opening an archived session and
+/// forgetting it) may operate on an archived row without making that fact an
+/// ambient boolean or weakening unrelated lifecycle checks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum CatalogAuthorization {
+    ActiveOnly,
+    ArchivedAllowed,
+}
+
+impl CatalogAuthorization {
+    #[must_use]
+    pub(crate) const fn permits_archived(self) -> bool {
+        matches!(self, Self::ArchivedAllowed)
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

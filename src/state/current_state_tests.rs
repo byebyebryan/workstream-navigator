@@ -224,6 +224,281 @@ fn direct_schema15_has_semantic_exec_target_table_only() {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the fixture enumerates the complete owned graph and refusal invariants"
+)]
+fn forgetting_archived_workstream_removes_only_its_owned_graph() {
+    let temporary = tempdir().unwrap();
+    let path = temporary.path().join("state");
+    let checkout = temporary.path().join("checkout");
+    fs::create_dir(&checkout).unwrap();
+    let mut state = create_current(&path, &RandomIdGenerator).unwrap();
+    let (selected_location, selected_id) = state
+        .seed_test_workstream(
+            &checkout,
+            "selected",
+            ProviderKind::OpenCode,
+            &RandomIdGenerator,
+        )
+        .unwrap();
+    let child_checkout = temporary.path().join("child");
+    fs::create_dir(&child_checkout).unwrap();
+    let (child_location, child_id) = state
+        .seed_test_workstream(
+            &child_checkout,
+            "child",
+            ProviderKind::OpenCode,
+            &RandomIdGenerator,
+        )
+        .unwrap();
+    let mut registry = state.into_host_registry().unwrap();
+    let runtime = registry.reserve_runtime(selected_id).unwrap();
+    registry
+        .mark_runtime_stopped(runtime.runtime_id, runtime.revision)
+        .unwrap();
+    let runtime = registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap();
+    registry
+        .park_runtime(runtime.runtime_id, runtime.revision)
+        .unwrap();
+    let overview = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == selected_id)
+        .unwrap();
+    let archived_revision = registry
+        .archive_workstream(selected_id, overview.revision, 42)
+        .unwrap();
+    let runtime_generation = runtime.tmux_generation;
+    let operation_id = Uuid::from_u128(0xD240).to_string();
+    let database = path.join("host.sqlite");
+    let connection = Connection::open(&database).unwrap();
+    let selected_project_id: String = connection
+        .query_row(
+            "SELECT project_id FROM project_locations WHERE location_id = ?1",
+            [selected_location.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    connection
+        .execute(
+            "UPDATE workstreams SET source_workstream_id = ?1
+             WHERE workstream_id = ?2",
+            params![selected_id.to_string(), child_id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO independent_creation_requests (
+                request_key, source_workstream_id, source_revision, workstream_id
+             ) VALUES (?1, ?2, ?3, ?4)",
+            params![
+                "forget-child-request",
+                selected_id.to_string(),
+                archived_revision.value(),
+                child_id.to_string(),
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO provider_bindings (
+                binding_id, runtime_id, provider, native_session_id, start_source,
+                last_settled_turn_id, observed_thread_name, name_state,
+                name_observed_at, predecessor_native_session_id,
+                predecessor_effective_name, runtime_generation, revision
+             ) VALUES (?1, ?2, 'opencode', 'native-session', 'startup', NULL, NULL,
+                       'unavailable', NULL, NULL, NULL, ?3, 1)",
+            params![
+                Uuid::from_u128(0xD241).to_string(),
+                runtime.runtime_id.to_string(),
+                runtime_generation,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO opencode_runtime_handles (
+                runtime_id, runtime_generation, endpoint_host, endpoint_port,
+                version, native_session_id, observer_pid, observer_birth,
+                observer_status, revision
+             ) VALUES (?1, ?2, '127.0.0.1', 43123, 'test', 'native-session',
+                       NULL, NULL, 'stopped', 1)",
+            params![runtime.runtime_id.to_string(), runtime_generation],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO opencode_settled_messages (
+                runtime_id, runtime_generation, native_session_id, message_id
+             ) VALUES (?1, ?2, 'native-session', 'message-1')",
+            params![runtime.runtime_id.to_string(), runtime_generation],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO attention_states (
+                workstream_id, result_unseen_since_revision,
+                recovery_unseen_since_revision, latest_native_session_id,
+                latest_native_session_provider, latest_turn_id, revision
+             ) VALUES (?1, 1, NULL, 'native-session', 'opencode', 'turn-1', 1)",
+            [selected_id.to_string()],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO compound_operations (
+                operation_id, request_key, kind, phase, expected_revisions_json,
+                effect_watermark, outcome_json, revision
+             ) VALUES (?1, 'forget-onboard', 'onboard', 'provider_exec_proven', ?2, NULL, NULL, 1)",
+            params![
+                operation_id,
+                serde_json::json!({
+                    "workstream_id": selected_id,
+                    "candidate_runtime_id": runtime.runtime_id,
+                })
+                .to_string(),
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO onboarding_exec_targets (
+                operation_id, provider, executable_device, executable_inode
+             ) VALUES (?1, 'opencode', 1, 1)",
+            [&operation_id],
+        )
+        .unwrap();
+    let retired_fork_id = Uuid::from_u128(0xD242).to_string();
+    connection
+        .execute(
+            "INSERT INTO compound_operations (
+                operation_id, request_key, kind, phase, expected_revisions_json,
+                effect_watermark, outcome_json, revision
+             ) VALUES (?1, 'retired-fork-history', 'fork', 'committed', '{}',
+                       'legacy-effect', NULL, 1)",
+            [&retired_fork_id],
+        )
+        .unwrap();
+
+    assert!(matches!(
+        registry.forget_workstream(selected_id, archived_revision.next()),
+        Err(StateError::Domain(_))
+    ));
+    let selected_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM workstreams WHERE workstream_id = ?1",
+            [selected_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(selected_count, 1);
+    connection
+        .execute(
+            "UPDATE compound_operations SET phase = 'external_effect_started'
+             WHERE operation_id = ?1",
+            [&operation_id],
+        )
+        .unwrap();
+    assert!(matches!(
+        registry.forget_workstream(selected_id, archived_revision),
+        Err(StateError::WorkstreamForgetRefused)
+    ));
+    connection
+        .execute(
+            "UPDATE compound_operations SET phase = 'provider_exec_proven'
+             WHERE operation_id = ?1",
+            [&operation_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    registry
+        .forget_workstream(selected_id, archived_revision)
+        .unwrap();
+    drop(registry);
+
+    let connection = Connection::open(&database).unwrap();
+    for table in [
+        "runtimes",
+        "provider_bindings",
+        "opencode_runtime_handles",
+        "opencode_settled_messages",
+        "attention_states",
+        "independent_creation_requests",
+        "onboarding_exec_targets",
+    ] {
+        let count: i64 = connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 0, "{table} should be deleted for the selected graph");
+    }
+    let selected_operation_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM compound_operations WHERE operation_id = ?1",
+            [operation_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(selected_operation_count, 0);
+    let retired_fork_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM compound_operations WHERE operation_id = ?1",
+            [&retired_fork_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(retired_fork_count, 1);
+    let selected_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM workstreams WHERE workstream_id = ?1",
+            [selected_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(selected_count, 0);
+    let child_source: Option<String> = connection
+        .query_row(
+            "SELECT source_workstream_id FROM workstreams WHERE workstream_id = ?1",
+            [child_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(child_source, None);
+    let child_location_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM project_locations WHERE location_id = ?1",
+            [child_location.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(child_location_count, 1);
+    let selected_location_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM project_locations WHERE location_id = ?1",
+            [selected_location.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(selected_location_count, 1);
+    let selected_project_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM projects WHERE project_id = ?1",
+            [&selected_project_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(selected_project_count, 1);
+    let workstream_count: i64 = connection
+        .query_row("SELECT COUNT(*) FROM workstreams", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(workstream_count, 1);
+}
+
+#[test]
 fn current_open_refuses_extra_schema_objects() {
     let temporary = tempdir().unwrap();
     let path = temporary.path().join("state");
@@ -894,6 +1169,78 @@ fn restore_normalizes_only_parked_workstreams_and_preserves_runtime_state() {
         registry.binding_for_runtime(runtime_id).unwrap(),
         Some(binding)
     );
+}
+
+#[test]
+fn restore_preserves_live_runtime_byte_for_byte_and_only_changes_visibility() {
+    let fixture = codex_lifecycle_fixture();
+    let mut registry = open_current(&StateRoot::select(&fixture.path))
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    let runtime = registry
+        .runtime_for_workstream(fixture.workstream_id)
+        .unwrap()
+        .unwrap();
+    observe_codex(
+        &mut registry,
+        &fixture,
+        &runtime,
+        LifecycleEvent::UserPromptSubmit,
+        None,
+        None,
+    )
+    .unwrap();
+    let runtime_before = registry
+        .runtime_for_workstream(fixture.workstream_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime_before.status, crate::domain::RuntimeStatus::Working);
+    let active = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == fixture.workstream_id)
+        .unwrap();
+    let archived_revision = registry
+        .archive_workstream(fixture.workstream_id, active.revision, 3)
+        .unwrap();
+    let archived = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == fixture.workstream_id)
+        .unwrap();
+    assert_eq!(archived.archived_at_millis, Some(3));
+    assert_eq!(
+        archived.runtime.as_ref(),
+        Some(&runtime_before),
+        "the low-level catalog transition must retain the live Runtime unchanged"
+    );
+
+    let runtime_at_restore = registry
+        .runtime_by_id(runtime_before.runtime_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime_at_restore, runtime_before);
+    let restored_revision = registry
+        .restore_workstream(fixture.workstream_id, archived_revision)
+        .unwrap();
+    let runtime_after = registry
+        .runtime_by_id(runtime_before.runtime_id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(runtime_after, runtime_at_restore);
+    let restored = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == fixture.workstream_id)
+        .unwrap();
+    let mut expected = archived;
+    expected.archived_at_millis = None;
+    expected.revision = restored_revision;
+    assert_eq!(restored, expected);
 }
 
 #[test]

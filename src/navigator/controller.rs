@@ -40,7 +40,7 @@ use crate::{
     runtime::{LinuxProcessProbe, PrivateRuntime, SystemTmux},
     shell_control::reconcile_provider_exec_from_presentation,
     snapshot::{Snapshot, SnapshotError, read_snapshot},
-    state::{StateRoot, open_current},
+    state::{CatalogAuthorization, StateRoot, open_current},
 };
 
 use super::view::{Command, Navigator, ObserverSetupKind, ShellLocation};
@@ -456,6 +456,13 @@ impl PendingObserverIntent {
                     workstream_id,
                     expected_workstream_revision,
                 },
+                ManagedAction::Forget {
+                    workstream_id,
+                    expected_workstream_revision,
+                } => Command::Forget {
+                    workstream_id,
+                    expected_workstream_revision,
+                },
             },
             Self::NewAtSameLocation {
                 source_workstream_id,
@@ -647,6 +654,21 @@ fn execute_command(
             );
             false
         }
+        Command::Forget {
+            workstream_id,
+            expected_workstream_revision,
+        } => {
+            execute_managed_action(
+                root,
+                navigator,
+                presentation,
+                ManagedAction::Forget {
+                    workstream_id,
+                    expected_workstream_revision,
+                },
+            );
+            false
+        }
         Command::AcceptObserverSetup { kind } => {
             accept_observer_setup(root, navigator, presentation, kind, pending_observer);
             false
@@ -686,6 +708,10 @@ pub(crate) enum ManagedAction {
         expected_workstream_revision: Revision,
     },
     Restore {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+    },
+    Forget {
         workstream_id: WorkstreamId,
         expected_workstream_revision: Revision,
     },
@@ -742,7 +768,9 @@ fn prepare_observer_or_request(
             ManagedAction::Start { provider, .. } | ManagedAction::Recover { provider, .. } => {
                 *provider
             }
-            ManagedAction::Archive { .. } | ManagedAction::Restore { .. } => ProviderKind::Codex,
+            ManagedAction::Archive { .. }
+            | ManagedAction::Restore { .. }
+            | ManagedAction::Forget { .. } => ProviderKind::Codex,
         },
         PendingObserverIntent::NewAtSameLocation { provider, .. } => *provider,
     };
@@ -1146,7 +1174,7 @@ fn execute_managed_action(
     let Some(workstream_id) = attachment_workstream else {
         return;
     };
-    if !navigator.select_workstream(workstream_id) {
+    if !navigator.select_catalog_workstream(workstream_id) {
         navigator.set_guidance("Managed session action completed; its active card is unavailable");
         return;
     }
@@ -1177,9 +1205,7 @@ fn navigator_attachment_for(
 ) -> Option<(Revision, RuntimeId, Revision)> {
     let snapshot = read_snapshot(root).ok()?;
     let workstream = snapshot.workstreams.iter().find(|workstream| {
-        workstream.workstream_id == workstream_id
-            && !workstream.archived
-            && workstream.onboarding.is_none()
+        workstream.workstream_id == workstream_id && workstream.onboarding.is_none()
     })?;
     let runtime = workstream.runtime?;
     Some((workstream.revision, runtime.runtime_id, runtime.revision))
@@ -1208,11 +1234,12 @@ pub(crate) fn apply_managed_action(
             expected_workstream_revision,
             provider,
         } => {
-            require_active_workstream(
+            require_catalog_workstream(
                 &snapshot,
                 workstream_id,
                 expected_workstream_revision,
                 Some(provider),
+                CatalogAuthorization::ArchivedAllowed,
             )?;
             crate::actions::start(
                 root,
@@ -1228,11 +1255,12 @@ pub(crate) fn apply_managed_action(
             expected_workstream_revision,
             provider,
         } => {
-            require_active_workstream(
+            require_catalog_workstream(
                 &snapshot,
                 workstream_id,
                 expected_workstream_revision,
                 Some(provider),
+                CatalogAuthorization::ArchivedAllowed,
             )?;
             crate::actions::recover(
                 root,
@@ -1304,6 +1332,20 @@ pub(crate) fn apply_managed_action(
                 .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             Ok(None)
         }
+        ManagedAction::Forget {
+            workstream_id,
+            expected_workstream_revision,
+        } => {
+            require_forgettable_workstream(&snapshot, workstream_id, expected_workstream_revision)?;
+            crate::actions::forget(
+                root,
+                &mut registry,
+                workstream_id,
+                expected_workstream_revision,
+            )
+            .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
+            Ok(None)
+        }
     }
 }
 
@@ -1328,20 +1370,60 @@ fn resolve_parked_onboarding_recovery(
         .map_err(|_| NavigatorError::ManagedActionUnavailable)
 }
 
+#[allow(
+    dead_code,
+    reason = "tests exercise the active-only catalog fence directly"
+)]
 fn require_active_workstream(
     snapshot: &Snapshot,
     workstream_id: WorkstreamId,
     expected_revision: Revision,
     expected_provider: Option<ProviderKind>,
 ) -> Result<(), NavigatorError> {
+    require_catalog_workstream(
+        snapshot,
+        workstream_id,
+        expected_revision,
+        expected_provider,
+        CatalogAuthorization::ActiveOnly,
+    )
+}
+
+fn require_catalog_workstream(
+    snapshot: &Snapshot,
+    workstream_id: WorkstreamId,
+    expected_revision: Revision,
+    expected_provider: Option<ProviderKind>,
+    authorization: CatalogAuthorization,
+) -> Result<(), NavigatorError> {
     let workstream = snapshot
         .workstreams
         .iter()
         .find(|workstream| {
             workstream.workstream_id == workstream_id
-                && !workstream.archived
+                && (authorization.permits_archived() || !workstream.archived)
                 && workstream.revision == expected_revision
                 && expected_provider.is_none_or(|provider| workstream.provider == provider)
+        })
+        .ok_or(NavigatorError::ManagedActionUnavailable)?;
+    if workstream.onboarding.is_some() {
+        return Err(NavigatorError::ManagedActionUnavailable);
+    }
+    Ok(())
+}
+
+fn require_forgettable_workstream(
+    snapshot: &Snapshot,
+    workstream_id: WorkstreamId,
+    expected_revision: Revision,
+) -> Result<(), NavigatorError> {
+    let workstream = snapshot
+        .workstreams
+        .iter()
+        .find(|workstream| {
+            workstream.workstream_id == workstream_id
+                && workstream.archived
+                && workstream.revision == expected_revision
         })
         .ok_or(NavigatorError::ManagedActionUnavailable)?;
     if workstream.onboarding.is_some() {

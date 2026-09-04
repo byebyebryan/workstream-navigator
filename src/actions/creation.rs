@@ -1,4 +1,4 @@
-use super::model::workstream_overview;
+use super::model::active_workstream_overview;
 use super::{ActionError, HostRegistry, ProviderKind, Revision, StartOutcome, WorkstreamId, start};
 
 #[derive(Clone, Copy)]
@@ -26,7 +26,7 @@ where
         ProviderKind,
     ) -> Result<StartOutcome, ActionError>,
 {
-    let source = workstream_overview(registry, spec.source_workstream_id)?;
+    let source = active_workstream_overview(registry, spec.source_workstream_id)?;
     if spec
         .expected_revision
         .is_some_and(|expected| expected != source.revision)
@@ -51,9 +51,9 @@ where
 }
 
 /// Creates an independent Workstream at a registered project's root, then
-/// starts its first native provider Runtime. The retained source may be
-/// archived: archive changes Navigator visibility only and does not revoke
-/// its project.
+/// starts its first native provider Runtime. The source must remain in the
+/// active catalog; archive changes Navigator visibility only and does not
+/// revoke its project.
 ///
 /// The source selects a `ProjectLocation` and expected revision only. This
 /// action never invokes Git or copies files; the native provider owns any

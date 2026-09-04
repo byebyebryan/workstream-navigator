@@ -105,7 +105,8 @@ const MAX_PROJECT_PROJECTION_LOCATIONS: usize = 4096;
 /// exact-stop cleanup for an onboarding recovery. It records recovery
 /// resolution, never provider-exec proof; the retained Runtime may later be
 /// resumed normally.
-const PARKED_RECOVERY_RESOLVED_OUTCOME: &str = r#"{"code":"parked_recovery_resolved_v1"}"#;
+pub(crate) const PARKED_RECOVERY_RESOLVED_OUTCOME: &str =
+    r#"{"code":"parked_recovery_resolved_v1"}"#;
 /// Exact terminal journal evidence written when presentation authority cancels
 /// an unconsumed, pre-effect onboarding capability.  The operation remains
 /// as a bounded audit record while its attempt-only graph is removed.

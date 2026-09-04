@@ -2,14 +2,44 @@
 
 ## Status and authority
 
-D0-D23 are complete. D23 removes the duplicate public Park lifecycle, makes
-provider exit the ordinary stop-and-keep-visible path, and keeps
-Archive/Restore contextual while retaining exact internal cleanup authority.
-The locally accepted artifact passes the full disposable gate and is installed
-byte-identically for operator inspection. This result does not claim remote CI
-or live Codex/OpenCode acceptance. D18 checkpoint `c961c7e` remains the latest
-artifact with separately authorized destructive-reset, native-trust, and
-disposable live-provider release evidence.
+### D24 archived catalog and forget
+
+D24 keeps Archived as a secondary session catalog and buffer zone rather than a
+different lifecycle. `Enter` on an archived Workstream uses the ordinary exact
+attach/start/recover path and leaves `archived_at` set; an explicitly opened
+archived Runtime may remain live until its provider exits. `u` restores only
+catalog visibility and preserves any live Runtime. `x` opens a distinct Forget
+confirmation. Forget is revision- and ownership-fenced, exact-stops a live
+owned Runtime, and removes only the selected Workstream's WSNav-owned graph;
+provider-native history, Projects/Locations, Git, and files remain untouched.
+The public equivalent is `wsnav forget <workstream-id> <revision>`.
+
+When native attachment returns, D24 proves the exact private pane outcome. A
+still-live PID/birth is a detach and does not mutate lifecycle state. One
+retained dead pane with the recorded PID and launch cwd, an absent process, and
+exit status `0` is cleaned and recorded as stopped/parked without changing
+`archived_at`. Non-zero, changed, or incomplete evidence remains fail-closed.
+The private Runtime installs and reconciles an exact `pane-died` hook that
+detaches its client while retaining the dead pane, allowing the attachment
+helper to return and classify that evidence immediately.
+The same proof runs before attachment so a clean exit stranded by an older
+installed helper self-heals instead of remaining permanently unavailable; its
+proven stopped outcome uses the same presentation-clear path as an exit
+observed after attachment.
+After that exact stopped outcome, the presentation resets and clears only the
+stale right-hand display and restores the cursor; it writes no WSNav prose into
+the provider pane. A resumable card shows a static gray `■` that remains
+readable against the selection highlight. A detach keeps both the provider
+display and unmarked live/idle card unchanged.
+
+D0-D24 are complete. The D24 source passes the full disposable gate and its
+locked release is installed byte-identically for operator inspection with
+SHA-256
+`4b81709179b308e32039aa53573b12c9a787b9249547fd5835cd6c10e85c9518`.
+This result does not claim remote CI or live Codex/OpenCode acceptance. D18
+checkpoint `c961c7e` remains the latest artifact with separately authorized
+destructive-reset, native-trust, and disposable live-provider release
+evidence.
 
 - [Product and architecture design](design.md) is the V1 contract.
 - [Delivery roadmap](roadmap.md) owns delivery order, checkpoint status, and
@@ -54,7 +84,7 @@ the [D19 acceptance record](evidence/acceptance/d19-tmux-navigation.md).
 
 ## Current operator contract
 
-This section describes the locally installed D23 development artifact. D18
+This section describes the locally installed D24 development artifact. D18
 remains the latest separately accepted live-provider release.
 
 WSNav is host-local. Run it on the machine where the provider Runtime lives.
@@ -67,20 +97,22 @@ Runtime and provider remain untouched; reconnect and rerun `wsnav` on that host
 to reattach.
 
 The shell-first navigator has two direct pages: Workstreams and Archived. `.`
-opens Archived; `Esc` returns to Workstreams; `Left` and `Right` do not cycle
-views. Workstreams keeps `Enter`, `n`, `x`, and `?`; `n` creates a separate
-blank Workstream at the selected Location, while native provider branching
-remains in the current Workstream. `x` archives only after exact Runtime
-cleanup. Archived uses `u` to restore
-without starting or attaching a provider. The installed `wsnav --help` output
-is the CLI reference for that exact binary.
+toggles between them; `Esc` also returns to Workstreams; `Left` and `Right` do
+not cycle views. The footer keeps `. view`, `? help`, and `q quit` as its stable
+bottom row. A selected managed Workstream adds `n new` and `x archive` above
+it; Archived adds `u restore` and `x forget`. `n` creates a separate blank Workstream at the
+selected Location, while native provider branching remains in the current
+Workstream. `x` archives only after exact Runtime cleanup; `u` restores without
+starting or attaching a provider; Archived `Enter` may start or attach while
+retaining the archive marker. The installed `wsnav --help` output is the CLI
+reference for that exact binary.
 
 Session-card markers project current provider and recovery lifecycle: `!` is
 Workstream or onboarding recovery, `…` is starting, `●` is working, `✓` is
-Runtime attention, and idle or stopped sessions are blank (including records
-retained from earlier releases). A subsequent provider prompt changes the
-marker back to working; presentation selection and focus never acknowledge or
-persist a separate result state.
+Runtime attention, `■` is stopped or internally parked and resumable, and idle
+sessions are blank. A subsequent provider prompt changes the marker back to
+working; presentation selection and focus never acknowledge or persist a
+separate result state.
 
 Tmux alone owns pane focus. `Ctrl+b Left`/`Right` and deliberate primary-button
 press are the only ordinary focus transitions; Navigator activation and

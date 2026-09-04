@@ -1,14 +1,14 @@
 # Workstream Navigator V1 Design
 
-Date: 2026-09-03
+Date: 2026-09-04
 
-Status: D23, developed from `54cf0db`, passes its complete local/disposable
-gate and is byte-identically installed for operator inspection with executable
-SHA-256
-`08023657e5b7c81eb48bf5e3cee7d5741f52b1d9c63f74a37a567563c1994191`.
-It removes the duplicate public Park lifecycle while retaining exact internal
-Runtime-stop authority for compound Archive and recovery, with no schema
-change. No remote-CI or live-provider acceptance is claimed for D23. The D22
+Status: D24, developed in the current tree from `677a611`, passes its complete
+local/disposable gate and is byte-identically installed for operator inspection
+with executable SHA-256
+`4b81709179b308e32039aa53573b12c9a787b9249547fd5835cd6c10e85c9518`.
+It makes Archived a secondary catalog with retained native opening, visibility-
+only Restore, and narrow revision-fenced Forget. Schema 15 is unchanged. No
+remote-CI or live-provider acceptance is claimed for D24. The D22
 correction in `8338a04` remains operator-accepted on the unchanged direct,
 current-only schema-15 epoch. Operator inspection first falsified checkpoint
 `ed74b0b` after a Codex upgrade left the exact still-running
@@ -22,6 +22,62 @@ installed artifact
 `f732e2b16344b038cd05996501ce77be42302f7403de9720d156dbf24777d124`
 remain the latest separately accepted destructive-reset, native-trust, and
 disposable Codex/OpenCode lifecycle evidence.
+
+### D24 archived catalog and forget
+
+D24 treats Archived as a secondary catalog and buffer zone for sessions, not a
+new lifecycle. Archived cards use the same bounded metadata and exact actions
+as active cards. `Enter` uses ordinary exact attach/start/resume/recover
+authority while leaving `archived_at` set; an explicitly opened archived
+Runtime may remain live until its provider exits. Provider exit still stops the
+Runtime normally. `u` is restore-only and preserves any live Runtime. `x` is a
+distinct Forget confirmation.
+
+Returning from native tmux attachment is classified from exact private-Runtime
+evidence, not from the tmux client's status alone. The recorded Runtime remains
+unchanged when its exact PID/birth is still live, because that is an ordinary
+detach. One exact retained dead pane is a normal provider exit only when its
+pane PID and launch cwd match the record, that PID is absent, the topology is
+unchanged across the bounded proof, and the pane exit status is `0`; WSNav then
+removes only that private server and records the Runtime stopped and Workstream
+parked while preserving `archived_at`. A non-zero status or any missing,
+changed, or ambiguous identity remains unavailable and untouched. Attachment
+preflight repeats this proof to reconcile a clean exit retained by an earlier
+helper. That result becomes the same proven stopped presentation outcome as an
+exit observed after attachment, so the surface is cleared without launching
+or attaching a provider.
+
+Each private Runtime installs and reconciles an exact server-local `pane-died`
+hook that detaches the attached client from that Runtime's generated session
+when the provider pane dies. `remain-on-exit` still retains the dead pane and
+its status as bounded exit evidence, but the client no longer stays trapped on
+that pane; attachment returns immediately so the proof above can run. The hook
+does not classify, clean, or mutate lifecycle state itself.
+
+Once that exact stopped outcome is durable, the presentation helper may reset
+terminal styling, clear the stale right-hand display, and restore the cursor
+before becoming inert. It emits no text and does not clear a detach, non-zero
+exit, or ambiguous attachment. The Navigator renders stopped and internally
+parked Workstreams with a static gray `■` that remains readable against the
+card selection highlight, distinct from the unmarked live/idle state; this is
+a resumable-state cue, not a Park action or separate lifecycle.
+
+Forget is revision-, archived-, and onboarding-fenced. It exact-stops a live
+owned Runtime before one schema-15 transaction removes only the selected
+Workstream and its WSNav-owned graph: OpenCode settled messages/handles,
+provider binding, Runtime, attention state, selected-workstream creation
+metadata, target-owned completed operations and execution-target metadata. A
+child Workstream remains and has its nullable source lineage severed. Stale,
+ambiguous, unresolved, or shared operation effects retain the Workstream and
+the transaction rolls back. Provider-native history, Project/Location/Git/files,
+and unrelated records are never deleted. The public equivalent is
+`wsnav forget <workstream-id> <revision>`.
+
+Schema 15 remains unchanged. D24 does not add transcript preview, provider
+thread archive/delete, bulk or automatic pruning, page-change lifecycle
+effects, or project cleanup. The focused D24 evidence record is
+[archived-catalog-forget.md](evidence/acceptance/d24-archived-catalog-forget.md);
+the complete gate and installed-artifact evidence are recorded there.
 
 The design is the current product and architecture contract. Dated acceptance,
 spike, and study records preserve the evidence and limitations of the candidate
@@ -165,10 +221,15 @@ contains or captures provider-pane content.
   separate Park action.
 - Navigator-local Workstreams and Archived pages. Workstreams is the default
   operational home, always groups active Workstreams by Project, and keeps the
-  provisional shell card outside those groups. Archived is a separate restore
-  page rather than another Workstreams view.
-- Reversible Workstream archive and restore for removing inactive work from the
-  ordinary navigator without deleting provider history or Git state.
+  provisional shell card outside those groups. Archived is a secondary catalog
+  and buffer zone for inactive sessions rather than another lifecycle or view
+  mode.
+- Archived as a secondary catalog for managing inactive sessions. `Enter` may
+  attach/start/resume/recover an archived Workstream while retaining
+  `archived_at`; `u` restores visibility only; and `x` forgets one archived
+  Workstream after exact stop, revision, ownership, and onboarding checks.
+  Forget removes only the selected Workstream's WSNav-owned graph and never
+  provider history or Project/Git/files.
 - Independent workstreams started at a registered project root.
 - Native provider conversation branching rotates the current tip within one
   Workstream; it never creates a second WSNav card. `n` creates a separate
@@ -246,8 +307,10 @@ contains or captures provider-pane content.
 - Automatic Git fetch, pull, commit, merge, rebase, reset, stash, push,
   cherry-pick, or conflict resolution.
 - Copying files, commits, branches, or worktrees between Workstreams.
-- Hard deletion of Workstream records, native provider sessions, or project
-  files. Archive is visibility and retention, not cleanup authority.
+- Provider-native session deletion or Project/Location/Git/file cleanup. The
+  narrow `forget` action may delete only one archived Workstream and its
+  WSNav-owned graph after exact ownership checks; it never deletes provider
+  history or project artifacts.
 - Automatic installation, upgrade, repository cloning, or host-wide teardown.
 - Claude or provider parity beyond the explicitly bounded OpenCode D8 scope.
 - Cross-host logical Project grouping or use of repository-origin metadata to
@@ -839,15 +902,16 @@ the provider surface. Navigation and status live in the navigator pane.
 The navigator footer reserves separate space for status and controls. When
 there is a warning, progress update, or action outcome, it appears in a
 bordered `Status` box with at most three wrapped content lines directly above
-the persistent contextual key strip. Ordinary grouping state is not repeated
-there. The box never replaces the controls below it. The key strip keeps
-single-key terminal actions first-class and wraps only at complete action
-boundaries into at most two compact lines. It never lets terminal wrapping mix
-two bindings. On a terminal too short to preserve useful content, the strip
-collapses to `? keys`. It lists only distinctive actions: ordinary
-Enter/Esc behavior remains native terminal convention rather than consuming
-permanent hint space. Related actions remain adjacent in each page's strip. A
-one-cell inset keeps the hints visually separate from the Workstream list.
+the controls. Ordinary grouping state is not repeated there. The box never
+replaces the controls below it. The bottom row is stable across Workstreams and
+Archived: `. view`, `? help`, and `q quit`. A contextual session-action row
+appears directly above it: `n new` plus `x archive` for an ordinary selected
+Workstream, only `x archive` for terminal recovery, and `u restore` plus
+`x forget` in Archived. The Shell card has no session-action row. Each row keeps
+bindings indivisible and wraps only at complete action boundaries on
+pathologically narrow terminals. Ordinary Enter/Esc behavior remains native
+terminal convention rather than consuming permanent hint space. A one-cell
+inset keeps the hints visually separate from the Workstream list.
 
 `?` opens a vertically centered shortcut panel across the Ratatui navigator's
 full inner width. The fully bordered panel is page-specific and single-column,
@@ -874,7 +938,7 @@ Workstreams
 └── Recovery
 
 Archived
-└── Project-grouped archived Workstreams and Restore
+└── Project-grouped archived Workstreams with Open, Restore, and Forget
 ```
 
 Workstreams is the default page and retains the product's ordinary switching
@@ -929,12 +993,15 @@ Workstream at the selected managed Workstream's exact ProjectLocation with the
 same provider; `x` opens the reversible archive confirmation; and `?` toggles
 the Workstreams reference. Native provider branching stays within the current
 Workstream, and exiting the native provider TUI stops that session while its
-active card remains available for `Enter` to resume. Archived has its own help
-and `u` restores without starting. Archive and Restore are page-local and are
-never advertised together. On the provisional shell card, `Enter` shows the
-shell without transferring focus and `n` has no separate meaning. Unprefixed
-`Left` and `Right` remain inert. There is no hard delete: archive/restore is the
-sole Workstream visibility control.
+active card remains available for `Enter` to resume. Archived has the same
+session-card shape and `Enter` action while retaining `archived_at`; an
+explicitly opened archived Runtime may stay live until provider exit. `u`
+restores visibility only, and `x` opens the distinct Forget confirmation.
+Archive and Restore/Forget are page-local and are never advertised together.
+On the provisional shell card, `Enter` shows the shell without transferring
+focus and `n` has no separate meaning. Unprefixed `Left` and `Right` remain
+inert. Forget is the only irreversible Workstream action and is restricted to
+WSNav-owned archived graph state.
 
 Workstreams always groups active Workstreams by Project. Groups sort by their
 newest included member's durable `last_activity_sequence`, descending, with
@@ -944,8 +1011,11 @@ Headers are non-actionable display rows; selection, mouse activation, and
 provider attachment remain exact Workstream operations. Archived uses the
 same deterministic grouping and ordering over archived members. `u` restores the
 selected Workstream, returns to Workstreams, and selects it without starting,
-resuming, or attaching a provider. Page selection is process-local
-presentation state and is never persisted.
+resuming, or attaching a provider. `Enter` on Archived uses the same exact
+attach/start/resume/recover checks as Workstreams but does not clear
+`archived_at`; `x` requires explicit Forget confirmation and a revision-fenced
+owned-graph deletion. Page selection is process-local presentation state and is
+never persisted.
 
 The navigator assumes horizontal space is scarce and spends vertical space to
 keep rows scannable. Each Project-grouped Workstream is a compact two-line tree
@@ -961,10 +1031,12 @@ pathologically narrow widths without allowing a card to overflow. Every
 display line in a card is one selectable and mouse-actionable Workstream row.
 Archived uses the same compact row shape as Workstreams.
 
-Stopped and legacy internally parked Workstreams render no lifecycle marker.
-Recovery markers derive from the actual Workstream or onboarding recovery
-lifecycle; there is no separate sticky result or recovery notification to mask
-it. The internal `parked` value is not a product status or action.
+Stopped and legacy internally parked Workstreams render a static gray `■`;
+this is the single resumable-state cue and does not expose a Park action.
+Recovery markers
+derive from the actual Workstream or onboarding recovery lifecycle; there is no
+separate sticky result or recovery notification to mask it. The internal
+`parked` value is not a distinct product status or action.
 Bounded prose in status and guidance panels word-wraps by terminal cell width.
 The status area reserves the wrapped line count, and the renderer and mouse
 hit-testing use the same resulting list geometry.
@@ -1139,6 +1211,14 @@ retained, and no provider session is deleted or replaced. Restore atomically
 clears archive visibility and normalizes only `parked` to `open`, leaving the
 Runtime stopped so a later `Enter` performs the exact resume. Existing active
 `parked` records are displayed as stopped and remain resumable through `Enter`.
+Opening a row from Archived uses this same attach/start/resume/recover path and
+does not clear `archived_at`; an explicitly opened archived Runtime may remain
+live until provider exit. Restore changes visibility only. Forget is separate:
+after exact-stop and final revision/onboarding/ownership checks, one schema-15
+transaction deletes only the selected Workstream's WSNav-owned graph and
+severs nullable child source lineage. Any stale, ambiguous, unresolved, or
+shared operation effect retains the row and rolls back. Provider-native
+history, Project/Location/Git/files, and unrelated records remain untouched.
 The host registry, not tmux's own session list, is the host-local Workstream
 catalog. This contains server failure, terminal sizing, attachment, and
 `tmux ls` visibility to one Workstream at a time.
@@ -1181,8 +1261,10 @@ All mutation commands use host-local SQLite transactions and optimistic
 revisions. Independent Start commits its Workstream and private Runtime
 reservation before launching the selected native provider, so reopening that
 Workstream automatically continues the normal start/resume path after a client
-loss. Concurrent observations and clients may race, but only one transaction
-can commit a particular record revision.
+loss. Archived is an explicit secondary catalog authorization for these same
+attach/start/resume/recover operations; it leaves `archived_at` unchanged.
+Concurrent observations and clients may race, but only one transaction can
+commit a particular record revision.
 
 Focus, attach, snapshot, and passive observation refresh are not durable
 operations. Thread naming remains a provider-owned setting that WSNav only
@@ -1215,6 +1297,7 @@ facade:
 snapshot() -> derived host display, projects, locations, workstreams, dynamic provider capabilities, runtime probes, lifecycle status
 apply(action, expected revisions) -> deterministic outcome
 attach(runtime_id) -> native terminal attachment
+forget(workstream_id, expected revision) -> one archived WSNav-owned graph deletion
 ```
 
 `HostId` appears once as registry identity and display-label fallback evidence;
@@ -1306,7 +1389,9 @@ absent; a live, ambiguous, changed, or foreign attachment is never replaced.
 A non-interactive public CLI action never installs, updates, or opens native
 review. It returns a typed `observer readiness required` result with bounded
 guidance to use interactive `wsnav`; hidden internal preparation entrypoints
-remain inaccessible as normal public workflow.
+remain inaccessible as normal public workflow. The revision-fenced public
+`wsnav forget <workstream-id> <revision>` command is equivalent to Archived
+`x` and never broadens the selected graph's ownership boundary.
 
 For an absent profile or an exact owned declaration requiring update, the
 review path explains the bounded mutation and asks for explicit consent before
@@ -1843,13 +1928,18 @@ credential, or environment dump is persisted.
   Workstream retains its exact binding, ProjectLocation, and lineage. It may
   retain internal `parked` or `recovery_required` state; restore never starts a
   Runtime and atomically normalizes only `parked` to `open` while leaving its
-  Runtime stopped.
+  Runtime stopped. Archived `Enter` may reopen the exact Runtime without
+  clearing `archived_at`; `u` is restore-only. `x` Forget removes only the
+  selected archived Workstream and its WSNav-owned graph after exact
+  revision/ownership/onboarding checks, while preserving provider history and
+  Project/Location/Git/files and severing child source lineage.
 
 Session-card markers are a direct projection of the current bounded state, not
 a second notification inbox: `!` is actual Workstream or onboarding recovery,
 `…` is starting, `●` is working, `✓` is a Runtime in `attention`, and idle,
-stopped, or internally parked is blank. A later observed provider
-prompt changes `attention` to `working` without a user acknowledgment action.
+`■` is stopped or internally parked and resumable, and idle is blank. A later
+observed provider prompt changes `attention` to `working` without a user
+acknowledgment action.
 Selection, activation, focus, attachment, and provider cycling retain their
 existing lifecycle and attachment semantics, but none writes an
 acknowledgment or separate attention state. The schema-15 `attention_states`
@@ -2513,12 +2603,15 @@ The Workstreams page has one pinned provisional shell card plus one
 Project-grouped active projection; Archived is a separate direct page rather
 than a view mode.
 Archive is the ordinary answer to accumulated test or inactive Workstreams;
-there is no hard-delete action. Project groups disappear from Workstreams when
-they have no active Workstreams, while their archived Workstreams remain
-available through Archived. A dormant Location with no retained Workstream has
-no ordinary standalone navigator row. Archiving a working Runtime requires
-explicit confirmation because its exact internal stop interrupts the current
-provider turn.
+Archived is a buffer catalog where the same session can be opened again.
+Project groups disappear from Workstreams when they have no active Workstreams,
+while their archived Workstreams remain available through Archived. A dormant
+Location with no retained Workstream has no ordinary standalone navigator row.
+Archiving a working Runtime requires explicit confirmation because its exact
+internal stop interrupts the current provider turn. Forget is an explicit,
+irreversible action for one archived Workstream; it removes only WSNav-owned
+catalog graph rows after exact checks and never cleans provider-native history,
+Project/Location/Git/files, or unrelated records.
 
 Projects remain durable presentation groups behind Workstream and Archived
 rows, but WSNav provides no Projects page or Project-level action surface.
@@ -2529,10 +2622,12 @@ refresh, cross-host merge/split, permanent Project deletion, and repository
 cleanup remain outside the product.
 
 There is no Project-level hide, forget, remove, or `x` action. Workstream
-archive/restore is the one reversible visibility mechanism, so an archived
-Workstream never becomes unreachable from the ordinary TUI behind a second
-hidden layer. Project and ProjectLocation deletion, repository cleanup, and Git
-mutation remain outside the product.
+archive/restore remains the reversible visibility mechanism, while Workstream
+Forget is a separate archived-row action limited to WSNav-owned catalog graph
+state. An archived Workstream never becomes unreachable from the ordinary TUI
+behind a hidden layer before the user explicitly forgets it. Project and
+ProjectLocation deletion, repository cleanup, and Git mutation remain outside
+the product.
 
 There is no Projects, Hosts, or settings page. Provider capability and observer readiness
 appear only as bounded context in the operation that needs them. If observer
@@ -3008,6 +3103,8 @@ roadmap and version-specific decisions remain in
 | D20 | Native-owned conversation branching | [Acceptance](evidence/acceptance/d20-native-owned-branching.md) |
 | D21 | Provider-derived attention | [Acceptance](evidence/acceptance/d21-provider-derived-attention.md) |
 | D22 | Exact live retained-session recovery confirmation | [Acceptance](evidence/acceptance/d22-exact-live-recovery.md) |
+| D23 | Provider-native stop and contextual Archive/Restore | [Acceptance](evidence/acceptance/d23-native-stop-contextual-visibility.md) |
+| D24 | Archived secondary catalog, retained opening, and WSNav-owned Forget | [Acceptance](evidence/acceptance/d24-archived-catalog-forget.md) |
 
 ## Current concrete provider boundary
 

@@ -36,6 +36,11 @@ pub(super) enum Commands {
         workstream_id: String,
         revision: i64,
     },
+    /// Permanently forget one archived Workstream and its WSNav-owned state.
+    Forget {
+        workstream_id: String,
+        revision: i64,
+    },
     /// Show one local runtime's durable host-registry record.
     Status { workstream_id: String },
     /// List unresolved native-session creation operations without exposing request keys or provider data.

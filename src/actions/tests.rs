@@ -9,10 +9,11 @@ use super::{
     },
     codex_recovery_program,
     creation::{IndependentStartSpec, start_independent_workstream_with},
+    forget,
     model::reconcile_observer_trust_with_manager,
-    park, preflight_attachment_read_only,
+    park, preflight_attachment, preflight_attachment_read_only,
     providers::managed_codex_environment,
-    reconcile_lost_runtimes, restore, start,
+    reconcile_lost_runtimes, reconcile_provider_attachment_end, restore, start,
     start::{
         CodexRecoveryEvidence, CodexThreadReader, backfill_live_runtime_provider_pid,
         codex_recovery_process_matches, opencode_recovery_handle_matches,
@@ -232,6 +233,19 @@ fn live_runtime_for_read_only_test(
     WorkstreamId,
     DisposableRuntimeGuard,
 ) {
+    live_runtime_for_read_only_test_with_program(provider, "exec sleep 60")
+}
+
+fn live_runtime_for_read_only_test_with_program(
+    provider: ProviderKind,
+    shell_program: &str,
+) -> (
+    tempfile::TempDir,
+    crate::state::StateRoot,
+    crate::state::RuntimeRecord,
+    WorkstreamId,
+    DisposableRuntimeGuard,
+) {
     let (temporary, root, mut registry, workstream_id) = registry_for_provider(provider);
     let repository = temporary.path().join("repository");
     fs::create_dir(&repository).unwrap();
@@ -253,7 +267,7 @@ fn live_runtime_for_read_only_test(
             program: vec![
                 OsString::from("/bin/sh"),
                 OsString::from("-c"),
-                OsString::from("exec sleep 60"),
+                OsString::from(shell_program),
             ],
             environment: std::collections::BTreeMap::new(),
         })
@@ -335,6 +349,255 @@ fn workstream_revisions(
     (overview.revision, overview.runtime.unwrap().revision)
 }
 
+#[cfg(unix)]
+fn release_provider_and_wait_for_retained_exit(
+    root: &crate::state::StateRoot,
+    record: &crate::state::RuntimeRecord,
+    expected_status: i32,
+) {
+    fs::write(record.cwd.join(".wsnav-test-exit"), b"release").unwrap();
+    let paths =
+        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session).unwrap();
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+    let provider_pid = record.provider_pid.unwrap();
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if matches!(
+            runtime.provider_exit_status(provider_pid, &record.cwd),
+            Ok(status) if status == expected_status
+        ) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "provider pane did not retain expected exit status {expected_status}"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+#[cfg(unix)]
+fn attachment_end_keeps_an_exact_live_provider_unchanged_after_detach() {
+    if Command::new("tmux")
+        .arg("-V")
+        .spawn()
+        .and_then(std::process::Child::wait_with_output)
+        .is_err()
+    {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+
+    let (_temporary, root, record, workstream_id, _runtime_guard) =
+        live_runtime_for_read_only_test(ProviderKind::Codex);
+    let mut registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    let before = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+
+    assert!(
+        !reconcile_provider_attachment_end(
+            &root,
+            &mut registry,
+            workstream_id,
+            record.runtime_id,
+            &record.tmux_generation,
+        )
+        .unwrap()
+    );
+
+    let after = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.lifecycle, WorkstreamLifecycle::Open);
+    assert_eq!(
+        after.runtime.as_ref().unwrap().revision,
+        before.runtime.as_ref().unwrap().revision
+    );
+    assert_eq!(
+        after.runtime.as_ref().unwrap().status,
+        crate::domain::RuntimeStatus::Idle
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn attachment_end_parks_an_exact_provider_that_exited_normally() {
+    if Command::new("tmux")
+        .arg("-V")
+        .spawn()
+        .and_then(std::process::Child::wait_with_output)
+        .is_err()
+    {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+
+    let (_temporary, root, record, workstream_id, _runtime_guard) =
+        live_runtime_for_read_only_test_with_program(
+            ProviderKind::Codex,
+            "while [ ! -e .wsnav-test-exit ]; do sleep 0.01; done; exit 0",
+        );
+    let mut registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    let active_revision = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap()
+        .revision;
+    registry
+        .archive_workstream(workstream_id, active_revision, 7)
+        .unwrap();
+    drop(registry);
+    release_provider_and_wait_for_retained_exit(&root, &record, 0);
+    let paths =
+        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session).unwrap();
+    let mut registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+
+    assert!(
+        reconcile_provider_attachment_end(
+            &root,
+            &mut registry,
+            workstream_id,
+            record.runtime_id,
+            &record.tmux_generation,
+        )
+        .unwrap()
+    );
+
+    let after = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert_eq!(after.archived_at_millis, Some(7));
+    assert_eq!(after.lifecycle, WorkstreamLifecycle::Parked);
+    assert_eq!(
+        after.runtime.as_ref().unwrap().status,
+        crate::domain::RuntimeStatus::Stopped
+    );
+    assert!(!paths.directory.exists());
+}
+
+#[test]
+#[cfg(unix)]
+fn attachment_preflight_self_heals_a_retained_normal_exit() {
+    if Command::new("tmux")
+        .arg("-V")
+        .spawn()
+        .and_then(std::process::Child::wait_with_output)
+        .is_err()
+    {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+
+    let (_temporary, root, record, workstream_id, _runtime_guard) =
+        live_runtime_for_read_only_test_with_program(
+            ProviderKind::Codex,
+            "while [ ! -e .wsnav-test-exit ]; do sleep 0.01; done; exit 0",
+        );
+    release_provider_and_wait_for_retained_exit(&root, &record, 0);
+    let mut registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+
+    assert!(matches!(
+        preflight_attachment(&root, &mut registry, workstream_id),
+        Err(ActionError::ProviderExited)
+    ));
+    let after = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert_eq!(after.lifecycle, WorkstreamLifecycle::Parked);
+    assert_eq!(
+        after.runtime.as_ref().unwrap().status,
+        crate::domain::RuntimeStatus::Stopped
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn attachment_end_refuses_a_nonzero_provider_exit_without_mutation() {
+    if Command::new("tmux")
+        .arg("-V")
+        .spawn()
+        .and_then(std::process::Child::wait_with_output)
+        .is_err()
+    {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+
+    let (_temporary, root, record, workstream_id, _runtime_guard) =
+        live_runtime_for_read_only_test_with_program(
+            ProviderKind::Codex,
+            "while [ ! -e .wsnav-test-exit ]; do sleep 0.01; done; exit 7",
+        );
+    release_provider_and_wait_for_retained_exit(&root, &record, 7);
+    let paths =
+        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session).unwrap();
+    let mut registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    let before = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+
+    assert!(matches!(
+        reconcile_provider_attachment_end(
+            &root,
+            &mut registry,
+            workstream_id,
+            record.runtime_id,
+            &record.tmux_generation,
+        ),
+        Err(ActionError::RuntimeProbeAmbiguous)
+    ));
+    let after = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(after.lifecycle, WorkstreamLifecycle::Open);
+    assert_eq!(
+        after.runtime.as_ref().unwrap().status,
+        crate::domain::RuntimeStatus::Idle
+    );
+    assert!(paths.socket.exists());
+}
+
 #[test]
 fn completed_native_review_promotes_pending_observer_before_a_managed_action() {
     let temporary = tempfile::tempdir().unwrap();
@@ -379,7 +642,7 @@ fn completed_native_review_promotes_pending_observer_before_a_managed_action() {
 }
 
 #[test]
-fn archive_and_restore_without_a_runtime_never_start_codex() {
+fn archive_and_restore_without_a_runtime_keep_start_archived_provider_scoped() {
     let (temporary, mut registry, workstream_id) = registry();
     let root = crate::state::StateRoot::select(temporary.path());
 
@@ -395,7 +658,7 @@ fn archive_and_restore_without_a_runtime_never_start_codex() {
     assert!(archived.runtime.is_none());
     assert!(matches!(
         start(&root, &mut registry, workstream_id, Some(archived_revision)),
-        Err(ActionError::WorkstreamArchived)
+        Err(ActionError::ObserverNotInstalled)
     ));
     assert!(matches!(
         park(&root, &mut registry, workstream_id, Some(archived_revision)),
@@ -416,6 +679,102 @@ fn archive_and_restore_without_a_runtime_never_start_codex() {
     assert_eq!(restored.archived_at_millis, None);
     assert!(restored.runtime.is_none());
     assert_eq!(restored.revision, restored_revision);
+}
+
+#[test]
+fn forget_requires_the_archived_revision_and_removes_the_catalog_row() {
+    let (_temporary, root, mut registry, workstream_id) =
+        registry_for_provider(ProviderKind::OpenCode);
+
+    assert!(matches!(
+        forget(&root, &mut registry, workstream_id, Revision::INITIAL),
+        Err(ActionError::WorkstreamNotArchived)
+    ));
+
+    let archived_revision =
+        archive(&root, &mut registry, workstream_id, Revision::INITIAL).unwrap();
+
+    assert!(matches!(
+        forget(
+            &root,
+            &mut registry,
+            workstream_id,
+            archived_revision.next(),
+        ),
+        Err(ActionError::WorkstreamRevisionConflict)
+    ));
+    assert!(
+        registry
+            .workstream_overviews()
+            .unwrap()
+            .iter()
+            .any(|overview| overview.workstream_id == workstream_id)
+    );
+
+    forget(&root, &mut registry, workstream_id, archived_revision).unwrap();
+    assert!(
+        registry
+            .workstream_overviews()
+            .unwrap()
+            .iter()
+            .all(|overview| overview.workstream_id != workstream_id)
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn forget_removes_an_archived_exact_stopped_runtime() {
+    if Command::new("tmux")
+        .arg("-V")
+        .spawn()
+        .and_then(std::process::Child::wait_with_output)
+        .is_err()
+    {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+
+    let (_temporary, root, record, workstream_id, _runtime_guard) =
+        live_runtime_for_read_only_test(ProviderKind::Codex);
+    let mut registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    let expected_revision = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap()
+        .revision;
+    let archived_revision = archive(&root, &mut registry, workstream_id, expected_revision)
+        .expect("owned Runtime archive should complete");
+    let archived = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert!(archived.archived_at_millis.is_some());
+    assert_eq!(
+        archived.runtime.as_ref().map(|runtime| runtime.runtime_id),
+        Some(record.runtime_id)
+    );
+    assert_eq!(
+        archived.runtime.as_ref().map(|runtime| runtime.status),
+        Some(crate::domain::RuntimeStatus::Stopped)
+    );
+
+    forget(&root, &mut registry, workstream_id, archived_revision)
+        .expect("an exact-stopped retained Runtime is forgettable");
+    assert!(
+        registry
+            .workstream_overviews()
+            .unwrap()
+            .iter()
+            .all(|overview| overview.workstream_id != workstream_id)
+    );
+    assert!(registry.runtime_by_id(record.runtime_id).unwrap().is_none());
 }
 
 #[test]

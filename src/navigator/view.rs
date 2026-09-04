@@ -139,6 +139,10 @@ pub(crate) enum Command {
         workstream_id: WorkstreamId,
         expected_workstream_revision: Revision,
     },
+    Forget {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+    },
     /// Opens the contextual setup guide before a Codex action can proceed.
     /// The guide carries no provider argv or profile path.
     AcceptObserverSetup {
@@ -154,6 +158,10 @@ pub(crate) enum Command {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Modal {
     ConfirmArchive {
+        workstream_id: WorkstreamId,
+        expected_workstream_revision: Revision,
+    },
+    ConfirmForget {
         workstream_id: WorkstreamId,
         expected_workstream_revision: Revision,
     },
@@ -231,6 +239,14 @@ impl Navigator {
     /// lifecycle/creation transition. It is never a durable mutation.
     pub(crate) fn select_workstream(&mut self, workstream_id: WorkstreamId) -> bool {
         self.model.select_workstream(workstream_id)
+    }
+
+    /// Moves the process-local cursor to one exact Workstream in whichever
+    /// catalog contains it. Starting or recovering an archived session keeps
+    /// the secondary catalog visible while ordinary active actions retain
+    /// [`Self::select_workstream`]'s active-only fence.
+    pub(crate) fn select_catalog_workstream(&mut self, workstream_id: WorkstreamId) -> bool {
+        self.model.select_catalog_workstream(workstream_id)
     }
 
     /// Sets bounded presentation-local guidance after an unavailable
@@ -429,6 +445,24 @@ impl Model {
         true
     }
 
+    pub(crate) fn select_catalog_workstream(&mut self, workstream_id: WorkstreamId) -> bool {
+        let Some(workstream) = self
+            .snapshot
+            .workstreams
+            .iter()
+            .find(|workstream| workstream.workstream_id == workstream_id)
+        else {
+            return false;
+        };
+        self.page = if workstream.archived {
+            Page::Archived
+        } else {
+            Page::Workstreams
+        };
+        self.selected = Some(RowId::Workstream(workstream_id));
+        true
+    }
+
     /// Resolves one rendered list line to its exact actionable identity.
     /// Project headings occupy one line; the shell and managed cards occupy
     /// two stable lines each.
@@ -468,7 +502,10 @@ impl Model {
                 Command::None
             }
             KeyCode::Char('.') => {
-                self.set_page(Page::Archived);
+                self.set_page(match self.page {
+                    Page::Workstreams => Page::Archived,
+                    Page::Archived => Page::Workstreams,
+                });
                 Command::None
             }
             KeyCode::Char('w') | KeyCode::Esc => {
@@ -485,7 +522,10 @@ impl Model {
             }
             KeyCode::Enter => self.activate_selected(),
             KeyCode::Char('n') => self.new_from_selected(),
-            KeyCode::Char('x') => self.archive_selected(),
+            KeyCode::Char('x') => match self.page {
+                Page::Workstreams => self.archive_selected(),
+                Page::Archived => self.forget_selected(),
+            },
             KeyCode::Char('u') => self.restore_selected(),
             _ => Command::None,
         }
@@ -528,7 +568,9 @@ impl Model {
             Some(RowId::ProvisionalShell) if self.page == Page::Workstreams => {
                 Command::MaterializeProvisionalShell
             }
-            Some(RowId::Workstream(workstream_id)) if self.page == Page::Workstreams => {
+            Some(RowId::Workstream(workstream_id))
+                if matches!(self.page, Page::Workstreams | Page::Archived) =>
+            {
                 self.primary_workstream_action(workstream_id)
             }
             _ => Command::None,
@@ -643,6 +685,26 @@ impl Model {
             })
     }
 
+    fn forget_selected(&mut self) -> Command {
+        if self.page != Page::Archived {
+            return Command::None;
+        }
+        let Some(RowId::Workstream(workstream_id)) = self.selected else {
+            return Command::None;
+        };
+        let Some(workstream) = self.selected_workstream(workstream_id) else {
+            return Command::None;
+        };
+        if !workstream.archived {
+            return Command::None;
+        }
+        self.modal = Some(Modal::ConfirmForget {
+            workstream_id,
+            expected_workstream_revision: workstream.revision,
+        });
+        Command::None
+    }
+
     fn handle_modal_key(&mut self, key: KeyCode) -> Command {
         if matches!(self.modal, Some(Modal::ObserverConsent { .. })) {
             return match key {
@@ -664,11 +726,21 @@ impl Model {
                 self.modal = None;
                 Command::None
             }
-            KeyCode::Char('n') if matches!(self.modal, Some(Modal::ConfirmArchive { .. })) => {
+            KeyCode::Char('n')
+                if matches!(
+                    self.modal,
+                    Some(Modal::ConfirmArchive { .. } | Modal::ConfirmForget { .. })
+                ) =>
+            {
                 self.modal = None;
                 Command::None
             }
-            KeyCode::Char('y') if matches!(self.modal, Some(Modal::ConfirmArchive { .. })) => {
+            KeyCode::Char('y')
+                if matches!(
+                    self.modal,
+                    Some(Modal::ConfirmArchive { .. } | Modal::ConfirmForget { .. })
+                ) =>
+            {
                 self.confirm_modal()
             }
             KeyCode::Enter => self.confirm_modal(),
@@ -686,6 +758,13 @@ impl Model {
                 workstream_id,
                 expected_workstream_revision,
             } => Command::Archive {
+                workstream_id,
+                expected_workstream_revision,
+            },
+            Modal::ConfirmForget {
+                workstream_id,
+                expected_workstream_revision,
+            } => Command::Forget {
                 workstream_id,
                 expected_workstream_revision,
             },
@@ -793,8 +872,9 @@ fn render_model(
             let tree_last = rows
                 .get(index.saturating_add(1))
                 .is_none_or(|next| !same_project_workstream(row, next));
+            let is_selected = row.id() == selected;
             let item = ListItem::new(row_lines_at(row, tree_last, available_width, now_millis));
-            if row.id() == selected {
+            if is_selected {
                 item.style(Style::default().bg(Color::DarkGray))
             } else {
                 item
@@ -964,14 +1044,15 @@ fn workstream_marker(workstream: &WorkstreamSnapshot) -> (&'static str, Style) {
     } else if workstream.onboarding == Some(OnboardingStatus::ActionFenced) {
         ("…", Style::default().fg(Color::Cyan))
     } else if workstream.lifecycle == WorkstreamLifecycle::Parked {
-        (" ", Style::default())
+        ("■", Style::default().fg(Color::Gray))
     } else {
         match workstream.runtime.map(|runtime| runtime.status) {
             Some(RuntimeStatus::Working) => ("●", Style::default().fg(Color::Yellow)),
             Some(RuntimeStatus::Starting) => ("…", Style::default().fg(Color::Cyan)),
             Some(RuntimeStatus::Unknown) => ("?", Style::default().fg(Color::Red)),
             Some(RuntimeStatus::Attention) => ("✓", Style::default().fg(Color::Green)),
-            Some(RuntimeStatus::Stopped | RuntimeStatus::Idle) | None => (" ", Style::default()),
+            Some(RuntimeStatus::Stopped) => ("■", Style::default().fg(Color::Gray)),
+            Some(RuntimeStatus::Idle) | None => (" ", Style::default()),
         }
     }
 }
@@ -1090,58 +1171,59 @@ fn activity_age_color(last_activity_at_millis: Option<i64>, now_millis: Option<i
     }
 }
 
-fn control_bindings(model: &Model) -> &'static [(&'static str, &'static str)] {
+type ControlBinding = (&'static str, &'static str);
+
+const NAVIGATION_CONTROLS: &[ControlBinding] = &[(".", "view"), ("?", "help"), ("q", "quit")];
+const WORKSTREAM_CONTROLS: &[ControlBinding] = &[("n", "new"), ("x", "archive")];
+const RECOVERY_CONTROLS: &[ControlBinding] = &[("x", "archive")];
+const ARCHIVED_CONTROLS: &[ControlBinding] = &[("u", "restore"), ("x", "forget")];
+
+/// Returns footer rows in visual order. Session actions occupy a contextual
+/// row above the stable page-navigation row.
+fn control_rows(model: &Model) -> Vec<&'static [ControlBinding]> {
     if model.help_visible() {
-        return &[];
+        return Vec::new();
     }
     if let Some(modal) = model.modal() {
-        return match modal {
+        return vec![match modal {
             Modal::ConfirmArchive { .. } => &[("Enter / y", "archive"), ("n / Esc", "cancel")],
+            Modal::ConfirmForget { .. } => &[("Enter / y", "forget"), ("n / Esc", "cancel")],
             Modal::ObserverConsent { .. } => &[("Enter / y", "continue"), ("n / Esc", "cancel")],
-        };
+        }];
     }
     match model.page() {
-        Page::Workstreams => match model.selected() {
-            Some(RowId::Workstream(workstream_id))
-                if model
-                    .selected_workstream(workstream_id)
-                    .is_some_and(|workstream| {
-                        !workstream.archived
-                            && workstream.onboarding.is_none()
-                            && workstream.lifecycle != WorkstreamLifecycle::RecoveryRequired
-                    }) =>
-            {
-                &[
-                    ("n", "new"),
-                    ("x", "archive"),
-                    (".", "archived"),
-                    ("?", "help"),
-                    ("q", "quit"),
-                ]
+        Page::Workstreams => {
+            let session_controls = match model.selected() {
+                Some(RowId::Workstream(workstream_id))
+                    if model
+                        .selected_workstream(workstream_id)
+                        .is_some_and(|workstream| {
+                            !workstream.archived
+                                && workstream.onboarding.is_none()
+                                && workstream.lifecycle != WorkstreamLifecycle::RecoveryRequired
+                        }) =>
+                {
+                    WORKSTREAM_CONTROLS
+                }
+                Some(RowId::Workstream(workstream_id))
+                    if model
+                        .selected_workstream(workstream_id)
+                        .is_some_and(|workstream| {
+                            !workstream.archived
+                                && workstream.onboarding != Some(OnboardingStatus::ActionFenced)
+                        }) =>
+                {
+                    RECOVERY_CONTROLS
+                }
+                _ => &[],
+            };
+            if session_controls.is_empty() {
+                vec![NAVIGATION_CONTROLS]
+            } else {
+                vec![session_controls, NAVIGATION_CONTROLS]
             }
-            Some(RowId::Workstream(workstream_id))
-                if model
-                    .selected_workstream(workstream_id)
-                    .is_some_and(|workstream| {
-                        !workstream.archived
-                            && workstream.onboarding != Some(OnboardingStatus::ActionFenced)
-                    }) =>
-            {
-                &[
-                    ("x", "archive"),
-                    (".", "archived"),
-                    ("?", "help"),
-                    ("q", "quit"),
-                ]
-            }
-            _ => &[(".", "archived"), ("?", "help"), ("q", "quit")],
-        },
-        Page::Archived => &[
-            ("u", "restore"),
-            ("w / Esc", "workstreams"),
-            ("?", "help"),
-            ("q", "quit"),
-        ],
+        }
+        Page::Archived => vec![ARCHIVED_CONTROLS, NAVIGATION_CONTROLS],
     }
 }
 
@@ -1162,9 +1244,12 @@ fn help_lines(page: Page) -> Vec<Line<'static>> {
         }
         Page::Archived => {
             lines.extend([
+                help_binding("Enter", "open"),
+                help_binding(".", "view"),
                 help_binding("Esc", "back"),
                 help_heading("Sessions"),
                 help_binding("u", "restore session"),
+                help_binding("x", "forget session"),
             ]);
         }
     }
@@ -1241,6 +1326,10 @@ fn render_modal(frame: &mut Frame<'_>, area: Rect, modal: &Modal) {
             " Archive session ",
             "Archive this managed session? Its live Runtime will be stopped first.\n\nEnter or y confirms; n or Esc cancels.".to_owned(),
         ),
+        Modal::ConfirmForget { .. } => (
+            " Forget session ",
+            "Forget this archived session from WSNav? Its provider history, project, and files will be retained. A live Runtime will be stopped first.\n\nEnter or y confirms; n or Esc cancels.".to_owned(),
+        ),
     };
     let overlay = centered_rect(94, 52, area);
     frame.render_widget(Clear, overlay);
@@ -1296,40 +1385,42 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 }
 
 fn controls_lines(model: &Model, width: u16) -> Vec<Line<'static>> {
-    let bindings = control_bindings(model);
-    if bindings.is_empty() {
+    let rows = control_rows(model);
+    if rows.is_empty() {
         return Vec::new();
     }
     let key = Style::default().fg(Color::Yellow);
     let label = Style::default().fg(Color::Gray);
     let width = usize::from(width.max(1));
     let mut lines = Vec::new();
-    let mut spans = vec![Span::raw(" ")];
-    let mut used = 1_usize;
-    for (shortcut, description) in bindings {
-        let binding_width = display_width(shortcut)
-            .saturating_add(1)
-            .saturating_add(display_width(description));
-        let separator_width = usize::from(used > 1) * 2;
-        if used > 1
-            && used
-                .saturating_add(separator_width)
-                .saturating_add(binding_width)
-                > width
-        {
-            lines.push(Line::from(spans));
-            spans = vec![Span::raw(" ")];
-            used = 1;
-        } else if separator_width > 0 {
-            spans.push(Span::raw("  "));
-            used = used.saturating_add(separator_width);
+    for bindings in rows {
+        let mut spans = vec![Span::raw(" ")];
+        let mut used = 1_usize;
+        for (shortcut, description) in bindings {
+            let binding_width = display_width(shortcut)
+                .saturating_add(1)
+                .saturating_add(display_width(description));
+            let separator_width = usize::from(used > 1) * 2;
+            if used > 1
+                && used
+                    .saturating_add(separator_width)
+                    .saturating_add(binding_width)
+                    > width
+            {
+                lines.push(Line::from(spans));
+                spans = vec![Span::raw(" ")];
+                used = 1;
+            } else if separator_width > 0 {
+                spans.push(Span::raw("  "));
+                used = used.saturating_add(separator_width);
+            }
+            spans.push(Span::styled((*shortcut).to_owned(), key));
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled((*description).to_owned(), label));
+            used = used.saturating_add(binding_width);
         }
-        spans.push(Span::styled((*shortcut).to_owned(), key));
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled((*description).to_owned(), label));
-        used = used.saturating_add(binding_width);
+        lines.push(Line::from(spans));
     }
-    lines.push(Line::from(spans));
     lines
 }
 
@@ -1804,7 +1895,7 @@ mod tests {
         workstream.onboarding = None;
         workstream.runtime = None;
         workstream.lifecycle = WorkstreamLifecycle::Parked;
-        assert_eq!(marker(&workstream), (" ", None));
+        assert_eq!(marker(&workstream), ("■", Some(Color::Gray)));
         workstream.lifecycle = WorkstreamLifecycle::Open;
 
         workstream.runtime = Some(RuntimeSnapshot {
@@ -1815,7 +1906,7 @@ mod tests {
         assert_eq!(marker(&workstream), ("✓", Some(Color::Green)));
 
         workstream.lifecycle = WorkstreamLifecycle::Parked;
-        assert_eq!(marker(&workstream), (" ", None));
+        assert_eq!(marker(&workstream), ("■", Some(Color::Gray)));
         workstream.lifecycle = WorkstreamLifecycle::Open;
 
         workstream.onboarding = Some(OnboardingStatus::ActionFenced);
@@ -1831,10 +1922,11 @@ mod tests {
         workstream.runtime.as_mut().unwrap().status = RuntimeStatus::Unknown;
         assert_eq!(marker(&workstream), ("?", Some(Color::Red)));
 
-        for status in [RuntimeStatus::Idle, RuntimeStatus::Stopped] {
-            workstream.runtime.as_mut().unwrap().status = status;
-            assert_eq!(marker(&workstream), (" ", None));
-        }
+        workstream.runtime.as_mut().unwrap().status = RuntimeStatus::Stopped;
+        assert_eq!(marker(&workstream), ("■", Some(Color::Gray)));
+
+        workstream.runtime.as_mut().unwrap().status = RuntimeStatus::Idle;
+        assert_eq!(marker(&workstream), (" ", None));
         workstream.runtime = None;
         assert_eq!(marker(&workstream), (" ", None));
     }
@@ -1884,6 +1976,7 @@ mod tests {
         let (mut snapshot, active, _) = snapshot();
         snapshot.workstreams[0].native_name = Some("selected thread".to_owned());
         snapshot.workstreams[0].last_activity_at_millis = Some(9_999_000);
+        snapshot.workstreams[0].lifecycle = WorkstreamLifecycle::Parked;
         let mut navigator = Navigator::new(snapshot);
         navigator.model_mut().select_next();
         let backend = TestBackend::new(32, 24);
@@ -1899,14 +1992,13 @@ mod tests {
             Color::DarkGray
         );
         assert_eq!(buffer[(geometry.inner.x, first_card_line)].symbol(), "└");
-        assert_eq!(
-            buffer[(
-                geometry.inner.x.saturating_add(2),
-                first_card_line.saturating_add(1)
-            )]
-                .symbol(),
-            " ",
-        );
+        let marker = &buffer[(
+            geometry.inner.x.saturating_add(2),
+            first_card_line.saturating_add(1),
+        )];
+        assert_eq!(marker.symbol(), "■");
+        assert_eq!(marker.fg, Color::Gray);
+        assert_eq!(marker.bg, Color::DarkGray);
         assert_eq!(navigator.model.selected(), Some(RowId::Workstream(active)));
     }
 
@@ -2007,7 +2099,7 @@ mod tests {
     }
 
     #[test]
-    fn narrow_footer_keeps_every_complete_binding_visible() {
+    fn footer_keeps_contextual_actions_above_stable_navigation() {
         let (mut snapshot, _, _) = snapshot();
         snapshot.workstreams[0].runtime = Some(RuntimeSnapshot {
             runtime_id: RuntimeId::from(Uuid::from_u128(5)),
@@ -2018,25 +2110,11 @@ mod tests {
         model.select_next();
 
         let lines = super::controls_lines(&model, 32);
-        let rendered = lines
-            .iter()
-            .map(|line| {
-                line.spans
-                    .iter()
-                    .map(|span| span.content.as_ref())
-                    .collect::<String>()
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
-        for expected in ["n new", "x archive", ". archived", "q quit"] {
-            assert!(
-                rendered.contains(expected),
-                "missing {expected:?}: {rendered}"
-            );
-        }
-        assert!(!rendered.contains("↑↓ select"));
-        assert!(!rendered.contains("Enter open"));
-        assert!(!rendered.contains("p park"));
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+        assert_eq!(
+            rendered,
+            vec![" n new  x archive", " . view  ? help  q quit"]
+        );
         assert!(lines.iter().all(|line| line.width() <= 32));
         assert_eq!(
             super::controls_height(&model, 32),
@@ -2045,30 +2123,41 @@ mod tests {
     }
 
     #[test]
-    fn compact_footer_omits_full_help_only_bindings() {
+    fn footer_navigation_is_stable_and_actions_are_page_local() {
         let (snapshot, _, _) = snapshot();
         let mut model = Model::new(snapshot);
 
-        let initial_bindings = super::control_bindings(&model);
+        assert_eq!(
+            super::controls_lines(&model, 32)
+                .iter()
+                .map(line_text)
+                .collect::<Vec<_>>(),
+            vec![" . view  ? help  q quit"]
+        );
         model.select_next();
-        let workstreams_bindings = super::control_bindings(&model);
+        let workstreams = super::controls_lines(&model, 32)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            workstreams,
+            vec![" n new  x archive", " . view  ? help  q quit"]
+        );
         let _ = model.handle_key(crossterm::event::KeyCode::Char('.'));
-        let archived_bindings = super::control_bindings(&model);
+        let archived = super::controls_lines(&model, 32)
+            .iter()
+            .map(line_text)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            archived,
+            vec![" u restore  x forget", " . view  ? help  q quit"]
+        );
 
-        for bindings in [initial_bindings, workstreams_bindings, archived_bindings] {
-            assert!(!bindings.iter().any(|(key, _)| *key == "↑↓"));
-            assert!(
-                !bindings
-                    .iter()
-                    .any(|(key, action)| *key == "Enter" && matches!(*action, "open" | "shell"))
-            );
+        for line in workstreams.iter().chain(archived.iter()) {
+            assert!(!line.contains("↑↓ select"));
+            assert!(!line.contains("Enter open"));
+            assert!(!line.contains("park"));
         }
-        assert!(workstreams_bindings.iter().any(|(key, _)| *key == "x"));
-        assert!(!workstreams_bindings.iter().any(|(key, _)| *key == "u"));
-        assert!(!workstreams_bindings.iter().any(|(key, _)| *key == "p"));
-        assert!(archived_bindings.iter().any(|(key, _)| *key == "u"));
-        assert!(!archived_bindings.iter().any(|(key, _)| *key == "x"));
-        assert!(!archived_bindings.iter().any(|(key, _)| *key == "p"));
     }
 
     #[test]
@@ -2081,7 +2170,7 @@ mod tests {
         );
         assert_eq!(
             super::help_overlay(Rect::new(0, 0, 32, 24), Page::Archived),
-            Rect::new(0, 8, 32, 7)
+            Rect::new(0, 7, 32, 10)
         );
 
         let lines = super::help_lines(Page::Workstreams);
@@ -2115,6 +2204,11 @@ mod tests {
                 .any(|line| line.contains("u       restore session"))
         );
         assert!(
+            archived_text
+                .iter()
+                .any(|line| line.contains("x       forget session"))
+        );
+        assert!(
             !archived_text
                 .iter()
                 .any(|line| line.contains("archive session"))
@@ -2132,7 +2226,7 @@ mod tests {
             Command::None
         );
         assert!(model.help_visible());
-        assert!(super::control_bindings(&model).is_empty());
+        assert!(super::control_rows(&model).is_empty());
         assert!(super::controls_lines(&model, 32).is_empty());
         assert_eq!(super::footer_height(Rect::new(0, 0, 32, 24), &model), 0);
         assert_eq!(
@@ -2254,11 +2348,9 @@ mod tests {
         let (snapshot, _, _) = snapshot();
         let mut model = Model::new(snapshot);
         model.request_observer_setup(ObserverSetupKind::TrustReview);
-        let bindings = super::control_bindings(&model);
-        assert_eq!(
-            bindings,
-            &[("Enter / y", "continue"), ("n / Esc", "cancel")]
-        );
+        let rows = super::control_rows(&model);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0], &[("Enter / y", "continue"), ("n / Esc", "cancel")]);
         let text = super::observer_setup_modal_text(ObserverSetupKind::TrustReview);
         assert!(text.contains("native /hooks"));
         assert!(!text.contains("CODEX_HOME"));
@@ -2279,7 +2371,7 @@ mod tests {
     }
 
     #[test]
-    fn archived_page_has_no_shell_card_and_cannot_start_a_new_session() {
+    fn archived_page_has_no_shell_card_and_dot_returns_to_workstreams() {
         let (snapshot, _, archived) = snapshot();
         let mut model = Model::new(snapshot);
         let _ = model.handle_key(crossterm::event::KeyCode::Char('.'));
@@ -2296,14 +2388,26 @@ mod tests {
         );
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Enter),
+            Command::Start {
+                workstream_id: archived,
+                expected_workstream_revision: Revision::INITIAL,
+                provider: ProviderKind::OpenCode,
+            }
+        );
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('.')),
             Command::None
         );
+        assert_eq!(model.page(), Page::Workstreams);
+        assert_eq!(model.selected(), Some(RowId::ProvisionalShell));
+
+        let _ = model.handle_key(crossterm::event::KeyCode::Char('.'));
+        assert_eq!(model.page(), Page::Archived);
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Esc),
             Command::None
         );
         assert_eq!(model.page(), Page::Workstreams);
-        assert_eq!(model.selected(), Some(RowId::ProvisionalShell));
     }
 
     #[test]
@@ -2381,6 +2485,20 @@ mod tests {
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Char('x')),
             Command::None
+        );
+        assert_eq!(
+            model.modal(),
+            Some(&Modal::ConfirmForget {
+                workstream_id: archived,
+                expected_workstream_revision: Revision::INITIAL,
+            })
+        );
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Enter),
+            Command::Forget {
+                workstream_id: archived,
+                expected_workstream_revision: Revision::INITIAL,
+            }
         );
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Char('u')),

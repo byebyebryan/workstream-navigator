@@ -245,6 +245,7 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
         | Commands::Attach { .. }
         | Commands::Archive { .. }
         | Commands::Restore { .. }
+        | Commands::Forget { .. }
         | Commands::Status { .. }
         | Commands::Operations => execute_local_command(root, command),
         Commands::Navigator
@@ -349,6 +350,20 @@ fn execute_local_command(root: &StateRoot, command: Commands) -> Result<(), AppE
             apply_managed_action(
                 root,
                 ManagedAction::Restore {
+                    workstream_id: parse_workstream(&workstream_id)?,
+                    expected_workstream_revision: parse_revision(revision)?,
+                },
+            )
+            .map_err(AppError::Navigator)?;
+            Ok(())
+        }
+        Commands::Forget {
+            workstream_id,
+            revision,
+        } => {
+            apply_managed_action(
+                root,
+                ManagedAction::Forget {
                     workstream_id: parse_workstream(&workstream_id)?,
                     expected_workstream_revision: parse_revision(revision)?,
                 },

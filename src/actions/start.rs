@@ -1,9 +1,10 @@
 use super::{
-    ActionError, Duration, HostRegistry, Instant, IntegrationLifecycle, LinuxProcessProbe,
-    NativeLaunch, OpenCodeClient, OpenCodeEndpoint, OsString, Path, PathBuf, PrivateRuntime,
-    ProcessProbe, ProviderKind, ProviderSessionId, Revision, RuntimeId, RuntimePaths, RuntimeProbe,
-    StartOutcome, StateError, SystemTmux, WorkstreamId, WorkstreamLifecycle, codex_launch_program,
-    codex_recovery_program, env, opencode, prove_owned_process_group, thread,
+    ActionError, CatalogAuthorization, Duration, HostRegistry, Instant, IntegrationLifecycle,
+    LinuxProcessProbe, NativeLaunch, OpenCodeClient, OpenCodeEndpoint, OsString, Path, PathBuf,
+    PrivateRuntime, ProcessProbe, ProviderKind, ProviderSessionId, Revision, RuntimeId,
+    RuntimePaths, RuntimeProbe, StartOutcome, StateError, SystemTmux, WorkstreamId,
+    WorkstreamLifecycle, codex_launch_program, codex_recovery_program, env, opencode,
+    prove_owned_process_group, thread,
 };
 use super::{
     attachment::{PriorOpenCodeRuntime, inspect_opencode_prior_runtime, prepare_opencode_runtime},
@@ -15,8 +16,8 @@ use super::{
     },
     lifecycle::stop_opencode_observer,
     model::{
-        active_workstream_overview, observer_profile, reconcile_observer_trust,
-        require_codex_provider,
+        observer_profile, reconcile_observer_trust, require_codex_provider,
+        workstream_overview_authorized,
     },
     providers::managed_codex_environment,
 };
@@ -54,7 +55,11 @@ pub fn start(
     workstream_id: WorkstreamId,
     expected_revision: Option<Revision>,
 ) -> Result<StartOutcome, ActionError> {
-    let overview = active_workstream_overview(registry, workstream_id)?;
+    let overview = workstream_overview_authorized(
+        registry,
+        workstream_id,
+        CatalogAuthorization::ArchivedAllowed,
+    )?;
     match overview.provider {
         ProviderKind::Codex => {
             start_codex(root, registry, workstream_id, expected_revision, &overview)
@@ -141,7 +146,11 @@ fn start_codex(
         .map(|runtime| registry.retained_codex_binding_for_runtime(runtime.runtime_id))
         .transpose()?
         .flatten();
-    let record = registry.reserve_runtime_with_provider(workstream_id, overview.provider)?;
+    let record = registry.reserve_runtime_with_provider_authorized(
+        workstream_id,
+        overview.provider,
+        CatalogAuthorization::ArchivedAllowed,
+    )?;
     launch_reserved_runtime(
         root,
         registry,
@@ -172,8 +181,13 @@ fn start_opencode(
         PriorOpenCodeRuntime::AlreadyLive => return Ok(StartOutcome::AlreadyLive),
         PriorOpenCodeRuntime::Ready(binding) => binding.map(|binding| *binding),
     };
-    let (record, endpoint, session) =
-        prepare_opencode_runtime(registry, workstream_id, overview, prior_binding.as_ref())?;
+    let (record, endpoint, session) = prepare_opencode_runtime(
+        registry,
+        workstream_id,
+        overview,
+        prior_binding.as_ref(),
+        CatalogAuthorization::ArchivedAllowed,
+    )?;
     if let Err(error) =
         launch_reserved_opencode_runtime(root, registry, &record, &endpoint, &session)
     {
@@ -204,7 +218,11 @@ pub fn recover(
     workstream_id: WorkstreamId,
     expected_revision: Option<Revision>,
 ) -> Result<StartOutcome, ActionError> {
-    let overview = active_workstream_overview(registry, workstream_id)?;
+    let overview = workstream_overview_authorized(
+        registry,
+        workstream_id,
+        CatalogAuthorization::ArchivedAllowed,
+    )?;
     match overview.provider {
         ProviderKind::Codex => {
             recover_codex(root, registry, workstream_id, expected_revision, &overview)
@@ -302,8 +320,11 @@ fn recover_codex(
         }
     }
     let prior_binding = registry.retained_codex_binding_for_runtime(prior_runtime.runtime_id)?;
-    let record =
-        registry.reserve_runtime_recovery_with_provider(workstream_id, overview.provider)?;
+    let record = registry.reserve_runtime_recovery_with_provider_authorized(
+        workstream_id,
+        overview.provider,
+        CatalogAuthorization::ArchivedAllowed,
+    )?;
     launch_reserved_runtime(
         root,
         registry,
@@ -356,12 +377,13 @@ where
     {
         return Err(ActionError::RuntimeProbeAmbiguous);
     }
-    let retained_binding = registry.codex_recovery_binding(
+    let retained_binding = registry.codex_recovery_binding_authorized(
         workstream_id,
         expected_workstream_revision,
         runtime.runtime_id,
         runtime.revision,
         &runtime.tmux_generation,
+        CatalogAuthorization::ArchivedAllowed,
     )?;
     let command = process_probe
         .process_command_checked(*pane_pid)
@@ -375,13 +397,14 @@ where
     if fresh_probe != *probe {
         return Err(ActionError::RuntimeProbeAmbiguous);
     }
-    registry.reconcile_codex_recovery(
+    registry.reconcile_codex_recovery_authorized(
         workstream_id,
         expected_workstream_revision,
         runtime.runtime_id,
         runtime.revision,
         &runtime.tmux_generation,
         &retained_binding,
+        CatalogAuthorization::ArchivedAllowed,
     )?;
     Ok(StartOutcome::Reconciled)
 }
@@ -525,8 +548,11 @@ fn launch_recovered_opencode_runtime(
     workstream_id: WorkstreamId,
     session: &ProviderSessionId,
 ) -> Result<(), ActionError> {
-    let record =
-        registry.reserve_runtime_recovery_with_provider(workstream_id, ProviderKind::OpenCode)?;
+    let record = registry.reserve_runtime_recovery_with_provider_authorized(
+        workstream_id,
+        ProviderKind::OpenCode,
+        CatalogAuthorization::ArchivedAllowed,
+    )?;
     if let Err(error) = registry.bind_opencode_session(
         record.runtime_id,
         &record.tmux_generation,

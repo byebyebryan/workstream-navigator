@@ -1,7 +1,7 @@
 use super::{
-    ActionError, HostRegistry, LinuxProcessProbe, OpenCodeClient, OpenCodeEndpoint, OpenCodeError,
-    PrivateRuntime, ProcessProbe, ProviderKind, ProviderSessionId, RuntimePaths, RuntimeProbe,
-    SystemTmux, WorkstreamId, endpoint_owned_by_process, opencode,
+    ActionError, CatalogAuthorization, HostRegistry, LinuxProcessProbe, OpenCodeClient,
+    OpenCodeEndpoint, OpenCodeError, PrivateRuntime, ProcessProbe, ProviderKind, ProviderSessionId,
+    RuntimePaths, RuntimeProbe, SystemTmux, WorkstreamId, endpoint_owned_by_process, opencode,
 };
 use super::{
     cleanup::{
@@ -10,6 +10,8 @@ use super::{
         fail_known_absent_opencode_session_creation, fail_unknown_opencode_session_creation,
         fail_unlaunched_runtime, matches_recorded_runtime,
     },
+    lifecycle::{clean_provider_exit_status, park_authorized},
+    model::workstream_overview_authorized,
     start::backfill_live_runtime_provider_pid,
 };
 
@@ -208,8 +210,13 @@ pub fn preflight_attachment(
     registry: &mut HostRegistry,
     workstream_id: WorkstreamId,
 ) -> Result<crate::state::RuntimeRecord, ActionError> {
-    let mut runtime_record = registry
-        .runtime_for_workstream(workstream_id)?
+    let overview = workstream_overview_authorized(
+        registry,
+        workstream_id,
+        CatalogAuthorization::ArchivedAllowed,
+    )?;
+    let mut runtime_record = overview
+        .runtime
         .ok_or(ActionError::NoRuntime(workstream_id))?;
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
@@ -223,6 +230,16 @@ pub fn preflight_attachment(
         )?,
     );
     let probe = runtime.probe()?;
+    if clean_provider_exit_status(&runtime, &runtime_record, &probe)? == Some(0) {
+        park_authorized(
+            root,
+            registry,
+            workstream_id,
+            Some(overview.revision),
+            CatalogAuthorization::ArchivedAllowed,
+        )?;
+        return Err(ActionError::ProviderExited);
+    }
     if let Some(backfilled) = backfill_live_runtime_provider_pid(registry, &runtime_record, &probe)?
     {
         runtime_record = backfilled;
@@ -292,6 +309,7 @@ pub(super) fn prepare_opencode_runtime(
     workstream_id: WorkstreamId,
     overview: &crate::state::WorkstreamOverview,
     prior_binding: Option<&crate::state::ProviderBinding>,
+    authorization: CatalogAuthorization,
 ) -> Result<
     (
         crate::state::RuntimeRecord,
@@ -300,7 +318,11 @@ pub(super) fn prepare_opencode_runtime(
     ),
     ActionError,
 > {
-    let record = registry.reserve_runtime_with_provider(workstream_id, ProviderKind::OpenCode)?;
+    let record = registry.reserve_runtime_with_provider_authorized(
+        workstream_id,
+        ProviderKind::OpenCode,
+        authorization,
+    )?;
     let session = if let Some(binding) = prior_binding {
         if binding.provider != ProviderKind::OpenCode {
             return Err(fail_unlaunched_runtime(

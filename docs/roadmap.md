@@ -1,13 +1,14 @@
 # Workstream Navigator V1 Roadmap
 
-Date: 2026-09-03
+Date: 2026-09-04
 
-Status: D0-D23 implementation is complete. D23, developed from `54cf0db`, is
-locally accepted and installed for operator inspection with executable SHA-256
-`08023657e5b7c81eb48bf5e3cee7d5741f52b1d9c63f74a37a567563c1994191`.
-It removes the duplicate public Park lifecycle while retaining exact internal
-Runtime-stop authority for Archive and recovery. No remote-CI or live-provider
-acceptance is claimed for D23. The D22 correction in `8338a04` remains
+Status: D0-D24 implementation is complete. D24, developed in the current tree
+from `677a611`, passes the full local/disposable gate and is byte-identically
+installed for operator inspection with executable SHA-256
+`4b81709179b308e32039aa53573b12c9a787b9249547fd5835cd6c10e85c9518`.
+It makes Archived a secondary catalog with retained native opening,
+visibility-only Restore, and narrow revision-fenced Forget. No remote-CI or
+live-provider acceptance is claimed for D24. The D22 correction in `8338a04` remains
 operator-accepted against the exact retained live Codex recovery that
 falsified checkpoint `ed74b0b`. Linux reported that
 still-running executable as `codex (deleted)` after an on-disk Codex upgrade;
@@ -37,6 +38,74 @@ roadmap is preserved as
 - D18 is a clean state break. Schemas 12 through 14 are refusal evidence, not
   migration or adoption inputs.
 
+## Completed checkpoint: D24 archived catalog and WSNav-owned Forget
+
+Implementation status: locally accepted and installed for operator inspection.
+No remote-CI or live-provider claim is made.
+
+D24 keeps Archived as a secondary catalog and buffer zone for session
+management. It offers the ordinary exact attach/start/resume/recover action on
+an archived row while preserving `archived_at`; provider exit still stops an
+explicitly opened archived Runtime. `u` restores visibility only. `x` opens a
+distinct Forget confirmation and the revision-fenced public command
+`wsnav forget <workstream-id> <revision>` provides scripting parity.
+
+Scope:
+
+- preserve active-only Archive, exact stop, and `n` semantics;
+- authorize archived Enter/start/recover/attach through an explicit typed
+  catalog scope without clearing `archived_at`;
+- make Restore-only visibility reversal preserve any live Runtime;
+- distinguish ordinary detach from native provider exit after attachment:
+  preserve an exact live PID/birth unchanged, but exact-clean and park only one
+  retained dead pane with matching PID/start cwd, absent process, and status
+  zero; use an exact private-server `pane-died` hook to detach the client while
+  retaining that pane as evidence, and repeat the proof at preflight for an
+  older stranded clean exit, returning either proof through the same stopped
+  presentation outcome;
+- after a proven stopped outcome only, clear the stale right-hand terminal
+  display using control sequences with no WSNav prose, and render a static gray
+  `■` on stopped/internally parked cards that remains readable when selected
+  while keeping live/idle cards unmarked;
+- exact-stop a live owned Runtime before Forget, then commit one schema-15
+  transaction that removes only the selected Workstream and its WSNav-owned
+  graph, including dependent OpenCode rows, binding, Runtime, attention,
+  creation-request metadata, and target-owned completed operation/exec-target
+  rows; sever nullable child source lineage;
+- refuse stale, ambiguous, unresolved, or shared operation effects while
+  retaining the Workstream and preserving provider-native history,
+  Project/Location/Git/files, and unrelated records; and
+- keep the footer/help stable (`. view`, `? help`, `q quit`) with active
+  `n new x archive` and Archived `u restore x forget` controls.
+
+Non-goals:
+
+- do not add provider-thread archive/delete, transcript preview, tmux
+  read-only mode, bulk/automatic pruning, migration/reset, project cleanup,
+  page-change lifecycle effects, or automatic restore/stop;
+- do not make `n` available from Archived; and
+- do not weaken private-tmux, observer/recovery, native TUI/naming/branching,
+  or no-transcript boundaries.
+
+Exit gate:
+
+- focused state tests prove exact graph deletion, child-lineage severing,
+  revision fencing, and refusal on unresolved operation effects;
+- focused action/controller tests prove archived opening, restore-only
+  behavior, exact-stop-before-Forget, retained-row failure semantics, detach
+  preservation, exact zero-status provider-exit cleanup, retained-pane client
+  detachment, and non-zero refusal;
+- Navigator tests prove Archived Enter/Restore/Forget dispatch and the exact
+  footer/help/modal copy plus the stopped-versus-idle marker distinction;
+- CLI/source acceptance proves `forget` is public and revision-fenced while
+  active-only `n`/Archive behavior remains; and
+- `scripts/check` and the locked release build/install are recorded with exact
+  artifact identity; live-provider operator acceptance remains separate.
+
+Evidence record:
+
+- [D24 archived catalog and WSNav-owned Forget](evidence/acceptance/d24-archived-catalog-forget.md)
+
 ## Completed checkpoint: D23 provider-native stop and contextual visibility
 
 Implementation status: locally accepted and installed for operator inspection.
@@ -63,8 +132,9 @@ Scope:
 - render existing active schema-15 `parked` records like stopped Workstreams
   and keep them resumable through `Enter`, without migration or schema change;
   and
-- make footer and the floating Help panel page-local so Archive and Restore are
-  never advertised together.
+- keep a stable `. view`/`? help`/`q quit` footer row, add page-local session
+  actions above it, and keep Archive and Restore from being advertised
+  together in either the footer or floating Help panel.
 
 Non-goals:
 
@@ -690,6 +760,7 @@ historical evidence rather than current delivery authority.
 | D21 | Provider-derived attention; Navigator acknowledgment and duplicate sticky state retired | [D21 acceptance](evidence/acceptance/d21-provider-derived-attention.md) |
 | D22 | Exact live retained-session Codex recovery confirmation | [D22 acceptance](evidence/acceptance/d22-exact-live-recovery.md) |
 | D23 | Provider-native stop; public Park retired and archive/restore made contextual | [D23 acceptance](evidence/acceptance/d23-native-stop-contextual-visibility.md) |
+| D24 | Archived secondary catalog and WSNav-owned Forget; locally accepted and installed for inspection | [D24 evidence](evidence/acceptance/d24-archived-catalog-forget.md) |
 
 ## Deferred product decisions
 

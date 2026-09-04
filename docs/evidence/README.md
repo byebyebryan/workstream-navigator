@@ -55,6 +55,8 @@ to make their old procedures appear current.
   visibility](acceptance/d23-native-stop-contextual-visibility.md)
 - [D24 archived secondary catalog and WSNav-owned
   Forget](acceptance/d24-archived-catalog-forget.md)
+- [D25 current-product stabilization and
+  closure](acceptance/d25-current-product-closure.md)
 
 ## Design spikes
 

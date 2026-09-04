@@ -5,6 +5,21 @@ coding-agent workstreams on the machine where it is running. It adds
 organization, attachment, status, and a few compound workstream actions
 around the provider's native terminal UI.
 
+> **D25 status:** current-product stabilization is locally accepted and the
+> locked release is installed byte-identically for operator inspection with
+> executable SHA-256
+> `7d8c4704a79b7c1e48c1bbff0034aaf5faf9b5905744e4520838de8eeca5bdc0`.
+> Provider exit now converges through the initial Shell-to-provider promotion
+> path as well as ordinary managed reattachment, while retaining exact
+> presentation, Runtime, generation, process, cwd, topology, revision, and
+> status-zero proof. Linux process disappearance and tmux publication races
+> are bounded without converting ambiguity into absence. Sanitized acceptance
+> passed with Codex 0.153.2 and OpenCode 1.18.27 on this exact artifact; the
+> disposable roots were removed completely. No passing current-source
+> remote-CI result is included in this acceptance record.
+> No current UI capture was generated. See the
+> [D25 acceptance record](docs/evidence/acceptance/d25-current-product-closure.md).
+
 > **D24 status:** locally accepted and installed byte-identically for operator
 > inspection with executable SHA-256
 > `4b81709179b308e32039aa53573b12c9a787b9249547fd5835cd6c10e85c9518`.
@@ -28,8 +43,8 @@ around the provider's native terminal UI.
 > Its evidence and limitations are in the
 > [D23 acceptance record](docs/evidence/acceptance/d23-native-stop-contextual-visibility.md).
 > This is local/disposable acceptance, not remote-CI or live-provider
-> acceptance. D18 checkpoint `c961c7e` remains the latest artifact with
-> separately authorized Codex/OpenCode lifecycle evidence. See the
+> acceptance. D18 checkpoint `c961c7e` retains the older separately authorized
+> destructive-reset and native-trust evidence. See the
 > [roadmap](docs/roadmap.md#completed-checkpoint-d23-provider-native-stop-and-contextual-visibility).
 
 ## Host-local by design
@@ -57,6 +72,8 @@ and attach to the same Runtime.
   host; it never groups records across hosts.
 - Starting, switching, exact resume, archive, restore, and bounded
   lost-Runtime recovery.
+- Narrow, revision-fenced Forget of one archived Workstream's WSNav-owned
+  graph while preserving provider history, Projects/Locations, Git, and files.
 - Provider-native conversation branching remains inside the same Workstream;
   observer evidence rotates its exact current conversation binding and name.
 - A contextual, read-only observer-readiness check for provider actions that
@@ -178,11 +195,11 @@ migration, state rollback, automatic downgrade, or compatibility launcher.
 
 ## Build, install, and CLI
 
-WSNav remains source-installed. This host runs the byte-identical current D19
-candidate recorded in the D19 acceptance document; the D18 acceptance record
-separately identifies the exact artifact used for live-provider release
-acceptance. Build and validate any replacement before atomically installing
-its exact release artifact:
+WSNav remains source-installed. This host runs the byte-identical current D25
+artifact recorded in the D25 acceptance document; the D18 acceptance record
+separately identifies the older exact artifact used for destructive-reset and
+native-trust acceptance. Build and validate any replacement before atomically
+installing its exact release artifact:
 
 ```console
 cargo build --locked --release
@@ -198,18 +215,18 @@ repository gate from the checkout as shown above.
 operations remain optional scripting, diagnostics, and break-glass parity;
 `wsnav forget <workstream-id> <revision>` is the revision-fenced equivalent of
 the Archived `x` action.
-ordinary work happens in the Navigator/provider presentation. The destructive
-reset, exact-artifact installation, native observer trust, and disposable
-live-provider release acceptance are complete for the accepted D18 artifact.
-They are historical evidence, not accepted-release or live-provider evidence
-for the locally installed D19 candidate.
+Ordinary work happens in the Navigator/provider presentation. D18 retains the
+historical destructive-reset and native observer-trust evidence. D25 records
+the current exact-artifact installation and sanitized Codex/OpenCode lifecycle
+acceptance separately; that acceptance record includes no passing
+current-source remote-CI result.
 
 ## See it
 
 The [historical product captures](docs/media/README.md) show a retired two-pane
 baseline with privacy-safe fixture data. They are retained design history, not
-current UI or acceptance evidence. A new current-product capture is deferred
-until the next UI/UX pass settles the interaction being demonstrated.
+current UI or acceptance evidence. Current-product capture generation is
+operator-owned and outside checkpoint acceptance.
 
 ## Documentation
 

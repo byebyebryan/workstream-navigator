@@ -1,7 +1,8 @@
 use super::{
     ActionError, CatalogAuthorization, HostRegistry, Instant, LinuxProcessProbe, PrivateRuntime,
-    ProviderKind, Revision, RuntimeId, RuntimePaths, RuntimeProbe, StateError, SystemClock,
-    SystemTmux, WorkstreamId, WorkstreamLifecycle, terminate_owned_observer_process, thread,
+    ProcessProbe, ProviderKind, Revision, RuntimeId, RuntimePaths, RuntimeProbe, StateError,
+    SystemClock, SystemTmux, WorkstreamId, WorkstreamLifecycle, terminate_owned_observer_process,
+    thread,
 };
 use super::{
     cleanup::{
@@ -163,10 +164,16 @@ pub(crate) fn reconcile_provider_attachment_end(
         RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
     );
     let probe = runtime.probe()?;
-    if matches_recorded_runtime(&record, &probe, false) {
-        return Ok(false);
-    }
-    if clean_provider_exit_status(&runtime, &record, &probe)? != Some(0) {
+    let exit_status = match attachment_end_provider_state(&record, &probe, &process_probe)? {
+        AttachmentEndProviderState::Live => return Ok(false),
+        AttachmentEndProviderState::ExitPending => {
+            await_clean_provider_exit_status(&runtime, &record, &probe)?
+        }
+        AttachmentEndProviderState::NotRecordedLive => {
+            clean_provider_exit_status(&runtime, &record, &probe)?
+        }
+    };
+    if exit_status != Some(0) {
         return Err(ActionError::RuntimeProbeAmbiguous);
     }
     park_authorized(
@@ -177,6 +184,95 @@ pub(crate) fn reconcile_provider_attachment_end(
         CatalogAuthorization::ArchivedAllowed,
     )?;
     Ok(true)
+}
+
+/// Classifies the one transition that can race the `pane-died` detach hook.
+///
+/// A live pane normally proves that an attached client simply detached. Linux
+/// can, however, retain the exact just-exited pane PID as a zombie while tmux
+/// has already run the hook and returned the native client. That is not live
+/// provider authority: it is bounded evidence that the retained dead-pane
+/// proof must converge before the attachment can be classified.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum AttachmentEndProviderState {
+    Live,
+    ExitPending,
+    NotRecordedLive,
+}
+
+pub(super) fn attachment_end_provider_state(
+    record: &crate::state::RuntimeRecord,
+    probe: &RuntimeProbe,
+    process_probe: &dyn ProcessProbe,
+) -> Result<AttachmentEndProviderState, ActionError> {
+    if !matches_recorded_runtime(record, probe, false) {
+        return Ok(AttachmentEndProviderState::NotRecordedLive);
+    }
+    let (provider_pid, expected_birth) = recorded_provider_identity(record)?;
+    match process_probe
+        .process_observation_checked(provider_pid)
+        .map_err(|_| ActionError::RuntimeProbeAmbiguous)?
+    {
+        Some(observation)
+            if observation.birth == expected_birth
+                && observation.state == crate::runtime::ProcessState::Running =>
+        {
+            Ok(AttachmentEndProviderState::Live)
+        }
+        Some(observation)
+            if observation.birth == expected_birth
+                && observation.state == crate::runtime::ProcessState::Zombie =>
+        {
+            Ok(AttachmentEndProviderState::ExitPending)
+        }
+        // The probe already observed the exact PID/birth and a second
+        // atomically-read observation found it absent. Re-run the retained
+        // pane proof rather than treating this narrow disappearance as a
+        // client detach.
+        None => Ok(AttachmentEndProviderState::ExitPending),
+        Some(_) => Err(ActionError::RuntimeProbeAmbiguous),
+    }
+}
+
+fn await_clean_provider_exit_status(
+    runtime: &PrivateRuntime<'_>,
+    record: &crate::state::RuntimeRecord,
+    initial_probe: &RuntimeProbe,
+) -> Result<Option<i32>, ActionError> {
+    let deadline = Instant::now() + PARK_CONFIRM_TIMEOUT;
+    let mut probe = initial_probe.clone();
+    await_pending_exit_evidence_with(
+        || {
+            let exit_status = clean_provider_exit_status(runtime, record, &probe)?;
+            if exit_status.is_none() {
+                probe = runtime.probe()?;
+            }
+            Ok(exit_status)
+        },
+        || Instant::now() < deadline,
+        || thread::sleep(PARK_CONFIRM_POLL_INTERVAL),
+    )
+}
+
+pub(super) fn await_pending_exit_evidence_with<R, C, W>(
+    mut read_exit_status: R,
+    mut before_deadline: C,
+    mut wait: W,
+) -> Result<Option<i32>, ActionError>
+where
+    R: FnMut() -> Result<Option<i32>, ActionError>,
+    C: FnMut() -> bool,
+    W: FnMut(),
+{
+    loop {
+        if let Some(exit_status) = read_exit_status()? {
+            return Ok(Some(exit_status));
+        }
+        if !before_deadline() {
+            return Ok(None);
+        }
+        wait();
+    }
 }
 
 pub(super) fn clean_provider_exit_status(

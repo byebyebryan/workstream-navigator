@@ -1392,9 +1392,21 @@ fn read_linux_process_stat_for_group(
     // Enumeration may observe a transient malformed stat while an unrelated
     // process is exiting. Direct identity reads remain strict and never use
     // this retry boundary.
-    read_linux_process_stat_for_group_with(pid, read_linux_process_stat, || {
+    read_linux_process_stat_for_group_with(pid, read_linux_process_stat_for_group_entry, || {
         thread::sleep(PROCESS_GROUP_STAT_RETRY_DELAY);
     })
+}
+
+/// Reads a `/proc` stat record found while enumerating a process group.
+///
+/// Linux can report `ESRCH` after `/proc` directory enumeration has returned a
+/// PID but before that PID's stat record is opened. At this enumeration seam,
+/// that error is equivalent to a vanished entry. Direct identity reads remain
+/// strict, so they cannot turn an ambiguous probe into absence evidence.
+fn read_linux_process_stat_for_group_entry(
+    pid: u32,
+) -> Result<Option<LinuxProcessStat>, ProcessProbeError> {
+    read_linux_process_stat_with_scope(pid, LinuxProcessStatReadScope::GroupEnumeration)
 }
 
 fn read_linux_process_stat_for_group_with<R, W>(
@@ -1424,6 +1436,12 @@ struct LinuxProcessStat {
     birth: String,
     process_group_id: u32,
     session_id: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinuxProcessStatReadScope {
+    DirectIdentity,
+    GroupEnumeration,
 }
 
 #[cfg(target_os = "linux")]
@@ -1474,9 +1492,29 @@ fn read_linux_process_command(pid: u32) -> Result<Option<ProcessCommand>, Proces
 }
 
 fn read_linux_process_stat(pid: u32) -> Result<Option<LinuxProcessStat>, ProcessProbeError> {
-    let stat = match fs::read_to_string(format!("/proc/{pid}/stat")) {
+    read_linux_process_stat_with_scope(pid, LinuxProcessStatReadScope::DirectIdentity)
+}
+
+fn read_linux_process_stat_with_scope(
+    pid: u32,
+    scope: LinuxProcessStatReadScope,
+) -> Result<Option<LinuxProcessStat>, ProcessProbeError> {
+    read_linux_process_stat_with(pid, scope, |pid| {
+        fs::read_to_string(format!("/proc/{pid}/stat"))
+    })
+}
+
+fn read_linux_process_stat_with<R>(
+    pid: u32,
+    scope: LinuxProcessStatReadScope,
+    mut read: R,
+) -> Result<Option<LinuxProcessStat>, ProcessProbeError>
+where
+    R: FnMut(u32) -> std::io::Result<String>,
+{
+    let stat = match read(pid) {
         Ok(stat) => stat,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) if linux_process_stat_entry_vanished(scope, &error) => return Ok(None),
         Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
             return Err(ProcessProbeError::Inaccessible);
         }
@@ -1512,6 +1550,15 @@ fn read_linux_process_stat(pid: u32) -> Result<Option<LinuxProcessStat>, Process
         process_group_id,
         session_id,
     }))
+}
+
+fn linux_process_stat_entry_vanished(
+    scope: LinuxProcessStatReadScope,
+    error: &std::io::Error,
+) -> bool {
+    error.kind() == std::io::ErrorKind::NotFound
+        || (scope == LinuxProcessStatReadScope::GroupEnumeration
+            && error.raw_os_error() == Some(nix::errno::Errno::ESRCH as i32))
 }
 
 /// Confirms that this hook process is a direct child of the current provider.
@@ -2335,6 +2382,39 @@ mod tests {
             .and_then(std::process::Child::wait_with_output)
     }
 
+    fn wait_for_private_client_attachment(
+        socket: &Path,
+        session_name: &str,
+        client_pid: u32,
+        timeout: Duration,
+    ) {
+        let expected = format!("{client_pid}|{session_name}");
+        let deadline = Instant::now() + timeout;
+        loop {
+            let output = command_output(
+                Command::new("tmux")
+                    .env_remove("TMUX")
+                    .args(["-f", "/dev/null", "-S"])
+                    .arg(socket)
+                    .args(["list-clients", "-F", "#{client_pid}|#{client_session}"]),
+            )
+            .unwrap();
+            assert!(output.status.success(), "tmux failed: {:?}", output.stderr);
+            if String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .any(|client| client == expected)
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "private tmux control-mode client did not attach"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
     fn binding_keys(socket: &Path, table: &str) -> BTreeSet<String> {
         let output = command_output(
             Command::new("tmux")
@@ -2846,6 +2926,46 @@ mod tests {
             assert!(reads.borrow().is_empty());
             assert_eq!(*waits.borrow(), 0);
         }
+    }
+
+    #[test]
+    fn linux_process_stat_maps_esrch_to_absence_only_during_group_enumeration() {
+        let group_result =
+            read_linux_process_stat_with(77, LinuxProcessStatReadScope::GroupEnumeration, |_| {
+                Err(std::io::Error::from_raw_os_error(
+                    nix::errno::Errno::ESRCH as i32,
+                ))
+            })
+            .unwrap();
+        assert!(group_result.is_none());
+
+        let direct_result =
+            read_linux_process_stat_with(77, LinuxProcessStatReadScope::DirectIdentity, |_| {
+                Err(std::io::Error::from_raw_os_error(
+                    nix::errno::Errno::ESRCH as i32,
+                ))
+            });
+        assert!(matches!(direct_result, Err(ProcessProbeError::Io(_))));
+
+        let inaccessible =
+            read_linux_process_stat_with(77, LinuxProcessStatReadScope::GroupEnumeration, |_| {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+            });
+        assert!(matches!(inaccessible, Err(ProcessProbeError::Inaccessible)));
+
+        let other_io =
+            read_linux_process_stat_with(77, LinuxProcessStatReadScope::GroupEnumeration, |_| {
+                Err(std::io::Error::from_raw_os_error(
+                    nix::errno::Errno::EIO as i32,
+                ))
+            });
+        assert!(matches!(other_io, Err(ProcessProbeError::Io(_))));
+
+        let malformed =
+            read_linux_process_stat_with(77, LinuxProcessStatReadScope::GroupEnumeration, |_| {
+                Ok("malformed stat".to_owned())
+            });
+        assert!(matches!(malformed, Err(ProcessProbeError::Malformed)));
     }
 
     #[test]
@@ -3871,7 +3991,12 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        thread::sleep(Duration::from_millis(50));
+        wait_for_private_client_attachment(
+            &paths.socket,
+            &paths.session_name,
+            client.id(),
+            Duration::from_secs(2),
+        );
         assert!(client.try_wait().unwrap().is_none());
         fs::write(temporary.path().join(".wsnav-provider-exit"), b"exit").unwrap();
 

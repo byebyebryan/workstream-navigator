@@ -1805,8 +1805,6 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         process::Command,
-        thread,
-        time::Duration,
     };
 
     use uuid::Uuid;
@@ -1828,7 +1826,6 @@ mod tests {
         presentation::{
             AttachmentPhase, AttachmentPurpose, AttachmentStatus, Presentation, PresentationError,
         },
-        process::output_bounded,
         provisional::{ProvisionalPhase, read_marker},
         snapshot::{OnboardingStatus, ProjectSnapshot, Snapshot, WorkstreamSnapshot},
         state::{StateRoot, create_current, open_current},
@@ -2118,25 +2115,8 @@ mod tests {
         assert!(!restored.workstreams[0].archived);
     }
 
-    fn wait_for_private_client(socket: &Path) {
-        for _ in 0..50 {
-            let mut command = Command::new("tmux");
-            command.env_remove("TMUX").args(["-S"]).arg(socket).args([
-                "list-clients",
-                "-F",
-                "#{client_name}",
-            ]);
-            let output = output_bounded(&mut command, 4 * 1024, 4 * 1024).unwrap();
-            if output.status.success() && !output.stdout.is_empty() {
-                return;
-            }
-            thread::sleep(Duration::from_millis(10));
-        }
-        panic!("the provisional Runtime never received the outer provider-pane client");
-    }
-
     #[test]
-    fn materialized_shell_stays_unregistered_and_attaches_only_its_private_runtime() {
+    fn materialized_shell_stays_unregistered_and_reuses_its_exact_private_runtime() {
         let temporary = tempfile::tempdir().unwrap();
         let state_path = temporary.path().join("state");
         let seed = temporary.path().join("seed");
@@ -2172,7 +2152,6 @@ mod tests {
         let marker = read_marker(root.base(), &presentation.paths().directory).unwrap();
         assert_eq!(marker.phase(), ProvisionalPhase::Materialized);
         let _runtime_guard = DisposableTmuxServerGuard(marker.runtime_paths().socket.clone());
-        wait_for_private_client(&marker.runtime_paths().socket);
         assert_eq!(
             observe_shell_cwd(&root, &presentation, &seed).unwrap(),
             seed.canonicalize().unwrap()

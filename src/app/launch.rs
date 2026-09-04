@@ -473,6 +473,69 @@ pub(super) fn provider_attach(
     provider_wait()
 }
 
+/// Attaches the initial provisional shell's exact private Runtime. The outer
+/// pane retains only its immutable provisional identity; once native tmux
+/// returns, cleanup is possible only after that identity proves it became the
+/// exact retired `provider_exec_proven` Runtime generation. The shared
+/// attachment-end reconciler remains the sole mutation authority.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "the pane helper receives only immutable provisional identity claims"
+)]
+pub(super) fn provisional_provider_attach(
+    root: &StateRoot,
+    expected_presentation_id: &str,
+    expected_presentation_revision: i64,
+    expected_slot_generation: &str,
+    expected_runtime_id: &str,
+    presentation_socket: PathBuf,
+    presentation_session: String,
+) -> Result<(), AppError> {
+    let presentation =
+        Presentation::from_control(root.base(), presentation_socket, presentation_session)?;
+    let identity = (|| -> Result<crate::shell_control::ProvisionalAttachmentIdentity, AppError> {
+        Ok(crate::shell_control::ProvisionalAttachmentIdentity {
+            presentation_id: uuid::Uuid::parse_str(expected_presentation_id)
+                .map_err(|_| AppError::AttachmentUnavailable)?,
+            presentation_revision: Revision::try_from(expected_presentation_revision)
+                .map_err(|_| AppError::AttachmentUnavailable)?,
+            slot_generation: uuid::Uuid::parse_str(expected_slot_generation)
+                .map_err(|_| AppError::AttachmentUnavailable)?,
+            candidate_runtime_id: RuntimeId::from_str(expected_runtime_id)
+                .map_err(AppError::InvalidRuntimeId)?,
+        })
+    })();
+    let outcome = identity.and_then(|identity| {
+        let tmux = super::SystemTmux::default();
+        let process_probe = LinuxProcessProbe;
+        let runtime = PrivateRuntime::new(
+            &tmux,
+            &process_probe,
+            RuntimePaths::for_runtime(root.base(), identity.candidate_runtime_id),
+        );
+        let mut command = runtime.attach_command();
+        command.stderr(Stdio::null());
+        let status = command.status().map_err(AppError::Io)?;
+        let Some(record) = crate::shell_control::retired_provisional_attachment_record(
+            root,
+            &presentation,
+            identity,
+        )
+        .map_err(|_| AppError::AttachmentUnavailable)?
+        else {
+            return Ok(RuntimeAttachmentEnd::Detached);
+        };
+        finish_runtime_attachment(root, &record, status)
+    });
+    if matches!(outcome, Ok(RuntimeAttachmentEnd::Stopped)) {
+        let _ = clear_stopped_provider_surface();
+    }
+    // Like managed attachment, retain an inert provider-pane helper after a
+    // return. Failures stay silent in the provider pane and cannot become
+    // native-provider traffic.
+    provider_wait()
+}
+
 /// Attaches only a Runtime that is neither owned nor fenced by an
 /// unfinished onboarding operation. The Navigator passes the same snapshot
 /// revisions through the outer helper, so stale cards can never authorize an

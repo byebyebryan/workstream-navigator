@@ -20,7 +20,7 @@ use crate::{
         finalize_observer_trust_under_lease, observer_readiness, prepare_observer_activation,
     },
     clock::{Clock, SystemClock},
-    domain::{ProviderKind, RandomIdGenerator},
+    domain::{OnboardingPhase, ProviderKind, RandomIdGenerator, Revision, RuntimeId},
     onboarding::{ShellCommandDecision, classify_shell_command},
     onboarding_broker::{
         PrepareContext, PreparedHandoff, PresentationBinding, SystemWorktreeInspector,
@@ -40,14 +40,16 @@ use crate::{
         ExpectedProviderExecutable, LinuxProviderExecutableProbe, ReconcileError,
         finalize_opencode_observer_ready, prove_provider_exec,
     },
-    provisional::{HostRetirementError, read_marker, retire_provider_exec_proven_marker},
+    provisional::{
+        HostRetirementError, SlotError, read_marker, retire_provider_exec_proven_marker,
+    },
     review::ReviewDirectory,
     runtime::{LinuxProcessProbe, PrivateRuntime, ProcessGroupProbe, SystemTmux},
     shell_gate::{
         ShellGateContext, ShellGateDecision, ShellGateError, ShellGateInvocation,
         classify_shell_gate, prepare_managed_shell_gate, validate_invocation,
     },
-    state::{CurrentState, IntegrationLifecycle, StateRoot, open_current},
+    state::{CurrentState, IntegrationLifecycle, RuntimeRecord, StateRoot, open_current},
 };
 
 /// The only two outcomes a shell wrapper needs from the gate. An unmanaged
@@ -167,6 +169,140 @@ pub(crate) enum ProviderExecReconciliationError {
     Retirement(#[from] HostRetirementError),
     #[error("OpenCode observer handoff is unavailable")]
     Observer,
+}
+
+/// Immutable identity carried by the outer provisional attachment helper.
+/// It is captured before the unregistered shell can become a Runtime and is
+/// used only to prove the later retired handoff belongs to that same pane.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ProvisionalAttachmentIdentity {
+    pub(crate) presentation_id: uuid::Uuid,
+    pub(crate) presentation_revision: Revision,
+    pub(crate) slot_generation: uuid::Uuid,
+    pub(crate) candidate_runtime_id: RuntimeId,
+}
+
+/// Bounded refusal while determining whether a returned provisional client
+/// became the exact managed Runtime it originally carried. This path is
+/// deliberately read-only: attachment-end cleanup remains in `actions`.
+#[derive(Debug, Error)]
+pub(crate) enum ProvisionalAttachmentReconciliationError {
+    #[error("provisional attachment context is unavailable")]
+    Context,
+    #[error("provisional attachment state is unavailable")]
+    State,
+    #[error("provisional attachment handoff is unavailable")]
+    Handoff,
+}
+
+/// Finds the managed Runtime that an outer provisional attachment may
+/// reconcile after its native tmux client returns.
+///
+/// A present matching marker is an ordinary unpromoted detach and deliberately
+/// returns `None`. Once the marker has been retired, the original pane gains
+/// cleanup authority only by joining its immutable presentation/slot identity
+/// to one `provider_exec_proven` onboarding journal and then to the matching
+/// registered Runtime generation. The caller still repeats exact exit proof
+/// and revision-fenced parking through `actions`.
+pub(crate) fn retired_provisional_attachment_record(
+    root: &StateRoot,
+    presentation: &Presentation,
+    expected: ProvisionalAttachmentIdentity,
+) -> Result<Option<RuntimeRecord>, ProvisionalAttachmentReconciliationError> {
+    let context = presentation
+        .context()
+        .map_err(|_| ProvisionalAttachmentReconciliationError::Context)?;
+    if context.presentation_id() != expected.presentation_id
+        || context.presentation_revision() != expected.presentation_revision
+    {
+        return Err(ProvisionalAttachmentReconciliationError::Context);
+    }
+
+    match read_marker(root.base(), &presentation.paths().directory) {
+        Ok(slot) => {
+            if slot.presentation_id() != expected.presentation_id
+                || slot.presentation_revision() != expected.presentation_revision
+                || slot.slot_generation() != expected.slot_generation
+                || slot.candidate_runtime_id() != expected.candidate_runtime_id
+            {
+                return Err(ProvisionalAttachmentReconciliationError::Context);
+            }
+            // The shell remains provisional. Its detached client cannot
+            // mutate Runtime or Workstream state.
+            return Ok(None);
+        }
+        Err(SlotError::MarkerUnavailable) => {}
+        Err(_) => return Err(ProvisionalAttachmentReconciliationError::State),
+    }
+
+    let mut state =
+        open_current(root).map_err(|_| ProvisionalAttachmentReconciliationError::State)?;
+    let provisional_lease = state
+        .acquire_provisional_lease()
+        .map_err(|_| ProvisionalAttachmentReconciliationError::State)?;
+    let Some(operation) = state
+        .onboarding_marker_operation_current(
+            &provisional_lease,
+            expected.presentation_id,
+            expected.presentation_revision,
+            expected.slot_generation,
+            expected.candidate_runtime_id,
+            None,
+        )
+        .map_err(|_| ProvisionalAttachmentReconciliationError::State)?
+    else {
+        return Ok(None);
+    };
+    if operation.phase != OnboardingPhase::ProviderExecProven {
+        return Err(ProvisionalAttachmentReconciliationError::Handoff);
+    }
+    let target = state
+        .onboarding_exec_proven_target_current(&provisional_lease, operation.operation_id)
+        .map_err(|_| ProvisionalAttachmentReconciliationError::Handoff)?;
+    let ownership = target.ownership();
+    if ownership.operation_id != operation.operation_id
+        || ownership.runtime_id != expected.candidate_runtime_id
+    {
+        return Err(ProvisionalAttachmentReconciliationError::Handoff);
+    }
+    provisional_lease
+        .revalidate_for_mutation(state.root())
+        .map_err(|_| ProvisionalAttachmentReconciliationError::State)?;
+    let registry = state
+        .into_host_registry()
+        .map_err(|_| ProvisionalAttachmentReconciliationError::State)?;
+    let record = registry
+        .runtime_by_id(expected.candidate_runtime_id)
+        .map_err(|_| ProvisionalAttachmentReconciliationError::State)?
+        .ok_or(ProvisionalAttachmentReconciliationError::Handoff)?;
+    if !retired_provisional_runtime_matches(
+        expected.candidate_runtime_id,
+        ownership,
+        target.runtime_generation(),
+        &record,
+    ) || crate::runtime::RuntimePaths::for_record(
+        root.base(),
+        record.runtime_id,
+        &record.tmux_session,
+    )
+    .map_err(|_| ProvisionalAttachmentReconciliationError::Handoff)?
+        != crate::runtime::RuntimePaths::for_runtime(root.base(), expected.candidate_runtime_id)
+    {
+        return Err(ProvisionalAttachmentReconciliationError::Handoff);
+    }
+    Ok(Some(record))
+}
+
+fn retired_provisional_runtime_matches(
+    expected_runtime_id: RuntimeId,
+    ownership: crate::state::current::OnboardingOwnership,
+    expected_runtime_generation: &str,
+    record: &RuntimeRecord,
+) -> bool {
+    ownership.runtime_id == expected_runtime_id
+        && record.runtime_id == expected_runtime_id
+        && record.workstream_id == ownership.workstream_id
+        && record.tmux_generation == expected_runtime_generation
 }
 
 /// Reopens the private presentation marker before any account-shell path
@@ -912,9 +1048,129 @@ mod tests {
         reconcile_provider_exec_from_presentation,
     };
     use crate::{
-        account_shell::AccountShellError, domain::ProviderKind,
+        account_shell::AccountShellError,
+        domain::{
+            LocationId, OperationId, ProviderKind, Revision, RuntimeId, RuntimeStatus, WorkstreamId,
+        },
+        presentation::Presentation,
         provider_reconcile::ExpectedProviderExecutable,
+        provisional::{ProvisionalSlot, SlotGeneration, read_marker, write_new_marker},
+        state::{
+            RuntimeRecord, StateRoot, create_current, current::OnboardingOwnership, open_current,
+        },
     };
+
+    use super::{
+        ProvisionalAttachmentIdentity, retired_provisional_attachment_record,
+        retired_provisional_runtime_matches,
+    };
+
+    #[test]
+    fn retired_provisional_attachment_requires_the_original_runtime_and_generation() {
+        let runtime_id = RuntimeId::from(uuid::Uuid::from_u128(1));
+        let workstream_id = WorkstreamId::from(uuid::Uuid::from_u128(2));
+        let ownership = OnboardingOwnership {
+            operation_id: OperationId::from(uuid::Uuid::from_u128(3)),
+            location_id: LocationId::from(uuid::Uuid::from_u128(4)),
+            workstream_id,
+            runtime_id,
+            operation_revision: Revision::INITIAL,
+        };
+        let mut record = RuntimeRecord {
+            runtime_id,
+            workstream_id,
+            provider: ProviderKind::Codex,
+            tmux_generation: "generation-a".to_owned(),
+            tmux_session: format!("wsnav-{runtime_id}"),
+            cwd: std::env::temp_dir(),
+            provider_pid: Some(99),
+            process_birth: Some("birth-99".to_owned()),
+            status: RuntimeStatus::Attention,
+            revision: Revision::INITIAL,
+        };
+
+        assert!(retired_provisional_runtime_matches(
+            runtime_id,
+            ownership,
+            "generation-a",
+            &record,
+        ));
+        record.tmux_generation = "generation-b".to_owned();
+        assert!(!retired_provisional_runtime_matches(
+            runtime_id,
+            ownership,
+            "generation-a",
+            &record,
+        ));
+        record.tmux_generation = "generation-a".to_owned();
+        record.runtime_id = RuntimeId::from(uuid::Uuid::from_u128(5));
+        assert!(!retired_provisional_runtime_matches(
+            runtime_id,
+            ownership,
+            "generation-a",
+            &record,
+        ));
+    }
+
+    #[test]
+    fn unpromoted_provisional_attachment_end_keeps_the_marker_and_registry_unchanged() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state_path = temporary.path().join("state");
+        let seed = temporary.path().join("seed");
+        let executable = temporary.path().join("wsnav-fixture");
+        fs::create_dir(&seed).unwrap();
+        fs::write(&executable, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        drop(create_current(&state_path, &crate::domain::RandomIdGenerator).unwrap());
+        let presentation = Presentation::fresh_with_executable(&state_path, executable);
+        presentation
+            .start(uuid::Uuid::from_u128(11), &seed)
+            .unwrap();
+        let root = StateRoot::select(&state_path);
+        let mut state = open_current(&root).unwrap();
+        let lease = state.acquire_provisional_lease().unwrap();
+        let slot = ProvisionalSlot::materializing(
+            state.root(),
+            uuid::Uuid::from_u128(11),
+            Revision::INITIAL,
+            lease.lease_generation(),
+            RuntimeId::from(uuid::Uuid::from_u128(12)),
+            SlotGeneration::new(uuid::Uuid::from_u128(13)),
+            &seed,
+        )
+        .unwrap();
+        write_new_marker(state.root(), &presentation.paths().directory, &slot).unwrap();
+        drop(lease);
+        drop(state);
+
+        assert_eq!(
+            retired_provisional_attachment_record(
+                &root,
+                &presentation,
+                ProvisionalAttachmentIdentity {
+                    presentation_id: slot.presentation_id(),
+                    presentation_revision: slot.presentation_revision(),
+                    slot_generation: slot.slot_generation(),
+                    candidate_runtime_id: slot.candidate_runtime_id(),
+                },
+            )
+            .unwrap(),
+            None,
+        );
+        let state = open_current(&root).unwrap();
+        assert_eq!(
+            read_marker(state.root(), &presentation.paths().directory).unwrap(),
+            slot
+        );
+        assert!(state.registered_runtime_paths().unwrap().is_empty());
+        drop(state);
+        presentation.close().unwrap();
+    }
 
     #[test]
     fn unmanaged_commands_return_before_the_real_host_context_is_required() {

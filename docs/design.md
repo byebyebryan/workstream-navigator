@@ -2,26 +2,52 @@
 
 Date: 2026-09-04
 
-Status: D24, developed in the current tree from `677a611`, passes its complete
-local/disposable gate and is byte-identically installed for operator inspection
-with executable SHA-256
-`4b81709179b308e32039aa53573b12c9a787b9249547fd5835cd6c10e85c9518`.
-It makes Archived a secondary catalog with retained native opening, visibility-
-only Restore, and narrow revision-fenced Forget. Schema 15 is unchanged. No
-remote-CI or live-provider acceptance is claimed for D24. The D22
-correction in `8338a04` remains operator-accepted on the unchanged direct,
-current-only schema-15 epoch. Operator inspection first falsified checkpoint
-`ed74b0b` after a Codex upgrade left the exact still-running
-executable represented by Linux as `codex (deleted)`, which its matcher
-rejected. The corrected build recognizes only that exact kernel tombstone
-while retaining every Runtime, argv, provider, session, and revision fence;
-explicit Recover then reconciled the retained binding without restarting or
-advancing the `starting` Runtime. No remote-CI claim is made for D22. D18
-checkpoint `c961c7e` and
-installed artifact
-`f732e2b16344b038cd05996501ce77be42302f7403de9720d156dbf24777d124`
-remain the latest separately accepted destructive-reset, native-trust, and
-disposable Codex/OpenCode lifecycle evidence.
+Status: D25 is complete in this checkpoint, developed from `076b0a7`. Its full
+local/disposable and declared-Rust-1.88 gates pass, and its locked release
+is byte-identically installed for operator inspection with executable SHA-256
+`7d8c4704a79b7c1e48c1bbff0034aaf5faf9b5905744e4520838de8eeca5bdc0`.
+Sanitized native-exit acceptance passed with Codex 0.153.2 and OpenCode 1.18.27
+on that exact artifact, followed by complete disposable cleanup. Schema 15 and
+the D24 product surface are unchanged. No passing current-source remote-CI
+result is included in the D25 acceptance record. D18 checkpoint
+`c961c7e` retains the older separately accepted destructive-reset and native
+observer-trust evidence.
+
+### D25 current-product stabilization
+
+D25 stabilizes the current contract without adding session-management scope.
+The outer provider pane created for the provisional Shell now retains an
+internal attachment helper across Shell-to-provider promotion. When native
+tmux attachment returns, that helper gains reconciliation authority only after
+the provisional marker is absent and the durable onboarding journal proves the
+same presentation ID and revision, slot generation, candidate Runtime ID,
+`provider_exec_proven` operation, Workstream, Runtime generation, and canonical
+private paths. A present matching marker is an ordinary unpromoted detach and
+causes no registry mutation. Missing, duplicated, stale, malformed, or
+mismatched evidence is a closed refusal.
+
+After that identity join, the helper delegates to the ordinary managed
+attachment-end reconciler. An exact running PID/birth remains a detach. Only a
+matching zombie or the narrow disappearance between two exact reads opens a
+bounded convergence window for the retained pane; status `0` with matching
+PID, launch cwd, topology, and process absence parks the Runtime. Non-zero,
+reused, inaccessible, malformed, missing, or timed-out evidence remains
+unavailable. A prior stopped Runtime may shed an older retained private server
+only through the same exact status-zero proof before reserving its next
+generation.
+
+Linux `ESRCH` is treated as a vanished `/proc` entry only while enumerating a
+process group; direct identity reads remain strict. Tests wait for the exact
+private client and retained dead-status metadata instead of fixed scheduling,
+and the focus regression polls the current terminal screen instead of relying
+on a recorder attached after the initial frame. These are deterministic test
+seams, not new product authority.
+
+D25 adds no public command, key, page, lifecycle, provider-thread action,
+schema migration, transcript/capture storage, provider output mutation,
+project cleanup, or packaging scope. Current UI capture generation is
+operator-owned and outside acceptance. The focused record is
+[d25-current-product-closure.md](evidence/acceptance/d25-current-product-closure.md).
 
 ### D24 archived catalog and forget
 
@@ -934,8 +960,7 @@ rather than a generic management landing page:
 ```text
 Workstreams
 ├── Shell
-├── Project-grouped active Workstreams
-└── Recovery
+└── Project-grouped active Workstreams
 
 Archived
 └── Project-grouped archived Workstreams with Open, Restore, and Forget
@@ -987,7 +1012,7 @@ surface.
 
 The Workstreams page retains a smaller accepted action muscle memory: `Enter`
 attaches a live Runtime, starts/resumes a stopped one, or enters exact native
-recovery for an ordinary lost Runtime. Under D19 that action may replace the
+recovery for an ordinary lost Runtime. That action may replace the
 right-hand surface but never changes pane focus. `n` creates a separate blank
 Workstream at the selected managed Workstream's exact ProjectLocation with the
 same provider; `x` opens the reversible archive confirmation; and `?` toggles
@@ -1629,46 +1654,22 @@ Codex's native CLI and ephemeral App Server divide the action boundary:
 
 #### Workstream display names
 
-The current tip's non-empty `thread.name` is canonical. When it is missing or
-cannot be refreshed, the navigator uses a bounded synthetic display fallback
-without persisting a shadow label.
-
-Name observation and transition context are separate:
-
-```text
-NameState
-  named | known_empty | unavailable
-
-EffectiveNameSource
-  native | cached_stale | synthetic
-```
-
-`known_empty` means an exact App Server read returned no name. `unavailable`
-means the bounded host-local read did not complete; it does not erase a cached
-name.
-
-| Context | Effective display when the current tip has no native name |
-| --- | --- |
-| New Workstream before thread binding | `starting` |
-| New or existing Workstream with a known-empty name | `untitled` |
-| Metadata refresh unavailable with a current-tip cache | Last cached native name with a stale indicator |
-| Metadata refresh unavailable without a current-tip cache | `name unavailable` |
-| Provider thread missing during recovery | Last cached native name with `recovery required`; otherwise `recovery required` |
-
-Resolution prefers a current non-empty native name, then a current-binding
-cache when refresh is unavailable, and finally a synthetic lifecycle fallback.
-An unavailable observation never becomes `unnamed` or `untitled`; those
-displays require `known_empty`. The reduced navigator's last-resort row label
-is the stable short Workstream ID without a synthetic prefix; it never
-substitutes for exact identity or action authority. Fallbacks never expose a
-provider identifier or raw provider payload. Git state, host, and cwd remain
-secondary context rather than naming authority.
+The current tip's observed non-empty provider name is canonical display text.
+When no usable native name is currently stored for that binding, the navigator
+shows the stable short Workstream ID without a synthetic prefix. It does not
+render `starting`, `untitled`, `name unavailable`, or a stale-name indicator.
+Lifecycle remains visible through the separate card marker, so fallback text
+does not duplicate status or pretend to be provider metadata. Neither native
+names nor short-ID fallbacks authorize an action; exact typed identifiers and
+revisions remain the only authority. No fallback exposes a provider session
+identifier or raw payload.
 
 An exact thread ID, not any displayed text, remains identity and action
 authority. Names and computed fallbacks need not be unique.
 
-Navigator rows show Project, provider, current tip name, and a relative age
-from the last observed native conversation activity. Activity sequence remains
+Navigator rows show Project, provider, the current observed native name or
+short Workstream ID, and a relative age from the last observed native
+conversation activity. Activity sequence remains
 the deterministic ordering key within this host. There is no cross-host
 ordering or combined client view. The wall-clock value survives start, resume,
 native provider exit, and archive. A migrated Workstream or one with no
@@ -1689,8 +1690,8 @@ cache and never opens an App Server on the input loop.
 
 After a native same-Workstream cutover, Workstream Navigator does not copy the
 previous title into the new tip. The provider-owned name is refreshed from the
-new exact binding; until then the navigator uses only its bounded synthetic
-fallback without persisting it as provider metadata.
+new exact binding; until then the navigator shows only the short Workstream ID
+without persisting it as provider metadata.
 
 Semantic automatic naming is not a lifecycle-hook responsibility. It may later
 be offered as an opt-in Codex skill or managed agent policy, where Codex already
@@ -1913,8 +1914,8 @@ credential, or environment dump is persisted.
   naming authority.
 - `name_state=unavailable` retains a prior cached name; an unavailable refresh
   never becomes evidence that the provider name is empty.
-- `EffectiveNameSource` is derived presentation state and is not persisted as a
-  user-authored name.
+- The short-ID display fallback and lifecycle marker are derived presentation
+  state and are not persisted as a user-authored name.
 - Codex may create native conversations sequentially inside one Workstream as
   the user uses native `/clear` or `/fork`. D1.5 observes only the separately
   proven exact binding replacement; other native actions remain canonical
@@ -2496,10 +2497,10 @@ without transferring pane focus and `n` performs no separate action. An
 archived Workstream must be restored before it can be the source of `n`.
 
 No workstream name, model, branch, session ID, or first prompt is required in a
-manager-owned creation form. Before binding, the row shows
-`starting`; a bound but unnamed tip shows `untitled`. Later native `/rename` or
-provider/agent naming policy updates the one Codex-owned thread name, which
-WSNav passively observes.
+manager-owned creation form. Until a non-empty native name is observed, the
+row shows the short Workstream ID while the independent marker carries any
+starting or recovery state. Later native `/rename` or provider/agent naming
+policy updates the one Codex-owned thread name, which WSNav passively observes.
 
 ### Native Codex thread management
 
@@ -2851,9 +2852,10 @@ outer-tmux prefix-passthrough boundary. The gate proves:
   copy-mode scrolling, completed provider output, and direct `wsnav attach`
   behavior remain intact.
 
-The complete gate passes for checkpoint `a0ec38b`; D19 is the current locally
-installed operator contract. The evidence is local/disposable and does not
-claim remote CI or real-provider acceptance. No partial D19 slice was installed.
+The complete gate passed for checkpoint `a0ec38b`; this remains historical D19
+evidence rather than the current installed operator contract. It is
+local/disposable and does not claim remote CI or real-provider acceptance. No
+partial D19 slice was installed.
 
 ## Failure and recovery model
 
@@ -3105,6 +3107,7 @@ roadmap and version-specific decisions remain in
 | D22 | Exact live retained-session recovery confirmation | [Acceptance](evidence/acceptance/d22-exact-live-recovery.md) |
 | D23 | Provider-native stop and contextual Archive/Restore | [Acceptance](evidence/acceptance/d23-native-stop-contextual-visibility.md) |
 | D24 | Archived secondary catalog, retained opening, and WSNav-owned Forget | [Acceptance](evidence/acceptance/d24-archived-catalog-forget.md) |
+| D25 | Current-product lifecycle and evidence stabilization | [Acceptance](evidence/acceptance/d25-current-product-closure.md) |
 
 ## Current concrete provider boundary
 

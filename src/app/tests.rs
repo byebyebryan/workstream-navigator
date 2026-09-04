@@ -338,6 +338,7 @@ fn state_free_opencode_helpers_are_hidden_and_not_observer_or_provider_pane_comm
 fn retired_provider_and_presentation_helpers_are_unparseable_but_control_is_typed() {
     assert!(Cli::try_parse_from(["wsnav", "_navigator"]).is_err());
     assert!(Cli::try_parse_from(["wsnav", "_provider_attach"]).is_err());
+    assert!(Cli::try_parse_from(["wsnav", "_provisional_provider_attach"]).is_err());
     assert!(Cli::try_parse_from(["wsnav", "_provider_remote_attach"]).is_err());
 
     let current = Cli::try_parse_from([
@@ -368,6 +369,33 @@ fn retired_provider_and_presentation_helpers_are_unparseable_but_control_is_type
     ));
     assert!(is_provider_pane_command(current.command.as_ref()));
     assert!(!is_observer_command(current.command.as_ref()));
+
+    let provisional = Cli::try_parse_from([
+        "wsnav",
+        "_provisional_provider_attach",
+        "--expected-presentation-id",
+        "00000000-0000-0000-0000-000000000004",
+        "--expected-presentation-revision",
+        "1",
+        "--expected-slot-generation",
+        "00000000-0000-0000-0000-000000000005",
+        "--expected-runtime-id",
+        "00000000-0000-0000-0000-000000000006",
+        "--presentation-socket",
+        "/state/presentation/presentation-0123456789ab/tmux.sock",
+        "--presentation-session",
+        "wsnav-presentation-0123456789ab",
+    ])
+    .unwrap();
+    assert!(matches!(
+        provisional.command.as_ref(),
+        Some(Commands::ProvisionalProviderAttach {
+            expected_presentation_revision: 1,
+            ..
+        })
+    ));
+    assert!(is_provider_pane_command(provisional.command.as_ref()));
+    assert!(!is_observer_command(provisional.command.as_ref()));
 
     assert!(Cli::try_parse_from(["wsnav", "_observer_review"]).is_err());
     assert!(Cli::try_parse_from(["wsnav", "_presentation_shell"]).is_err());

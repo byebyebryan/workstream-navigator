@@ -132,6 +132,24 @@ pub(super) enum Commands {
         #[arg(long)]
         provider_cycle: bool,
     },
+    /// Internal provisional attachment helper. It attaches the exact
+    /// unregistered private Runtime and gains cleanup authority only after an
+    /// exact retired onboarding handoff proves it became managed.
+    #[command(name = "_provisional_provider_attach", hide = true)]
+    ProvisionalProviderAttach {
+        #[arg(long)]
+        expected_presentation_id: String,
+        #[arg(long)]
+        expected_presentation_revision: i64,
+        #[arg(long)]
+        expected_slot_generation: String,
+        #[arg(long)]
+        expected_runtime_id: String,
+        #[arg(long)]
+        presentation_socket: PathBuf,
+        #[arg(long)]
+        presentation_session: String,
+    },
     /// Internal passive Codex lifecycle hook entrypoint.
     #[command(name = "_hook", hide = true)]
     Hook,
@@ -175,6 +193,7 @@ pub(super) const fn is_provider_pane_command(command: Option<&Commands>) -> bool
         Some(
             Commands::PresentationControl { .. }
                 | Commands::ProviderAttach { .. }
+                | Commands::ProvisionalProviderAttach { .. }
                 | Commands::RuntimeLaunch { .. }
         )
     )

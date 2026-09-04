@@ -3,7 +3,8 @@ use super::{
     cli::{Cli, Commands},
     launch::{
         OpenCodeObserverArguments, attach_runtime, opencode_observer, presentation_control,
-        presentation_mouse_validate, provider_attach, provider_wait, runtime_launch,
+        presentation_mouse_validate, provider_attach, provider_wait, provisional_provider_attach,
+        runtime_launch,
     },
     local::observe_hook,
     model::{AppError, default_state_root, parse_provider, parse_revision, parse_workstream},
@@ -207,6 +208,22 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
             presentation_session,
             &attempt_id,
             provider_cycle,
+        ),
+        Commands::ProvisionalProviderAttach {
+            expected_presentation_id,
+            expected_presentation_revision,
+            expected_slot_generation,
+            expected_runtime_id,
+            presentation_socket,
+            presentation_session,
+        } => provisional_provider_attach(
+            root,
+            &expected_presentation_id,
+            expected_presentation_revision,
+            &expected_slot_generation,
+            &expected_runtime_id,
+            presentation_socket,
+            presentation_session,
         ),
         Commands::RuntimeLaunch {
             runtime_id,

@@ -530,10 +530,7 @@ impl Presentation {
             self.set_pane_role(&provider, PresentationPaneRole::Provider, None)?;
             self.invoke(
                 None,
-                self.provider_respawn_for_command(
-                    &provider,
-                    Self::provisional_attach_command(slot.runtime_paths()),
-                ),
+                self.provider_respawn_for_command(&provider, self.provisional_attach_command(slot)),
             )?;
             // The provider pane has changed, but no state did. Recheck
             // the held lease before returning so the controller never treats

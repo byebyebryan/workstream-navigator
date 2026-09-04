@@ -2,23 +2,17 @@
 
 Date: 2026-09-04
 
-Status: D0-D24 implementation is complete. D24, developed in the current tree
-from `677a611`, passes the full local/disposable gate and is byte-identically
-installed for operator inspection with executable SHA-256
-`4b81709179b308e32039aa53573b12c9a787b9249547fd5835cd6c10e85c9518`.
-It makes Archived a secondary catalog with retained native opening,
-visibility-only Restore, and narrow revision-fenced Forget. No remote-CI or
-live-provider acceptance is claimed for D24. The D22 correction in `8338a04` remains
-operator-accepted against the exact retained live Codex recovery that
-falsified checkpoint `ed74b0b`. Linux reported that
-still-running executable as `codex (deleted)` after an on-disk Codex upgrade;
-the corrected matcher accepted only that exact kernel tombstone alongside all
-other recovery fences. D21 checkpoint `868ee85` remains the completed
-provider-derived attention boundary. No remote-CI claim is transferred to D22.
-D18
-checkpoint `c961c7e` remains the latest accepted artifact with separately
-authorized reset, native-trust, and disposable Codex/OpenCode lifecycle
-evidence.
+Status: D0-D25 implementation is complete. D25, developed from `076b0a7`,
+passes the full local/disposable gate and declared Rust 1.88 suite. Its locked
+release is byte-identically installed for operator
+inspection with executable SHA-256
+`7d8c4704a79b7c1e48c1bbff0034aaf5faf9b5905744e4520838de8eeca5bdc0`.
+Sanitized native-exit acceptance passed with Codex 0.153.2 and OpenCode 1.18.27
+on that exact artifact, with complete cleanup. D25 stabilizes the existing D24
+surface and schema 15; it adds no user-facing session-management capability.
+No passing current-source remote CI is included in the D25 acceptance record.
+D18 checkpoint `c961c7e` retains the older separately
+authorized destructive-reset and native observer-trust evidence.
 
 `docs/design.md` is the product and architecture contract. This file owns
 delivery order, implementation status, and exit gates. The complete prior
@@ -37,6 +31,85 @@ roadmap is preserved as
   ambiguity handling.
 - D18 is a clean state break. Schemas 12 through 14 are refusal evidence, not
   migration or adoption inputs.
+
+## Completed checkpoint: D25 current-product stabilization and closure
+
+Implementation status: locally accepted, sanitized live-provider accepted,
+and installed for operator inspection. No passing current-source remote-CI
+result is included in this acceptance record.
+
+D25 closes deterministic and operational gaps found while reviewing the
+current simplified product. It does not change the D24 product surface. The
+initial Shell attachment now survives promotion as a hidden exact-identity
+helper, so native provider exit reaches the same retained-pane reconciler used
+by ordinary managed reattachment. Process and tmux publication races are
+bounded at their observation seams without weakening identity or ambiguity
+handling.
+
+Scope:
+
+- replace fixed scheduling in the private-client exit regression with an
+  exact client PID/session readiness proof;
+- treat Linux `ESRCH` as a vanished process only for a `/proc` entry already
+  found during process-group enumeration, while keeping direct identity,
+  permission, malformed, and other I/O failures strict;
+- distinguish a still-running exact provider detach from an exact zombie or
+  narrow matching-process disappearance, and give only the latter a bounded
+  retained-pane convergence window before requiring matching PID, launch cwd,
+  topology, process absence, and status `0`;
+- remove an older stopped Runtime's retained private server before reusing its
+  Runtime ID only through that same exact status-zero proof; refuse live,
+  non-zero, reused, inaccessible, malformed, or ambiguous evidence;
+- keep the provisional outer attachment alive through promotion, then join
+  its immutable presentation ID/revision, slot generation, and candidate
+  Runtime ID to one exact `provider_exec_proven` operation, owned Workstream,
+  Runtime generation, and canonical private paths before delegating cleanup;
+  an unpromoted detach performs no state mutation;
+- make focus and retained-status tests wait on the exact current terminal/tmux
+  evidence they assert, including tmux's separate dead-status publication;
+- reconcile present-tense product documentation with the implemented compact
+  name/marker rows while preserving all historical D0-D24 evidence; and
+- build, atomically install, and checksum the locked release, and exercise
+  sanitized Codex/OpenCode native exit on that exact artifact with complete
+  disposable cleanup.
+
+Non-goals:
+
+- do not add or restore Fork, Rename, Ack, Park/Unpark, provider-thread
+  archive/delete, transcript preview, bulk pruning, or any other public action;
+- do not add a page, status, schema migration, compatibility route, provider
+  traffic, terminal-content persistence, project cleanup, packaging change,
+  or automatic provider relaunch; and
+- do not generate or claim a current UI capture; capture selection and
+  publication remain operator-owned.
+
+Exit gate:
+
+- focused regressions prove exact client/status readiness, scoped Linux
+  disappearance, detach-versus-exit convergence, stopped-retained cleanup,
+  provisional promotion identity, and no-mutation unpromoted detach;
+- the complete locked suite passes locally and on Ubuntu 24.04 with Rust
+  1.88.0, tmux 3.4, Git 2.43.0, and Zsh 5.9;
+- `scripts/check` passes formatting, strict Clippy, all disposable tests,
+  packaging, dependency policy, documentation links, and source boundaries;
+- sanitized Codex 0.153.2 and OpenCode 1.18.27 each reach durable attention,
+  then native `/exit` proves parked/stopped state, provider and private-server
+  absence, and a live inert presentation surface on the exact release; and
+- source and installed `wsnav 0.1.0` binaries are mode `0755`, size 7,370,160
+  bytes, and SHA-256
+  `7d8c4704a79b7c1e48c1bbff0034aaf5faf9b5905744e4520838de8eeca5bdc0`.
+
+Remote evidence boundary:
+
+- authenticated GitHub inspection from Starship recovered historical run
+  `33883382546`, job `101057180882`, whose MSRV failure was the private-client
+  detach timing regression; and
+- that historical failing job is diagnosis evidence only. This acceptance
+  record includes no passing remote-CI result for D25.
+
+Evidence record:
+
+- [D25 current-product stabilization and closure](evidence/acceptance/d25-current-product-closure.md)
 
 ## Completed checkpoint: D24 archived catalog and WSNav-owned Forget
 
@@ -761,6 +834,7 @@ historical evidence rather than current delivery authority.
 | D22 | Exact live retained-session Codex recovery confirmation | [D22 acceptance](evidence/acceptance/d22-exact-live-recovery.md) |
 | D23 | Provider-native stop; public Park retired and archive/restore made contextual | [D23 acceptance](evidence/acceptance/d23-native-stop-contextual-visibility.md) |
 | D24 | Archived secondary catalog and WSNav-owned Forget; locally accepted and installed for inspection | [D24 evidence](evidence/acceptance/d24-archived-catalog-forget.md) |
+| D25 | Current-product lifecycle and evidence stabilization; local, MSRV, and sanitized live-provider accepted | [D25 evidence](evidence/acceptance/d25-current-product-closure.md) |
 
 ## Deferred product decisions
 

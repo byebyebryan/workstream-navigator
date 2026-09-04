@@ -2,6 +2,36 @@
 
 ## Status and authority
 
+### D25 current-product stabilization
+
+D25 closes the current product around the already-settled shell-first,
+provider-native session model. It adds no page, action, status, schema, or
+provider-content ownership. The initial provisional attachment now retains a
+hidden, presentation-bound helper through promotion; after native attachment
+returns, that helper may reconcile only when the retired marker joins to the
+exact `provider_exec_proven` operation, Runtime, Workstream, generation, and
+private paths it carried before launch. An unpromoted shell detach remains
+state-free. The existing exact retained-pane proof remains the only authority
+to classify status `0` as provider exit and park the Runtime.
+
+The same closure bounds Linux `/proc` disappearance during process-group
+enumeration without weakening direct identity reads, waits for exact tmux
+client and dead-pane metadata publication in tests, and uses current-screen
+terminal evidence for the focus regression. A stopped Runtime left with an
+exact retained zero-status pane by an older helper is removed before its next
+generation is reserved; live, non-zero, reused, malformed, or inaccessible
+evidence remains fail-closed.
+
+D0-D25 are complete. The locked D25 release is installed byte-identically for
+operator inspection with SHA-256
+`7d8c4704a79b7c1e48c1bbff0034aaf5faf9b5905744e4520838de8eeca5bdc0`.
+The full disposable gate, declared Rust 1.88 suite, and sanitized native-exit
+acceptance passed with Codex 0.153.2 and OpenCode 1.18.27. No passing
+current-source remote CI is included in that acceptance record. Current UI
+capture generation was left to the operator and is not
+acceptance evidence. See the
+[D25 acceptance record](evidence/acceptance/d25-current-product-closure.md).
+
 ### D24 archived catalog and forget
 
 D24 keeps Archived as a secondary session catalog and buffer zone rather than a
@@ -32,14 +62,10 @@ the provider pane. A resumable card shows a static gray `■` that remains
 readable against the selection highlight. A detach keeps both the provider
 display and unmarked live/idle card unchanged.
 
-D0-D24 are complete. The D24 source passes the full disposable gate and its
-locked release is installed byte-identically for operator inspection with
-SHA-256
-`4b81709179b308e32039aa53573b12c9a787b9249547fd5835cd6c10e85c9518`.
-This result does not claim remote CI or live Codex/OpenCode acceptance. D18
-checkpoint `c961c7e` remains the latest artifact with separately authorized
-destructive-reset, native-trust, and disposable live-provider release
-evidence.
+D24 remains the completed archived-catalog capability and its exact historical
+artifact evidence remains in the D24 acceptance record. D18 checkpoint
+`c961c7e` retains the older separately authorized destructive-reset and native
+observer-trust evidence.
 
 - [Product and architecture design](design.md) is the V1 contract.
 - [Delivery roadmap](roadmap.md) owns delivery order, checkpoint status, and
@@ -84,8 +110,8 @@ the [D19 acceptance record](evidence/acceptance/d19-tmux-navigation.md).
 
 ## Current operator contract
 
-This section describes the locally installed D24 development artifact. D18
-remains the latest separately accepted live-provider release.
+This section describes the locally installed D25 development artifact. D18
+retains the older destructive-reset and native observer-trust evidence.
 
 WSNav is host-local. Run it on the machine where the provider Runtime lives.
 For another machine, establish ordinary SSH in a separate terminal, tab, or
@@ -400,14 +426,13 @@ and complete disposable cleanup.
 
 ## Build and command references
 
-The project is a source-installed operator beta. This host's installed D19
+The project is a source-installed operator beta. This host's installed D25
 development artifact opens only schema 15 and its `wsnav --help` is the
 installed CLI reference. A host must not be described as running a candidate
 until its artifact is built, checked, atomically installed, and
 checksum-verified there. Run
 `cargo build --locked --release` and `scripts/check` before any
-replacement. D19's local/disposable acceptance and installation are recorded
-separately from D18's destructive reset, native observer trust, and
-live-provider acceptance; there is no state rollback. The normal workflow
-remains the Navigator beside either the provisional account shell or the native
-provider TUI.
+replacement. D25's local/disposable and sanitized live-provider acceptance is
+recorded separately from D18's destructive reset and native observer trust;
+there is no state rollback. The normal workflow remains the Navigator beside
+either the provisional account shell or the native provider TUI.

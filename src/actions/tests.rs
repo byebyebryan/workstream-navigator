@@ -10,25 +10,31 @@ use super::{
     codex_recovery_program,
     creation::{IndependentStartSpec, start_independent_workstream_with},
     forget,
+    lifecycle::{
+        AttachmentEndProviderState, attachment_end_provider_state, await_pending_exit_evidence_with,
+    },
     model::reconcile_observer_trust_with_manager,
     park, preflight_attachment, preflight_attachment_read_only,
     providers::managed_codex_environment,
     reconcile_lost_runtimes, reconcile_provider_attachment_end, restore, start,
     start::{
         CodexRecoveryEvidence, CodexThreadReader, backfill_live_runtime_provider_pid,
-        codex_recovery_process_matches, opencode_recovery_handle_matches,
-        reconcile_live_codex_recovery, runtime_launch_program,
+        codex_recovery_process_matches, existing_live_runtime_start_outcome,
+        opencode_recovery_handle_matches, reconcile_live_codex_recovery,
+        remove_stopped_retained_clean_exit, runtime_launch_program,
     },
 };
 use crate::provider::codex::app_server::{AppServerError, ThreadMetadata};
 use crate::provider::lifecycle::{LifecycleEvent, LifecycleObservation};
 use crate::provider::names::NameState;
 use crate::runtime::{
-    LinuxProcessProbe, NativeLaunch, PrivateRuntime, ProcessCommand, RuntimePaths, SystemTmux,
+    LinuxProcessProbe, NativeLaunch, PrivateRuntime, ProcessCommand, ProcessObservation,
+    ProcessState, RuntimePaths, SystemTmux,
 };
 
 use std::{
     cell::{Cell, RefCell},
+    collections::VecDeque,
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
@@ -360,19 +366,45 @@ fn release_provider_and_wait_for_retained_exit(
         RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session).unwrap();
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
-    let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
     let provider_pid = record.provider_pid.unwrap();
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        if matches!(
-            runtime.provider_exit_status(provider_pid, &record.cwd),
-            Ok(status) if status == expected_status
-        ) {
-            return;
-        }
+        let mut command = Command::new("tmux");
+        command
+            .env_remove("TMUX")
+            .args(["-f", "/dev/null", "-S"])
+            .arg(&paths.socket)
+            .args([
+                "list-panes",
+                "-t",
+                &format!("{}:provider", paths.session_name),
+                "-F",
+                "#{pane_index}|#{pane_dead}|#{pane_dead_status}",
+            ]);
+        let metadata = crate::process::output_bounded(&mut command, 4 * 1024, 4 * 1024).unwrap();
+        let expected_metadata = format!("0|1|{expected_status}");
+        let last_observation = if metadata.status.success()
+            && String::from_utf8_lossy(&metadata.stdout)
+                .lines()
+                .any(|line| line == expected_metadata)
+        {
+            match runtime.provider_exit_status(provider_pid, &record.cwd) {
+                Ok(status) if status == expected_status => return,
+                Ok(status) => format!("retained status {status}"),
+                Err(error) => format!("probe error: {error}"),
+            }
+        } else {
+            format!(
+                "retained metadata not ready: status={} stdout={:?} stderr={:?}",
+                metadata.status,
+                String::from_utf8_lossy(&metadata.stdout),
+                String::from_utf8_lossy(&metadata.stderr)
+            )
+        };
         assert!(
             Instant::now() < deadline,
-            "provider pane did not retain expected exit status {expected_status}"
+            "provider pane did not retain expected exit status {expected_status}; expected pid {provider_pid}; last observation: {last_observation}"
         );
         thread::sleep(Duration::from_millis(10));
     }
@@ -538,6 +570,109 @@ fn attachment_preflight_self_heals_a_retained_normal_exit() {
     assert_eq!(
         after.runtime.as_ref().unwrap().status,
         crate::domain::RuntimeStatus::Stopped
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn stopped_retained_zero_exit_is_removed_before_start_reserves_its_next_generation() {
+    if Command::new("tmux")
+        .arg("-V")
+        .spawn()
+        .and_then(std::process::Child::wait_with_output)
+        .is_err()
+    {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+
+    let (_temporary, root, record, workstream_id, _runtime_guard) =
+        live_runtime_for_read_only_test_with_program(
+            ProviderKind::Codex,
+            "while [ ! -e .wsnav-test-exit ]; do sleep 0.01; done; exit 0",
+        );
+    let mut registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    registry
+        .mark_runtime_stopped(record.runtime_id, record.revision)
+        .unwrap();
+    let stopped = registry.runtime_by_id(record.runtime_id).unwrap().unwrap();
+    drop(registry);
+    release_provider_and_wait_for_retained_exit(&root, &stopped, 0);
+
+    let paths =
+        RuntimePaths::for_record(root.base(), stopped.runtime_id, &stopped.tmux_session).unwrap();
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
+    let probe = runtime.probe().unwrap();
+    assert!(remove_stopped_retained_clean_exit(&runtime, &stopped, &probe).unwrap());
+    assert!(matches!(runtime.probe().unwrap(), RuntimeProbe::Missing));
+    assert!(!paths.directory.exists());
+
+    let mut registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    assert_eq!(
+        registry.runtime_by_id(stopped.runtime_id).unwrap().unwrap(),
+        stopped,
+        "clean retained-exit removal must not mutate the already-stopped record"
+    );
+    let next = registry.reserve_runtime(workstream_id).unwrap();
+    assert_eq!(next.runtime_id, stopped.runtime_id);
+    assert_ne!(next.tmux_generation, stopped.tmux_generation);
+    assert_eq!(next.status, crate::domain::RuntimeStatus::Starting);
+}
+
+#[test]
+#[cfg(unix)]
+fn stopped_retained_nonzero_exit_is_not_removed_or_reused() {
+    if Command::new("tmux")
+        .arg("-V")
+        .spawn()
+        .and_then(std::process::Child::wait_with_output)
+        .is_err()
+    {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+
+    let (_temporary, root, record, _workstream_id, _runtime_guard) =
+        live_runtime_for_read_only_test_with_program(
+            ProviderKind::Codex,
+            "while [ ! -e .wsnav-test-exit ]; do sleep 0.01; done; exit 7",
+        );
+    let mut registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    registry
+        .mark_runtime_stopped(record.runtime_id, record.revision)
+        .unwrap();
+    let stopped = registry.runtime_by_id(record.runtime_id).unwrap().unwrap();
+    drop(registry);
+    release_provider_and_wait_for_retained_exit(&root, &stopped, 7);
+
+    let paths =
+        RuntimePaths::for_record(root.base(), stopped.runtime_id, &stopped.tmux_session).unwrap();
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
+    let probe = runtime.probe().unwrap();
+    assert!(!remove_stopped_retained_clean_exit(&runtime, &stopped, &probe).unwrap());
+    assert!(paths.socket.exists());
+    assert_eq!(
+        crate::state::open_current(&root)
+            .unwrap()
+            .into_host_registry()
+            .unwrap()
+            .runtime_by_id(stopped.runtime_id)
+            .unwrap()
+            .unwrap(),
+        stopped
     );
 }
 
@@ -1983,6 +2118,147 @@ impl ProcessProbe for FixedBirth {
     fn process_birth(&self, _pid: u32) -> Option<String> {
         self.0.clone()
     }
+}
+
+struct FixedObservation(Option<ProcessObservation>);
+
+impl ProcessProbe for FixedObservation {
+    fn process_birth(&self, _pid: u32) -> Option<String> {
+        self.0.as_ref().map(|observation| observation.birth.clone())
+    }
+
+    fn process_observation_checked(
+        &self,
+        _pid: u32,
+    ) -> Result<Option<ProcessObservation>, crate::runtime::ProcessProbeError> {
+        Ok(self.0.clone())
+    }
+}
+
+fn exact_runtime_record_and_probe() -> (crate::state::RuntimeRecord, RuntimeProbe) {
+    let record = crate::state::RuntimeRecord {
+        runtime_id: RuntimeId::new(),
+        workstream_id: WorkstreamId::new(),
+        provider: crate::domain::ProviderKind::Codex,
+        tmux_generation: "generation".to_owned(),
+        tmux_session: "session".to_owned(),
+        cwd: PathBuf::from("/disposable/repository"),
+        provider_pid: Some(77),
+        process_birth: Some("birth-a".to_owned()),
+        status: crate::domain::RuntimeStatus::Idle,
+        revision: Revision::INITIAL,
+    };
+    let probe = RuntimeProbe::Live {
+        pane_id: "%1".to_owned(),
+        pane_pid: 77,
+        cwd: record.cwd.clone(),
+        process_birth: Some("birth-a".to_owned()),
+    };
+    (record, probe)
+}
+
+#[test]
+fn attachment_end_waits_only_for_an_exact_zombie_or_vanished_provider() {
+    let (record, probe) = exact_runtime_record_and_probe();
+    let running = FixedObservation(Some(ProcessObservation {
+        birth: "birth-a".to_owned(),
+        state: ProcessState::Running,
+    }));
+    assert_eq!(
+        attachment_end_provider_state(&record, &probe, &running).unwrap(),
+        AttachmentEndProviderState::Live
+    );
+
+    let zombie = FixedObservation(Some(ProcessObservation {
+        birth: "birth-a".to_owned(),
+        state: ProcessState::Zombie,
+    }));
+    assert_eq!(
+        attachment_end_provider_state(&record, &probe, &zombie).unwrap(),
+        AttachmentEndProviderState::ExitPending
+    );
+    assert_eq!(
+        attachment_end_provider_state(&record, &probe, &FixedObservation(None)).unwrap(),
+        AttachmentEndProviderState::ExitPending
+    );
+    assert_eq!(
+        attachment_end_provider_state(&record, &RuntimeProbe::Missing, &running).unwrap(),
+        AttachmentEndProviderState::NotRecordedLive
+    );
+
+    let reused = FixedObservation(Some(ProcessObservation {
+        birth: "birth-b".to_owned(),
+        state: ProcessState::Running,
+    }));
+    assert!(matches!(
+        attachment_end_provider_state(&record, &probe, &reused),
+        Err(ActionError::RuntimeProbeAmbiguous)
+    ));
+}
+
+#[test]
+fn stopped_runtime_never_adopts_a_matching_live_provider_on_start() {
+    let (mut record, probe) = exact_runtime_record_and_probe();
+    assert_eq!(
+        existing_live_runtime_start_outcome(&record, &probe).unwrap(),
+        Some(StartOutcome::AlreadyLive)
+    );
+
+    record.status = crate::domain::RuntimeStatus::Stopped;
+    assert!(matches!(
+        existing_live_runtime_start_outcome(&record, &probe),
+        Err(ActionError::RuntimeProbeAmbiguous)
+    ));
+
+    let mismatched = RuntimeProbe::Live {
+        pane_id: "%1".to_owned(),
+        pane_pid: 78,
+        cwd: record.cwd.clone(),
+        process_birth: record.process_birth.clone(),
+    };
+    assert!(matches!(
+        existing_live_runtime_start_outcome(&record, &mismatched),
+        Err(ActionError::RuntimeProbeAmbiguous)
+    ));
+}
+
+#[test]
+fn pending_exit_evidence_waits_for_exact_status_without_accepting_absence_or_nonzero() {
+    let statuses = RefCell::new(VecDeque::from([None, None, Some(0)]));
+    let remaining_waits = Cell::new(2_u8);
+    let waits = Cell::new(0);
+    assert_eq!(
+        await_pending_exit_evidence_with(
+            || Ok(statuses.borrow_mut().pop_front().unwrap()),
+            || {
+                let remaining = remaining_waits.get();
+                remaining_waits.set(remaining.saturating_sub(1));
+                remaining > 0
+            },
+            || waits.set(waits.get() + 1),
+        )
+        .unwrap(),
+        Some(0)
+    );
+    assert_eq!(waits.get(), 2);
+    assert!(statuses.borrow().is_empty());
+
+    let nonzero_waits = Cell::new(0);
+    assert_eq!(
+        await_pending_exit_evidence_with(
+            || Ok(Some(7)),
+            || panic!("nonzero native exit must not be retried into success"),
+            || nonzero_waits.set(nonzero_waits.get() + 1),
+        )
+        .unwrap(),
+        Some(7)
+    );
+    assert_eq!(nonzero_waits.get(), 0);
+
+    assert_eq!(
+        await_pending_exit_evidence_with(|| Ok(None), || false, || panic!("timed out")).unwrap(),
+        None
+    );
 }
 
 #[test]

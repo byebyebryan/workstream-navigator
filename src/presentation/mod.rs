@@ -2225,29 +2225,53 @@ exit 0
     }
 
     #[test]
-    fn provisional_attachment_uses_only_the_exact_private_tmux_paths() {
+    fn provisional_attachment_helper_carries_only_the_exact_slot_identity() {
         let temporary = tempfile::tempdir().unwrap();
-        let runtime = RuntimePaths::for_runtime(
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        let runtime_id = crate::domain::RuntimeId::from(uuid::Uuid::from_u128(87));
+        let slot = crate::provisional::ProvisionalSlot::materializing(
             temporary.path(),
-            crate::domain::RuntimeId::from(uuid::Uuid::from_u128(87)),
+            uuid::Uuid::from_u128(86),
+            Revision::INITIAL,
+            1,
+            runtime_id,
+            crate::provisional::SlotGeneration::new(uuid::Uuid::from_u128(88)),
+            &seed,
+        );
+        let presentation = Presentation::fresh_with_executable(
+            temporary.path(),
+            temporary.path().join("wsnav-fixture"),
         );
 
-        let command = Presentation::provisional_attach_command(&runtime);
+        let command = presentation.provisional_attach_command(&slot.unwrap());
 
-        assert_eq!(command[0], "env");
-        assert_eq!(command[1], "-u");
-        assert_eq!(command[2], "TMUX");
-        assert_eq!(command[3], "tmux");
-        assert_eq!(command[4], "-u");
-        assert_eq!(command[5], "-S");
-        assert_eq!(command[6], runtime.socket.into_os_string());
-        assert_eq!(command[7], "attach-session");
-        assert_eq!(command[8], "-t");
-        assert_eq!(command[9], OsString::from(runtime.session_name));
+        assert_eq!(command[0], presentation.executable.clone().into_os_string());
+        assert_eq!(command[1], "--state-root");
+        assert_eq!(command[2], temporary.path().as_os_str());
+        assert_eq!(command[3], "_provisional_provider_attach");
+        assert_eq!(command[4], "--expected-presentation-id");
+        assert_eq!(command[5], "00000000-0000-0000-0000-000000000056");
+        assert_eq!(command[6], "--expected-presentation-revision");
+        assert_eq!(command[7], "1");
+        assert_eq!(command[8], "--expected-slot-generation");
+        assert_eq!(command[9], "00000000-0000-0000-0000-000000000058");
+        assert_eq!(command[10], "--expected-runtime-id");
+        assert_eq!(command[11], runtime_id.to_string().as_str());
+        assert_eq!(command[12], "--presentation-socket");
+        assert_eq!(
+            command[13],
+            presentation.paths.socket.clone().into_os_string()
+        );
+        assert_eq!(command[14], "--presentation-session");
+        assert_eq!(
+            command[15],
+            OsString::from(presentation.paths.session_name.clone())
+        );
         assert!(
             command
                 .iter()
-                .all(|argument| argument != "sh" && argument != "/bin/sh")
+                .all(|argument| argument != "tmux" && argument != "env" && argument != "sh")
         );
     }
 

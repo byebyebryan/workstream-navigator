@@ -14,7 +14,7 @@ use super::{
         park_and_stop_provider, prefer_cleanup_error, spawned_observer_identity_matches,
         stop_recorded_provider, stop_recorded_provider_if_present,
     },
-    lifecycle::stop_opencode_observer,
+    lifecycle::{clean_provider_exit_status, stop_opencode_observer},
     model::{
         observer_profile, reconcile_observer_trust, require_codex_provider,
         workstream_overview_authorized,
@@ -111,33 +111,38 @@ fn start_codex(
             )?,
         );
         let prior_probe = prior.probe()?;
+        if let Some(outcome) = existing_live_runtime_start_outcome(prior_record, &prior_probe)? {
+            return Ok(outcome);
+        }
         if let Some(backfilled) =
             backfill_live_runtime_provider_pid(registry, prior_record, &prior_probe)?
         {
             *prior_record = backfilled;
         }
-        if matches_recorded_runtime(prior_record, &prior_probe, false) {
-            return Ok(StartOutcome::AlreadyLive);
+        if let Some(outcome) = existing_live_runtime_start_outcome(prior_record, &prior_probe)? {
+            return Ok(outcome);
         }
-        match prior_probe {
-            RuntimeProbe::Missing => {
-                clean_missing_stopped_runtime(&prior, prior_record)?;
-                if prior_record.process_birth.is_some()
-                    && !matches!(prior_record.status, crate::domain::RuntimeStatus::Stopped)
-                {
-                    registry.mark_runtime_recovery_required(
-                        prior_record.runtime_id,
-                        prior_record.revision,
-                    )?;
-                    return Err(ActionError::NativeRecoveryRequired);
+        if !remove_stopped_retained_clean_exit(&prior, prior_record, &prior_probe)? {
+            match prior_probe {
+                RuntimeProbe::Missing => {
+                    clean_missing_stopped_runtime(&prior, prior_record)?;
+                    if prior_record.process_birth.is_some()
+                        && !matches!(prior_record.status, crate::domain::RuntimeStatus::Stopped)
+                    {
+                        registry.mark_runtime_recovery_required(
+                            prior_record.runtime_id,
+                            prior_record.revision,
+                        )?;
+                        return Err(ActionError::NativeRecoveryRequired);
+                    }
+                    if !matches!(prior_record.status, crate::domain::RuntimeStatus::Stopped) {
+                        registry
+                            .mark_runtime_stopped(prior_record.runtime_id, prior_record.revision)?;
+                    }
                 }
-                if !matches!(prior_record.status, crate::domain::RuntimeStatus::Stopped) {
-                    registry
-                        .mark_runtime_stopped(prior_record.runtime_id, prior_record.revision)?;
+                RuntimeProbe::Live { .. } | RuntimeProbe::Unknown { .. } => {
+                    return Err(ActionError::RuntimeProbeAmbiguous);
                 }
-            }
-            RuntimeProbe::Live { .. } | RuntimeProbe::Unknown { .. } => {
-                return Err(ActionError::RuntimeProbeAmbiguous);
             }
         }
     }
@@ -158,6 +163,51 @@ fn start_codex(
         codex_launch_program(&record.cwd, prior_binding.as_ref()),
     )?;
     Ok(StartOutcome::Started)
+}
+
+/// Accepts a retained live Runtime only while its durable lifecycle agrees.
+/// A `stopped` record is never authority to adopt a still-running provider.
+pub(super) fn existing_live_runtime_start_outcome(
+    record: &crate::state::RuntimeRecord,
+    probe: &RuntimeProbe,
+) -> Result<Option<StartOutcome>, ActionError> {
+    if record.status == crate::domain::RuntimeStatus::Stopped
+        && matches!(
+            probe,
+            RuntimeProbe::Live {
+                process_birth: Some(_),
+                ..
+            }
+        )
+    {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    if !matches_recorded_runtime(record, probe, false) {
+        return Ok(None);
+    }
+    Ok(Some(StartOutcome::AlreadyLive))
+}
+
+/// Removes the one retained private server left by the prior native-exit
+/// ordering only after the existing exact clean-exit proof succeeds.
+///
+/// Older `WSNav` binaries could durably record a Runtime as stopped from a
+/// trusted `SessionEnd` hook before its provider exited and tmux retained the
+/// resulting dead pane. The stopped record is not cleanup authority: this
+/// removes only its private server once the retained pane independently proves
+/// the recorded PID, cwd, topology, absence, and zero native status.
+pub(super) fn remove_stopped_retained_clean_exit(
+    runtime: &PrivateRuntime<'_>,
+    record: &crate::state::RuntimeRecord,
+    probe: &RuntimeProbe,
+) -> Result<bool, ActionError> {
+    if record.status != crate::domain::RuntimeStatus::Stopped
+        || clean_provider_exit_status(runtime, record, probe)? != Some(0)
+    {
+        return Ok(false);
+    }
+    runtime.park().map_err(ActionError::Runtime)?;
+    Ok(true)
 }
 
 fn start_opencode(
@@ -1317,7 +1367,7 @@ pub(super) fn runtime_launch_program(
 
 #[cfg(all(test, unix))]
 mod observer_command_tests {
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::fs;
 
     use nix::unistd::{Pid, getpgid};
 
@@ -1328,7 +1378,6 @@ mod observer_command_tests {
         let temporary = tempfile::tempdir().unwrap();
         let executable = temporary.path().join("observer-helper");
         fs::write(&executable, "#!/bin/sh\nexec sleep 30\n").unwrap();
-        fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         let observer = OpenCodeObserverLaunch {
             root: temporary.path().to_path_buf(),
             runtime_id: RuntimeId::new(),
@@ -1340,11 +1389,28 @@ mod observer_command_tests {
             process_birth: "provider-birth".to_owned(),
             handle_revision: Revision::INITIAL,
         };
-        let mut command = opencode_observer_command(
-            &executable,
-            &observer,
-            opencode::OpenCodeObserverMode::Current,
-        );
+        // Invoke the disposable script through `sh` rather than direct `exec`:
+        // Linux may reject a freshly-written script with `ETXTBSY` if its
+        // filesystem still reports a writer. The process-group assertion is
+        // about the shared observer-command configuration, not kernel script
+        // execution, so exercise that configuration through the interpreter.
+        let mut command = std::process::Command::new("/bin/sh");
+        command
+            .arg(&executable)
+            .arg("--state-root")
+            .arg(&observer.root)
+            .arg(opencode::OpenCodeObserverMode::Current.command_name())
+            .arg(observer.runtime_id.to_string())
+            .arg(&observer.generation)
+            .arg(observer.endpoint.port.to_string())
+            .arg(observer.session.native_id())
+            .arg(observer.pane_pid.to_string())
+            .arg(observer.cwd.as_os_str())
+            .arg(&observer.process_birth)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        crate::process::isolate_long_lived_helper(&mut command);
         let mut child = command.spawn().unwrap();
         let child_pid = i32::try_from(child.id()).unwrap();
 

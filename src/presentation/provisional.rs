@@ -306,22 +306,30 @@ impl Presentation {
         arguments
     }
 
-    /// The provisional attach command is deliberately direct argv: no shell,
-    /// provider command, or user-derived string crosses into the outer pane.
-    /// `env -u TMUX` prevents tmux's nested-server warning path from changing
-    /// an attachment to the exact private Runtime socket.
-    pub(super) fn provisional_attach_command(paths: &RuntimePaths) -> Vec<OsString> {
+    /// Starts the outer provisional attachment helper with only the immutable
+    /// slot identity it needs to attach the exact private Runtime. After its
+    /// native client returns, that helper can reconcile only a subsequently
+    /// retired, generation-matching managed handoff; an unpromoted shell
+    /// remains state-free. No shell, provider command, or user-derived string
+    /// crosses into the outer pane.
+    pub(super) fn provisional_attach_command(&self, slot: &ProvisionalSlot) -> Vec<OsString> {
         vec![
-            "env".into(),
-            "-u".into(),
-            "TMUX".into(),
-            "tmux".into(),
-            "-u".into(),
-            "-S".into(),
-            paths.socket.clone().into_os_string(),
-            "attach-session".into(),
-            "-t".into(),
-            paths.session_name.clone().into(),
+            self.executable.clone().into_os_string(),
+            "--state-root".into(),
+            self.state_root.clone().into_os_string(),
+            "_provisional_provider_attach".into(),
+            "--expected-presentation-id".into(),
+            slot.presentation_id().to_string().into(),
+            "--expected-presentation-revision".into(),
+            slot.presentation_revision().value().to_string().into(),
+            "--expected-slot-generation".into(),
+            slot.slot_generation().to_string().into(),
+            "--expected-runtime-id".into(),
+            slot.candidate_runtime_id().to_string().into(),
+            "--presentation-socket".into(),
+            self.paths.socket.clone().into_os_string(),
+            "--presentation-session".into(),
+            self.paths.session_name.clone().into(),
         ]
     }
 }

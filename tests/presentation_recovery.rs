@@ -23,6 +23,8 @@ const READINESS_TIMEOUT: Duration = Duration::from_secs(2);
 const READINESS_POLL: Duration = Duration::from_millis(10);
 const DEFAULT_NAVIGATOR_PANE_WIDTH: u16 = 32;
 const FOCUS_TEST_CHILD: &str = "WSNAV_FOCUS_TEST_CHILD";
+const NAVIGATOR_FOCUSED_TITLE_PREFIX: &str = "\x1b[38;5;2m┌\x1b[1m Work";
+const NAVIGATOR_UNFOCUSED_TITLE_PREFIX: &str = "\x1b[38;5;2m┌\x1b[1m\x1b[38;5;8m Work";
 
 fn current_state_root() -> tempfile::TempDir {
     let root = tempfile::tempdir().expect("temporary state root");
@@ -311,24 +313,19 @@ fn fresh_presentation_focuses_navigator_and_tmux_left_right_updates_cue() {
 
     let navigator = pane_id_for_role(&paths, "navigator");
     let provider = pane_id_for_role(&paths, "provider");
-    let focus_output = state_root.path().join("navigator-focus-output");
-    pipe_navigator_output(&paths, &navigator, &focus_output);
     let mut client = attach_tmux_client(&paths);
     wait_for_presentation_client(&paths);
     wait_for_active_pane(&paths.socket, &navigator);
     wait_for_navigator_text(&paths, &navigator, "Workstreams");
-    wait_for_navigator_color_sequence(&focus_output, &["\x1b[38;5;2;"]);
+    wait_for_navigator_title_prefix(&paths, &navigator, NAVIGATOR_FOCUSED_TITLE_PREFIX);
 
     send_client_keys(&mut client, b"\x02\x1b[C");
     wait_for_active_pane(&paths.socket, &provider);
-    wait_for_navigator_color_sequence(&focus_output, &["\x1b[38;5;2;", "\x1b[38;5;8;"]);
+    wait_for_navigator_title_prefix(&paths, &navigator, NAVIGATOR_UNFOCUSED_TITLE_PREFIX);
 
     send_client_keys(&mut client, b"\x02\x1b[D");
     wait_for_active_pane(&paths.socket, &navigator);
-    wait_for_navigator_color_sequence(
-        &focus_output,
-        &["\x1b[38;5;2;", "\x1b[38;5;8;", "\x1b[38;5;2;"],
-    );
+    wait_for_navigator_title_prefix(&paths, &navigator, NAVIGATOR_FOCUSED_TITLE_PREFIX);
     let _ = client.kill();
     let _ = client.wait();
 }
@@ -865,41 +862,26 @@ fn navigator_capture(paths: &PresentationPaths, pane: &str) -> String {
     tmux_output(&paths.socket, ["capture-pane", "-e", "-p", "-t", pane])
 }
 
-fn pipe_navigator_output(paths: &PresentationPaths, pane: &str, output: &Path) {
-    let command = format!("cat > {}", shell_quote_for_test(output));
-    let piped = tmux_command(&paths.socket)
-        .args(["pipe-pane", "-O", "-t", pane, &command])
-        .output()
-        .unwrap();
-    assert!(piped.status.success(), "tmux failed: {:?}", piped.stderr);
-}
-
-fn wait_for_navigator_color_sequence(output: &Path, colors: &[&str]) {
+/// `capture-pane -e` exposes the Navigator's current terminal attributes.
+/// Unlike `pipe-pane`, it does not miss the initial frame emitted before the
+/// recorder is installed or depend on Ratatui resending an unchanged style.
+fn wait_for_navigator_title_prefix(paths: &PresentationPaths, pane: &str, expected: &str) {
     let deadline = Instant::now() + READINESS_TIMEOUT;
     while Instant::now() < deadline {
-        let bytes = fs::read(output).unwrap_or_default();
-        if colors_in_order(&bytes, colors) {
+        let capture = navigator_capture(paths, pane);
+        if capture
+            .lines()
+            .next()
+            .is_some_and(|title| title.starts_with(expected))
+        {
             return;
         }
         thread::sleep(READINESS_POLL);
     }
     panic!(
-        "Navigator focus cue did not reach {colors:?}: {:?}",
-        String::from_utf8_lossy(&fs::read(output).unwrap_or_default())
+        "Navigator title focus cue did not reach {expected:?}: {:?}",
+        navigator_capture(paths, pane)
     );
-}
-
-fn colors_in_order(mut output: &[u8], colors: &[&str]) -> bool {
-    for color in colors {
-        let Some(offset) = output
-            .windows(color.len())
-            .position(|candidate| candidate == color.as_bytes())
-        else {
-            return false;
-        };
-        output = &output[offset + color.len()..];
-    }
-    true
 }
 
 fn wait_for_navigator_text(paths: &PresentationPaths, pane: &str, text: &str) {

@@ -1,8 +1,8 @@
 use super::{
-    ActionError, CatalogAuthorization, HostRegistry, Instant, LinuxProcessProbe, PrivateRuntime,
-    ProcessProbe, ProviderKind, Revision, RuntimeId, RuntimePaths, RuntimeProbe, StateError,
-    SystemClock, SystemTmux, WorkstreamId, WorkstreamLifecycle, terminate_owned_observer_process,
-    thread,
+    ActionError, CatalogAuthorization, HostRegistry, Instant, LinuxProcessProbe, Path, PathBuf,
+    PrivateRuntime, ProcessProbe, ProviderKind, Revision, RuntimeId, RuntimePaths, RuntimeProbe,
+    StateError, SystemClock, SystemTmux, WorkstreamId, WorkstreamLifecycle,
+    terminate_owned_observer_process, thread,
 };
 use super::{
     cleanup::{
@@ -62,7 +62,13 @@ pub(crate) fn park_authorized(
         RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
     );
     let probe = runtime.probe()?;
-    let clean_provider_exit = clean_provider_exit_status(&runtime, &record, &probe)? == Some(0);
+    let promoted_cwd = promoted_onboarding_cwd(root, registry, &record)?;
+    let clean_provider_exit = clean_provider_exit_status_with_cwd_proof(
+        &runtime,
+        &record,
+        &probe,
+        promoted_cwd.as_deref(),
+    )? == Some(0);
     match probe {
         probe @ RuntimeProbe::Live { .. } if matches_recorded_runtime(&record, &probe, false) => {}
         RuntimeProbe::Live { .. } | RuntimeProbe::Unknown { .. } if clean_provider_exit => {}
@@ -164,14 +170,18 @@ pub(crate) fn reconcile_provider_attachment_end(
         RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
     );
     let probe = runtime.probe()?;
+    let promoted_cwd = promoted_onboarding_cwd(root, registry, &record)?;
     let exit_status = match attachment_end_provider_state(&record, &probe, &process_probe)? {
         AttachmentEndProviderState::Live => return Ok(false),
         AttachmentEndProviderState::ExitPending => {
-            await_clean_provider_exit_status(&runtime, &record, &probe)?
+            await_clean_provider_exit_status(&runtime, &record, &probe, promoted_cwd.as_deref())?
         }
-        AttachmentEndProviderState::NotRecordedLive => {
-            clean_provider_exit_status(&runtime, &record, &probe)?
-        }
+        AttachmentEndProviderState::NotRecordedLive => clean_provider_exit_status_with_cwd_proof(
+            &runtime,
+            &record,
+            &probe,
+            promoted_cwd.as_deref(),
+        )?,
     };
     if exit_status != Some(0) {
         return Err(ActionError::RuntimeProbeAmbiguous);
@@ -238,12 +248,14 @@ fn await_clean_provider_exit_status(
     runtime: &PrivateRuntime<'_>,
     record: &crate::state::RuntimeRecord,
     initial_probe: &RuntimeProbe,
+    promoted_cwd: Option<&Path>,
 ) -> Result<Option<i32>, ActionError> {
     let deadline = Instant::now() + PARK_CONFIRM_TIMEOUT;
     let mut probe = initial_probe.clone();
     await_pending_exit_evidence_with(
         || {
-            let exit_status = clean_provider_exit_status(runtime, record, &probe)?;
+            let exit_status =
+                clean_provider_exit_status_with_cwd_proof(runtime, record, &probe, promoted_cwd)?;
             if exit_status.is_none() {
                 probe = runtime.probe()?;
             }
@@ -280,6 +292,15 @@ pub(super) fn clean_provider_exit_status(
     record: &crate::state::RuntimeRecord,
     probe: &RuntimeProbe,
 ) -> Result<Option<i32>, ActionError> {
+    clean_provider_exit_status_with_cwd_proof(runtime, record, probe, None)
+}
+
+pub(super) fn clean_provider_exit_status_with_cwd_proof(
+    runtime: &PrivateRuntime<'_>,
+    record: &crate::state::RuntimeRecord,
+    probe: &RuntimeProbe,
+    promoted_cwd: Option<&Path>,
+) -> Result<Option<i32>, ActionError> {
     let pane_pid = match probe {
         RuntimeProbe::Live {
             process_birth: Some(_),
@@ -300,7 +321,47 @@ pub(super) fn clean_provider_exit_status(
     if pane_pid.is_some_and(|pane_pid| pane_pid != recorded_pid) {
         return Ok(None);
     }
-    Ok(runtime.provider_exit_status(recorded_pid, &record.cwd).ok())
+    Ok(match promoted_cwd {
+        Some(promoted_cwd) => runtime
+            .provider_exit_status_with_promoted_cwd(recorded_pid, &record.cwd, promoted_cwd)
+            .ok(),
+        None => runtime.provider_exit_status(recorded_pid, &record.cwd).ok(),
+    })
+}
+
+/// Returns the exact canonical project cwd from one still-starting,
+/// shell-promoted onboarding proof.  A normal Runtime never receives this
+/// exception: its retained pane must continue to prove the original Runtime
+/// cwd directly.
+pub(super) fn promoted_onboarding_cwd(
+    root: &crate::state::StateRoot,
+    registry: &HostRegistry,
+    record: &crate::state::RuntimeRecord,
+) -> Result<Option<PathBuf>, ActionError> {
+    if record.status != crate::domain::RuntimeStatus::Starting {
+        return Ok(None);
+    }
+    let Some(target) = registry
+        .onboarding_exec_proven_target_for_runtime(
+            root.base(),
+            record.workstream_id,
+            record.runtime_id,
+            &record.tmux_generation,
+        )
+        .map_err(ActionError::State)?
+    else {
+        return Ok(None);
+    };
+    let ownership = target.ownership();
+    if ownership.workstream_id != record.workstream_id
+        || ownership.runtime_id != record.runtime_id
+        || target.provider() != record.provider
+        || target.runtime_generation() != record.tmux_generation
+        || target.project_root() != record.cwd
+    {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
+    Ok(Some(target.project_root().to_path_buf()))
 }
 
 pub(super) fn stop_opencode_observer(

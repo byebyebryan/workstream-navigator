@@ -516,10 +516,11 @@ pub(super) fn provisional_provider_attach(
         let mut command = runtime.attach_command();
         command.stderr(Stdio::null());
         let status = command.status().map_err(AppError::Io)?;
-        let Some(record) = crate::shell_control::retired_provisional_attachment_record(
+        let Some(record) = crate::shell_control::await_retired_provisional_attachment_record(
             root,
             &presentation,
             identity,
+            &runtime,
         )
         .map_err(|_| AppError::AttachmentUnavailable)?
         else {

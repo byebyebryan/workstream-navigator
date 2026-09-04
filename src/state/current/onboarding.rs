@@ -918,7 +918,7 @@ type ExecProofRuntimeRow = (
     clippy::too_many_lines,
     reason = "the exec-proof loader keeps every bounded process and ownership check auditable"
 )]
-fn load_exec_proof_target(
+pub(super) fn load_exec_proof_target(
     transaction: &rusqlite::Transaction<'_>,
     state_root: &Path,
     operation_id: OperationId,

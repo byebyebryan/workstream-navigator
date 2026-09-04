@@ -2,14 +2,15 @@
 
 Date: 2026-09-04
 
-Status: D25 is complete in this checkpoint, developed from `076b0a7`. Its full
-local/disposable and declared-Rust-1.88 gates pass, and its locked release
-is byte-identically installed for operator inspection with executable SHA-256
-`7d8c4704a79b7c1e48c1bbff0034aaf5faf9b5905744e4520838de8eeca5bdc0`.
-Sanitized native-exit acceptance passed with Codex 0.153.2 and OpenCode 1.18.27
-on that exact artifact, followed by complete disposable cleanup. Schema 15 and
-the D24 product surface are unchanged. No passing current-source remote-CI
-result is included in the D25 acceptance record. D18 checkpoint
+Status: D25 is complete in this checkpoint, developed from `076b0a7`, with an
+immediate shell-first exit correction after operator falsification. The
+corrected full local/disposable gate passes, and its locked release is
+byte-identically installed for operator inspection with executable SHA-256
+`2ab6c705291d6140826e0a72c00c1668f03b7bf463b7d104c38e0dad5dfa1057`.
+Sanitized native-exit acceptance with Codex 0.153.2 and OpenCode 1.18.27 remains
+bound to the prior D25 artifact; it is not evidence for the corrected hash.
+Schema 15 and the D24 product surface are unchanged. No passing current-source
+remote-CI result is included in the D25 acceptance record. D18 checkpoint
 `c961c7e` retains the older separately accepted destructive-reset and native
 observer-trust evidence.
 
@@ -18,23 +19,29 @@ observer-trust evidence.
 D25 stabilizes the current contract without adding session-management scope.
 The outer provider pane created for the provisional Shell now retains an
 internal attachment helper across Shell-to-provider promotion. When native
-tmux attachment returns, that helper gains reconciliation authority only after
-the provisional marker is absent and the durable onboarding journal proves the
-same presentation ID and revision, slot generation, candidate Runtime ID,
-`provider_exec_proven` operation, Workstream, Runtime generation, and canonical
-private paths. A present matching marker is an ordinary unpromoted detach and
-causes no registry mutation. Missing, duplicated, stale, malformed, or
-mismatched evidence is a closed refusal.
+tmux attachment returns, an exact live provisional pane is an ordinary detach
+and causes no registry mutation. An exact dead candidate may wait for at most
+one bounded convergence window while the durable proof and marker retirement
+complete. Reconciliation authority still requires the provisional marker to
+be absent and the onboarding journal to prove the same presentation ID and
+revision, slot generation, candidate Runtime ID, `provider_exec_proven`
+operation, Workstream, Runtime generation, and canonical private paths.
+Missing, duplicated, stale, malformed, timed-out, or mismatched evidence is a
+closed refusal.
 
 After that identity join, the helper delegates to the ordinary managed
 attachment-end reconciler. An exact running PID/birth remains a detach. Only a
 matching zombie or the narrow disappearance between two exact reads opens a
 bounded convergence window for the retained pane; status `0` with matching
-PID, launch cwd, topology, and process absence parks the Runtime. Non-zero,
-reused, inaccessible, malformed, missing, or timed-out evidence remains
-unavailable. A prior stopped Runtime may shed an older retained private server
-only through the same exact status-zero proof before reserving its next
-generation.
+PID, topology, and process absence parks the Runtime. Ordinary Runtimes also
+require the pane launch cwd to equal the recorded cwd. A still-starting
+shell-promoted Runtime may instead bridge its canonical recorded project cwd
+to the earlier absolute pane seed cwd only through one exact current-generation
+`provider_exec_proven` onboarding target that independently proved the native
+provider cwd. Non-zero, reused, inaccessible, malformed, missing, duplicated,
+stale, or timed-out evidence remains unavailable. A prior stopped Runtime may
+shed an older retained private server only through the same exact status-zero
+proof before reserving its next generation.
 
 Linux `ESRCH` is treated as a vanished `/proc` entry only while enumerating a
 process group; direct identity reads remain strict. Tests wait for the exact

@@ -9,6 +9,8 @@ use std::{
     ffi::OsString,
     path::PathBuf,
     process::{self, Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
 
 use thiserror::Error;
@@ -44,7 +46,10 @@ use crate::{
         HostRetirementError, SlotError, read_marker, retire_provider_exec_proven_marker,
     },
     review::ReviewDirectory,
-    runtime::{LinuxProcessProbe, PrivateRuntime, ProcessGroupProbe, SystemTmux},
+    runtime::{
+        LinuxProcessProbe, PrivateRuntime, ProcessGroupProbe, RuntimePaths, RuntimeProbe,
+        SystemTmux,
+    },
     shell_gate::{
         ShellGateContext, ShellGateDecision, ShellGateError, ShellGateInvocation,
         classify_shell_gate, prepare_managed_shell_gate, validate_invocation,
@@ -195,6 +200,9 @@ pub(crate) enum ProvisionalAttachmentReconciliationError {
     Handoff,
 }
 
+const PROVISIONAL_ATTACH_RECONCILIATION_TIMEOUT: Duration = Duration::from_millis(500);
+const PROVISIONAL_ATTACH_RECONCILIATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
 /// Finds the managed Runtime that an outer provisional attachment may
 /// reconcile after its native tmux client returns.
 ///
@@ -291,6 +299,200 @@ pub(crate) fn retired_provisional_attachment_record(
         return Err(ProvisionalAttachmentReconciliationError::Handoff);
     }
     Ok(Some(record))
+}
+
+/// Waits through the ordering window between a native provider exit and
+/// retirement of its presentation-private marker. A live exact provisional
+/// shell returns immediately and remains state-free. A retained dead pane may
+/// remain pending while the durable provider proof and marker retirement join;
+/// only the later exact proven target can authorize clean-exit classification.
+pub(crate) fn await_retired_provisional_attachment_record(
+    root: &StateRoot,
+    presentation: &Presentation,
+    expected: ProvisionalAttachmentIdentity,
+    runtime: &PrivateRuntime<'_>,
+) -> Result<Option<RuntimeRecord>, ProvisionalAttachmentReconciliationError> {
+    let deadline = Instant::now() + PROVISIONAL_ATTACH_RECONCILIATION_TIMEOUT;
+    await_retired_provisional_attachment_record_with(
+        || retired_provisional_attachment_record(root, presentation, expected),
+        || {
+            provisional_attachment_requires_reconciliation_wait(
+                root,
+                presentation,
+                expected,
+                runtime,
+            )
+        },
+        || Instant::now() < deadline,
+        || thread::sleep(PROVISIONAL_ATTACH_RECONCILIATION_POLL_INTERVAL),
+    )
+}
+
+fn await_retired_provisional_attachment_record_with<R, C, D, W>(
+    mut read_record: R,
+    mut requires_wait: C,
+    mut before_deadline: D,
+    mut wait: W,
+) -> Result<Option<RuntimeRecord>, ProvisionalAttachmentReconciliationError>
+where
+    R: FnMut() -> Result<Option<RuntimeRecord>, ProvisionalAttachmentReconciliationError>,
+    C: FnMut() -> Result<bool, ProvisionalAttachmentReconciliationError>,
+    D: FnMut() -> bool,
+    W: FnMut(),
+{
+    loop {
+        if let Some(record) = read_record()? {
+            return Ok(Some(record));
+        }
+        if !requires_wait()? {
+            return Ok(None);
+        }
+        if !before_deadline() {
+            return Ok(None);
+        }
+        wait();
+    }
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "the exact marker, journal, Runtime, and retained-pane wait fence stays auditable"
+)]
+fn provisional_attachment_requires_reconciliation_wait(
+    root: &StateRoot,
+    presentation: &Presentation,
+    expected: ProvisionalAttachmentIdentity,
+    runtime: &PrivateRuntime<'_>,
+) -> Result<bool, ProvisionalAttachmentReconciliationError> {
+    let context = presentation
+        .context()
+        .map_err(|_| ProvisionalAttachmentReconciliationError::Context)?;
+    if context.presentation_id() != expected.presentation_id
+        || context.presentation_revision() != expected.presentation_revision
+    {
+        return Err(ProvisionalAttachmentReconciliationError::Context);
+    }
+    let slot = match read_marker(root.base(), &presentation.paths().directory) {
+        Ok(slot) => slot,
+        Err(SlotError::MarkerUnavailable) => return Ok(false),
+        Err(_) => return Err(ProvisionalAttachmentReconciliationError::State),
+    };
+    if slot.presentation_id() != expected.presentation_id
+        || slot.presentation_revision() != expected.presentation_revision
+        || slot.slot_generation() != expected.slot_generation
+        || slot.candidate_runtime_id() != expected.candidate_runtime_id
+    {
+        return Err(ProvisionalAttachmentReconciliationError::Context);
+    }
+    if !matches!(
+        slot.phase(),
+        crate::provisional::ProvisionalPhase::RuntimeOwnedLaunching
+            | crate::provisional::ProvisionalPhase::ProviderExecProven
+    ) {
+        return Ok(false);
+    }
+    let operation_id = slot
+        .handoff_request()
+        .map(crate::domain::OperationId::from)
+        .ok_or(ProvisionalAttachmentReconciliationError::Handoff)?;
+    let mut state =
+        open_current(root).map_err(|_| ProvisionalAttachmentReconciliationError::State)?;
+    let provisional_lease = state
+        .acquire_provisional_lease()
+        .map_err(|_| ProvisionalAttachmentReconciliationError::State)?;
+    let Some(operation) = state
+        .onboarding_marker_operation_current(
+            &provisional_lease,
+            expected.presentation_id,
+            expected.presentation_revision,
+            expected.slot_generation,
+            expected.candidate_runtime_id,
+            Some(operation_id),
+        )
+        .map_err(|_| ProvisionalAttachmentReconciliationError::Handoff)?
+    else {
+        return Err(ProvisionalAttachmentReconciliationError::Handoff);
+    };
+    let target = if operation.phase == OnboardingPhase::ProviderExecProven {
+        let target = state
+            .onboarding_exec_proven_target_current(&provisional_lease, operation_id)
+            .map_err(|_| ProvisionalAttachmentReconciliationError::Handoff)?;
+        let ownership = target.ownership();
+        if ownership.operation_id != operation_id
+            || ownership.runtime_id != expected.candidate_runtime_id
+            || target.runtime_generation().is_empty()
+        {
+            return Err(ProvisionalAttachmentReconciliationError::Handoff);
+        }
+        Some(target)
+    } else {
+        None
+    };
+    provisional_lease
+        .revalidate_for_mutation(state.root())
+        .map_err(|_| ProvisionalAttachmentReconciliationError::State)?;
+    let registry = state
+        .into_host_registry()
+        .map_err(|_| ProvisionalAttachmentReconciliationError::State)?;
+    let record = registry
+        .runtime_by_id(expected.candidate_runtime_id)
+        .map_err(|_| ProvisionalAttachmentReconciliationError::State)?
+        .ok_or(ProvisionalAttachmentReconciliationError::Handoff)?;
+    if record.status != crate::domain::RuntimeStatus::Starting
+        || RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)
+            .map_err(|_| ProvisionalAttachmentReconciliationError::Handoff)?
+            != RuntimePaths::for_runtime(root.base(), expected.candidate_runtime_id)
+    {
+        return Err(ProvisionalAttachmentReconciliationError::Handoff);
+    }
+    drop(registry);
+    drop(provisional_lease);
+    let Ok(probe) = runtime.probe() else {
+        // The marker/runtime identity is exact, but provider topology is not
+        // currently readable. Keep this bounded and state-free while the
+        // marker/journal join may still converge.
+        return Ok(true);
+    };
+    let potentially_dead = !matches!(
+        probe,
+        RuntimeProbe::Missing
+            | RuntimeProbe::Live {
+                process_birth: Some(_),
+                ..
+            }
+    );
+    if !potentially_dead {
+        return Ok(false);
+    }
+    let Some(target) = target else {
+        // The exact Runtime is retained and appears dead, but the durable
+        // proof is not yet available. Keep polling without granting cleanup
+        // authority; a timeout remains an untouched refusal.
+        return Ok(true);
+    };
+    let ownership = target.ownership();
+    if record.workstream_id != ownership.workstream_id
+        || record.provider != target.provider()
+        || record.tmux_generation != target.runtime_generation()
+    {
+        return Err(ProvisionalAttachmentReconciliationError::Handoff);
+    }
+    let (Some(provider_pid), Some(provider_birth)) =
+        (record.provider_pid, record.process_birth.as_deref())
+    else {
+        return Err(ProvisionalAttachmentReconciliationError::Handoff);
+    };
+    if provider_birth.is_empty() {
+        return Err(ProvisionalAttachmentReconciliationError::Handoff);
+    }
+    match runtime.provider_exit_status_with_promoted_cwd(
+        provider_pid,
+        &record.cwd,
+        target.project_root(),
+    ) {
+        Ok(0) => Ok(true),
+        Ok(_) | Err(_) => Ok(false),
+    }
 }
 
 fn retired_provisional_runtime_matches(
@@ -1039,8 +1241,8 @@ fn exec_program(_program: &[OsString]) -> std::io::Error {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
     use std::fs;
+    use std::{cell::Cell, ffi::OsString};
 
     use super::{
         AccountShellGateOutcome, AccountShellOpenCodeLaunchError, ProviderExecReconciliationError,
@@ -1061,9 +1263,95 @@ mod tests {
     };
 
     use super::{
-        ProvisionalAttachmentIdentity, retired_provisional_attachment_record,
-        retired_provisional_runtime_matches,
+        ProvisionalAttachmentIdentity, await_retired_provisional_attachment_record_with,
+        retired_provisional_attachment_record, retired_provisional_runtime_matches,
     };
+
+    fn retained_test_runtime() -> RuntimeRecord {
+        RuntimeRecord {
+            runtime_id: RuntimeId::from(uuid::Uuid::from_u128(51)),
+            workstream_id: WorkstreamId::from(uuid::Uuid::from_u128(52)),
+            provider: ProviderKind::Codex,
+            tmux_generation: "generation-a".to_owned(),
+            tmux_session: "wsnav-generation-a".to_owned(),
+            cwd: std::env::temp_dir(),
+            provider_pid: Some(99),
+            process_birth: Some("birth-99".to_owned()),
+            status: RuntimeStatus::Starting,
+            revision: Revision::INITIAL,
+        }
+    }
+
+    #[test]
+    fn provisional_attachment_waits_for_launching_proof_then_marker_retirement() {
+        let durable_proof = Cell::new(false);
+        let marker_retired = Cell::new(false);
+        let proof_checks = Cell::new(0_u8);
+        let reads = Cell::new(0_u8);
+        let waits = Cell::new(0_u8);
+        let expected = retained_test_runtime();
+        let result = await_retired_provisional_attachment_record_with(
+            || {
+                let attempt = reads.get();
+                reads.set(attempt.saturating_add(1));
+                Ok(marker_retired.get().then(|| expected.clone()))
+            },
+            || {
+                match proof_checks.get() {
+                    0 => assert!(!durable_proof.get()),
+                    1 => assert!(durable_proof.get() && !marker_retired.get()),
+                    _ => panic!("marker retirement should be observed next"),
+                }
+                proof_checks.set(proof_checks.get().saturating_add(1));
+                Ok(true)
+            },
+            || true,
+            || {
+                let attempt = waits.get();
+                waits.set(attempt.saturating_add(1));
+                if attempt == 0 {
+                    durable_proof.set(true);
+                } else {
+                    marker_retired.set(true);
+                }
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result, Some(expected));
+        assert_eq!(reads.get(), 3);
+        assert_eq!(waits.get(), 2);
+    }
+
+    #[test]
+    fn provisional_attachment_timeout_without_proof_stays_untouched() {
+        let waits = Cell::new(0_u8);
+        let result = await_retired_provisional_attachment_record_with(
+            || Ok(None),
+            || Ok(true),
+            || waits.get() < 2,
+            || waits.set(waits.get().saturating_add(1)),
+        )
+        .unwrap();
+
+        assert_eq!(result, None);
+        assert_eq!(waits.get(), 2);
+    }
+
+    #[test]
+    fn provisional_attachment_live_detach_stays_state_free() {
+        let waits = Cell::new(0_u8);
+        let result = await_retired_provisional_attachment_record_with(
+            || Ok(None),
+            || Ok(false),
+            || panic!("live detach must not enter the polling deadline"),
+            || waits.set(waits.get().saturating_add(1)),
+        )
+        .unwrap();
+
+        assert_eq!(result, None);
+        assert_eq!(waits.get(), 0);
+    }
 
     #[test]
     fn retired_provisional_attachment_requires_the_original_runtime_and_generation() {

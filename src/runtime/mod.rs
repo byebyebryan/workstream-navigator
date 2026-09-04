@@ -1874,6 +1874,32 @@ impl<'a> PrivateRuntime<'a> {
         expected_pane_pid: u32,
         expected_cwd: &Path,
     ) -> Result<i32, RuntimeError> {
+        self.provider_exit_status_with_cwd_proof(expected_pane_pid, expected_cwd, None)
+    }
+
+    /// Proves a clean provider exit for a shell-promoted Runtime whose tmux
+    /// pane was seeded before the account shell changed into the canonical
+    /// project directory. The caller must supply the exact durable onboarding
+    /// target's project cwd; the ordinary direct-runtime path remains strict.
+    pub(crate) fn provider_exit_status_with_promoted_cwd(
+        &self,
+        expected_pane_pid: u32,
+        expected_cwd: &Path,
+        promoted_cwd: &Path,
+    ) -> Result<i32, RuntimeError> {
+        self.provider_exit_status_with_cwd_proof(
+            expected_pane_pid,
+            expected_cwd,
+            Some(promoted_cwd),
+        )
+    }
+
+    fn provider_exit_status_with_cwd_proof(
+        &self,
+        expected_pane_pid: u32,
+        expected_cwd: &Path,
+        promoted_cwd: Option<&Path>,
+    ) -> Result<i32, RuntimeError> {
         self.validate_exact_topology_with_pane_state(true)?;
         let pane_target =
             OsString::from(format!("{}:{PROVIDER_WINDOW}.0", self.paths.session_name));
@@ -1902,8 +1928,13 @@ impl<'a> PrivateRuntime<'a> {
         )?
         .parse::<i32>()
         .map_err(|_| RuntimeError::InvalidTopology)?;
+        if promoted_cwd.is_some_and(|promoted_cwd| promoted_cwd != expected_cwd)
+            || !Path::new(&pane_start_path).is_absolute()
+        {
+            return Err(RuntimeError::InvalidTopology);
+        }
         if pane_pid != expected_pane_pid
-            || Path::new(&pane_start_path) != expected_cwd
+            || (promoted_cwd.is_none() && Path::new(&pane_start_path) != expected_cwd)
             || self
                 .process_probe
                 .process_birth(expected_pane_pid)
@@ -2776,6 +2807,24 @@ mod tests {
 
         assert_eq!(
             runtime.provider_exit_status(77, temporary.path()).unwrap(),
+            0
+        );
+        assert!(tmux.responses.borrow().is_empty());
+    }
+
+    #[test]
+    fn retained_dead_pane_accepts_a_seed_path_after_promoted_cwd_proof() {
+        let temporary = tempfile::tempdir().unwrap();
+        let seed = temporary.path().join("seed");
+        fs::create_dir(&seed).unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let tmux = FakeTmux::with_responses(dead_pane_responses(&paths.session_name, 77, &seed, 0));
+        let runtime = PrivateRuntime::new(&tmux, &AbsentProcessProbe, paths);
+
+        assert_eq!(
+            runtime
+                .provider_exit_status_with_promoted_cwd(77, temporary.path(), temporary.path())
+                .unwrap(),
             0
         );
         assert!(tmux.responses.borrow().is_empty());

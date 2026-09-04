@@ -45,6 +45,8 @@ use std::{
 };
 
 use rusqlite::{Connection, params};
+use uuid::Uuid;
+
 fn private_existing_root(path: &Path) -> crate::state::StateRoot {
     #[cfg(unix)]
     {
@@ -571,6 +573,142 @@ fn attachment_preflight_self_heals_a_retained_normal_exit() {
         after.runtime.as_ref().unwrap().status,
         crate::domain::RuntimeStatus::Stopped
     );
+}
+
+#[test]
+#[cfg(unix)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the disposable onboarding exit regression keeps its full state and process proof auditable"
+)]
+fn attachment_preflight_repairs_shell_promoted_exit_with_a_different_seed_path() {
+    if Command::new("tmux")
+        .arg("-V")
+        .spawn()
+        .and_then(std::process::Child::wait_with_output)
+        .is_err()
+    {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+
+    let (temporary, root, record, workstream_id, _runtime_guard) =
+        live_runtime_for_read_only_test_with_program(
+            ProviderKind::Codex,
+            "while [ ! -e .wsnav-test-exit ]; do sleep 0.01; done; exit 0",
+        );
+    let seed_cwd = temporary.path().join("repository");
+    let promoted_cwd = temporary.path().join("promoted-project");
+    fs::create_dir(&promoted_cwd).unwrap();
+    let connection = Connection::open(root.host_database_path()).unwrap();
+    let location_id: String = connection
+        .query_row(
+            "SELECT location_id FROM workstreams WHERE workstream_id = ?1",
+            [workstream_id.to_string()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let operation_id = Uuid::from_u128(0xD25_0001).to_string();
+    let intent = serde_json::json!({
+        "version": 1,
+        "presentation_id": Uuid::from_u128(0xD25_0002),
+        "presentation_revision": 1,
+        "slot_generation": Uuid::from_u128(0xD25_0003),
+        "lease_generation": 1,
+        "candidate_runtime_id": record.runtime_id,
+        "provider": "codex",
+        "location_id": location_id,
+        "workstream_id": workstream_id,
+        "runtime_generation": record.tmux_generation,
+        "registry_generation": "test-registry",
+        "argv_digest": "test-argv-digest",
+        "boot_provenance": "test-boot-provenance"
+    })
+    .to_string();
+    let verifier = format!("wsnav-launch-verifier-v1:sha256:{}", "0".repeat(64));
+    let claims_digest = format!("wsnav-launch-claims-v1:sha256:{}", "0".repeat(64));
+    connection
+        .execute(
+            "UPDATE runtimes SET cwd = ?1, lifecycle = 'starting' WHERE runtime_id = ?2",
+            params![
+                promoted_cwd.to_string_lossy(),
+                record.runtime_id.to_string()
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO compound_operations (
+                operation_id, request_key, kind, phase, expected_revisions_json,
+                effect_watermark, outcome_json, revision,
+                launch_token_id, launch_token_verifier,
+                launch_token_expiry_monotonic, launch_claims_digest
+             ) VALUES (?1, 'promoted-exit-test', 'onboard', 'provider_exec_proven', ?2,
+                       NULL, NULL, 1, ?3, ?4, 1, ?5)",
+            params![
+                operation_id,
+                intent,
+                Uuid::from_u128(0xD25_0004).to_string(),
+                verifier,
+                claims_digest,
+            ],
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO onboarding_exec_targets (
+                operation_id, provider, executable_device, executable_inode
+             ) VALUES (?1, 'codex', 1, 1)",
+            [&operation_id],
+        )
+        .unwrap();
+    drop(connection);
+
+    fs::write(seed_cwd.join(".wsnav-test-exit"), b"release").unwrap();
+    let paths =
+        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session).unwrap();
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        if matches!(
+            runtime.provider_exit_status_with_promoted_cwd(
+                record.provider_pid.unwrap(),
+                &promoted_cwd,
+                &promoted_cwd,
+            ),
+            Ok(0)
+        ) {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "promoted provider pane did not retain a clean dead process"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+
+    let mut registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    assert!(matches!(
+        preflight_attachment(&root, &mut registry, workstream_id),
+        Err(ActionError::ProviderExited)
+    ));
+    let after = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert_eq!(after.lifecycle, WorkstreamLifecycle::Parked);
+    assert_eq!(
+        after.runtime.as_ref().unwrap().status,
+        crate::domain::RuntimeStatus::Stopped
+    );
+    assert!(!paths.directory.exists());
 }
 
 #[test]

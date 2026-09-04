@@ -4,14 +4,15 @@
 //! revision-fenced reads. Mutations that span provider onboarding live in the
 //! onboarding module; presentation owns its own topology.
 
+use super::onboarding::load_exec_proof_target;
 use super::{
     BTreeMap, BTreeSet, CurrentState, HostRegistry, MAX_NAVIGATOR_WORKSTREAMS, OnboardingMarkerRow,
     OnboardingOperationInventory, OnboardingOperationInventoryPage, OnboardingPhase,
-    OnboardingVisibility, OnboardingWorkstreamProjection, OperationId, OptionalExtension,
-    PARKED_RECOVERY_RESOLVED_OUTCOME, Path, PersistedOnboardingIntent, ProjectProjection,
-    RuntimeId, RuntimePaths, RuntimePathsPage, StateError, StateMode, Uuid, ensure_current_mode,
-    load_project_projections, operation_phase_from_text, page_parameters, schema_version,
-    validate_schema15,
+    OnboardingProviderExecTarget, OnboardingVisibility, OnboardingWorkstreamProjection,
+    OperationId, OptionalExtension, PARKED_RECOVERY_RESOLVED_OUTCOME, Path,
+    PersistedOnboardingIntent, ProjectProjection, RuntimeId, RuntimePaths, RuntimePathsPage,
+    StateError, StateMode, Uuid, WorkstreamId, ensure_current_mode, load_project_projections,
+    operation_phase_from_text, page_parameters, schema_version, validate_schema15,
 };
 
 #[cfg(test)]
@@ -20,7 +21,7 @@ use super::{
     validate_project_membership_transaction,
 };
 #[cfg(test)]
-use crate::domain::{IdGenerator, LocationId, ProviderKind, WorkstreamId};
+use crate::domain::{IdGenerator, LocationId, ProviderKind};
 #[cfg(test)]
 use rusqlite::{TransactionBehavior, params};
 
@@ -442,5 +443,124 @@ impl CurrentState {
             None
         };
         Ok(RuntimePathsPage { paths, next_cursor })
+    }
+}
+
+impl HostRegistry {
+    /// Loads the one durable onboarding proof that can authorize the shell
+    /// promotion exit path for an exact Runtime.  This is intentionally a
+    /// registry read rather than a marker read: the original presentation may
+    /// already be gone by the time a retained provider pane is reconciled.
+    /// Every onboarding journal is scanned in bounded pages so a long-lived
+    /// host cannot turn this proof into an unbounded query.
+    pub(crate) fn onboarding_exec_proven_target_for_runtime(
+        &self,
+        state_root: &Path,
+        workstream_id: WorkstreamId,
+        runtime_id: RuntimeId,
+        runtime_generation: &str,
+    ) -> Result<Option<OnboardingProviderExecTarget>, StateError> {
+        if runtime_generation.is_empty() {
+            return Err(StateError::MalformedHostSchema);
+        }
+        validate_schema15(&self.connection)?;
+        let transaction = self
+            .connection
+            .unchecked_transaction()
+            .map_err(StateError::Sqlite)?;
+        let (query_limit, cursor_step) = page_parameters(MAX_NAVIGATOR_WORKSTREAMS)?;
+        let mut cursor = 0_u32;
+        let mut matching_operation = None;
+        let mut matching_non_proven = false;
+        loop {
+            let rows = {
+                let mut statement = transaction
+                    .prepare(
+                        "SELECT operation_id, phase, expected_revisions_json
+                         FROM compound_operations
+                         WHERE kind = 'onboard'
+                         ORDER BY operation_id
+                         LIMIT ?1 OFFSET ?2",
+                    )
+                    .map_err(StateError::Sqlite)?;
+                let rows = statement
+                    .query_map([query_limit, i64::from(cursor)], |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                        ))
+                    })
+                    .map_err(StateError::Sqlite)?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(StateError::Sqlite)?;
+                drop(statement);
+                rows
+            };
+            let has_more = rows.len() > MAX_NAVIGATOR_WORKSTREAMS;
+            for (operation_id, phase, encoded_intent) in
+                rows.into_iter().take(MAX_NAVIGATOR_WORKSTREAMS)
+            {
+                let operation_id = operation_id
+                    .parse::<OperationId>()
+                    .map_err(|_| StateError::MalformedHostSchema)?;
+                let operation_phase = operation_phase_from_text(&phase)
+                    .map_err(|_| StateError::MalformedHostSchema)?;
+                let intent: PersistedOnboardingIntent = serde_json::from_str(&encoded_intent)
+                    .map_err(|_| StateError::MalformedHostSchema)?;
+                if intent.version != 1 {
+                    return Err(StateError::MalformedHostSchema);
+                }
+                if intent.candidate_runtime_id != runtime_id {
+                    continue;
+                }
+                if intent.workstream_id != workstream_id {
+                    return Err(StateError::OperationRequestMismatch);
+                }
+                // Runtime IDs are retained across launches. Older proven
+                // onboarding journals for the same Runtime therefore remain
+                // in the bounded audit log, but cannot authorize a later
+                // generation. Only an exact current generation is eligible
+                // for the promoted-cwd exception below.
+                if intent.runtime_generation != runtime_generation {
+                    continue;
+                }
+                if operation_phase != crate::domain::OperationPhase::ProviderExecProven {
+                    if matching_non_proven || matching_operation.is_some() {
+                        return Err(StateError::MalformedHostSchema);
+                    }
+                    matching_non_proven = true;
+                    continue;
+                }
+                if matching_non_proven || matching_operation.replace(operation_id).is_some() {
+                    return Err(StateError::MalformedHostSchema);
+                }
+            }
+            if !has_more {
+                break;
+            }
+            cursor = cursor
+                .checked_add(cursor_step)
+                .ok_or(StateError::NavigatorCursorOverflow)?;
+        }
+
+        let target = matching_operation
+            .map(|operation_id| {
+                load_exec_proof_target(
+                    &transaction,
+                    state_root,
+                    operation_id,
+                    OnboardingPhase::ProviderExecProven,
+                )
+            })
+            .transpose()?;
+        transaction.commit().map_err(StateError::Sqlite)?;
+        if target.as_ref().is_some_and(|target| {
+            target.ownership().workstream_id != workstream_id
+                || target.ownership().runtime_id != runtime_id
+        }) {
+            return Err(StateError::OnboardingOperationUnavailable);
+        }
+        Ok(target)
     }
 }

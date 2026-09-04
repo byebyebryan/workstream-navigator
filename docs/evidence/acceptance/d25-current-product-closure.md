@@ -1,8 +1,10 @@
 # D25 Current-Product Stabilization and Closure
 
-Status: locally accepted, sanitized live-provider accepted, and installed
-byte-identically for operator inspection from the D25 candidate. This record
-includes no passing current-source remote-CI result.
+Status: the immediate shell-first exit correction is locally accepted and
+installed byte-identically for operator inspection. Sanitized live-provider
+and declared-Rust-1.88 acceptance remains bound to the prior D25 artifact, not
+the corrected hash. This record includes no passing current-source remote-CI
+result.
 
 ## Contract exercised
 
@@ -13,23 +15,29 @@ owned. No prompt, response, tool output, terminal capture, transcript,
 credential, or raw provider payload becomes WSNav state.
 
 The initial Shell-to-provider path now keeps an internal attachment helper in
-the outer provider pane. When the native tmux client returns, the helper may
-reconcile only after the original presentation ID/revision, provisional slot
-generation, and candidate Runtime ID join to exactly one retired
+the outer provider pane. When the native tmux client returns, an exact live
+provisional pane is an ordinary detach and causes no registry mutation. An
+exact dead candidate may wait for at most one bounded window while the durable
+proof and presentation-private marker retirement converge. Reconciliation
+still requires the original presentation ID/revision, provisional slot
+generation, and candidate Runtime ID to join to exactly one retired
 `provider_exec_proven` onboarding operation, its owned Workstream and Runtime
-generation, and the canonical private Runtime paths. A still-present matching
-marker is an unpromoted shell detach and causes no registry mutation. Missing,
-stale, duplicated, malformed, or mismatched evidence is refused.
+generation, and the canonical private Runtime paths. Missing, stale,
+duplicated, malformed, timed-out, or mismatched evidence is refused.
 
 The helper then delegates to the ordinary attachment-end proof. An exact
 running PID/birth is a detach. A matching zombie, or absence on the immediate
 second identity read, permits a bounded wait for the retained private pane.
-Only matching PID, launch cwd, dead topology, process absence, and status `0`
-authorize private-server removal and stopped/parked state. Non-zero, reused,
-inaccessible, malformed, timed-out, or otherwise ambiguous evidence remains
-untouched. The same proof removes a clean retained server left by an older
-helper before reserving the stopped Runtime's next generation; it never adopts
-a live provider into a stopped record.
+Only matching PID, dead topology, process absence, and status `0` authorize
+private-server removal and stopped/parked state. Ordinary Runtimes additionally
+require launch cwd equality. A still-starting shell-promoted Runtime may bridge
+an earlier absolute pane seed cwd to its canonical recorded project cwd only
+through one exact current-generation `provider_exec_proven` target that
+independently proved the native provider cwd. Non-zero, reused, inaccessible,
+malformed, missing, duplicated, stale, timed-out, or otherwise ambiguous
+evidence remains untouched. The same proof removes a clean retained server
+left by an older helper before reserving the stopped Runtime's next generation;
+it never adopts a live provider into a stopped record.
 
 Linux `ESRCH` maps to a vanished process only at the process-group enumeration
 seam after `/proc` already yielded that entry. Direct identity reads remain
@@ -72,12 +80,50 @@ license/advisory/source policy, documentation links, source acceptance, and
 staged/unstaged diff checks. Cargo Deny emitted only the already accepted
 duplicate-version warnings; advisories, bans, licenses, and sources passed.
 
+## Immediate shell-first exit correction
+
+Operator falsification on the installed prior D25 artifact started a native
+provider from a newly onboarded provisional Shell and exited it immediately.
+The durable onboarding journal reached `provider_exec_proven`, the retained
+private pane exposed the recorded PID with status `0`, and the process was
+absent, but the Runtime remained `starting` and could not be reopened. No pane
+content was inspected and the specimen state was left untouched.
+
+The cause was a false cwd equivalence in retained-exit proof: tmux permanently
+reported the cwd used to seed the provisional account Shell, while onboarding
+correctly recorded the canonical project root proven after the shell changed
+directory and execed the provider. The ordinary retained-exit path required
+those two values to be identical. A second narrow ordering window existed
+between the durable `provider_exec_proven` commit and presentation-marker
+retirement.
+
+The correction keeps ordinary Runtime launch-cwd equality unchanged. Only a
+`starting` Runtime with one exact current-generation onboarding target may use
+that target's canonical project root as the promoted-cwd proof. PID, provider,
+Workstream, generation, private paths, topology, process absence, and exit
+status remain exact. The provisional helper returns immediately for an exact
+live detach; an exact dead candidate may poll for at most 500 milliseconds
+while durable proof and marker retirement converge. Missing, stale,
+duplicated, malformed, non-zero, mismatched, or timed-out evidence grants no
+mutation authority.
+
+Focused promoted-cwd, state-before-marker, timeout, and live-detach regressions
+passed. The corrected uninterrupted `scripts/check` run passed formatting,
+strict Clippy, all 412 library tests, all 10 presentation tests, package
+verification, dependency license/advisory/source policy, documentation links,
+source/CLI acceptance, presentation/state acceptance, and diff checks. Cargo
+Deny again emitted only the accepted duplicate-version warnings; advisories,
+bans, licenses, and sources passed. No live-provider, declared-Rust-1.88, or
+remote-CI acceptance was run on the corrected artifact.
+
 ## Sanitized live-provider acceptance
 
-Explicit operator-authorized acceptance used isolated mode-0700 homes, provider
-configuration, repositories, schema-15 state roots, presentation sockets, and
-private Runtime servers. It used the exact locked artifact recorded below with
-Codex 0.153.2 and OpenCode 1.18.27.
+This historical acceptance belongs to the prior D25 artifact with SHA-256
+`7d8c4704a79b7c1e48c1bbff0034aaf5faf9b5905744e4520838de8eeca5bdc0`.
+It is not current-artifact evidence. Explicit operator-authorized acceptance
+used isolated mode-0700 homes, provider configuration, repositories, schema-15
+state roots, presentation sockets, and private Runtime servers with Codex
+0.153.2 and OpenCode 1.18.27.
 
 For each provider, one harmless native interaction established durable
 `attention`. Native `/exit` then produced all of the following without pane
@@ -96,18 +142,20 @@ prompt or result was recorded in this evidence.
 
 ## Installed artifact
 
-The locked release was atomically installed to `~/.local/bin/wsnav`. Source and
-installed artifacts are mode `0755`, size 7,370,160 bytes, report
-`wsnav 0.1.0`, and are byte-identical:
+The corrected locked release was atomically installed to
+`~/.local/bin/wsnav`. Source and installed artifacts are mode `0755`, size
+7,398,872 bytes, report `wsnav 0.1.0`, and are byte-identical:
 
 ```text
-7d8c4704a79b7c1e48c1bbff0034aaf5faf9b5905744e4520838de8eeca5bdc0  target/release/wsnav
-7d8c4704a79b7c1e48c1bbff0034aaf5faf9b5905744e4520838de8eeca5bdc0  ~/.local/bin/wsnav
+2ab6c705291d6140826e0a72c00c1668f03b7bf463b7d104c38e0dad5dfa1057  target/release/wsnav
+2ab6c705291d6140826e0a72c00c1668f03b7bf463b7d104c38e0dad5dfa1057  ~/.local/bin/wsnav
 ```
 
 ## Evidence boundaries
 
 - No passing current-source remote CI result is included in this record.
+- No live-provider or declared-Rust-1.88 acceptance was run on the corrected
+  installed hash; those results remain bound to the prior D25 artifact.
 - No current UI capture was generated. Capture selection and publication were
   explicitly left to the operator and are not a D25 exit gate.
 - No Fork, Rename, Ack, Park/Unpark, provider-thread archive/delete, transcript

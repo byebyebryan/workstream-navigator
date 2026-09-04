@@ -2,15 +2,17 @@
 
 Date: 2026-09-04
 
-Status: D0-D25 implementation is complete. D25, developed from `076b0a7`,
-passes the full local/disposable gate and declared Rust 1.88 suite. Its locked
-release is byte-identically installed for operator
-inspection with executable SHA-256
-`7d8c4704a79b7c1e48c1bbff0034aaf5faf9b5905744e4520838de8eeca5bdc0`.
-Sanitized native-exit acceptance passed with Codex 0.153.2 and OpenCode 1.18.27
-on that exact artifact, with complete cleanup. D25 stabilizes the existing D24
-surface and schema 15; it adds no user-facing session-management capability.
-No passing current-source remote CI is included in the D25 acceptance record.
+Status: D0-D25 implementation is complete. D25, developed from `076b0a7`, now
+includes an immediate shell-first exit correction after operator
+falsification. The corrected source passes the full local/disposable gate, and
+its locked release is byte-identically installed for operator inspection with
+executable SHA-256
+`2ab6c705291d6140826e0a72c00c1668f03b7bf463b7d104c38e0dad5dfa1057`.
+The declared Rust 1.88 suite and sanitized native-exit acceptance with Codex
+0.153.2 and OpenCode 1.18.27 remain bound to the prior D25 artifact, not this
+corrected hash. D25 stabilizes the existing D24 surface and schema 15; it adds
+no user-facing session-management capability. No passing current-source remote
+CI is included in the D25 acceptance record.
 D18 checkpoint `c961c7e` retains the older separately
 authorized destructive-reset and native observer-trust evidence.
 
@@ -34,9 +36,10 @@ roadmap is preserved as
 
 ## Completed checkpoint: D25 current-product stabilization and closure
 
-Implementation status: locally accepted, sanitized live-provider accepted,
-and installed for operator inspection. No passing current-source remote-CI
-result is included in this acceptance record.
+Implementation status: the corrected source is locally accepted and installed
+for operator inspection. Sanitized live-provider acceptance remains bound to
+the prior D25 artifact. No passing current-source remote-CI result is included
+in this acceptance record.
 
 D25 closes deterministic and operational gaps found while reviewing the
 current simplified product. It does not change the D24 product surface. The
@@ -55,8 +58,9 @@ Scope:
   permission, malformed, and other I/O failures strict;
 - distinguish a still-running exact provider detach from an exact zombie or
   narrow matching-process disappearance, and give only the latter a bounded
-  retained-pane convergence window before requiring matching PID, launch cwd,
-  topology, process absence, and status `0`;
+  retained-pane convergence window before requiring matching PID, exact
+  ordinary or shell-promoted cwd proof, topology, process absence, and status
+  `0`;
 - remove an older stopped Runtime's retained private server before reusing its
   Runtime ID only through that same exact status-zero proof; refuse live,
   non-zero, reused, inaccessible, malformed, or ambiguous evidence;
@@ -64,7 +68,12 @@ Scope:
   its immutable presentation ID/revision, slot generation, and candidate
   Runtime ID to one exact `provider_exec_proven` operation, owned Workstream,
   Runtime generation, and canonical private paths before delegating cleanup;
-  an unpromoted detach performs no state mutation;
+  an unpromoted live detach performs no state mutation, while an exact dead
+  candidate may wait boundedly for durable proof and marker retirement;
+- keep ordinary retained-exit launch-cwd equality strict, but allow a
+  still-starting shell-promoted Runtime to use its exact current-generation
+  `provider_exec_proven` project root when its pane was seeded before the shell
+  changed into that root;
 - make focus and retained-status tests wait on the exact current terminal/tmux
   evidence they assert, including tmux's separate dead-status publication;
 - reconcile present-tense product documentation with the implemented compact
@@ -87,17 +96,21 @@ Exit gate:
 
 - focused regressions prove exact client/status readiness, scoped Linux
   disappearance, detach-versus-exit convergence, stopped-retained cleanup,
-  provisional promotion identity, and no-mutation unpromoted detach;
-- the complete locked suite passes locally and on Ubuntu 24.04 with Rust
-  1.88.0, tmux 3.4, Git 2.43.0, and Zsh 5.9;
+  provisional promotion identity, shell-seed versus proven-project cwd,
+  state-before-marker convergence, bounded timeout, and no-mutation live
+  detach;
+- the corrected complete locked suite passes locally; the prior D25 artifact's
+  suite passed on Ubuntu 24.04 with Rust 1.88.0, tmux 3.4, Git 2.43.0, and Zsh
+  5.9;
 - `scripts/check` passes formatting, strict Clippy, all disposable tests,
   packaging, dependency policy, documentation links, and source boundaries;
-- sanitized Codex 0.153.2 and OpenCode 1.18.27 each reach durable attention,
-  then native `/exit` proves parked/stopped state, provider and private-server
-  absence, and a live inert presentation surface on the exact release; and
-- source and installed `wsnav 0.1.0` binaries are mode `0755`, size 7,370,160
-  bytes, and SHA-256
-  `7d8c4704a79b7c1e48c1bbff0034aaf5faf9b5905744e4520838de8eeca5bdc0`.
+- on the prior D25 release, sanitized Codex 0.153.2 and OpenCode 1.18.27 each
+  reached durable attention, then native `/exit` proved parked/stopped state,
+  provider and private-server absence, and a live inert presentation surface;
+  that run is not evidence for the corrected hash; and
+- corrected source and installed `wsnav 0.1.0` binaries are mode `0755`, size
+  7,398,872 bytes, and SHA-256
+  `2ab6c705291d6140826e0a72c00c1668f03b7bf463b7d104c38e0dad5dfa1057`.
 
 Remote evidence boundary:
 
@@ -834,7 +847,7 @@ historical evidence rather than current delivery authority.
 | D22 | Exact live retained-session Codex recovery confirmation | [D22 acceptance](evidence/acceptance/d22-exact-live-recovery.md) |
 | D23 | Provider-native stop; public Park retired and archive/restore made contextual | [D23 acceptance](evidence/acceptance/d23-native-stop-contextual-visibility.md) |
 | D24 | Archived secondary catalog and WSNav-owned Forget; locally accepted and installed for inspection | [D24 evidence](evidence/acceptance/d24-archived-catalog-forget.md) |
-| D25 | Current-product lifecycle and evidence stabilization; local, MSRV, and sanitized live-provider accepted | [D25 evidence](evidence/acceptance/d25-current-product-closure.md) |
+| D25 | Current-product lifecycle stabilization; corrected local artifact installed, prior artifact retains MSRV and sanitized live-provider evidence | [D25 evidence](evidence/acceptance/d25-current-product-closure.md) |
 
 ## Deferred product decisions
 

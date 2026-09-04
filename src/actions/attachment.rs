@@ -10,7 +10,9 @@ use super::{
         fail_known_absent_opencode_session_creation, fail_unknown_opencode_session_creation,
         fail_unlaunched_runtime, matches_recorded_runtime,
     },
-    lifecycle::{clean_provider_exit_status, park_authorized},
+    lifecycle::{
+        clean_provider_exit_status_with_cwd_proof, park_authorized, promoted_onboarding_cwd,
+    },
     model::workstream_overview_authorized,
     start::backfill_live_runtime_provider_pid,
 };
@@ -230,7 +232,14 @@ pub fn preflight_attachment(
         )?,
     );
     let probe = runtime.probe()?;
-    if clean_provider_exit_status(&runtime, &runtime_record, &probe)? == Some(0) {
+    let promoted_cwd = promoted_onboarding_cwd(root, registry, &runtime_record)?;
+    if clean_provider_exit_status_with_cwd_proof(
+        &runtime,
+        &runtime_record,
+        &probe,
+        promoted_cwd.as_deref(),
+    )? == Some(0)
+    {
         park_authorized(
             root,
             registry,

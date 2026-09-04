@@ -7,29 +7,35 @@
 D25 closes the current product around the already-settled shell-first,
 provider-native session model. It adds no page, action, status, schema, or
 provider-content ownership. The initial provisional attachment now retains a
-hidden, presentation-bound helper through promotion; after native attachment
-returns, that helper may reconcile only when the retired marker joins to the
-exact `provider_exec_proven` operation, Runtime, Workstream, generation, and
-private paths it carried before launch. An unpromoted shell detach remains
-state-free. The existing exact retained-pane proof remains the only authority
-to classify status `0` as provider exit and park the Runtime.
+hidden, presentation-bound helper through promotion. After native attachment
+returns, an exact dead candidate may wait boundedly for the durable proof and
+marker retirement to converge; cleanup still requires the retired marker to
+join the exact `provider_exec_proven` operation, Runtime, Workstream,
+generation, and private paths it carried before launch. An unpromoted live
+shell detach remains state-free. The existing exact retained-pane proof
+remains the only authority to classify status `0` as provider exit and park
+the Runtime.
 
-The same closure bounds Linux `/proc` disappearance during process-group
-enumeration without weakening direct identity reads, waits for exact tmux
-client and dead-pane metadata publication in tests, and uses current-screen
-terminal evidence for the focus regression. A stopped Runtime left with an
-exact retained zero-status pane by an older helper is removed before its next
-generation is reserved; live, non-zero, reused, malformed, or inaccessible
-evidence remains fail-closed.
+The shell-first correction also distinguishes the provisional pane's seed cwd
+from the canonical project cwd proven when the provider exec was adopted. Only
+one exact current-generation onboarding target may bridge those values;
+ordinary Runtimes keep strict pane-start cwd equality. The same closure bounds
+Linux `/proc` disappearance during process-group enumeration without weakening
+direct identity reads, waits for exact tmux client and dead-pane metadata
+publication in tests, and uses current-screen terminal evidence for the focus
+regression. A stopped Runtime left with an exact retained zero-status pane by
+an older helper is removed before its next generation is reserved; live,
+non-zero, reused, malformed, or inaccessible evidence remains fail-closed.
 
 D0-D25 are complete. The locked D25 release is installed byte-identically for
 operator inspection with SHA-256
-`7d8c4704a79b7c1e48c1bbff0034aaf5faf9b5905744e4520838de8eeca5bdc0`.
-The full disposable gate, declared Rust 1.88 suite, and sanitized native-exit
-acceptance passed with Codex 0.153.2 and OpenCode 1.18.27. No passing
-current-source remote CI is included in that acceptance record. Current UI
-capture generation was left to the operator and is not
-acceptance evidence. See the
+`2ab6c705291d6140826e0a72c00c1668f03b7bf463b7d104c38e0dad5dfa1057`.
+The corrected source passes the full local disposable gate. The declared Rust
+1.88 suite and sanitized native-exit acceptance with Codex 0.153.2 and OpenCode
+1.18.27 remain evidence for the prior D25 artifact, not this corrected hash.
+No passing current-source remote CI is included in that acceptance record.
+Current UI capture generation was left to the operator and is not acceptance
+evidence. See the
 [D25 acceptance record](evidence/acceptance/d25-current-product-closure.md).
 
 ### D24 archived catalog and forget
@@ -426,13 +432,14 @@ and complete disposable cleanup.
 
 ## Build and command references
 
-The project is a source-installed operator beta. This host's installed D25
-development artifact opens only schema 15 and its `wsnav --help` is the
-installed CLI reference. A host must not be described as running a candidate
-until its artifact is built, checked, atomically installed, and
+The project is a source-installed operator beta. This host's installed
+corrected D25 development artifact opens only schema 15 and its `wsnav --help`
+is the installed CLI reference. A host must not be described as running a
+candidate until its artifact is built, checked, atomically installed, and
 checksum-verified there. Run
 `cargo build --locked --release` and `scripts/check` before any
-replacement. D25's local/disposable and sanitized live-provider acceptance is
-recorded separately from D18's destructive reset and native observer trust;
-there is no state rollback. The normal workflow remains the Navigator beside
-either the provisional account shell or the native provider TUI.
+replacement. D25 records the corrected local/disposable result separately
+from the prior artifact's sanitized live-provider acceptance and D18's
+destructive reset and native observer trust; there is no state rollback. The
+normal workflow remains the Navigator beside either the provisional account
+shell or the native provider TUI.

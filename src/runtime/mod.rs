@@ -1988,8 +1988,8 @@ impl<'a> PrivateRuntime<'a> {
 
     /// Stops only the server at this Runtime's private socket, retaining its
     /// directory for a caller that has a narrower artifact cleanup proof.
-    /// This is used for presentation-private provisional shells so the
-    /// generic `park` recursive removal cannot outrun exact ownership checks.
+    /// This is used for presentation-private provisional shells so generic
+    /// exact-stop recursive removal cannot outrun exact ownership checks.
     pub(crate) fn stop_server(&self) -> Result<(), RuntimeError> {
         let response = self.tmux.invoke(&TmuxInvocation {
             socket: self.paths.socket.clone(),

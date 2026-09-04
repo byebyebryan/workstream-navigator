@@ -419,6 +419,175 @@ fn archive_and_restore_without_a_runtime_never_start_codex() {
 }
 
 #[test]
+#[cfg(unix)]
+fn archive_stops_exact_runtime_before_archive_and_restore_never_relaunches() {
+    if Command::new("tmux")
+        .arg("-V")
+        .spawn()
+        .and_then(std::process::Child::wait_with_output)
+        .is_err()
+    {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+
+    let (_temporary, root, record, workstream_id, _runtime_guard) =
+        live_runtime_for_read_only_test(ProviderKind::Codex);
+    let provider_pid = record
+        .provider_pid
+        .expect("live fixture must record provider process identity");
+    let process_birth = record
+        .process_birth
+        .clone()
+        .expect("live fixture must record process birth identity");
+    let paths =
+        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session).unwrap();
+    let tmux = SystemTmux::default();
+    let process_probe = LinuxProcessProbe;
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
+    assert!(paths.socket.exists(), "fake Runtime did not start");
+    assert_eq!(
+        process_probe.process_birth(provider_pid),
+        Some(process_birth.clone())
+    );
+
+    let mut registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    let expected_revision = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap()
+        .revision;
+    let archived_revision = archive(&root, &mut registry, workstream_id, expected_revision)
+        .expect("owned Runtime archive should complete");
+
+    assert!(
+        matches!(runtime.probe().unwrap(), RuntimeProbe::Missing),
+        "archive must stop the exact private Runtime before hiding it"
+    );
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while process_probe.process_birth(provider_pid).as_deref() == Some(process_birth.as_str())
+        && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_ne!(
+        process_probe.process_birth(provider_pid).as_deref(),
+        Some(process_birth.as_str()),
+        "archive must stop the recorded provider process"
+    );
+    let archived = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert!(archived.archived_at_millis.is_some());
+    assert_eq!(archived.lifecycle, WorkstreamLifecycle::Parked);
+    assert_eq!(archived.revision, archived_revision);
+    assert_eq!(
+        archived.runtime.as_ref().unwrap().runtime_id,
+        record.runtime_id
+    );
+    assert_eq!(
+        archived.runtime.as_ref().unwrap().status,
+        crate::domain::RuntimeStatus::Stopped
+    );
+
+    let restored_revision = restore(&mut registry, workstream_id, archived_revision).unwrap();
+    let restored = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert_eq!(restored.archived_at_millis, None);
+    assert_eq!(restored.lifecycle, WorkstreamLifecycle::Open);
+    assert_eq!(restored.revision, restored_revision);
+    assert_eq!(
+        restored.runtime.as_ref().unwrap().status,
+        crate::domain::RuntimeStatus::Stopped
+    );
+    assert!(matches!(runtime.probe().unwrap(), RuntimeProbe::Missing));
+    assert!(
+        !paths.socket.exists(),
+        "restore must not relaunch the Runtime"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn archive_refuses_ambiguous_runtime_identity_without_mutating_provider_or_state() {
+    if Command::new("tmux")
+        .arg("-V")
+        .spawn()
+        .and_then(std::process::Child::wait_with_output)
+        .is_err()
+    {
+        eprintln!("skipped: tmux is unavailable");
+        return;
+    }
+
+    let (_temporary, root, record, workstream_id, _runtime_guard) =
+        live_runtime_for_read_only_test(ProviderKind::Codex);
+    let paths =
+        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session).unwrap();
+    let process_probe = LinuxProcessProbe;
+    let provider_pid = record
+        .provider_pid
+        .expect("live fixture must record provider process identity");
+    let process_birth = record
+        .process_birth
+        .as_deref()
+        .expect("live fixture must record process birth identity");
+    let connection = Connection::open(root.host_database_path()).unwrap();
+    connection
+        .execute(
+            "UPDATE runtimes SET process_birth = 'foreign-birth' WHERE runtime_id = ?1",
+            [record.runtime_id.to_string()],
+        )
+        .unwrap();
+    drop(connection);
+
+    let mut registry = crate::state::open_current(&root)
+        .unwrap()
+        .into_host_registry()
+        .unwrap();
+    let before = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert!(archive(&root, &mut registry, workstream_id, before.revision).is_err());
+    assert!(
+        paths.socket.exists(),
+        "ambiguous archive must preserve the Runtime"
+    );
+    assert_eq!(
+        process_probe.process_birth(provider_pid).as_deref(),
+        Some(process_birth)
+    );
+    let after = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert_eq!(after.archived_at_millis, None);
+    assert_eq!(after.lifecycle, WorkstreamLifecycle::Open);
+    assert_eq!(after.revision, before.revision);
+    assert_eq!(
+        after.runtime.as_ref().unwrap().status,
+        crate::domain::RuntimeStatus::Idle
+    );
+}
+
+#[test]
 fn managed_codex_environment_has_only_the_explicit_utf8_locale() {
     let environment = managed_codex_environment();
 

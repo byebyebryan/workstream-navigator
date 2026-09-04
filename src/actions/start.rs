@@ -289,9 +289,9 @@ fn recover_codex(
     manager.verify_native_trust(&integration.ownership)?;
     match prior_probe {
         // The path is derived solely from this persisted Runtime ID. Once its
-        // exact server is conclusively gone, `park` uses that same private
-        // socket and removes only the owned socket/config directory before a
-        // new generation is allowed to claim it.
+        // exact server is conclusively gone, exact-stop cleanup uses that same
+        // private socket and removes only the owned socket/config directory
+        // before a new generation is allowed to claim it.
         RuntimeProbe::Missing => {
             let provider_result = stop_recorded_provider(&prior_runtime);
             provider_result?;

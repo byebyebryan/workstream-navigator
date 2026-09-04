@@ -448,11 +448,13 @@ fn normal_help_and_parser_exclude_retired_surfaces() {
     assert!(!help.contains("Register one existing Git project"));
     assert!(!help.contains("Create and start an independent Workstream"));
     assert!(!help.contains("acknowledge"));
+    assert!(!help.contains("Park a Runtime"));
     for retired in [
         "register",
         "new-workstream",
         "register-remote",
         "acknowledge",
+        "park",
         "host",
         "_remote",
         "_probe",

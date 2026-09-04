@@ -16,8 +16,8 @@ use crate::provider::lifecycle::{LifecycleEvent, LifecycleObservation};
 
 use super::current::{BootstrapCheckpoint, create_current_with_checkpoint_hook};
 use super::{
-    BOOTSTRAP_LOCK_FILE, HOST_APPLICATION_ID, HOST_SCHEMA_VERSION, HostRegistry, RuntimeRecord,
-    StateError, StateRoot, create_current, open_current,
+    BOOTSTRAP_LOCK_FILE, HOST_APPLICATION_ID, HOST_SCHEMA_VERSION, HostRegistry, ProviderBinding,
+    RuntimeRecord, StateError, StateRoot, create_current, open_current,
 };
 
 fn raw_identity(path: &std::path::Path) -> (u32, u32) {
@@ -777,6 +777,167 @@ fn direct_schema15_retains_current_registry_operations() {
     let workstreams = registry.workstream_overviews().unwrap();
     assert_eq!(workstreams.len(), 1);
     assert_eq!(workstreams[0].workstream_id, workstream_id);
+}
+
+fn parked_runtime_fixture() -> (
+    tempfile::TempDir,
+    HostRegistry,
+    WorkstreamId,
+    crate::domain::RuntimeId,
+    RuntimeRecord,
+    ProviderBinding,
+    crate::domain::Revision,
+) {
+    let temporary = tempdir().unwrap();
+    let path = temporary.path().join("state");
+    let checkout = temporary.path().join("checkout");
+    fs::create_dir(&checkout).unwrap();
+    let mut state = create_current(&path, &RandomIdGenerator).unwrap();
+    let (_, workstream_id) = state
+        .seed_test_workstream(
+            &checkout,
+            "checkout",
+            ProviderKind::Codex,
+            &RandomIdGenerator,
+        )
+        .unwrap();
+    let mut registry = state.into_host_registry().unwrap();
+    let runtime = registry.reserve_runtime(workstream_id).unwrap();
+    let cwd = runtime.cwd.to_string_lossy().into_owned();
+    registry
+        .apply_lifecycle_observation(
+            runtime.runtime_id,
+            &runtime.tmux_generation,
+            LifecycleObservation {
+                event: LifecycleEvent::SessionStart,
+                cwd: cwd.clone(),
+                native_session_id: "retained-session".to_owned(),
+                turn_id: None,
+                source: Some("startup".to_owned()),
+            },
+        )
+        .unwrap();
+    let runtime = registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap();
+    registry
+        .apply_lifecycle_observation(
+            runtime.runtime_id,
+            &runtime.tmux_generation,
+            LifecycleObservation {
+                event: LifecycleEvent::Stop,
+                cwd,
+                native_session_id: "retained-session".to_owned(),
+                turn_id: Some("settled-turn".to_owned()),
+                source: None,
+            },
+        )
+        .unwrap();
+    let runtime = registry.runtime_by_id(runtime.runtime_id).unwrap().unwrap();
+    let runtime_id = runtime.runtime_id;
+    let binding = registry.binding_for_runtime(runtime_id).unwrap().unwrap();
+    registry
+        .park_runtime(runtime.runtime_id, runtime.revision)
+        .unwrap();
+    let parked_runtime = registry.runtime_by_id(runtime_id).unwrap().unwrap();
+    let parked = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert_eq!(parked.lifecycle, crate::domain::WorkstreamLifecycle::Parked);
+    assert_eq!(
+        parked.runtime.as_ref().map(|runtime| runtime.status),
+        Some(crate::domain::RuntimeStatus::Stopped)
+    );
+
+    (
+        temporary,
+        registry,
+        workstream_id,
+        runtime_id,
+        parked_runtime,
+        binding,
+        parked.revision,
+    )
+}
+
+#[test]
+fn restore_normalizes_only_parked_workstreams_and_preserves_runtime_state() {
+    let (
+        _temporary,
+        mut registry,
+        workstream_id,
+        runtime_id,
+        parked_runtime,
+        binding,
+        parked_revision,
+    ) = parked_runtime_fixture();
+    let archived_revision = registry
+        .archive_workstream(workstream_id, parked_revision, 1)
+        .unwrap();
+    let restored_revision = registry
+        .restore_workstream(workstream_id, archived_revision)
+        .unwrap();
+    let restored = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert_eq!(restored.lifecycle, crate::domain::WorkstreamLifecycle::Open);
+    assert_eq!(restored.revision, restored_revision);
+    assert_eq!(
+        registry.runtime_by_id(runtime_id).unwrap().unwrap(),
+        parked_runtime
+    );
+    assert_eq!(
+        registry.binding_for_runtime(runtime_id).unwrap(),
+        Some(binding)
+    );
+}
+
+#[test]
+fn restore_preserves_recovery_required_lifecycle() {
+    let (
+        _temporary,
+        mut registry,
+        workstream_id,
+        runtime_id,
+        _parked_runtime,
+        _binding,
+        _parked_revision,
+    ) = parked_runtime_fixture();
+    let stopped_runtime = registry.runtime_by_id(runtime_id).unwrap().unwrap();
+    registry
+        .mark_runtime_recovery_required(stopped_runtime.runtime_id, stopped_runtime.revision)
+        .unwrap();
+    let recovery = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert_eq!(
+        recovery.lifecycle,
+        crate::domain::WorkstreamLifecycle::RecoveryRequired
+    );
+    let archived_recovery_revision = registry
+        .archive_workstream(workstream_id, recovery.revision, 2)
+        .unwrap();
+    let restored_recovery_revision = registry
+        .restore_workstream(workstream_id, archived_recovery_revision)
+        .unwrap();
+    let restored_recovery = registry
+        .workstream_overviews()
+        .unwrap()
+        .into_iter()
+        .find(|overview| overview.workstream_id == workstream_id)
+        .unwrap();
+    assert_eq!(
+        restored_recovery.lifecycle,
+        crate::domain::WorkstreamLifecycle::RecoveryRequired
+    );
+    assert_eq!(restored_recovery.revision, restored_recovery_revision);
 }
 
 #[test]

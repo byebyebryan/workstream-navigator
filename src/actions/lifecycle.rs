@@ -16,13 +16,15 @@ use super::{
 };
 use crate::domain::Clock;
 
-/// Parks one live Runtime while preserving provider history and project files.
+/// Stops one exact live Runtime while preserving provider history and project
+/// files. This is an internal cleanup primitive used by Archive and recovery;
+/// it is not a user-facing action.
 ///
 /// # Errors
 ///
 /// Returns an error when the expected Workstream revision is stale, the
-/// runtime cannot be parked, or durable state cannot record the exact effect.
-pub fn park(
+/// runtime cannot be stopped, or durable state cannot record the exact effect.
+pub(crate) fn park(
     root: &crate::state::StateRoot,
     registry: &mut HostRegistry,
     workstream_id: WorkstreamId,
@@ -123,15 +125,15 @@ pub(super) fn stop_opencode_observer(
 }
 
 /// Archives a Workstream as a reversible navigator-visibility change. A live
-/// Runtime is parked first so the provider is never left running behind a
-/// hidden row. If parking commits but the archive transition cannot, the
-/// Workstream remains visibly parked and can be retried with fresh revision
-/// evidence.
+/// Runtime is stopped first so the provider is never left running behind a
+/// hidden row. If exact cleanup commits but the archive transition cannot, the
+/// Workstream remains visible with its stopped Runtime and can be retried with
+/// fresh revision evidence.
 ///
 /// # Errors
 ///
 /// Returns an error when the Workstream revision is stale, a required Runtime
-/// park fails, the Workstream is already archived, or durable state cannot
+/// exact cleanup fails, the Workstream is already archived, or durable state cannot
 /// commit the exact archive transition.
 pub fn archive(
     root: &crate::state::StateRoot,
@@ -176,18 +178,19 @@ pub fn restore(
         .map_err(Into::into)
 }
 
-/// Waits briefly for the durable outcome of a concurrently requested park.
+/// Waits briefly for the durable outcome of a concurrently requested exact
+/// Runtime stop.
 ///
-/// Parking first stops the private tmux server, which makes an already
-/// attached native client exit before the park action can commit its `SQLite`
-/// transaction. Treat that exit as clean only after the exact Runtime and
-/// Workstream record the deliberate parked outcome. A crash, stale Runtime,
-/// or replacement generation never satisfies this predicate.
+/// The exact stop first terminates the private tmux server, which makes an
+/// already attached native client exit before the stop action can commit its
+/// `SQLite` transaction. Treat that exit as clean only after the exact Runtime
+/// and Workstream record the deliberate stopped outcome. A crash, stale
+/// Runtime, or replacement generation never satisfies this predicate.
 ///
 /// # Errors
 ///
 /// Returns an error when the registry cannot be opened or queried.
-pub fn await_deliberate_park(
+pub(crate) fn await_deliberate_park(
     root: &crate::state::StateRoot,
     runtime_id: RuntimeId,
     workstream_id: WorkstreamId,

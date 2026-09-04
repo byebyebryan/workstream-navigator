@@ -2,14 +2,14 @@
 
 ## Status and authority
 
-D0-D19 are complete. D19 checkpoint `a0ec38b` implements the tmux-derived
-navigation contract. The current post-rename startup-ordering and
-reconciliation-guidance refinement passes the full local/disposable gate and
-byte-identical per-host installation. It adds no state epoch or provider
-lifecycle effect. This result does not claim remote CI or live Codex/OpenCode
-acceptance. D18 checkpoint `c961c7e` remains the latest artifact with separately
-authorized destructive-reset, native-trust, and disposable live-provider
-release evidence.
+D0-D23 are complete. D23 removes the duplicate public Park lifecycle, makes
+provider exit the ordinary stop-and-keep-visible path, and keeps
+Archive/Restore contextual while retaining exact internal cleanup authority.
+The locally accepted artifact passes the full disposable gate and is installed
+byte-identically for operator inspection. This result does not claim remote CI
+or live Codex/OpenCode acceptance. D18 checkpoint `c961c7e` remains the latest
+artifact with separately authorized destructive-reset, native-trust, and
+disposable live-provider release evidence.
 
 - [Product and architecture design](design.md) is the V1 contract.
 - [Delivery roadmap](roadmap.md) owns delivery order, checkpoint status, and
@@ -54,7 +54,7 @@ the [D19 acceptance record](evidence/acceptance/d19-tmux-navigation.md).
 
 ## Current operator contract
 
-This section describes the locally installed D19 development artifact. D18
+This section describes the locally installed D23 development artifact. D18
 remains the latest separately accepted live-provider release.
 
 WSNav is host-local. Run it on the machine where the provider Runtime lives.
@@ -68,17 +68,19 @@ to reattach.
 
 The shell-first navigator has two direct pages: Workstreams and Archived. `.`
 opens Archived; `Esc` returns to Workstreams; `Left` and `Right` do not cycle
-views. Workstreams keeps `Enter`, `n`, `p`, `x`, and `?`; `n` creates a separate
+views. Workstreams keeps `Enter`, `n`, `x`, and `?`; `n` creates a separate
 blank Workstream at the selected Location, while native provider branching
-remains in the current Workstream. Archived uses `u` to restore
+remains in the current Workstream. `x` archives only after exact Runtime
+cleanup. Archived uses `u` to restore
 without starting or attaching a provider. The installed `wsnav --help` output
 is the CLI reference for that exact binary.
 
-Session-card markers project current provider and recovery lifecycle: `p` is
-parked, `!` is Workstream or onboarding recovery, `…` is starting, `●` is
-working, `✓` is Runtime attention, and idle or stopped sessions are blank. A
-subsequent provider prompt changes the marker back to working; presentation
-selection and focus never acknowledge or persist a separate result state.
+Session-card markers project current provider and recovery lifecycle: `!` is
+Workstream or onboarding recovery, `…` is starting, `●` is working, `✓` is
+Runtime attention, and idle or stopped sessions are blank (including records
+retained from earlier releases). A subsequent provider prompt changes the
+marker back to working; presentation selection and focus never acknowledge or
+persist a separate result state.
 
 Tmux alone owns pane focus. `Ctrl+b Left`/`Right` and deliberate primary-button
 press are the only ordinary focus transitions; Navigator activation and
@@ -156,7 +158,7 @@ presentation-private marker; they do not create a registry Runtime or
 Workstream row. Before creating those artifacts, materialization proves the
 candidate ID and all four path fields are absent and unused; it never adopts
 pre-existing artifacts. A marker-backed candidate is excluded from ordinary
-registry inventory, probe, park, remove, and recovery discovery/action until
+registry inventory, probe, Runtime-stop, removal, and recovery discovery/action until
 durable adoption; only the exact presentation marker plus the stable host-private
 `provisional.lock` lease may manage it. Markerless/registryless, foreign, or
 collision artifacts remain untouched, and a clean replacement allocates a fresh
@@ -264,20 +266,20 @@ presentation may retain its existing tmux
 Runtime attachment/pane or detach through ordinary card switching, but no new
 attachment to that Runtime is allowed. Selecting/materializing the fresh derived
 singleton card attaches only its separate provisional server under
-`provisional.lock` and grants no authority over the unproven Runtime. Park,
-Resume, contextual `n`, archive, recovery/start retry, and cleanup
+`provisional.lock` and grants no authority over the unproven Runtime. Resume,
+contextual `n`, archive, recovery/start retry, and cleanup
 actions for that Runtime refuse or wait with bounded
 `onboarding-in-progress` guidance. Passive snapshot/probe may show
 `starting`/`onboarding` and reconcile, but never adopts the helper/preparation
 process as provider identity, marks the Runtime lost, or signals it. Once
-terminal `recovery-required`, only the existing exact recovery or explicit Park
-rules apply. A terminal known-absent exec result is not itself action authority:
+terminal `recovery-required`, only exact recovery or Archive's exact cleanup
+path applies. A terminal known-absent exec result is not itself action authority:
 the reconciler must atomically resolve it. When provider-specific journal
 evidence proves no prior external effect or binding, guarded rollback ends
 onboarding and leaves the derived singleton card available but unmaterialized.
 When OpenCode has a known blank-session POST or binding, the same atomic
 resolution ends onboarding in the exact stopped/recovery state; only
-binding-preserving Resume/recovery or explicit Park is then allowed. A possible
+binding-preserving Resume/recovery or Archive is then allowed. A possible
 effect remains `recovery-required`. No ordinary action is enabled directly by
 exec-error evidence, and no operation remains fenced after terminal
 reconciliation. A host-local reconciler proves the same

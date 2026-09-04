@@ -433,9 +433,9 @@ pub(in crate::state) fn apply_session_start(
         if binding.provider != context.provider {
             return Err(StateError::ProviderIdentityMismatch);
         }
-        // A persisted binding appears at `starting` only when an exact parked
-        // session is resumed in a fresh private tmux generation. Repeated live
-        // SessionStart evidence must not mark a working turn idle.
+        // A persisted binding appears at `starting` only when an exact
+        // stopped session is resumed in a fresh private tmux generation.
+        // Repeated live SessionStart evidence must not mark a working turn idle.
         if context.runtime_status != "starting" {
             return Err(StateError::HookEvidenceMismatch);
         }

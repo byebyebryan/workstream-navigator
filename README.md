@@ -5,17 +5,16 @@ coding-agent workstreams on the machine where it is running. It adds
 organization, attachment, status, and a few compound workstream actions
 around the provider's native terminal UI.
 
-> **D19 status:** implemented and locally accepted for operator inspection.
-> Checkpoint `a0ec38b` completes the tmux-derived navigation contract; the
-> current post-rename startup-ordering and reconciliation-guidance refinement
-> passes the full local/disposable repository gate and is installed
-> byte-identically for operator inspection. The startup falsification and its
-> fail-closed correction remain in the
-> [D19 acceptance record](docs/evidence/acceptance/d19-tmux-navigation.md#post-rename-startup-falsification-and-closure).
+> **D23 status:** implemented, locally accepted, and installed byte-identically
+> for operator inspection. D23 removes the duplicate public Park lifecycle,
+> makes provider exit the ordinary stop-and-keep-visible path, and keeps
+> Archive/Restore contextual while retaining exact internal cleanup authority.
+> Its evidence and limitations are in the
+> [D23 acceptance record](docs/evidence/acceptance/d23-native-stop-contextual-visibility.md).
 > This is local/disposable acceptance, not remote-CI or live-provider
 > acceptance. D18 checkpoint `c961c7e` remains the latest artifact with
 > separately authorized Codex/OpenCode lifecycle evidence. See the
-> [roadmap](docs/roadmap.md#completed-checkpoint-d19-tmux-derived-presentation-navigation).
+> [roadmap](docs/roadmap.md#completed-checkpoint-d23-provider-native-stop-and-contextual-visibility).
 
 ## Host-local by design
 
@@ -40,7 +39,7 @@ and attach to the same Runtime.
 - A host-local catalog of registered Git Project Locations and Workstreams.
 - Project grouping by exact, credential-free Git-origin evidence on that
   host; it never groups records across hosts.
-- Starting, switching, parking, exact resume, archive, restore, and bounded
+- Starting, switching, exact resume, archive, restore, and bounded
   lost-Runtime recovery.
 - Provider-native conversation branching remains inside the same Workstream;
   observer evidence rotates its exact current conversation binding and name.
@@ -63,7 +62,7 @@ The Navigator has two direct pages. Page selection is process-local and is not p
 
 | Page | Purpose and direct controls |
 | --- | --- |
-| **Workstreams** | Default page with one pinned **Shell** card plus active Workstreams grouped by Project. `Enter` opens the selected shell or managed session; on a managed Workstream, `n` creates a separate blank Workstream at its exact Location, `p` parks, `x` archives, and `?` opens page help. Native provider branching stays within the current Workstream. |
+| **Workstreams** | Default page with one pinned **Shell** card plus active Workstreams grouped by Project. `Enter` opens the selected shell or managed session; on a managed Workstream, `n` creates a separate blank Workstream at its exact Location, `x` archives after exact Runtime cleanup, and `?` opens page help. Native provider branching stays within the current Workstream. |
 | **Archived** | Project-grouped archived Workstreams. `u` restores the selected Workstream and returns to Workstreams without launching or attaching a provider. |
 
 `.` opens or closes Archived; `Esc` returns to Workstreams. The compact footer
@@ -72,12 +71,13 @@ the complete `?` reference. Remaining footer hints pack into complete
 key/action pairs at the available width. Actions always resolve an exact
 Workstream ID or the presentation-local shell singleton.
 
-Session-card markers are projections of current lifecycle evidence: `p` means
-parked, `!` means Workstream or onboarding recovery is required, `…` means
-starting, `●` means working, `✓` means the Runtime is awaiting attention, and
-idle or stopped sessions are blank. A later provider prompt naturally changes
-the marker to working; selecting, opening, focusing, attaching, or cycling a
-card never acknowledges or writes a separate result state.
+Session-card markers are projections of current lifecycle evidence: `!` means
+Workstream or onboarding recovery is required, `…` means starting, `●` means
+working, `✓` means the Runtime is awaiting attention, and idle or stopped
+sessions are blank (including records retained from earlier releases). A later
+provider prompt naturally changes the marker to working; selecting, opening,
+focusing, attaching, or cycling a card never acknowledges or writes a separate
+result state.
 
 Pane focus is tmux-owned and separate from Navigator row selection. Use
 `Ctrl+b Left` and `Ctrl+b Right`, or deliberately press the primary mouse

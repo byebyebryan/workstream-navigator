@@ -243,7 +243,6 @@ fn execute_root_surface(root: &StateRoot, command: Commands) -> Result<(), AppEr
         Commands::Start { .. }
         | Commands::Recover { .. }
         | Commands::Attach { .. }
-        | Commands::Park { .. }
         | Commands::Archive { .. }
         | Commands::Restore { .. }
         | Commands::Status { .. }
@@ -328,19 +327,6 @@ fn execute_local_command(root: &StateRoot, command: Commands) -> Result<(), AppE
                 runtime.runtime_id,
                 runtime.revision,
             )
-        }
-        Commands::Park { workstream_id } => {
-            let workstream_id = parse_workstream(&workstream_id)?;
-            let workstream = workstream(&snapshot, workstream_id)?;
-            apply_managed_action(
-                root,
-                ManagedAction::Park {
-                    workstream_id,
-                    expected_workstream_revision: workstream.revision,
-                },
-            )
-            .map_err(AppError::Navigator)?;
-            Ok(())
         }
         Commands::Archive {
             workstream_id,

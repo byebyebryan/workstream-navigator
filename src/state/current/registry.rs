@@ -250,11 +250,12 @@ impl CurrentState {
                 return Err(StateError::MalformedHostSchema);
             }
             workstream_ids.push(intent.workstream_id);
-            // A recovery-required Runtime may be explicitly parked. That
-            // commits the onboarding journal without claiming its original
-            // native exec was proven.  The exact, bounded outcome is durable
-            // evidence of that decision; its Runtime may subsequently be
-            // resumed, so current stopped/parked lifecycle is not required.
+            // Archive may terminally resolve a recovery-required Runtime after
+            // exact-stop cleanup. That commits the onboarding journal without
+            // claiming its original native exec was proven. The exact, bounded
+            // outcome is durable evidence of that decision; its Runtime may
+            // subsequently be resumed, so current stopped/parked lifecycle is
+            // not required.
             if operation_phase == crate::domain::OperationPhase::Committed {
                 let retained_runtime: Option<(String, String)> = self
                     .connection

@@ -141,8 +141,8 @@ impl HostRegistry {
 
     /// Hides one exact Workstream from the active navigator scope without
     /// deleting its Runtime, provider binding, project files, or
-    /// lineage. The caller is responsible for any necessary Runtime park
-    /// before this durable visibility transition.
+    /// lineage. The caller is responsible for any necessary exact Runtime
+    /// stop before this durable visibility transition.
     ///
     /// # Errors
     ///
@@ -191,9 +191,16 @@ impl HostRegistry {
             .map_err(StateError::Sqlite)?;
         let existing = transaction
             .query_row(
-                "SELECT revision, archived_at_millis FROM workstreams WHERE workstream_id = ?1",
+                "SELECT revision, archived_at_millis, lifecycle
+                 FROM workstreams WHERE workstream_id = ?1",
                 [workstream_id.to_string()],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<i64>>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .optional()
             .map_err(StateError::Sqlite)?
@@ -211,12 +218,21 @@ impl HostRegistry {
             (None, Some(_)) | (Some(_), None) => {}
         }
         let next_revision = current_revision.next();
+        let lifecycle = if archived_at_millis.is_none() && existing.2 == "parked" {
+            "open"
+        } else {
+            existing.2.as_str()
+        };
         let updated = transaction
             .execute(
-                "UPDATE workstreams SET archived_at_millis = ?1, revision = ?2
-                 WHERE workstream_id = ?3 AND revision = ?4",
+                "UPDATE workstreams
+                 SET archived_at_millis = ?1,
+                     lifecycle = ?2,
+                     revision = ?3
+                 WHERE workstream_id = ?4 AND revision = ?5",
                 params![
                     archived_at_millis,
+                    lifecycle,
                     next_revision.value(),
                     workstream_id.to_string(),
                     current_revision.value(),

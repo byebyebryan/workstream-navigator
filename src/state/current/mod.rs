@@ -101,9 +101,10 @@ const MAX_PROVISIONAL_LOCK_BYTES: usize = 512;
 const OBSERVER_DEGRADED_MARKER_TEMP_SUFFIX: &str = ".tmp";
 const MAX_PROJECT_PROJECTION_PROJECTS: usize = 512;
 const MAX_PROJECT_PROJECTION_LOCATIONS: usize = 4096;
-/// Exact terminal journal evidence written only after the user has explicitly
-/// parked an onboarding recovery. It records recovery resolution, never
-/// provider-exec proof; the retained Runtime may later be resumed normally.
+/// Exact terminal journal evidence written only after Archive has completed
+/// exact-stop cleanup for an onboarding recovery. It records recovery
+/// resolution, never provider-exec proof; the retained Runtime may later be
+/// resumed normally.
 const PARKED_RECOVERY_RESOLVED_OUTCOME: &str = r#"{"code":"parked_recovery_resolved_v1"}"#;
 /// Exact terminal journal evidence written when presentation authority cancels
 /// an unconsumed, pre-effect onboarding capability.  The operation remains

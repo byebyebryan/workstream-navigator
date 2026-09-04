@@ -554,11 +554,11 @@ impl Presentation {
     /// `WSNav` command, management traffic, or provider payload is sent into
     /// the pane. A live or ambiguous managed attachment is a hard refusal
     /// because its native output must remain visible and untouched; only an
-    /// exact deliberately parked attachment may surrender its outer helper
-    /// pane.
+    /// attachment with exact deliberate-stop evidence may surrender its outer
+    /// helper pane.
     #[allow(
         clippy::too_many_lines,
-        reason = "The exact parked-attachment handoff keeps topology, state, status, and native review fences together."
+        reason = "The exact stopped-attachment handoff keeps topology, state, status, and native review fences together."
     )]
     pub(crate) fn start_observer_review(
         &self,
@@ -599,7 +599,7 @@ impl Presentation {
                 ));
             }
             if let Some(workstream_id) = attached_workstream {
-                // A parked/stopped Runtime is the only managed attachment
+                // A deliberately stopped Runtime is the only managed attachment
                 // that may surrender the outer helper pane.  The private
                 // Runtime remains the durable reopen path; a live or
                 // ambiguous probe keeps its provider output untouched.
@@ -707,7 +707,7 @@ impl Presentation {
     }
 
     /// Proves that the managed Runtime whose outer helper is being replaced
-    /// is deliberately parked and absent from its private tmux server.  The
+    /// is deliberately stopped and absent from its private tmux server.  The
     /// outer pane alone is not mutation authority: a stopped-looking helper
     /// can still belong to a live or changed Runtime.
     fn prove_stopped_attachment(
@@ -735,16 +735,16 @@ impl Presentation {
             .ok_or(PresentationError::ControlRefused(
                 "observer review managed attachment is unavailable",
             ))?;
-        let deliberately_parked = registry
+        let deliberately_stopped = registry
             .runtime_is_deliberately_parked(runtime.runtime_id, workstream_id)
             .map_err(|_| {
                 PresentationError::ControlRefused(
                     "observer review managed attachment state is unavailable",
                 )
             })?;
-        if !deliberately_parked {
+        if !deliberately_stopped {
             return Err(PresentationError::ControlRefused(
-                "observer review cannot replace a live or unparked attachment",
+                "observer review cannot replace a live or unverified attachment",
             ));
         }
         let paths =

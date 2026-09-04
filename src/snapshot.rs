@@ -248,6 +248,7 @@ mod tests {
     use super::{OnboardingStatus, read_snapshot};
     use crate::{
         domain::{ProviderKind, RandomIdGenerator, Revision, RuntimeId, WorkstreamLifecycle},
+        navigator::{ManagedAction, apply_managed_action},
         onboarding::{ShellCommandDecision, classify_shell_command},
         presentation::{ProvisionalInventory, ProvisionalInventoryError},
         provisional::{HostInventoryError, classify_host_inventory},
@@ -408,51 +409,79 @@ mod tests {
 
         drop(provisional);
         drop(state);
-        let state = open_current(&root).unwrap();
-        let mut registry = state.into_host_registry().unwrap();
-        let runtime = registry
-            .runtime_by_id(candidate_runtime_id)
-            .unwrap()
-            .unwrap();
-        registry
-            .park_runtime(candidate_runtime_id, runtime.revision)
-            .unwrap();
-        let parked_revision = registry
-            .workstream_overviews()
-            .unwrap()
-            .into_iter()
-            .find(|workstream| {
-                workstream
-                    .runtime
-                    .as_ref()
-                    .is_some_and(|runtime| runtime.runtime_id == candidate_runtime_id)
-            })
-            .unwrap()
-            .revision;
-        drop(registry);
 
-        let mut state = open_current(&root).unwrap();
-        let provisional = state.acquire_provisional_lease().unwrap();
-        state
-            .resolve_parked_recovery_current(
-                &provisional,
-                read_snapshot(&root).unwrap().workstreams[0].workstream_id,
-                parked_revision,
-            )
-            .unwrap();
-        drop(provisional);
-        drop(state);
-
-        let resolved = read_snapshot(&root).unwrap();
+        let before_archive = read_snapshot(&root).unwrap();
+        let workstream_id = before_archive.workstreams[0].workstream_id;
+        let expected_revision = before_archive.workstreams[0].revision;
         assert_eq!(
-            resolved.workstreams[0].lifecycle,
+            apply_managed_action(
+                &root,
+                ManagedAction::Archive {
+                    workstream_id,
+                    expected_workstream_revision: expected_revision,
+                },
+            )
+            .unwrap(),
+            None
+        );
+
+        let archived = read_snapshot(&root).unwrap();
+        assert!(archived.workstreams[0].archived);
+        assert_eq!(
+            archived.workstreams[0].lifecycle,
             crate::domain::WorkstreamLifecycle::Parked
         );
+        assert_eq!(
+            archived.workstreams[0].onboarding, None,
+            "Archive must resolve terminal onboarding recovery before hiding the row"
+        );
+        assert_eq!(
+            archived.workstreams[0].runtime.as_ref().unwrap().status,
+            crate::domain::RuntimeStatus::Stopped
+        );
+        let connection = Connection::open(root.host_database_path()).unwrap();
+        let (phase, outcome): (String, Option<String>) = connection
+            .query_row(
+                "SELECT phase, outcome_json FROM compound_operations WHERE kind = 'onboard'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(phase, "committed");
+        assert_eq!(
+            outcome.as_deref(),
+            Some(r#"{"code":"parked_recovery_resolved_v1"}"#)
+        );
+        drop(connection);
+
+        let archived_revision = archived.workstreams[0].revision;
+        assert_eq!(
+            apply_managed_action(
+                &root,
+                ManagedAction::Restore {
+                    workstream_id: archived.workstreams[0].workstream_id,
+                    expected_workstream_revision: archived_revision,
+                },
+            )
+            .unwrap(),
+            None
+        );
+        let resolved = read_snapshot(&root).unwrap();
+        assert!(!resolved.workstreams[0].archived);
+        assert_eq!(
+            resolved.workstreams[0].lifecycle,
+            crate::domain::WorkstreamLifecycle::Open
+        );
         assert_eq!(resolved.workstreams[0].onboarding, None);
+        assert_eq!(
+            resolved.workstreams[0].runtime.as_ref().unwrap().status,
+            crate::domain::RuntimeStatus::Stopped
+        );
 
         // The exact terminal journal outcome remains valid after ordinary
-        // Resume reuses the retained Runtime.  Requiring it to stay parked
-        // would incorrectly re-fence this Workstream on the next refresh.
+        // Resume reuses the retained Runtime. Requiring this terminal outcome
+        // to keep the row hidden would incorrectly re-fence this Workstream on
+        // the next refresh.
         let state = open_current(&root).unwrap();
         let mut registry = state.into_host_registry().unwrap();
         registry

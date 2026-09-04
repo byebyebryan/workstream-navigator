@@ -2,9 +2,14 @@
 
 Date: 2026-09-03
 
-Status: D0-D22 are complete. The D22 correction in `8338a04` is locally
-accepted, installed, and operator-accepted against the exact retained live
-Codex recovery that falsified checkpoint `ed74b0b`. Linux reported that
+Status: D0-D23 implementation is complete. D23, developed from `54cf0db`, is
+locally accepted and installed for operator inspection with executable SHA-256
+`08023657e5b7c81eb48bf5e3cee7d5741f52b1d9c63f74a37a567563c1994191`.
+It removes the duplicate public Park lifecycle while retaining exact internal
+Runtime-stop authority for Archive and recovery. No remote-CI or live-provider
+acceptance is claimed for D23. The D22 correction in `8338a04` remains
+operator-accepted against the exact retained live Codex recovery that
+falsified checkpoint `ed74b0b`. Linux reported that
 still-running executable as `codex (deleted)` after an on-disk Codex upgrade;
 the corrected matcher accepted only that exact kernel tombstone alongside all
 other recovery fences. D21 checkpoint `868ee85` remains the completed
@@ -31,6 +36,69 @@ roadmap is preserved as
   ambiguity handling.
 - D18 is a clean state break. Schemas 12 through 14 are refusal evidence, not
   migration or adoption inputs.
+
+## Completed checkpoint: D23 provider-native stop and contextual visibility
+
+Implementation status: locally accepted and installed for operator inspection.
+No remote-CI or live-provider claim is made.
+
+D23 removes the duplicate user-facing Park lifecycle. Exiting the provider's
+native TUI is the ordinary stop-and-keep-visible path; `Enter` remains the sole
+attach, resume, or recovery action. WSNav retains its exact internal Runtime
+stop only where a compound catalog action requires it.
+
+Scope:
+
+- retain contextual `n` for a separate Workstream and `Enter` for
+  attach/start/resume/recovery;
+- remove `p`, Park help/footer/status copy, the parked card marker, and the
+  public `wsnav park` command while retaining current-schema internal exact-stop
+  authority;
+- make Archive available only from Workstreams and perform exact Runtime stop
+  before hide, including terminal onboarding-recovery resolution after exact
+  cleanup so no recovery row is stranded by Park removal;
+- make Restore available only from Archived, clear visibility without launch,
+  and atomically normalize only internal `parked` to `open` while leaving the
+  Runtime stopped;
+- render existing active schema-15 `parked` records like stopped Workstreams
+  and keep them resumable through `Enter`, without migration or schema change;
+  and
+- make footer and the floating Help panel page-local so Archive and Restore are
+  never advertised together.
+
+Non-goals:
+
+- do not remove the schema-15 `parked` lifecycle value, add a migration, or
+  weaken exact process/tmux/revision/operation ownership;
+- do not intercept provider exit, add an Unpark action, automatically start on
+  Restore, or hide a provider whose cleanup is ambiguous;
+- do not add hard deletion, provider-history deletion, or Project/Git cleanup;
+  and
+- do not rewrite historical acceptance evidence that truthfully exercised the
+  former public Park surface.
+
+Exit gate:
+
+- focused state tests prove Restore clears archive and normalizes only
+  `parked` to `open` transactionally while preserving stopped Runtime, binding,
+  attention, and revision fencing;
+- focused action/controller tests prove Archive exact-stops before hide,
+  resolves terminal onboarding recovery only after exact cleanup, and leaves
+  the Workstream visible on every ambiguity or failure;
+- Navigator tests prove page-local Archive/Restore dispatch, footer, and help,
+  no public Park key or marker, and unchanged `n`/`Enter` behavior for active
+  stopped and legacy parked records;
+- CLI/source acceptance proves `park` is absent while Archive/Restore and all
+  unrelated supported commands remain available;
+- `scripts/check` passes against disposable state, provider, and private-tmux
+  fixtures without ordinary-state mutation; and
+- the locked release is built, atomically installed, and verified by version
+  plus executable hash for operator inspection.
+
+Evidence record:
+
+- [D23 provider-native stop and contextual
+  visibility](evidence/acceptance/d23-native-stop-contextual-visibility.md)
 
 ## Completed checkpoint: D22 exact live recovery confirmation
 
@@ -621,6 +689,7 @@ historical evidence rather than current delivery authority.
 | D20 | Provider-native conversation branching; managed Fork creation and recovery retired | [D20 acceptance](evidence/acceptance/d20-native-owned-branching.md) |
 | D21 | Provider-derived attention; Navigator acknowledgment and duplicate sticky state retired | [D21 acceptance](evidence/acceptance/d21-provider-derived-attention.md) |
 | D22 | Exact live retained-session Codex recovery confirmation | [D22 acceptance](evidence/acceptance/d22-exact-live-recovery.md) |
+| D23 | Provider-native stop; public Park retired and archive/restore made contextual | [D23 acceptance](evidence/acceptance/d23-native-stop-contextual-visibility.md) |
 
 ## Deferred product decisions
 

@@ -11,7 +11,7 @@ wsnav_bin="${workspace_root}/target/debug/wsnav"
 help_text="$("${wsnav_bin}" --help)"
 
 public_commands=(
-    navigator doctor remove-observer start recover attach park
+    navigator doctor remove-observer start recover attach
     archive restore status operations
 )
 for command in "${public_commands[@]}"; do
@@ -23,7 +23,7 @@ done
 
 retired_commands=(
     setup trust-observer update-observer register-remote host register
-    new-workstream rename acknowledge fork-workstream recover-operation navigator_d17 _remote _probe _attach _presentation_shell
+    new-workstream rename acknowledge fork-workstream recover-operation park navigator_d17 _remote _probe _attach _presentation_shell
     _observer_review _presentation_ssh_shell _provider_remote_attach
 )
 for command in "${retired_commands[@]}"; do

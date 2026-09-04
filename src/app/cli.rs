@@ -26,8 +26,6 @@ pub(super) enum Commands {
     Recover { workstream_id: String },
     /// Attach this terminal directly to a live native provider Runtime.
     Attach { workstream_id: String },
-    /// Park a Runtime without deleting project files or provider session history.
-    Park { workstream_id: String },
     /// Hide a Workstream from the ordinary navigator without deleting retained state.
     Archive {
         workstream_id: String,

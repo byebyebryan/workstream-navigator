@@ -2,10 +2,16 @@
 
 Date: 2026-09-03
 
-Status: the D22 correction in `8338a04` passes its full local/disposable gate,
-is byte-identically installed, and is operator-accepted on the unchanged
-direct, current-only schema-15 epoch. Operator inspection first falsified
-checkpoint `ed74b0b` after a Codex upgrade left the exact still-running
+Status: D23, developed from `54cf0db`, passes its complete local/disposable
+gate and is byte-identically installed for operator inspection with executable
+SHA-256
+`08023657e5b7c81eb48bf5e3cee7d5741f52b1d9c63f74a37a567563c1994191`.
+It removes the duplicate public Park lifecycle while retaining exact internal
+Runtime-stop authority for compound Archive and recovery, with no schema
+change. No remote-CI or live-provider acceptance is claimed for D23. The D22
+correction in `8338a04` remains operator-accepted on the unchanged direct,
+current-only schema-15 epoch. Operator inspection first falsified checkpoint
+`ed74b0b` after a Codex upgrade left the exact still-running
 executable represented by Linux as `codex (deleted)`, which its matcher
 rejected. The corrected build recognizes only that exact kernel tombstone
 while retaining every Runtime, argv, provider, session, and revision fence;
@@ -152,9 +158,11 @@ contains or captures provider-pane content.
 - Projects represented by one or more Git worktree roots detected and
   registered atomically during successful brokered launch on that host only.
   Project grouping is presentation state and never grants host authority.
-- Workstream creation, switching, parking, exact resume, and display through
-  the current tip's provider-owned native name when that metadata surface is
-  supported.
+- Workstream creation, switching, exact resume, archive/restore, and display
+  through the current tip's provider-owned native name when that metadata
+  surface is supported. Exiting the native provider TUI is the ordinary way to
+  stop a session while keeping its Workstream visible; WSNav exposes no
+  separate Park action.
 - Navigator-local Workstreams and Archived pages. Workstreams is the default
   operational home, always groups active Workstreams by Project, and keeps the
   provisional shell card outside those groups. Archived is a separate restore
@@ -449,8 +457,8 @@ current product.
 
 When this presentation is itself running inside an ordinary operator SSH
 session, an outer disconnect may end or detach the disposable presentation and
-its shell. It must not stop, park, rotate, or restart the host's private
-Runtime or provider. Reconnect to that host, rerun `wsnav`, and attach again.
+its shell. It must not stop, rotate, or restart the host's private Runtime or
+provider. Reconnect to that host, rerun `wsnav`, and attach again.
 
 Exactly one provisional card is always visible on Workstreams, pinned outside
 Project groups. At presentation creation, WSNav captures, validates, and
@@ -469,7 +477,7 @@ evidence, live only in the presentation-private marker. They do not create a
 registry `Runtime` or `Workstream` row. Before creating those artifacts,
 materialization proves the candidate ID and all four path fields are absent and
 unused; it never adopts pre-existing artifacts. A marker-backed candidate is
-outside ordinary registry inventory, probe, park, remove, and recovery
+outside ordinary registry inventory, probe, Runtime stop, removal, and recovery
 discovery/action until durable adoption; only the exact presentation marker
 plus the stable host-private `provisional.lock` lease may manage it.
 Markerless/registryless, foreign, or collision artifacts remain untouched, and a
@@ -551,12 +559,12 @@ The lifecycle therefore has these observable rules:
   marker, lease, path, process, or revision evidence is left untouched. WSNav
   fails closed, marks onboarding unavailable with bounded guidance, and blocks
   duplicate provisional creation until that exact evidence is resolved. It
-  never stops, parks, rotates, or cleans a managed Runtime.
+  never stops, rotates, or cleans a managed Runtime.
 
 Disposable acceptance must race close and presentation loss against lazy materialization,
 prepare and token issuance, helper consumption, OpenCode preparation and
 `POST /session`, and provider `exec`; it must also race passive snapshot,
-new attachment, Park/Resume/contextual `n`/archive/recovery/start retry,
+new attachment, Resume/contextual `n`/archive/recovery/start retry,
 helper exit, exec error, exec success proof,
 immediate provider exit, and restart across every post-commit phase. The
 evidence must show one deterministic lease winner, no managed kill, no helper
@@ -640,21 +648,21 @@ detach through ordinary card switching; neither creates a new attachment to
 that Runtime. Selecting/materializing the fresh derived singleton card attaches
 only its separate provisional server under `provisional.lock` and grants no
 authority over the unproven Runtime. Every new attachment to that Runtime and
-ordinary Runtime action or mutation—Park, Resume, contextual
+ordinary Runtime action or mutation—Resume, contextual
 `n` from this source, archive, recovery/start retry, and cleanup—refuses or
 waits with bounded `onboarding-in-progress` guidance.
 Passive snapshot/probe may render the managed Runtime as `starting`/`onboarding`
 and run exact reconciliation, but it must not treat the hidden helper or
 OpenCode preparation process as provider identity, mark the Runtime lost from
 that mismatch, signal it, or expose normal action authority. Once an operation
-is terminal `recovery-required`, only the existing exact recovery or explicit
-Park rules apply. A terminal known-absent exec result is not itself action
+is terminal `recovery-required`, only exact recovery or the compound Archive
+cleanup path applies. A terminal known-absent exec result is not itself action
 authority: the reconciler must atomically resolve it. When the provider-specific
 journal proves no prior external effect or binding, guarded rollback ends
 onboarding and leaves the derived singleton card available but unmaterialized.
 When OpenCode has a known blank-session POST or binding, the same atomic
 resolution ends onboarding in the exact stopped/recovery state; only
-binding-preserving Resume/recovery or explicit Park is then allowed. A possible
+binding-preserving Resume/recovery or compound Archive is then allowed. A possible
 effect remains `recovery-required`. No ordinary action is enabled directly by
 exec-error evidence, and no operation remains fenced after terminal
 reconciliation.
@@ -841,13 +849,14 @@ Enter/Esc behavior remains native terminal convention rather than consuming
 permanent hint space. Related actions remain adjacent in each page's strip. A
 one-cell inset keeps the hints visually separate from the Workstream list.
 
-`?` toggles an expanded shortcut reference at the bottom of the Ratatui
-navigator pane. The reference is page-specific and single-column, with one
-keyboard action per line. It omits mouse and self-closing reminders so ordinary
-pages fit without scrolling at the standard navigator height. It still scrolls
-if a terminal is unusually short rather than pairing or wrapping entries into
-each other. `?`, `Esc`, or `q` collapses it. This is not a tmux popup, window,
-centered overlay, or provider overlay.
+`?` opens a vertically centered shortcut panel across the Ratatui navigator's
+full inner width. The fully bordered panel is page-specific and single-column,
+with one keyboard action per line. It omits mouse, self-closing reminders, and
+the ordinary footer while open so pages fit without scrolling at the standard
+navigator height. It still clips if a terminal is unusually small rather than
+pairing or wrapping entries into each other. `Esc` or `q` returns to the page;
+`?` is inert while Help is open. This is not a tmux popup, window, or provider
+overlay.
 Shortcut descriptions begin at one display-cell-aware column regardless of key
 label width and are bounded to the remaining 19 cells of the normal 30-cell
 inner pane. The reference advertises `↑/↓` as the canonical selection keys;
@@ -912,18 +921,20 @@ ProjectLocation registration is a bounded host operation inside successful
 brokered promotion, and the shell remains the user's familiar path-selection
 surface.
 
-The Workstreams page retains its accepted action muscle memory: `Enter`
-attaches a live Runtime, starts/resumes a parked or stopped one, or enters exact
-native recovery for an ordinary lost Runtime. Under D19 that action may replace
-the right-hand surface but never changes pane focus. `n` creates a separate
-blank Workstream at the selected managed Workstream's exact ProjectLocation
-with the same provider; `p` parks; `x` opens the reversible archive
-confirmation; and `?` toggles the full reference. Native provider branching
-stays within the current Workstream. `u` on
-Archived restores without starting. On the provisional shell card, `Enter`
-shows the shell without transferring focus and `n` has no separate meaning.
-Unprefixed `Left` and `Right` remain inert. There is no hard delete:
-archive/restore is the sole Workstream visibility control.
+The Workstreams page retains a smaller accepted action muscle memory: `Enter`
+attaches a live Runtime, starts/resumes a stopped one, or enters exact native
+recovery for an ordinary lost Runtime. Under D19 that action may replace the
+right-hand surface but never changes pane focus. `n` creates a separate blank
+Workstream at the selected managed Workstream's exact ProjectLocation with the
+same provider; `x` opens the reversible archive confirmation; and `?` toggles
+the Workstreams reference. Native provider branching stays within the current
+Workstream, and exiting the native provider TUI stops that session while its
+active card remains available for `Enter` to resume. Archived has its own help
+and `u` restores without starting. Archive and Restore are page-local and are
+never advertised together. On the provisional shell card, `Enter` shows the
+shell without transferring focus and `n` has no separate meaning. Unprefixed
+`Left` and `Right` remain inert. There is no hard delete: archive/restore is the
+sole Workstream visibility control.
 
 Workstreams always groups active Workstreams by Project. Groups sort by their
 newest included member's durable `last_activity_sequence`, descending, with
@@ -950,9 +961,10 @@ pathologically narrow widths without allowing a card to overflow. Every
 display line in a card is one selectable and mouse-actionable Workstream row.
 Archived uses the same compact row shape as Workstreams.
 
-A Parked Workstream always renders the muted `p` lifecycle marker. Recovery
-markers derive from the actual Workstream or onboarding recovery lifecycle;
-there is no separate sticky result or recovery notification to mask it.
+Stopped and legacy internally parked Workstreams render no lifecycle marker.
+Recovery markers derive from the actual Workstream or onboarding recovery
+lifecycle; there is no separate sticky result or recovery notification to mask
+it. The internal `parked` value is not a product status or action.
 Bounded prose in status and guidance panels word-wraps by terminal cell width.
 The status area reserves the wrapped line count, and the renderer and mouse
 hit-testing use the same resulting list geometry.
@@ -985,7 +997,7 @@ wsnav
 ├ Codex                                     3 min ago
 │ ✓ lifecycle repair
 └ OpenCode                                   1 day ago
-  p later follow-up
+    later follow-up
 ```
 
 Tree branch and continuation glyphs are structural, neutral-colored chrome.
@@ -1006,8 +1018,9 @@ Switching workstreams replaces only the provider pane's attachment helper. It
 does not stop, restart, type into, or resize an inactive provider process beyond
 the normal detach/attach terminal negotiation. A currently Running attachment
 is therefore replaceable rather than treated as an in-progress Start; only an
-actual AwaitRuntime transition remains serialized. When detach or Park leaves
-the exact owned provider helper pane dead under tmux `remain-on-exit`, the
+actual AwaitRuntime transition remains serialized. When detach or an internal
+exact stop leaves the exact owned provider helper pane dead under tmux
+`remain-on-exit`, the
 replacement path may respawn that pane in place only after revalidating the
 single owned window, live navigator, exact roles, and bounded utility cleanup.
 Other dead or ambiguous presentation topology remains a refusal.
@@ -1082,7 +1095,7 @@ preallocates one candidate RuntimeId and uses these same final full-UUID
 `RuntimePaths` fields (directory, socket, configuration, and session) before a
 durable Runtime row exists; promotion adopts that candidate and never renames,
 re-homes, or replaces its live server. The persisted session value must match
-that exact current form before WSNav probes, attaches, parks, or removes a
+that exact current form before WSNav probes, attaches, stops, or removes a
 private server. A narrowly defined former
 short-ID form is read only for a Runtime record created by an older build; any
 other value is ambiguous and no tmux action is attempted.
@@ -1099,26 +1112,33 @@ Each live Runtime is a bounded tmux unit:
 Runtime -> one private socket and server -> one session -> one window -> one pane
 ```
 
-No private runtime server contains a sibling Workstream. Parking or stopping a
-Runtime removes its server rather than leaving an empty session.
+No private runtime server contains a sibling Workstream. An exact Runtime stop
+removes its server rather than leaving an empty session.
 
 Before releasing the launch barrier, WSNav proves that the sole pane process is
 the leader of its private process group and persists the exact leader PID plus
-process birth. Park first stops any provider-owned observer, then sends bounded
-TERM to that exact proven provider group while its leader identity is still
-corroborated. Surviving group members receive bounded KILL only after the same
-group/session ownership is revalidated. The private tmux server and artifacts
-are removed only after the complete group is gone. Observer sidecars remain a
-separate exact-PID ownership boundary and are never treated as provider-group
-leaders. Missing, changed, inaccessible, or malformed ownership evidence is
-never signaled; cleanup failure refuses the parked transition.
+process birth. The internal exact-stop primitive first stops any provider-owned
+observer, then sends bounded TERM to that exact proven provider group while its
+leader identity is still corroborated. Surviving group members receive bounded
+KILL only after the same group/session ownership is revalidated. The private
+tmux server and artifacts are removed only after the complete group is gone.
+Observer sidecars remain a separate exact-PID ownership boundary and are never
+treated as provider-group leaders. Missing, changed, inaccessible, or malformed
+ownership evidence is never signaled; cleanup failure refuses the transition
+and Archive leaves the Workstream visible.
+
 Once the exact provider group is proven gone and the private Runtime artifacts
-are removed, Park commits `Runtime=stopped` and `Workstream=parked` atomically.
-That convergence also applies when the Workstream was already
-`recovery_required`: an explicit Park after a failed cleanup resolves the
-retained Runtime to a safely resumable parked state instead of persisting the
-invalid `recovery_required + stopped` pair. Provider binding remains retained;
-no provider session is deleted or replaced.
+are removed, the internal primitive commits `Runtime=stopped` and
+`Workstream=parked` atomically. `parked` is retained as a schema-15 convergence
+and crash-recovery value, not a user-facing lifecycle. Archive immediately uses
+the resulting revision to hide the Workstream. Compound Archive applies the
+same convergence to a terminal onboarding-recovery Workstream and resolves the
+matching onboarding journal only after exact cleanup; a possible or ambiguous
+provider effect remains visible and fails closed. Provider binding remains
+retained, and no provider session is deleted or replaced. Restore atomically
+clears archive visibility and normalizes only `parked` to `open`, leaving the
+Runtime stopped so a later `Enter` performs the exact resume. Existing active
+`parked` records are displayed as stopped and remain resumable through `Enter`.
 The host registry, not tmux's own session list, is the host-local Workstream
 catalog. This contains server failure, terminal sizing, attachment, and
 `tmux ls` visibility to one Workstream at a time.
@@ -1166,8 +1186,8 @@ can commit a particular record revision.
 
 Focus, attach, snapshot, and passive observation refresh are not durable
 operations. Thread naming remains a provider-owned setting that WSNav only
-observes. Park and Resume reconcile through the authoritative Runtime record
-plus live tmux/process probes.
+observes. Resume and Archive's internal stop reconcile through the
+authoritative Runtime record plus live tmux/process probes.
 Brokered onboarding and OpenCode's non-idempotent blank-session creation
 boundary use the `CompoundOperation` journal.
 
@@ -1279,7 +1299,7 @@ When the user requests a Codex Start, Resume, or other managed operation
 that requires an unready observer, the Navigator instead captures that exact
 intent and its expected Workstream, Location, integration, and registry
 revisions in a typed process-local pending action, then offers contextual review
-in the right pane. A stopped or deliberately parked attachment may surrender
+in the right pane. A stopped attachment may surrender
 only its disposable outer helper after exact proof that its private Runtime is
 absent; a live, ambiguous, changed, or foreign attachment is never replaced.
 
@@ -1297,7 +1317,8 @@ path, or other ownership mismatch is never adopted or overwritten; the guide
 reports the exact refusal and leaves the requested action available for an
 explicit retry after external correction. Installation or declaration update
 also refuses while any WSNav-managed Codex Runtime is live and guides the user
-to park or stop it first; existing Runtime attachment remains available.
+to exit the provider or archive its Workstream first; existing Runtime
+attachment remains available.
 
 An accepted creation or update writes only the exact owned profile through a
 mode-`0600` temporary file and atomic rename. Its human-readable managed marker
@@ -1422,8 +1443,8 @@ shell-wrapper ancestry fallback is allowed; that would admit an agent
 tool-shell forgery.
 
 Hook evidence can update status and bind an observed native session inside an
-already managed runtime. It cannot authorize Workstream creation, parking,
-provider input, Git mutation, or focus.
+already managed runtime. It cannot authorize Workstream creation, Runtime
+stopping, provider input, Git mutation, or focus.
 
 A ProviderBinding is stronger than an untrusted hook claim. A `SessionStart`
 first agrees with a pending launch or the one accepted native transition, then
@@ -1565,7 +1586,8 @@ Navigator rows show Project, provider, current tip name, and a relative age
 from the last observed native conversation activity. Activity sequence remains
 the deterministic ordering key within this host. There is no cross-host
 ordering or combined client view. The wall-clock value survives start, resume,
-and park. A migrated Workstream or one with no observed turn visibly reports
+native provider exit, and archive. A migrated Workstream or one with no
+observed turn visibly reports
 `activity unknown` until its first prompt submission or settled result.
 
 Native `/rename` and provider/agent naming policy update the current Codex
@@ -1786,12 +1808,14 @@ credential, or environment dump is persisted.
   known-absent result is resolved atomically: provider-specific proof of no
   effect/binding permits guarded rollback and ends onboarding, while a known
   OpenCode binding ends onboarding in the exact stopped/recovery state where
-  only binding-preserving Resume/recovery or explicit Park is allowed. After
-  explicit Park has stopped that exact adopted Runtime and recorded the
-  Workstream parked under `provisional.lock`, it commits onboarding recovery
-  resolution without asserting that the original native exec was proven,
-  without deleting the retained binding, and without retrying a provider
-  effect; ordinary Resume then uses that retained binding.
+  only binding-preserving Resume/recovery or compound Archive is allowed.
+  Archive stops that exact adopted Runtime, records the internal parked
+  convergence under `provisional.lock`, resolves onboarding recovery, and then
+  hides the Workstream. It does not assert that the original native exec was
+  proven, delete the retained binding, or retry a provider effect. Restore
+  normalizes that internal value to `open`/stopped; ordinary Resume then uses
+  the retained binding. Any failure before the archive commit keeps the
+  Workstream visible.
 - One host has at most one owned `wsnav-observer` CodexIntegration.
 - One Workstream has at most one live Runtime.
 - One Runtime has one current ProviderBinding.
@@ -1816,13 +1840,15 @@ credential, or environment dump is persisted.
   at the selected Location.
 - Runtime status and Workstream lifecycle are separate.
 - Archive visibility is separate from Workstream lifecycle. An archived
-  Workstream retains `parked` or `recovery_required`, its exact binding,
-  ProjectLocation, and lineage; restore never starts a Runtime automatically.
+  Workstream retains its exact binding, ProjectLocation, and lineage. It may
+  retain internal `parked` or `recovery_required` state; restore never starts a
+  Runtime and atomically normalizes only `parked` to `open` while leaving its
+  Runtime stopped.
 
 Session-card markers are a direct projection of the current bounded state, not
-a second notification inbox: `p` is a parked Workstream, `!` is actual
-Workstream or onboarding recovery, `…` is starting, `●` is working, `✓` is a
-Runtime in `attention`, and idle or stopped is blank. A later observed provider
+a second notification inbox: `!` is actual Workstream or onboarding recovery,
+`…` is starting, `●` is working, `✓` is a Runtime in `attention`, and idle,
+stopped, or internally parked is blank. A later observed provider
 prompt changes `attention` to `working` without a user acknowledgment action.
 Selection, activation, focus, attachment, and provider cycling retain their
 existing lifecycle and attachment semantics, but none writes an
@@ -1846,6 +1872,10 @@ Suggested Workstream lifecycle values:
 ```text
 open | parked | recovery_required
 ```
+
+`parked` remains a current schema-15 internal convergence value for exact
+Runtime shutdown, archive staging, and legacy records. It is not displayed as
+a distinct product state and has no direct user action.
 
 Suggested observed Runtime status values:
 
@@ -2136,8 +2166,8 @@ D18 is complete only when one coherent current-only acceptance matrix proves:
   fixtures cover both complete profile removal and an explicitly quarantined
   provider-settings-only remainder without automatic adoption;
 - both providers pass the disposable Shell promotion, attach, `n`, native
-  conversation-tip rotation, Park/Resume, archive/restore, observer/recovery,
-  presentation restart, and
+  conversation-tip rotation, native exit/Resume, archive/restore,
+  observer/recovery, presentation restart, and
   complete-cleanup matrix without prompts, transcripts, or ordinary user
   state;
 - active current implementation identifiers, CLI help, internal routes,
@@ -2229,9 +2259,10 @@ Conversation lineage remains provider-owned:
 one Workstream -> successive native conversation tips
 ```
 
-It makes no claim about filesystem lineage. Parking and archiving stop or hide
-the Runtime while preserving provider history and the registered ProjectLocation;
-they never inspect or change project files.
+It makes no claim about filesystem lineage. Native provider exit stops a
+session while leaving its Workstream visible; Archive exact-stops when needed
+and hides the Workstream. Both preserve provider history and the registered
+ProjectLocation and never inspect or change project files.
 
 ## Core workflows
 
@@ -2276,7 +2307,7 @@ user starts a fresh wsnav presentation
 -> selecting/materializing the fresh derived singleton card attaches only its
    separate provisional server under `provisional.lock` and grants no authority
    over the unproven Runtime; no new attachment to that Runtime is allowed
--> ordinary Park/Resume/contextual n, archive, recovery/start retry, and
+-> ordinary Resume/contextual n, archive, recovery/start retry, and
    cleanup actions for that Runtime refuse or wait
    with bounded onboarding-in-progress guidance
 -> helper advances to `provider_exec_started` immediately before `execve`, then
@@ -2416,7 +2447,7 @@ ordinary network and SSH latency. The instances do not register one another,
 exchange snapshots, merge Projects, synchronize state, or transfer sessions,
 and they need no cross-host WSNav release or protocol parity. Closing the outer
 SSH connection may end that host's disposable presentation, but it does not
-stop, park, rotate, or restart its private Runtime/provider; reconnecting and
+stop, rotate, or restart its private Runtime/provider; reconnecting and
 rerunning wsnav reattaches it.
 
 ## Navigator experience
@@ -2429,7 +2460,7 @@ Shell
 Project
 ├── Tip thread name         working
 ├── Another native name     result ready
-└── untitled                parked
+└── untitled
 
 ┌ navigator ┐┌────────────── native provider TUI ──────────────┐
 │ tree      ││ directly interactive; no manager-owned chrome   │
@@ -2453,7 +2484,8 @@ Required interactions:
   within the same Workstream, without creating a second card;
 - inspect bounded Workstream status and display the current provider-owned
   thread name;
-- park/resume without deleting provider history;
+- stop through the native provider TUI and resume with `Enter` without deleting
+  provider history;
 - archive a Workstream out of the active list and restore it without starting
   Codex or deleting its retained state;
 - detect observer readiness without mutation and guide the user contextually
@@ -2485,7 +2517,8 @@ there is no hard-delete action. Project groups disappear from Workstreams when
 they have no active Workstreams, while their archived Workstreams remain
 available through Archived. A dormant Location with no retained Workstream has
 no ordinary standalone navigator row. Archiving a working Runtime requires
-explicit confirmation because parking it interrupts the current provider turn.
+explicit confirmation because its exact internal stop interrupts the current
+provider turn.
 
 Projects remain durable presentation groups behind Workstream and Archived
 rows, but WSNav provides no Projects page or Project-level action surface.
@@ -2533,7 +2566,7 @@ the D18 controller partially combines:
 | Pane receiving keyboard input | The exact private presentation tmux server |
 | Highlighted Workstreams row | Navigator process-local selection |
 | Shell, review, or managed Runtime shown on the right | Presentation attachment controller |
-| Start, Park, archive, recovery, and other effects | Existing revision-fenced WSNav actions |
+| Start, archive, recovery, and other effects | Existing revision-fenced WSNav actions |
 
 Changing one concern does not imply changing another. In particular, opening
 or replacing the right-hand surface never grants it keyboard focus.
@@ -2670,7 +2703,7 @@ remains in the right pane.
 An eligible destination is active, non-archived, free of onboarding and
 recovery fences, backed by an already-live Runtime, and accepted by the normal
 exact attachment preflight. Cycling skips every ineligible row. It never opens
-or materializes Shell and never starts, resumes, recovers, parks, or
+or materializes Shell and never starts, resumes, recovers, stops, or
 otherwise mutates a provider, Runtime, lifecycle, or durable row. Shell,
 provider-wait, observer-review, onboarding, stopped, recovery-required,
 archived, and direct-attach surfaces reject the command without changing the
@@ -2734,7 +2767,7 @@ claim remote CI or real-provider acceptance. No partial D19 slice was installed.
 | Normal local tmux detach and reattach to the same owned presentation | Preserve the exact provisional shell server, pane, process, actual cwd, and pending request; never create a duplicate shell. Every managed host Runtime also continues |
 | Confirmed presentation close | Acquire the shared `provisional.lock` lease and revalidate marker, journal, and revisions. Before the helper successfully revalidates every bound marker/process/cwd/path/revision/token claim and atomically consumes the capability while committing durable `Runtime-owned` authority, close may win only by atomically revoking the unconsumed capability and proving pre-effect absence; then roll back attempt-only rows and terminate only exact provisional artifacts. After that exact helper commit, never signal that server; managed Runtime servers and provider processes continue |
 | Conclusive presentation loss | Under the same `provisional.lock` lease, clean only exact pre-handoff provisional artifacts whose ownership and pre-effect absence are proven; after the exact helper commit leave the Runtime-owned server untouched and let onboarding recovery reconcile. After conclusive cleanup, the next presentation's derived singleton card is available but unmaterialized; ambiguous evidence leaves it unavailable. Managed Runtime servers and provider processes continue |
-| Runtime-owned onboarding before `provider_exec_proven` | Fence attachment/action authority for that unproven Runtime. Its originating presentation may retain its existing tmux Runtime attachment/pane or detach through ordinary card switching, but no new attachment to that Runtime is allowed. Selecting/materializing the fresh derived singleton card attaches only its separate provisional server under `provisional.lock` and grants no authority over the unproven Runtime. Refuse or wait on ordinary Park, Resume, contextual `n`, archive, recovery/start retry, and cleanup for that Runtime with bounded `onboarding-in-progress` guidance. Passive snapshot/probe may show `starting`/`onboarding` and reconcile, but never adopts the helper/preparation process, marks the Runtime lost, or signals it |
+| Runtime-owned onboarding before `provider_exec_proven` | Fence attachment/action authority for that unproven Runtime. Its originating presentation may retain its existing tmux Runtime attachment/pane or detach through ordinary card switching, but no new attachment to that Runtime is allowed. Selecting/materializing the fresh derived singleton card attaches only its separate provisional server under `provisional.lock` and grants no authority over the unproven Runtime. Refuse or wait on ordinary Resume, contextual `n`, archive, recovery/start retry, and cleanup for that Runtime with bounded `onboarding-in-progress` guidance. Passive snapshot/probe may show `starting`/`onboarding` and reconcile, but never adopts the helper/preparation process, marks the Runtime lost, or signals it |
 | Hidden helper exits before `provider_exec_started` | Reconcile the exact journal and classify a conclusive no-effect exit as known-absent; never infer provider identity or expose ordinary Runtime action from the helper process |
 | `execve` returns an exact error | Record terminal known-absent failure for the final provider TUI exec before helper exit when possible; the reconciler grants no action from that evidence alone and ends onboarding through guarded rollback only when provider-specific journal evidence proves no prior effect or binding, or through the exact stopped/recovery state when a known OpenCode binding must be preserved |
 | Crash after `provider_exec_started` without proof | Leave the Runtime and operation ambiguous/recovery-required; a possible live provider is never rolled back, and no second provider effect is attempted |
@@ -2772,7 +2805,7 @@ claim remote CI or real-provider acceptance. No partial D19 slice was installed.
 | Host database is absent beside any state-root artifact | Return typed `state recovery required`; never mint a HostIdentity, adopt or signal a Runtime, remove a presentation, or clean an unknown artifact |
 | `wsnav-observer` is absent or awaiting trust | Preserve existing Runtime attachment. Before a provisional Codex broker reservation, ask consent in the shell and complete native review; for a managed action capture the exact pending intent. Continue either path only after exact readiness and revision revalidation |
 | `wsnav-observer` is foreign, modified, disabled, or ambiguous | Preserve it and existing Runtime attachment; refuse the observer-dependent request with exact contextual diagnosis and retry guidance |
-| Profile update or exceptional removal is requested while a managed Runtime is live | Refuse the integration change until all WSNav-managed Codex Runtimes on that host are parked or stopped; do not block attachment |
+| Profile update or exceptional removal is requested while a managed Runtime is live | Refuse the integration change until all WSNav-managed Codex Runtimes on that host are stopped, whether by native provider exit or Archive's exact stop; do not block attachment |
 
 Result completion and its exact provider binding plus Runtime status commit in
 one host transaction. Current state has no separate result-acknowledgment

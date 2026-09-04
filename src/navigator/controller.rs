@@ -442,13 +442,6 @@ impl PendingObserverIntent {
                     expected_workstream_revision,
                     provider,
                 },
-                ManagedAction::Park {
-                    workstream_id,
-                    expected_workstream_revision,
-                } => Command::Park {
-                    workstream_id,
-                    expected_workstream_revision,
-                },
                 ManagedAction::Archive {
                     workstream_id,
                     expected_workstream_revision,
@@ -624,21 +617,6 @@ fn execute_command(
             );
             false
         }
-        Command::Park {
-            workstream_id,
-            expected_workstream_revision,
-        } => {
-            execute_managed_action(
-                root,
-                navigator,
-                presentation,
-                ManagedAction::Park {
-                    workstream_id,
-                    expected_workstream_revision,
-                },
-            );
-            false
-        }
         Command::Archive {
             workstream_id,
             expected_workstream_revision,
@@ -703,10 +681,6 @@ pub(crate) enum ManagedAction {
         expected_workstream_revision: Revision,
         provider: ProviderKind,
     },
-    Park {
-        workstream_id: WorkstreamId,
-        expected_workstream_revision: Revision,
-    },
     Archive {
         workstream_id: WorkstreamId,
         expected_workstream_revision: Revision,
@@ -768,9 +742,7 @@ fn prepare_observer_or_request(
             ManagedAction::Start { provider, .. } | ManagedAction::Recover { provider, .. } => {
                 *provider
             }
-            ManagedAction::Park { .. }
-            | ManagedAction::Archive { .. }
-            | ManagedAction::Restore { .. } => ProviderKind::Codex,
+            ManagedAction::Archive { .. } | ManagedAction::Restore { .. } => ProviderKind::Codex,
         },
         PendingObserverIntent::NewAtSameLocation { provider, .. } => *provider,
     };
@@ -1271,46 +1243,45 @@ pub(crate) fn apply_managed_action(
             .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             Ok(Some(workstream_id))
         }
-        ManagedAction::Park {
+        ManagedAction::Archive {
             workstream_id,
             expected_workstream_revision,
         } => {
-            require_parkable_workstream(&snapshot, workstream_id, expected_workstream_revision)?;
+            require_archivable_workstream(&snapshot, workstream_id, expected_workstream_revision)?;
             let resolves_onboarding_recovery = snapshot.workstreams.iter().any(|workstream| {
                 workstream.workstream_id == workstream_id
                     && workstream.onboarding
                         == Some(crate::snapshot::OnboardingStatus::RecoveryRequired)
             });
-            let parked_revision = crate::actions::park(
-                root,
-                &mut registry,
-                workstream_id,
-                Some(expected_workstream_revision),
-            )
-            .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
-            drop(registry);
             if resolves_onboarding_recovery {
-                resolve_parked_onboarding_recovery(root, workstream_id, parked_revision)?;
+                // Terminal onboarding recovery has no ordinary Start/Recover
+                // authority. Reuse the exact Runtime stop path first, close
+                // the matching recovery journal, and only then hide the row.
+                let stopped_revision = crate::actions::park(
+                    root,
+                    &mut registry,
+                    workstream_id,
+                    Some(expected_workstream_revision),
+                )
+                .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
+                drop(registry);
+                resolve_parked_onboarding_recovery(root, workstream_id, stopped_revision)?;
+                let state =
+                    open_current(root).map_err(|_| NavigatorError::ManagedActionUnavailable)?;
+                registry = state
+                    .into_host_registry()
+                    .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
+                crate::actions::archive(root, &mut registry, workstream_id, stopped_revision)
+                    .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
+            } else {
+                crate::actions::archive(
+                    root,
+                    &mut registry,
+                    workstream_id,
+                    expected_workstream_revision,
+                )
+                .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             }
-            Ok(None)
-        }
-        ManagedAction::Archive {
-            workstream_id,
-            expected_workstream_revision,
-        } => {
-            require_active_workstream(
-                &snapshot,
-                workstream_id,
-                expected_workstream_revision,
-                None,
-            )?;
-            crate::actions::archive(
-                root,
-                &mut registry,
-                workstream_id,
-                expected_workstream_revision,
-            )
-            .map_err(|_| NavigatorError::ManagedActionUnavailable)?;
             Ok(None)
         }
         ManagedAction::Restore {
@@ -1337,8 +1308,8 @@ pub(crate) fn apply_managed_action(
 }
 
 /// Closes only the terminal recovery journal for an exact Runtime that the
-/// preceding Park action already stopped. This does not retry the original
-/// provider launch or roll back its binding.
+/// preceding archive cleanup already stopped. This does not retry the
+/// original provider launch or roll back its binding.
 fn resolve_parked_onboarding_recovery(
     root: &StateRoot,
     workstream_id: WorkstreamId,
@@ -1379,9 +1350,10 @@ fn require_active_workstream(
     Ok(())
 }
 
-/// The terminal onboarding-recovery state exposes only explicit Park. The
-/// `ActionFenced` state permits no lifecycle mutation at all.
-fn require_parkable_workstream(
+/// Archive is available for ordinary active rows and terminal onboarding
+/// recovery rows. The `ActionFenced` state permits no lifecycle mutation at
+/// all because its provider effect has not reached a terminal boundary.
+fn require_archivable_workstream(
     snapshot: &Snapshot,
     workstream_id: WorkstreamId,
     expected_revision: Revision,
@@ -1395,10 +1367,12 @@ fn require_parkable_workstream(
                 && workstream.revision == expected_revision
         })
         .ok_or(NavigatorError::ManagedActionUnavailable)?;
-    if workstream.onboarding == Some(crate::snapshot::OnboardingStatus::ActionFenced) {
-        return Err(NavigatorError::ManagedActionUnavailable);
+    match workstream.onboarding {
+        Some(crate::snapshot::OnboardingStatus::ActionFenced) => {
+            Err(NavigatorError::ManagedActionUnavailable)
+        }
+        Some(crate::snapshot::OnboardingStatus::RecoveryRequired) | None => Ok(()),
     }
-    Ok(())
 }
 
 /// One exact post-start attachment claim for a session created from a selected
@@ -1760,7 +1734,7 @@ mod tests {
         apply_provider_exec_refresh, cycle_selection_attempt, describe_shell_location,
         materialize_provisional_shell_with_inputs, observe_shell_cwd,
         reattach_materialized_provisional_shell, refresh_provider_exec, require_active_workstream,
-        require_parkable_workstream, retry_default_navigator_width, start_same_location,
+        require_archivable_workstream, retry_default_navigator_width, start_same_location,
     };
     use crate::{
         domain::{
@@ -1991,7 +1965,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(require_parkable_workstream(&fenced, workstream_id, Revision::INITIAL).is_err());
+        assert!(require_archivable_workstream(&fenced, workstream_id, Revision::INITIAL).is_err());
 
         let (recovery, workstream_id) = managed_snapshot(Some(OnboardingStatus::RecoveryRequired));
         assert!(
@@ -2003,7 +1977,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(require_parkable_workstream(&recovery, workstream_id, Revision::INITIAL).is_ok());
+        assert!(require_archivable_workstream(&recovery, workstream_id, Revision::INITIAL).is_ok());
 
         let (ordinary, workstream_id) = managed_snapshot(None);
         assert!(

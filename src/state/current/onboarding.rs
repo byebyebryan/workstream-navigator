@@ -2375,16 +2375,17 @@ impl CurrentState {
         )
     }
 
-    /// Resolves one terminal onboarding recovery only after an explicit
-    /// Park has stopped the exact adopted Runtime and recorded the exact
-    /// Workstream as parked. This commits the onboarding journal without
+    /// Resolves one terminal onboarding recovery only after compound Archive
+    /// has exact-stopped the adopted Runtime and recorded the Workstream's
+    /// stopped/parked lifecycle. This commits the onboarding journal without
     /// asserting that the original provider exec was proven, without deleting
     /// its Runtime/binding, and without contacting or retrying a provider.
     ///
     /// The stable provisional lease serializes this terminal classification
     /// with every remaining onboarding participant. A caller supplies the
-    /// revision returned by the completed Park action, so a later Runtime or
-    /// Workstream transition cannot be mistaken for that deliberate recovery.
+    /// revision returned by Archive's completed exact-stop cleanup, so a later
+    /// Runtime or Workstream transition cannot be mistaken for that deliberate
+    /// recovery.
     pub(crate) fn resolve_parked_recovery_current(
         &mut self,
         provisional_lease: &ProvisionalLease,

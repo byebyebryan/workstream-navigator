@@ -131,10 +131,6 @@ pub(crate) enum Command {
         expected_workstream_revision: Revision,
         provider: ProviderKind,
     },
-    Park {
-        workstream_id: WorkstreamId,
-        expected_workstream_revision: Revision,
-    },
     Archive {
         workstream_id: WorkstreamId,
         expected_workstream_revision: Revision,
@@ -455,7 +451,7 @@ impl Model {
     pub(crate) fn handle_key(&mut self, key: KeyCode) -> Command {
         if self.help_visible {
             return match key {
-                KeyCode::Char('?' | 'q') | KeyCode::Esc => {
+                KeyCode::Char('q') | KeyCode::Esc => {
                     self.help_visible = false;
                     Command::None
                 }
@@ -489,7 +485,6 @@ impl Model {
             }
             KeyCode::Enter => self.activate_selected(),
             KeyCode::Char('n') => self.new_from_selected(),
-            KeyCode::Char('p') => self.park_selected(),
             KeyCode::Char('x') => self.archive_selected(),
             KeyCode::Char('u') => self.restore_selected(),
             _ => Command::None,
@@ -601,28 +596,10 @@ impl Model {
         }
     }
 
-    fn park_selected(&self) -> Command {
-        let Some(RowId::Workstream(workstream_id)) = self.selected else {
-            return Command::None;
-        };
-        let Some(workstream) = self.selected_workstream(workstream_id) else {
-            return Command::None;
-        };
-        if workstream.archived {
-            return Command::None;
-        }
-        match workstream.onboarding {
-            Some(OnboardingStatus::ActionFenced) => {
-                Command::ShowGuidance(ONBOARDING_IN_PROGRESS_GUIDANCE)
-            }
-            Some(OnboardingStatus::RecoveryRequired) | None => Command::Park {
-                workstream_id,
-                expected_workstream_revision: workstream.revision,
-            },
-        }
-    }
-
     fn archive_selected(&mut self) -> Command {
+        if self.page != Page::Workstreams {
+            return Command::None;
+        }
         let Some(RowId::Workstream(workstream_id)) = self.selected else {
             return Command::None;
         };
@@ -634,7 +611,11 @@ impl Model {
                 Command::ShowGuidance(ONBOARDING_IN_PROGRESS_GUIDANCE)
             }
             Some(OnboardingStatus::RecoveryRequired) => {
-                Command::ShowGuidance(ONBOARDING_RECOVERY_GUIDANCE)
+                self.modal = Some(Modal::ConfirmArchive {
+                    workstream_id,
+                    expected_workstream_revision: workstream.revision,
+                });
+                Command::None
             }
             None if !workstream.archived => {
                 self.modal = Some(Modal::ConfirmArchive {
@@ -722,7 +703,7 @@ impl Model {
 const ONBOARDING_IN_PROGRESS_GUIDANCE: &str =
     "Managed session onboarding is still in progress; wait for exact provider proof";
 const ONBOARDING_RECOVERY_GUIDANCE: &str =
-    "Managed session requires onboarding recovery; only Park is currently available";
+    "Managed session requires onboarding recovery; archive is available after exact cleanup";
 /// Returns the single semantic Workstream order shared by Navigator rows and
 /// provider-pane cycling. Projects are ordered by the newest included member;
 /// children then use their own activity sequence and stable ID tie-breakers.
@@ -859,7 +840,7 @@ fn render_model(
         );
     }
     if model.help_visible() {
-        render_help(frame, content);
+        render_help(frame, content, model.page());
     } else if let Some(modal) = model.modal() {
         render_modal(frame, content, modal);
     }
@@ -889,8 +870,6 @@ fn navigator_borders() -> Borders {
 fn navigator_inner(area: Rect) -> Rect {
     Block::default().borders(navigator_borders()).inner(area)
 }
-
-const PARKED_INDICATOR_COLOR: Color = Color::Indexed(110);
 
 /// Activity age is a neutral brightness ramp. It does not compete with the
 /// provider, Project, or lifecycle color axes.
@@ -978,14 +957,14 @@ const fn provider_label(provider: ProviderKind) -> &'static str {
 }
 
 fn workstream_marker(workstream: &WorkstreamSnapshot) -> (&'static str, Style) {
-    if workstream.lifecycle == WorkstreamLifecycle::Parked {
-        ("p", Style::default().fg(PARKED_INDICATOR_COLOR))
-    } else if workstream.onboarding == Some(OnboardingStatus::RecoveryRequired)
+    if workstream.onboarding == Some(OnboardingStatus::RecoveryRequired)
         || workstream.lifecycle == WorkstreamLifecycle::RecoveryRequired
     {
         ("!", Style::default().fg(Color::Red))
     } else if workstream.onboarding == Some(OnboardingStatus::ActionFenced) {
         ("…", Style::default().fg(Color::Cyan))
+    } else if workstream.lifecycle == WorkstreamLifecycle::Parked {
+        (" ", Style::default())
     } else {
         match workstream.runtime.map(|runtime| runtime.status) {
             Some(RuntimeStatus::Working) => ("●", Style::default().fg(Color::Yellow)),
@@ -1113,7 +1092,7 @@ fn activity_age_color(last_activity_at_millis: Option<i64>, now_millis: Option<i
 
 fn control_bindings(model: &Model) -> &'static [(&'static str, &'static str)] {
     if model.help_visible() {
-        return &[("? / Esc", "close help")];
+        return &[];
     }
     if let Some(modal) = model.modal() {
         return match modal {
@@ -1133,8 +1112,7 @@ fn control_bindings(model: &Model) -> &'static [(&'static str, &'static str)] {
                     }) =>
             {
                 &[
-                    ("n", "new here"),
-                    ("p", "park"),
+                    ("n", "new"),
                     ("x", "archive"),
                     (".", "archived"),
                     ("?", "help"),
@@ -1146,11 +1124,11 @@ fn control_bindings(model: &Model) -> &'static [(&'static str, &'static str)] {
                     .selected_workstream(workstream_id)
                     .is_some_and(|workstream| {
                         !workstream.archived
-                            && workstream.onboarding == Some(OnboardingStatus::RecoveryRequired)
+                            && workstream.onboarding != Some(OnboardingStatus::ActionFenced)
                     }) =>
             {
                 &[
-                    ("p", "park"),
+                    ("x", "archive"),
                     (".", "archived"),
                     ("?", "help"),
                     ("q", "quit"),
@@ -1167,23 +1145,30 @@ fn control_bindings(model: &Model) -> &'static [(&'static str, &'static str)] {
     }
 }
 
-/// Full-width, single-row Help content for the Navigator pane. It describes
-/// only current direct controls; contextual restrictions remain explicit
-/// rather than implying every key is always available.
-fn help_lines() -> Vec<Line<'static>> {
-    vec![
-        help_heading("Navigate"),
-        help_binding("↑↓", "select"),
-        help_binding("Enter", "open / shell"),
-        help_binding(".", "archived"),
-        help_binding("w / Esc", "workstreams"),
-        help_heading("Sessions"),
-        help_binding("n", "new at location"),
-        help_binding("p", "park session"),
-        help_binding("x", "archive session"),
-        help_binding("u", "restore session"),
-        help_binding("?/Esc/q", "close help"),
-    ]
+/// Page-local Help content for the Navigator pane. Archive and Restore are
+/// intentionally never advertised together.
+fn help_lines(page: Page) -> Vec<Line<'static>> {
+    let mut lines = vec![help_heading("Navigate"), help_binding("↑↓", "select")];
+    match page {
+        Page::Workstreams => {
+            lines.extend([
+                help_binding("Enter", "open"),
+                help_binding(".", "archived"),
+                help_binding("Esc", "back"),
+                help_heading("Sessions"),
+                help_binding("n", "new at location"),
+                help_binding("x", "archive session"),
+            ]);
+        }
+        Page::Archived => {
+            lines.extend([
+                help_binding("Esc", "back"),
+                help_heading("Sessions"),
+                help_binding("u", "restore session"),
+            ]);
+        }
+    }
+    lines
 }
 
 fn help_heading(title: &'static str) -> Line<'static> {
@@ -1196,7 +1181,7 @@ fn help_heading(title: &'static str) -> Line<'static> {
 }
 
 /// One left-aligned binding per row. The action labels all begin in the same
-/// column, making the full-width sheet easy to scan without a table border.
+/// column, making the Help panel easy to scan.
 fn help_binding(key: &'static str, action: &'static str) -> Line<'static> {
     const ACTION_COLUMN: usize = 8;
     let key_width = display_width(key);
@@ -1212,13 +1197,13 @@ fn help_binding(key: &'static str, action: &'static str) -> Line<'static> {
     ])
 }
 
-fn render_help(frame: &mut Frame<'_>, area: Rect) {
-    let overlay = help_overlay(area);
+fn render_help(frame: &mut Frame<'_>, area: Rect, page: Page) {
+    let overlay = help_overlay(area, page);
     frame.render_widget(Clear, overlay);
     frame.render_widget(
-        Paragraph::new(help_lines()).block(
+        Paragraph::new(help_lines(page)).block(
             Block::default()
-                .borders(Borders::TOP)
+                .borders(Borders::ALL)
                 .border_style(Style::default().fg(Color::Cyan))
                 .title(Span::styled(
                     " Help ",
@@ -1231,11 +1216,11 @@ fn render_help(frame: &mut Frame<'_>, area: Rect) {
     );
 }
 
-/// Gives Help every available Navigator column while fitting its top rule and
-/// fixed rows exactly to content. A shorter terminal necessarily clips, but
-/// no height is otherwise reserved or wasted.
-fn help_overlay(area: Rect) -> Rect {
-    let content_height = u16::try_from(help_lines().len().saturating_add(1)).unwrap_or(u16::MAX);
+/// Centers Help vertically at the Navigator's full inner width while fitting
+/// its border and fixed rows exactly to content. A smaller terminal clips.
+fn help_overlay(area: Rect, page: Page) -> Rect {
+    let content_height =
+        u16::try_from(help_lines(page).len().saturating_add(2)).unwrap_or(u16::MAX);
     let height = content_height.min(area.height).max(1);
     Rect::new(
         area.x,
@@ -1254,7 +1239,7 @@ fn render_modal(frame: &mut Frame<'_>, area: Rect, modal: &Modal) {
         ),
         Modal::ConfirmArchive { .. } => (
             " Archive session ",
-            "Archive this managed session? Its live Runtime will be parked first.\n\nEnter or y confirms; n or Esc cancels.".to_owned(),
+            "Archive this managed session? Its live Runtime will be stopped first.\n\nEnter or y confirms; n or Esc cancels.".to_owned(),
         ),
     };
     let overlay = centered_rect(94, 52, area);
@@ -1311,13 +1296,17 @@ fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
 }
 
 fn controls_lines(model: &Model, width: u16) -> Vec<Line<'static>> {
+    let bindings = control_bindings(model);
+    if bindings.is_empty() {
+        return Vec::new();
+    }
     let key = Style::default().fg(Color::Yellow);
     let label = Style::default().fg(Color::Gray);
     let width = usize::from(width.max(1));
     let mut lines = Vec::new();
     let mut spans = vec![Span::raw(" ")];
     let mut used = 1_usize;
-    for (shortcut, description) in control_bindings(model) {
+    for (shortcut, description) in bindings {
         let binding_width = display_width(shortcut)
             .saturating_add(1)
             .saturating_add(display_width(description));
@@ -1345,9 +1334,7 @@ fn controls_lines(model: &Model, width: u16) -> Vec<Line<'static>> {
 }
 
 fn controls_height(model: &Model, width: u16) -> u16 {
-    u16::try_from(controls_lines(model, width).len())
-        .unwrap_or(u16::MAX)
-        .max(1)
+    u16::try_from(controls_lines(model, width).len()).unwrap_or(u16::MAX)
 }
 
 fn footer_height(area: Rect, model: &Model) -> u16 {
@@ -1809,18 +1796,27 @@ mod tests {
 
         workstream.lifecycle = WorkstreamLifecycle::Parked;
         workstream.onboarding = Some(OnboardingStatus::RecoveryRequired);
-        assert_eq!(marker(&workstream), ("p", Some(Color::Indexed(110))));
+        assert_eq!(marker(&workstream), ("!", Some(Color::Red)));
 
         workstream.lifecycle = WorkstreamLifecycle::Open;
         assert_eq!(marker(&workstream), ("!", Some(Color::Red)));
 
         workstream.onboarding = None;
+        workstream.runtime = None;
+        workstream.lifecycle = WorkstreamLifecycle::Parked;
+        assert_eq!(marker(&workstream), (" ", None));
+        workstream.lifecycle = WorkstreamLifecycle::Open;
+
         workstream.runtime = Some(RuntimeSnapshot {
             runtime_id,
             status: RuntimeStatus::Attention,
             revision: Revision::INITIAL,
         });
         assert_eq!(marker(&workstream), ("✓", Some(Color::Green)));
+
+        workstream.lifecycle = WorkstreamLifecycle::Parked;
+        assert_eq!(marker(&workstream), (" ", None));
+        workstream.lifecycle = WorkstreamLifecycle::Open;
 
         workstream.onboarding = Some(OnboardingStatus::ActionFenced);
         assert_eq!(marker(&workstream), ("…", Some(Color::Cyan)));
@@ -2032,7 +2028,7 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n");
-        for expected in ["n new here", ". archived", "q quit"] {
+        for expected in ["n new", "x archive", ". archived", "q quit"] {
             assert!(
                 rendered.contains(expected),
                 "missing {expected:?}: {rendered}"
@@ -2040,6 +2036,7 @@ mod tests {
         }
         assert!(!rendered.contains("↑↓ select"));
         assert!(!rendered.contains("Enter open"));
+        assert!(!rendered.contains("p park"));
         assert!(lines.iter().all(|line| line.width() <= 32));
         assert_eq!(
             super::controls_height(&model, 32),
@@ -2052,17 +2049,13 @@ mod tests {
         let (snapshot, _, _) = snapshot();
         let mut model = Model::new(snapshot);
 
-        for bindings in [
-            super::control_bindings(&model),
-            {
-                model.select_next();
-                super::control_bindings(&model)
-            },
-            {
-                let _ = model.handle_key(crossterm::event::KeyCode::Char('.'));
-                super::control_bindings(&model)
-            },
-        ] {
+        let initial_bindings = super::control_bindings(&model);
+        model.select_next();
+        let workstreams_bindings = super::control_bindings(&model);
+        let _ = model.handle_key(crossterm::event::KeyCode::Char('.'));
+        let archived_bindings = super::control_bindings(&model);
+
+        for bindings in [initial_bindings, workstreams_bindings, archived_bindings] {
             assert!(!bindings.iter().any(|(key, _)| *key == "↑↓"));
             assert!(
                 !bindings
@@ -2070,19 +2063,29 @@ mod tests {
                     .any(|(key, action)| *key == "Enter" && matches!(*action, "open" | "shell"))
             );
         }
+        assert!(workstreams_bindings.iter().any(|(key, _)| *key == "x"));
+        assert!(!workstreams_bindings.iter().any(|(key, _)| *key == "u"));
+        assert!(!workstreams_bindings.iter().any(|(key, _)| *key == "p"));
+        assert!(archived_bindings.iter().any(|(key, _)| *key == "u"));
+        assert!(!archived_bindings.iter().any(|(key, _)| *key == "x"));
+        assert!(!archived_bindings.iter().any(|(key, _)| *key == "p"));
     }
 
     #[test]
     fn help_is_full_width_colored_and_fits_its_content() {
-        let overlay = super::help_overlay(Rect::new(0, 0, 32, 24));
-        assert_eq!(overlay, Rect::new(0, 6, 32, 12));
+        let overlay = super::help_overlay(Rect::new(0, 0, 32, 24), Page::Workstreams);
+        assert_eq!(overlay, Rect::new(0, 7, 32, 10));
         assert_eq!(
-            super::help_overlay(Rect::new(0, 0, 32, 18)),
-            Rect::new(0, 3, 32, 12)
+            super::help_overlay(Rect::new(0, 0, 32, 18), Page::Workstreams),
+            Rect::new(0, 4, 32, 10)
+        );
+        assert_eq!(
+            super::help_overlay(Rect::new(0, 0, 32, 24), Page::Archived),
+            Rect::new(0, 8, 32, 7)
         );
 
-        let lines = super::help_lines();
-        assert_eq!(lines.len(), 11);
+        let lines = super::help_lines(Page::Workstreams);
+        assert_eq!(lines.len(), 8);
         assert!(lines.iter().all(|line| line.width() <= 30));
         let rendered = lines
             .iter()
@@ -2094,10 +2097,77 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert_eq!(rendered[1], "↑↓      select");
+        assert_eq!(rendered[2], "Enter   open");
+        assert_eq!(rendered[4], "Esc     back");
         assert_eq!(rendered[6], "n       new at location");
+        assert_eq!(rendered[7], "x       archive session");
+        assert!(!rendered.iter().any(|line| line.contains("close help")));
+        assert!(!rendered.iter().any(|line| line.contains("park")));
         assert_eq!(lines[0].spans[0].style.fg, Some(Color::Cyan));
         assert_eq!(lines[6].spans[0].style.fg, Some(Color::Yellow));
-        assert_eq!(lines[10].spans[0].style.fg, Some(Color::Yellow));
+
+        let archived_lines = super::help_lines(Page::Archived);
+        let archived_text = archived_lines.iter().map(line_text).collect::<Vec<_>>();
+        assert!(archived_text.iter().any(|line| line == "Esc     back"));
+        assert!(
+            archived_text
+                .iter()
+                .any(|line| line.contains("u       restore session"))
+        );
+        assert!(
+            !archived_text
+                .iter()
+                .any(|line| line.contains("archive session"))
+        );
+        assert!(
+            !archived_text
+                .iter()
+                .any(|line| line.contains("new at location"))
+        );
+
+        let (snapshot, _, _) = snapshot();
+        let mut model = Model::new(snapshot);
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('?')),
+            Command::None
+        );
+        assert!(model.help_visible());
+        assert!(super::control_bindings(&model).is_empty());
+        assert!(super::controls_lines(&model, 32).is_empty());
+        assert_eq!(super::footer_height(Rect::new(0, 0, 32, 24), &model), 0);
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('?')),
+            Command::None
+        );
+        assert!(model.help_visible());
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('q')),
+            Command::None
+        );
+        assert!(!model.help_visible());
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('?')),
+            Command::None
+        );
+        assert!(model.help_visible());
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Esc),
+            Command::None
+        );
+        assert!(!model.help_visible());
+
+        let backend = TestBackend::new(32, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal
+            .draw(|frame| {
+                super::render_help(frame, Rect::new(0, 0, 32, 24), Page::Workstreams);
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer[(0, 7)].symbol(), "┌");
+        assert_eq!(buffer[(31, 7)].symbol(), "┐");
+        assert_eq!(buffer[(0, 16)].symbol(), "└");
+        assert_eq!(buffer[(31, 16)].symbol(), "┘");
     }
 
     #[test]
@@ -2279,22 +2349,18 @@ mod tests {
         model.select_next();
 
         assert_eq!(
-            model.handle_key(crossterm::event::KeyCode::Char('p')),
-            Command::Park {
-                workstream_id: active,
-                expected_workstream_revision: Revision::INITIAL,
-            }
-        );
-        assert_eq!(
-            model.handle_key(crossterm::event::KeyCode::Char('a')),
+            model.handle_key(crossterm::event::KeyCode::Char('u')),
             Command::None
         );
+        assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('p')),
+            Command::None
+        );
+        assert_eq!(model.selected(), Some(RowId::Workstream(active)));
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Char('x')),
             Command::None
         );
-        model.select_next();
-        assert_eq!(model.selected(), Some(RowId::Workstream(active)));
         assert_eq!(
             model.modal(),
             Some(&Modal::ConfirmArchive {
@@ -2313,6 +2379,10 @@ mod tests {
         let _ = model.handle_key(crossterm::event::KeyCode::Char('.'));
         assert_eq!(model.selected(), Some(RowId::Workstream(archived)));
         assert_eq!(
+            model.handle_key(crossterm::event::KeyCode::Char('x')),
+            Command::None
+        );
+        assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Char('u')),
             Command::Restore {
                 workstream_id: archived,
@@ -2322,21 +2392,25 @@ mod tests {
     }
 
     #[test]
-    fn onboarding_recovery_fence_only_allows_park() {
+    fn onboarding_recovery_can_only_archive_after_exact_cleanup() {
         let (mut snapshot, active, _) = snapshot();
         snapshot.workstreams[0].onboarding = Some(OnboardingStatus::RecoveryRequired);
         let mut model = Model::new(snapshot);
         model.select_next();
         assert_eq!(
             model.handle_key(crossterm::event::KeyCode::Char('p')),
-            Command::Park {
-                workstream_id: active,
-                expected_workstream_revision: Revision::INITIAL,
-            }
+            Command::None
         );
         assert_eq!(
-            model.handle_key(crossterm::event::KeyCode::Char('f')),
+            model.handle_key(crossterm::event::KeyCode::Char('x')),
             Command::None
+        );
+        assert_eq!(
+            model.modal(),
+            Some(&Modal::ConfirmArchive {
+                workstream_id: active,
+                expected_workstream_revision: Revision::INITIAL,
+            })
         );
     }
 }

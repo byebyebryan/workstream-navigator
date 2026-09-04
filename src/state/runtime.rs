@@ -426,12 +426,14 @@ impl HostRegistry {
             .collect()
     }
 
-    /// Confirms that one exact Runtime ended through the explicit park action.
+    /// Confirms that one exact Runtime ended through deliberate exact-stop
+    /// cleanup.
     ///
     /// This is intentionally stricter than a stopped runtime alone: an
     /// unexpected native-process exit also leaves a Runtime stopped, but does
-    /// not park its Workstream. Attachment helpers use this distinction after
-    /// their private tmux client exits unexpectedly.
+    /// not transition its Workstream to the retained stopped state. Attachment
+    /// helpers use this distinction after their private tmux client exits
+    /// unexpectedly.
     ///
     /// # Errors
     ///
@@ -996,7 +998,8 @@ impl HostRegistry {
     }
 
     /// Removes only the exact private `OpenCode` handle after its observer has
-    /// been validated/stopped and its Runtime is being deliberately parked.
+    /// been validated/stopped and its Runtime is being deliberately exact-
+    /// stopped.
     #[allow(clippy::missing_errors_doc)]
     pub fn delete_opencode_runtime_handle(
         &mut self,
@@ -1188,7 +1191,8 @@ impl HostRegistry {
         }
     }
 
-    /// Marks the reserved Runtime stopped after its exact private tmux server is parked.
+    /// Marks the reserved Runtime stopped after its exact private tmux server
+    /// has been stopped.
     ///
     /// # Errors
     ///
@@ -1212,9 +1216,10 @@ impl HostRegistry {
         Ok(())
     }
 
-    /// Records that an owned private Runtime disappeared without a deliberate
-    /// park or verified native end. Its provider binding and project files are
-    /// retained, but neither a blank start nor a stale hook may continue it.
+    /// Records that an owned private Runtime disappeared without deliberate
+    /// exact-stop cleanup or a verified native end. Its provider binding and
+    /// project files are retained, but neither a blank start nor a stale hook
+    /// may continue it.
     ///
     /// This operation is idempotent after the first transition so cleanup of a
     /// failed recovery launch cannot erase the original recovery evidence.
@@ -1279,9 +1284,10 @@ impl HostRegistry {
         transaction.commit().map_err(StateError::Sqlite)
     }
 
-    /// Records an explicit user park after the exact private tmux server has
-    /// stopped. Provider history and project files are retained, while the
-    /// Workstream's durable lifecycle becomes `parked`.
+    /// Records completed exact-stop cleanup after the exact private tmux server
+    /// has stopped. Provider history and project files are retained, while the
+    /// Workstream's durable lifecycle becomes `parked` for archive/recovery
+    /// bookkeeping.
     ///
     /// # Errors
     ///

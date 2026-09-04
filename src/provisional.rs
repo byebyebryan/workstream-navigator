@@ -129,7 +129,7 @@ pub(crate) enum HostInventoryError {
 /// Bounded refusal from retiring one terminal, Runtime-owned provisional
 /// marker. The retained onboarding journal and registered Runtime remain the
 /// authority; this operation removes only the presentation-private marker and
-/// never attaches, signals, parks, or removes the provider Runtime.
+/// never attaches, signals, exact-stops, or removes the provider Runtime.
 #[derive(Debug, Error)]
 pub(crate) enum HostRetirementError {
     #[error("completed onboarding state is unavailable")]
@@ -447,8 +447,8 @@ pub(crate) fn remove_exact_provisional_artifacts(
 /// Proves that the candidate Runtime directory contains only the private
 /// artifacts created by the provisional owner.  This is deliberately a
 /// separate read-only seam so a caller can complete the proof before asking
-/// tmux to stop a live provisional server; `park` must never get a chance to
-/// recursively remove an unreviewed directory.
+/// tmux to stop a live provisional server; exact-stop cleanup must never get a
+/// chance to recursively remove an unreviewed directory.
 pub(crate) fn validate_exact_provisional_runtime_artifacts(
     state_root: &Path,
     expected: &ProvisionalSlot,

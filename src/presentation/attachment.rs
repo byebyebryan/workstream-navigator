@@ -857,10 +857,18 @@ fn cycle_marker_is_restorable(
 mod tests {
     use std::path::PathBuf;
 
+    #[cfg(target_os = "linux")]
+    use std::{
+        thread,
+        time::{Duration, Instant},
+    };
+
     use uuid::Uuid;
 
     use super::*;
     use crate::domain::WorkstreamId;
+    #[cfg(target_os = "linux")]
+    use crate::runtime::{LinuxProcessProbe, ProcessProbe, ProcessState};
 
     #[test]
     fn cycle_rollback_restores_when_marker_write_has_not_started() {
@@ -890,10 +898,13 @@ mod tests {
     }
 
     struct CyclePresentationFixture {
+        // Rust drops struct fields in declaration order. The guard must retain
+        // the private socket until it has stopped the disposable server;
+        // `TempDir` removes that socket during its own drop.
+        _cleanup: DisposableAttachmentTmuxGuard,
         _temporary: tempfile::TempDir,
         presentation: Presentation,
         provider: String,
-        _cleanup: DisposableAttachmentTmuxGuard,
     }
 
     impl CyclePresentationFixture {
@@ -924,10 +935,10 @@ mod tests {
                 directory: presentation.paths.directory.clone(),
             };
             Self {
+                _cleanup: cleanup,
                 _temporary: temporary,
                 presentation,
                 provider,
-                _cleanup: cleanup,
             }
         }
 
@@ -957,6 +968,108 @@ mod tests {
                 .trim()
                 .to_owned()
         }
+
+        fn server_pid(&self) -> u32 {
+            self.presentation
+                .invoke_capture(
+                    None,
+                    vec!["display-message".into(), "-p".into(), "#{pid}".into()],
+                )
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        }
+
+        fn provider_pid(&self) -> u32 {
+            self.presentation
+                .invoke_capture(
+                    None,
+                    vec![
+                        "display-message".into(),
+                        "-p".into(),
+                        "-t".into(),
+                        self.provider.clone().into(),
+                        "#{pane_pid}".into(),
+                    ],
+                )
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap()
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn wait_for_fixture_process_stop(
+        process_probe: LinuxProcessProbe,
+        process_pid: u32,
+        expected_birth: &str,
+        description: &str,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match process_probe.process_observation_checked(process_pid) {
+                Err(error) => {
+                    panic!("{description} observation became ambiguous: {error}");
+                }
+                Ok(None) => return,
+                Ok(Some(observation)) if observation.birth != expected_birth => return,
+                // A stopped process can remain as an exact zombie until its
+                // parent reaps it (notably under a container test PID 1). It
+                // cannot retain a live tmux server or provider pane.
+                Ok(Some(observation)) if observation.state == ProcessState::Zombie => return,
+                Ok(Some(_)) if Instant::now() < deadline => {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                Ok(Some(_)) => {
+                    panic!("{description} remained live after fixture drop");
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn cycle_fixture_stops_its_server_and_provider_before_its_tempdir_drops() {
+        if super::private_tmux_command()
+            .arg("-V")
+            .spawn()
+            .and_then(std::process::Child::wait_with_output)
+            .is_err()
+        {
+            eprintln!("skipped: tmux is unavailable");
+            return;
+        }
+        let fixture = CyclePresentationFixture::new(3);
+        let server_pid = fixture.server_pid();
+        let provider_pid = fixture.provider_pid();
+        let process_probe = LinuxProcessProbe;
+        let server_birth = process_probe
+            .process_observation_checked(server_pid)
+            .expect("fixture server must be observable")
+            .expect("fixture server must be live")
+            .birth;
+        let provider_birth = process_probe
+            .process_observation_checked(provider_pid)
+            .expect("fixture provider must be observable")
+            .expect("fixture provider must be live")
+            .birth;
+
+        drop(fixture);
+
+        wait_for_fixture_process_stop(
+            process_probe,
+            server_pid,
+            &server_birth,
+            "cycle fixture private tmux server",
+        );
+        wait_for_fixture_process_stop(
+            process_probe,
+            provider_pid,
+            &provider_birth,
+            "cycle fixture provider pane",
+        );
     }
 
     #[test]

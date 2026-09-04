@@ -10,9 +10,7 @@ use super::{
         fail_known_absent_opencode_session_creation, fail_unknown_opencode_session_creation,
         fail_unlaunched_runtime, matches_recorded_runtime,
     },
-    lifecycle::{
-        clean_provider_exit_status_with_cwd_proof, park_authorized, promoted_onboarding_cwd,
-    },
+    lifecycle::park_authorized_if_clean_provider_exit,
     model::workstream_overview_authorized,
     start::backfill_live_runtime_provider_pid,
 };
@@ -232,21 +230,16 @@ pub fn preflight_attachment(
         )?,
     );
     let probe = runtime.probe()?;
-    let promoted_cwd = promoted_onboarding_cwd(root, registry, &runtime_record)?;
-    if clean_provider_exit_status_with_cwd_proof(
-        &runtime,
+    if park_authorized_if_clean_provider_exit(
+        root,
+        registry,
+        workstream_id,
+        overview.revision,
         &runtime_record,
-        &probe,
-        promoted_cwd.as_deref(),
-    )? == Some(0)
+        CatalogAuthorization::ArchivedAllowed,
+    )?
+    .is_some()
     {
-        park_authorized(
-            root,
-            registry,
-            workstream_id,
-            Some(overview.revision),
-            CatalogAuthorization::ArchivedAllowed,
-        )?;
         return Err(ActionError::ProviderExited);
     }
     if let Some(backfilled) = backfill_live_runtime_provider_pid(registry, &runtime_record, &probe)?

@@ -11,7 +11,8 @@ use super::{
     creation::{IndependentStartSpec, start_independent_workstream_with},
     forget,
     lifecycle::{
-        AttachmentEndProviderState, attachment_end_provider_state, await_pending_exit_evidence_with,
+        AttachmentEndProviderState, attachment_end_provider_state,
+        await_pending_exit_evidence_with, await_provider_group_empty_with,
     },
     model::reconcile_observer_trust_with_manager,
     park, preflight_attachment, preflight_attachment_read_only,
@@ -382,14 +383,14 @@ fn release_provider_and_wait_for_retained_exit(
                 "-t",
                 &format!("{}:provider", paths.session_name),
                 "-F",
-                "#{pane_index}|#{pane_dead}|#{pane_dead_status}",
+                "#{pane_index}|#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}",
             ]);
         let metadata = crate::process::output_bounded(&mut command, 4 * 1024, 4 * 1024).unwrap();
-        let expected_metadata = format!("0|1|{expected_status}");
+        let expected_metadata = "0|1|";
         let last_observation = if metadata.status.success()
             && String::from_utf8_lossy(&metadata.stdout)
                 .lines()
-                .any(|line| line == expected_metadata)
+                .any(|line| line.starts_with(expected_metadata))
         {
             match runtime.provider_exit_status(provider_pid, &record.cwd) {
                 Ok(status) if status == expected_status => return,
@@ -1052,6 +1053,10 @@ fn forget_removes_an_archived_exact_stopped_runtime() {
 
 #[test]
 #[cfg(unix)]
+#[allow(
+    clippy::too_many_lines,
+    reason = "the archive regression keeps its lifecycle and process proof auditable"
+)]
 fn archive_stops_exact_runtime_before_archive_and_restore_never_relaunches() {
     if Command::new("tmux")
         .arg("-V")
@@ -1102,16 +1107,24 @@ fn archive_stops_exact_runtime_before_archive_and_restore_never_relaunches() {
         "archive must stop the exact private Runtime before hiding it"
     );
     let deadline = Instant::now() + Duration::from_secs(2);
-    while process_probe.process_birth(provider_pid).as_deref() == Some(process_birth.as_str())
-        && Instant::now() < deadline
+    while let Some(observation) = process_probe
+        .process_observation_checked(provider_pid)
+        .expect("archive provider process probe must remain readable")
     {
+        assert_eq!(
+            observation.birth.as_str(),
+            process_birth.as_str(),
+            "archive observed a different process at the recorded provider PID: {observation:?}"
+        );
+        if observation.state == ProcessState::Zombie {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "archive left the recorded provider process running: {observation:?}"
+        );
         thread::sleep(Duration::from_millis(10));
     }
-    assert_ne!(
-        process_probe.process_birth(provider_pid).as_deref(),
-        Some(process_birth.as_str()),
-        "archive must stop the recorded provider process"
-    );
     let archived = registry
         .workstream_overviews()
         .unwrap()
@@ -2397,6 +2410,40 @@ fn pending_exit_evidence_waits_for_exact_status_without_accepting_absence_or_non
         await_pending_exit_evidence_with(|| Ok(None), || false, || panic!("timed out")).unwrap(),
         None
     );
+}
+
+#[test]
+fn clean_exit_group_drain_requires_an_empty_read_or_refuses() {
+    let observations = RefCell::new(VecDeque::from([Ok(false), Ok(true)]));
+    let remaining_waits = Cell::new(1_u8);
+    let waits = Cell::new(0);
+    assert!(
+        await_provider_group_empty_with(
+            || observations.borrow_mut().pop_front().unwrap(),
+            || {
+                let remaining = remaining_waits.get();
+                remaining_waits.set(remaining.saturating_sub(1));
+                remaining > 0
+            },
+            || waits.set(waits.get() + 1),
+        )
+        .is_ok()
+    );
+    assert_eq!(waits.get(), 1);
+    assert!(observations.borrow().is_empty());
+
+    assert!(matches!(
+        await_provider_group_empty_with(|| Ok(false), || false, || panic!("must not wait")),
+        Err(ActionError::RuntimeProbeAmbiguous)
+    ));
+    assert!(matches!(
+        await_provider_group_empty_with(
+            || Err(ActionError::RuntimeProbeAmbiguous),
+            || panic!("probe failure must not be retried"),
+            || panic!("probe failure must not wait"),
+        ),
+        Err(ActionError::RuntimeProbeAmbiguous)
+    ));
 }
 
 #[test]

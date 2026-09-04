@@ -1,10 +1,9 @@
 # D25 Current-Product Stabilization and Closure
 
-Status: the immediate shell-first exit correction is locally accepted and
-installed byte-identically for operator inspection. Sanitized live-provider
-and declared-Rust-1.88 acceptance remains bound to the prior D25 artifact, not
-the corrected hash. This record includes no passing current-source remote-CI
-result.
+Status: the immediate shell-first exit correction is locally,
+declared-Rust-1.88, and live-provider accepted. The corrected locked release is
+installed byte-identically for operator inspection. This record includes no
+passing current-source remote-CI result.
 
 ## Contract exercised
 
@@ -28,23 +27,52 @@ duplicated, malformed, timed-out, or mismatched evidence is refused.
 The helper then delegates to the ordinary attachment-end proof. An exact
 running PID/birth is a detach. A matching zombie, or absence on the immediate
 second identity read, permits a bounded wait for the retained private pane.
-Only matching PID, dead topology, process absence, and status `0` authorize
-private-server removal and stopped/parked state. Ordinary Runtimes additionally
-require launch cwd equality. A still-starting shell-promoted Runtime may bridge
-an earlier absolute pane seed cwd to its canonical recorded project cwd only
-through one exact current-generation `provider_exec_proven` target that
-independently proved the native provider cwd. Non-zero, reused, inaccessible,
-malformed, missing, duplicated, stale, timed-out, or otherwise ambiguous
-evidence remains untouched. The same proof removes a clean retained server
-left by an older helper before reserving the stopped Runtime's next generation;
-it never adopts a live provider into a stopped record.
+Normally, only matching PID, dead topology, process absence, and tmux status
+`0` authorize private-server removal and stopped/parked state. On Linux only,
+when both tmux exit-status and exit-signal fields remain empty, the proof may
+instead use one exact retained zombie whose stable birth and `/proc` field-52
+raw wait status decode as normal exit `0`. It revalidates topology, PID, cwd,
+and the identical zombie evidence before accepting. Signal evidence,
+malformed or conflicting status, a live or reused process, or any changed read
+is refused. Ordinary Runtimes additionally require launch cwd equality. A
+still-starting shell-promoted Runtime may bridge an earlier absolute pane seed
+cwd to its canonical recorded project cwd only through one exact
+current-generation `provider_exec_proven` target that independently proved the
+native provider cwd. Missing, duplicated, stale, timed-out, or otherwise
+ambiguous evidence remains untouched. The same clean-exit proof removes a
+retained server left by an older helper before reserving the stopped Runtime's
+next generation; it never adopts a live provider into a stopped record.
+
+After exact native clean exit, WSNav waits boundedly and read-only until the
+recorded numeric provider group has no visible live members. It then re-reads
+the Workstream and Runtime revisions, retained pane PID/cwd/topology and
+zero-exit status, and group emptiness immediately before stopping the private
+server. It does not signal an absent provider leader's unproven group.
+Persistent membership, process-table failure, or changed evidence is refused;
+generic Archive/internal-stop process-group semantics are unchanged.
 
 Linux `ESRCH` maps to a vanished process only at the process-group enumeration
 seam after `/proc` already yielded that entry. Direct identity reads remain
-strict. The private-client regression waits for the exact client PID/session,
-the retained-exit fixture waits for tmux to publish the exact dead status before
-calling the full proof, and the focus regression polls current-screen terminal
-attributes. These are bounded observation seams, not new lifecycle authority.
+strict. The private-client regression waits for the exact client PID/session
+and a command-order acknowledgement through that client, the retained-exit
+fixture calls the production proof as soon as exact dead topology exists, and
+the focus regression polls current-screen terminal
+attributes. Account-shell wrapper semantics source the exact generated wrapper
+through noninteractive provider-shell command mode; separate tests retain the
+exact production interactive argv/bootstrap contract. These are bounded,
+deterministic test seams, not new lifecycle authority.
+
+Codex 0.153.2 may persist its model-availability tooltip counter into the
+selected observer profile during native review. WSNav accepts only the exact
+`[tui.model_availability_nux]` table with a nonempty map of bounded lowercase
+model slugs to unsigned 32-bit counters. Codex may also retain an explicit
+`enabled = true` beside an exact trust hash after a reviewed hook is disabled
+and re-enabled. That active record is accepted; `enabled = false`, another
+field, or another type remains `modified`. NUX state without complete hook
+hashes remains `trust_pending`; all four generated hook hashes and no disabled
+hook are still required for `ready`. Unknown `tui` keys or nested tables,
+invalid scalar types, duplicates, malformed model slugs, and out-of-range
+counters remain `modified`.
 
 ## Source and local validation
 
@@ -61,24 +89,30 @@ Local focused validation covered:
 - Linux `ESRCH` scope plus permission, other-I/O, and malformed refusal;
 - exact running detach versus zombie/disappearance convergence;
 - zero-status cleanup, non-zero refusal, and stopped-record non-adoption;
+- delayed tmux exit fields, exact zombie wait-status decoding, and
+  signaled/conflicting/malformed evidence refusal;
+- transient post-exit process-group drain plus persistent-membership and
+  process-table-error refusal without group signalling;
 - provisional identity/generation/path mismatch refusal and no-mutation
   unpromoted detach;
+- account-shell wrapper semantics both with and without a controlling TTY;
 - current-screen focus attributes; and
 - terminal clear controls with no WSNav prose.
 
-An Ubuntu 24.04 container with Rust 1.88.0, tmux 3.4, Git 2.43.0, and Zsh 5.9
-passed 20 consecutive focused repetitions of the stopped-retained-zero
-regression. The first complete rerun exposed that tmux can publish
-`pane_dead=1` before `pane_dead_status`; the fixture was corrected to wait for
-that exact metadata tuple while retaining the full production proof. The final
-locked all-target/all-feature MSRV run passed 407 library tests and 10
-presentation integration tests.
+Before the immediate-exit correction, an Ubuntu 24.04 container with Rust
+1.88.0, tmux 3.4, Git 2.43.0, and Zsh 5.9 passed 20 consecutive focused
+repetitions of the stopped-retained-zero regression. That run first exposed
+that tmux can publish `pane_dead=1` before `pane_dead_status`; after its fixture
+was corrected to wait for the exact metadata tuple, the then-current locked
+suite passed 407 library tests and 10 presentation integration tests. Those
+counts are retained as historical diagnostic evidence, not current-artifact
+acceptance.
 
-The final `scripts/check` run passed formatting, strict Clippy, all 407 library
-tests, all 10 presentation tests, package verification, dependency
-license/advisory/source policy, documentation links, source acceptance, and
-staged/unstaged diff checks. Cargo Deny emitted only the already accepted
-duplicate-version warnings; advisories, bans, licenses, and sources passed.
+The corrected complete locked suite also passed on Debian Bookworm with Rust
+1.88.0 and tmux 3.3a, the environment that exposed retained dead panes whose
+tmux exit fields can remain empty while the pane PID is still a zombie. Sixty
+consecutive focused non-zero-exit regressions passed there after the production
+proof, rather than the fixture, gained the exact read-only fallback.
 
 ## Immediate shell-first exit correction
 
@@ -108,26 +142,114 @@ duplicated, malformed, non-zero, mismatched, or timed-out evidence grants no
 mutation authority.
 
 Focused promoted-cwd, state-before-marker, timeout, and live-detach regressions
-passed. The corrected uninterrupted `scripts/check` run passed formatting,
-strict Clippy, all 412 library tests, all 10 presentation tests, package
+passed. The final uninterrupted `scripts/check` run passed formatting, strict
+Clippy, all 425 library tests, all 10 presentation tests, package
 verification, dependency license/advisory/source policy, documentation links,
 source/CLI acceptance, presentation/state acceptance, and diff checks. Cargo
 Deny again emitted only the accepted duplicate-version warnings; advisories,
-bans, licenses, and sources passed. No live-provider, declared-Rust-1.88, or
-remote-CI acceptance was run on the corrected artifact.
+bans, licenses, and sources passed.
+
+## Retained-status compatibility correction
+
+The corrected all-target Rust 1.88 run on tmux 3.3a falsified the assumption
+that a retained dead pane always publishes `pane_dead_status`. The pane was
+dead and its exact PID was a zombie, but both tmux exit fields remained empty;
+the prior production proof therefore refused a legitimate non-zero exit before
+it could classify it as unavailable.
+
+The correction reads Linux `/proc/<pid>/stat` field 52 without signaling or
+otherwise mutating the provider. Only an exact zombie with stable birth and raw
+wait status, normal-exit encoding, unchanged retained topology/PID/cwd, and a
+second identical read is eligible. Exit `0` authorizes ordinary clean-exit
+reconciliation; non-zero exit remains unavailable. Any tmux signal evidence,
+signaled wait encoding, malformed/out-of-range value, live/reused process, or
+conflict refuses. Current tmux 3.7c was separately probed on an isolated
+private server and its signaled-pane metadata was refused. The exact probe
+server and socket were removed.
+
+The complete Rust 1.88 suite passed 425 library tests and 10 presentation
+integration tests on both Debian Bookworm with tmux 3.3a and Ubuntu 24.04 with
+tmux 3.4. The local full gate passed the same 435 tests.
+
+An Ubuntu 24.04/tmux 3.4 stress run then exposed a second narrow cleanup race.
+The retained pane and native zero exit were exact, but generic park attempted
+provider-group shutdown after the leader was already absent and transiently
+observed a same-numbered member. It correctly refused with
+`ProcessGroupIdentityMismatch`; an immediate diagnostic found the group empty,
+so there was no durable ownership evidence that could authorize a signal. The
+dedicated clean-exit transition now owns the proof, waits read-only for an
+empty group, and re-fences all durable and pane evidence before server removal.
+The promoted preflight regression passed 60 consecutive repetitions on Rust
+1.88.0 with tmux 3.4; deterministic tests cover successful drain and bounded
+refusal.
+
+The final Ubuntu full-suite run also exposed an insufficient readiness seam in
+the private control-client fixture. tmux could list the exact client before its
+initial `attach-session` command had completed, allowing a late attach to win
+after the correct `pane-died` hook detached it. The fixture now queues one
+session-local option write through that exact control client and observes the
+option externally before releasing the provider. This is a metadata-only
+command-order barrier, not a timeout increase or production change. Two sets
+of 30 focused repetitions passed on tmux 3.4, the focused regression passed on
+tmux 3.3a, and both final all-target container suites passed afterward.
+
+The final Debian run exposed one additional assertion race after Archive had
+completed its exact stop: Linux could still expose the same-birth process as a
+zombie briefly. The test postcondition now waits boundedly and accepts only
+absence or that exact same-birth zombie. It still refuses a running or reused
+process and every observation error. The focused regression passed 100
+consecutive repetitions, all 39 action tests passed, and the final Debian and
+Ubuntu all-target suites each passed 425 library tests plus 10 presentation
+integration tests.
+
+The final local gate also exposed a disposable presentation-fixture leak. Its
+Rust struct dropped the temporary root before its tmux cleanup guard, removing
+the private socket before `kill-server` could use it. The guard now drops
+first. A Linux regression records exact process identities and proves that
+both the private tmux server and provider-pane process are absent, replaced,
+or same-birth zombies after fixture drop; live or unreadable evidence fails.
+It passed 60 consecutive repetitions on Debian/tmux 3.3a, both final
+Rust-1.88 all-target suites passed, and no new matching fixture process
+remained after validation. Four disposable servers from the falsifying local
+run were exact-identified and stopped; no broader historical `/tmp` residue
+was mutated.
+
+## Current Codex native-state compatibility
+
+Final-artifact native review on Codex 0.153.2 appended the expected four hook
+trust hashes and project trust, then also persisted its provider-owned
+`[tui.model_availability_nux]` display counter. A native disable/re-enable
+round-trip additionally retained `enabled = true` on the reviewed SessionStart
+record. The prior exact suffix parser correctly refused these previously
+unknown provider fields as `modified`, which made the current native onboarding
+flow unavailable even though the generated WSNav declaration and active hook
+trust were exact.
+
+The corrected parser keeps the declaration byte exact and admits only that one
+schema-checked TUI table plus optional `enabled = true` on an exact trusted-hook
+record. A NUX-only interrupted review stays retryable as `trust_pending`; it
+cannot make the integration `ready`. Positive tests cover the observed hook,
+project, NUX, and explicitly enabled state plus the unsigned-counter bound.
+Negative tests cover disabled, malformed, or extended hook records; unknown or
+nested TUI state; invalid types; duplicates; malformed or oversized model
+slugs; and out-of-range counters.
 
 ## Sanitized live-provider acceptance
 
-This historical acceptance belongs to the prior D25 artifact with SHA-256
-`7d8c4704a79b7c1e48c1bbff0034aaf5faf9b5905744e4520838de8eeca5bdc0`.
-It is not current-artifact evidence. Explicit operator-authorized acceptance
+Explicit operator-authorized acceptance on corrected artifact SHA-256
+`70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1`
 used isolated mode-0700 homes, provider configuration, repositories, schema-15
 state roots, presentation sockets, and private Runtime servers with Codex
-0.153.2 and OpenCode 1.18.27.
+0.153.2 and OpenCode 1.18.27. Configuration and credential source files were
+copied with mode `0600`; no values were output.
 
-For each provider, one harmless native interaction established durable
-`attention`. Native `/exit` then produced all of the following without pane
-content inspection:
+Each provider reached an exact `provider_exec_proven` onboarding target with
+no work prompt. The final Codex profile contained the exact reviewed hashes
+and bounded NUX counter; the earlier native disable/re-enable specimen supplied
+the `enabled = true` compatibility falsification. Codex was deliberately
+exited before a SessionStart binding existed, covering the immediate
+pre-binding edge. Native `/exit` then produced all of the following without
+provider-pane capture or content inspection:
 
 - the Workstream became parked and its Runtime stopped;
 - the recorded provider process and exact private Runtime server disappeared;
@@ -137,25 +259,24 @@ content inspection:
 
 The two disposable presentations were closed after verification. Exact socket,
 process, provider-handle, and state-directory checks found no retained
-acceptance resources, and both isolated roots were then deleted. No provider
-prompt or result was recorded in this evidence.
+acceptance resources; the isolated harness sockets and roots were then
+deleted. Ordinary WSNav state remained unchanged. No provider prompt or result
+was recorded in this evidence.
 
 ## Installed artifact
 
 The corrected locked release was atomically installed to
 `~/.local/bin/wsnav`. Source and installed artifacts are mode `0755`, size
-7,398,872 bytes, report `wsnav 0.1.0`, and are byte-identical:
+7,398,480 bytes, report `wsnav 0.1.0`, and are byte-identical:
 
 ```text
-2ab6c705291d6140826e0a72c00c1668f03b7bf463b7d104c38e0dad5dfa1057  target/release/wsnav
-2ab6c705291d6140826e0a72c00c1668f03b7bf463b7d104c38e0dad5dfa1057  ~/.local/bin/wsnav
+70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1  target/release/wsnav
+70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1  ~/.local/bin/wsnav
 ```
 
 ## Evidence boundaries
 
 - No passing current-source remote CI result is included in this record.
-- No live-provider or declared-Rust-1.88 acceptance was run on the corrected
-  installed hash; those results remain bound to the prior D25 artifact.
 - No current UI capture was generated. Capture selection and publication were
   explicitly left to the operator and are not a D25 exit gate.
 - No Fork, Rename, Ack, Park/Unpark, provider-thread archive/delete, transcript

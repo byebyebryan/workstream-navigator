@@ -12,28 +12,32 @@ returns, an exact dead candidate may wait boundedly for the durable proof and
 marker retirement to converge; cleanup still requires the retired marker to
 join the exact `provider_exec_proven` operation, Runtime, Workstream,
 generation, and private paths it carried before launch. An unpromoted live
-shell detach remains state-free. The existing exact retained-pane proof
-remains the only authority to classify status `0` as provider exit and park
-the Runtime.
+shell detach remains state-free. Exact tmux status and process absence remain
+the ordinary authority to classify provider exit; a Linux-only same-zombie
+wait-status proof covers tmux versions that retain a dead pane without
+publishing either exit field.
 
 The shell-first correction also distinguishes the provisional pane's seed cwd
 from the canonical project cwd proven when the provider exec was adopted. Only
 one exact current-generation onboarding target may bridge those values;
 ordinary Runtimes keep strict pane-start cwd equality. The same closure bounds
 Linux `/proc` disappearance during process-group enumeration without weakening
-direct identity reads, waits for exact tmux client and dead-pane metadata
-publication in tests, and uses current-screen terminal evidence for the focus
-regression. A stopped Runtime left with an exact retained zero-status pane by
-an older helper is removed before its next generation is reserved; live,
+direct identity reads. After native clean exit, WSNav waits read-only for the
+recorded numeric group to drain, then re-fences durable revisions, retained
+pane identity/topology/status, and group emptiness without signaling an
+unproven group. Tests begin at exact dead topology instead of assuming tmux
+exit-field publication, and the focus regression uses current-screen terminal
+evidence. A stopped Runtime left with an exact retained zero-status pane by an
+older helper is removed before its next generation is reserved; live,
 non-zero, reused, malformed, or inaccessible evidence remains fail-closed.
 
 D0-D25 are complete. The locked D25 release is installed byte-identically for
 operator inspection with SHA-256
-`2ab6c705291d6140826e0a72c00c1668f03b7bf463b7d104c38e0dad5dfa1057`.
-The corrected source passes the full local disposable gate. The declared Rust
-1.88 suite and sanitized native-exit acceptance with Codex 0.153.2 and OpenCode
-1.18.27 remain evidence for the prior D25 artifact, not this corrected hash.
-No passing current-source remote CI is included in that acceptance record.
+`70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1`.
+The corrected source passes the full local disposable and declared Rust 1.88
+gates. Sanitized immediate native-exit acceptance with Codex 0.153.2 and
+OpenCode 1.18.27 passes on the exact installed artifact. No passing
+current-source remote CI is included in that acceptance record.
 Current UI capture generation was left to the operator and is not acceptance
 evidence. See the
 [D25 acceptance record](evidence/acceptance/d25-current-product-closure.md).

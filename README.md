@@ -5,20 +5,20 @@ coding-agent workstreams on the machine where it is running. It adds
 organization, attachment, status, and a few compound workstream actions
 around the provider's native terminal UI.
 
-> **D25 status:** the immediate shell-first exit correction is locally
-> accepted and its locked release is installed byte-identically for operator
-> inspection with executable SHA-256
-> `2ab6c705291d6140826e0a72c00c1668f03b7bf463b7d104c38e0dad5dfa1057`.
+> **D25 status:** the immediate shell-first exit correction is locally and
+> declared-Rust-1.88 accepted, and its locked release is installed
+> byte-identically for operator inspection with executable SHA-256
+> `70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1`.
 > Provider exit now converges through the initial Shell-to-provider promotion
 > path even when the provisional tmux pane was seeded before the shell changed
 > into the canonical project directory. That exception requires the exact
 > current-generation `provider_exec_proven` target; ordinary Runtimes retain
-> strict launch-cwd proof. Linux process disappearance, tmux publication, and
-> marker-retirement races remain bounded without converting ambiguity into
-> absence. Sanitized Codex 0.153.2 and OpenCode 1.18.27 acceptance belongs to
-> the prior D25 artifact; it is not evidence for this corrected hash. No
-> passing current-source remote-CI result is included in this acceptance
-> record.
+> strict launch-cwd proof. Linux process disappearance, tmux exit publication,
+> post-exit process-group drain, and marker-retirement races remain bounded
+> without converting ambiguity into absence or signaling an unproven group.
+> Sanitized immediate native-exit acceptance with Codex 0.153.2 and OpenCode
+> 1.18.27 passes on this exact artifact. No passing current-source remote-CI
+> result is included in this acceptance record.
 > No current UI capture was generated. See the
 > [D25 acceptance record](docs/evidence/acceptance/d25-current-product-closure.md).
 
@@ -219,9 +219,9 @@ operations remain optional scripting, diagnostics, and break-glass parity;
 the Archived `x` action.
 Ordinary work happens in the Navigator/provider presentation. D18 retains the
 historical destructive-reset and native observer-trust evidence. D25 records
-the current corrected installation separately from the sanitized
-Codex/OpenCode lifecycle acceptance on the prior D25 artifact; that acceptance
-record includes no passing current-source remote-CI result.
+the current corrected installation and sanitized Codex/OpenCode lifecycle
+acceptance on that exact artifact; its acceptance record includes no passing
+current-source remote-CI result.
 
 ## See it
 

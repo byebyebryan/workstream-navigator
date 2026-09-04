@@ -4,15 +4,14 @@ Date: 2026-09-04
 
 Status: D0-D25 implementation is complete. D25, developed from `076b0a7`, now
 includes an immediate shell-first exit correction after operator
-falsification. The corrected source passes the full local/disposable gate, and
-its locked release is byte-identically installed for operator inspection with
-executable SHA-256
-`2ab6c705291d6140826e0a72c00c1668f03b7bf463b7d104c38e0dad5dfa1057`.
-The declared Rust 1.88 suite and sanitized native-exit acceptance with Codex
-0.153.2 and OpenCode 1.18.27 remain bound to the prior D25 artifact, not this
-corrected hash. D25 stabilizes the existing D24 surface and schema 15; it adds
-no user-facing session-management capability. No passing current-source remote
-CI is included in the D25 acceptance record.
+falsification. The corrected source passes the full local/disposable and
+declared Rust 1.88 gates. Its locked release is byte-identically installed for
+operator inspection with executable SHA-256
+`70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1`,
+and sanitized native-exit acceptance on that exact artifact passes with Codex
+0.153.2 and OpenCode 1.18.27. D25 stabilizes the existing D24 surface and
+schema 15; it adds no user-facing session-management capability. No passing
+current-source remote CI is included in the D25 acceptance record.
 D18 checkpoint `c961c7e` retains the older separately
 authorized destructive-reset and native observer-trust evidence.
 
@@ -36,10 +35,9 @@ roadmap is preserved as
 
 ## Completed checkpoint: D25 current-product stabilization and closure
 
-Implementation status: the corrected source is locally accepted and installed
-for operator inspection. Sanitized live-provider acceptance remains bound to
-the prior D25 artifact. No passing current-source remote-CI result is included
-in this acceptance record.
+Implementation status: the corrected source is locally, declared-baseline,
+and live-provider accepted, and installed for operator inspection. No passing
+current-source remote-CI result is included in this acceptance record.
 
 D25 closes deterministic and operational gaps found while reviewing the
 current simplified product. It does not change the D24 product surface. The
@@ -51,16 +49,25 @@ handling.
 
 Scope:
 
-- replace fixed scheduling in the private-client exit regression with an
-  exact client PID/session readiness proof;
+- replace fixed scheduling in the private-client exit regression with exact
+  client PID/session identity plus a control-command ordering acknowledgement;
 - treat Linux `ESRCH` as a vanished process only for a `/proc` entry already
   found during process-group enumeration, while keeping direct identity,
   permission, malformed, and other I/O failures strict;
 - distinguish a still-running exact provider detach from an exact zombie or
   narrow matching-process disappearance, and give only the latter a bounded
   retained-pane convergence window before requiring matching PID, exact
-  ordinary or shell-promoted cwd proof, topology, process absence, and status
-  `0`;
+  ordinary or shell-promoted cwd proof, topology, and clean-exit evidence;
+- normally require tmux status `0` plus process absence, but on Linux, when
+  both tmux exit fields remain empty, accept only stable same-birth zombie
+  evidence whose field-52 raw wait status decodes as normal exit `0`; refuse
+  signals, malformed or conflicting status, live/reused identity, and any
+  changed second read;
+- after proven native clean exit, wait boundedly and read-only for the recorded
+  numeric process group to drain, then re-fence Workstream/Runtime revisions,
+  retained pane identity/topology/status, and group emptiness before private
+  server removal; never signal an absent leader's unproven group, and leave
+  generic stop semantics unchanged;
 - remove an older stopped Runtime's retained private server before reusing its
   Runtime ID only through that same exact status-zero proof; refuse live,
   non-zero, reused, inaccessible, malformed, or ambiguous evidence;
@@ -75,7 +82,19 @@ Scope:
   `provider_exec_proven` project root when its pane was seeded before the shell
   changed into that root;
 - make focus and retained-status tests wait on the exact current terminal/tmux
-  evidence they assert, including tmux's separate dead-status publication;
+  evidence they assert, including a retained proof that begins at exact dead
+  topology rather than assuming tmux has published separate exit fields, and
+  accept an archived process only when it is absent or the exact same-birth
+  Linux zombie after a bounded wait; preserve a disposable fixture's private
+  socket until its exact tmux server and provider pane have stopped;
+- source the exact generated account-shell wrapper noninteractively in wrapper
+  semantics tests, while keeping separate exact tests for production's
+  interactive shell argv and bootstrap contract;
+- accept Codex's exact provider-native `[tui.model_availability_nux]` suffix
+  with bounded model slugs and unsigned 32-bit counters, while refusing every
+  other `tui` shape; accept an exact reviewed hook's optional provider-written
+  `enabled = true` while refusing disabled or extended records, and keep
+  incomplete hook review `trust_pending`;
 - reconcile present-tense product documentation with the implemented compact
   name/marker rows while preserving all historical D0-D24 evidence; and
 - build, atomically install, and checksum the locked release, and exercise
@@ -94,23 +113,26 @@ Non-goals:
 
 Exit gate:
 
-- focused regressions prove exact client/status readiness, scoped Linux
+- focused regressions prove exact client identity/command ordering and status
+  readiness, scoped Linux
   disappearance, detach-versus-exit convergence, stopped-retained cleanup,
   provisional promotion identity, shell-seed versus proven-project cwd,
-  state-before-marker convergence, bounded timeout, and no-mutation live
-  detach;
-- the corrected complete locked suite passes locally; the prior D25 artifact's
-  suite passed on Ubuntu 24.04 with Rust 1.88.0, tmux 3.4, Git 2.43.0, and Zsh
-  5.9;
+  state-before-marker convergence, missing-tmux-status zombie reconciliation,
+  signaled/conflicting-status refusal, transient group-drain convergence,
+  persistent/probe-error refusal, bounded timeout, no-mutation live detach,
+  exact Codex NUX acceptance, and arbitrary-TUI-state refusal;
+- the corrected complete locked suite passes locally and on the declared Rust
+  1.88 baseline, including Debian Bookworm with tmux 3.3a where the retained
+  zombie fallback is exercised;
 - `scripts/check` passes formatting, strict Clippy, all disposable tests,
   packaging, dependency policy, documentation links, and source boundaries;
-- on the prior D25 release, sanitized Codex 0.153.2 and OpenCode 1.18.27 each
-  reached durable attention, then native `/exit` proved parked/stopped state,
-  provider and private-server absence, and a live inert presentation surface;
-  that run is not evidence for the corrected hash; and
+- on the corrected D25 release, sanitized Codex 0.153.2 and OpenCode 1.18.27
+  each reached `provider_exec_proven` without a work prompt, then immediate
+  native `/exit` proved parked/stopped state, provider and private-server
+  absence, and a live inert presentation surface; and
 - corrected source and installed `wsnav 0.1.0` binaries are mode `0755`, size
-  7,398,872 bytes, and SHA-256
-  `2ab6c705291d6140826e0a72c00c1668f03b7bf463b7d104c38e0dad5dfa1057`.
+  7,398,480 bytes, and SHA-256
+  `70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1`.
 
 Remote evidence boundary:
 

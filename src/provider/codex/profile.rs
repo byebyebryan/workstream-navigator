@@ -15,6 +15,8 @@ pub const OBSERVER_PROFILE_SCHEMA_VERSION: u8 = 2;
 const PROFILE_MARKER: &str = "# Managed by Workstream Navigator. Do not edit manually.\n";
 const MAX_PROVIDER_PREFIX_BYTES: usize = 4096;
 const MAX_PROVIDER_SCALAR_BYTES: usize = 256;
+const MAX_MODEL_AVAILABILITY_NUX_COUNTER: i64 = u32::MAX as i64;
+const MAX_MODEL_SLUG_BYTES: usize = 128;
 
 const PROVIDER_SETTINGS: [&str; 2] = ["model", "model_reasoning_effort"];
 
@@ -285,7 +287,7 @@ impl ObserverProfile {
 
     /// Verifies the three-region profile contract: an optional validated
     /// provider prefix, the byte-exact `WSNav` declaration, and the narrow
-    /// Codex-owned native trust suffix. Provider bytes remain opaque to `WSNav`.
+    /// Codex-owned native state suffix. Provider bytes remain opaque to `WSNav`.
     fn verify_owned_document(
         &self,
         ownership: &ProfileOwnership,
@@ -330,7 +332,7 @@ impl ObserverProfile {
         let suffix = native_suffix
             .parse::<toml::Table>()
             .map_err(|_| ProfileError::ModifiedPath(self.path()))?;
-        if accepts_native_trust_suffix(&suffix, &self.path()) {
+        if accepts_native_state_suffix(&suffix, &self.path()) {
             Ok(OwnedDocument {
                 provider_prefix: provider_prefix.to_owned(),
                 native_suffix: Some(suffix),
@@ -352,7 +354,8 @@ impl ObserverProfile {
 }
 
 /// The validated three-region profile split. The provider prefix remains raw
-/// bytes; `WSNav` owns only its exact declaration and validates native trust.
+/// bytes; `WSNav` owns only its exact declaration and validates narrow native
+/// state after it.
 struct OwnedDocument {
     provider_prefix: String,
     native_suffix: Option<toml::Table>,
@@ -420,18 +423,55 @@ fn hash(content: &str) -> String {
     format!("{:x}", Sha256::digest(content.as_bytes()))
 }
 
-/// Accept only the narrow native state Codex appends after a `/hooks` review.
-/// The generated hook declaration before this suffix must remain byte exact.
-fn accepts_native_trust_suffix(suffix: &toml::Table, profile_path: &Path) -> bool {
-    if suffix.is_empty() || suffix.keys().any(|key| key != "hooks" && key != "projects") {
+/// Accept only the narrow native state Codex may co-locate after the generated
+/// declaration, which must remain byte exact.
+fn accepts_native_state_suffix(suffix: &toml::Table, profile_path: &Path) -> bool {
+    if suffix.is_empty()
+        || suffix
+            .keys()
+            .any(|key| key != "hooks" && key != "projects" && key != "tui")
+    {
         return false;
     }
-
     let hooks_valid = suffix
         .get("hooks")
         .is_none_or(|value| accepts_hook_state(value, profile_path));
     let projects_valid = suffix.get("projects").is_none_or(accepts_project_trust);
-    hooks_valid && projects_valid
+    let tui_valid = suffix.get("tui").is_none_or(accepts_model_availability_nux);
+    hooks_valid && projects_valid && tui_valid
+}
+
+fn accepts_model_availability_nux(value: &toml::Value) -> bool {
+    let Some(tui) = value.as_table() else {
+        return false;
+    };
+    if tui.len() != 1 {
+        return false;
+    }
+    let Some(counters) = tui
+        .get("model_availability_nux")
+        .and_then(toml::Value::as_table)
+    else {
+        return false;
+    };
+    !counters.is_empty()
+        && counters.iter().all(|(model, value)| {
+            is_codex_model_slug(model)
+                && value.as_integer().is_some_and(|counter| {
+                    (0..=MAX_MODEL_AVAILABILITY_NUX_COUNTER).contains(&counter)
+                })
+        })
+}
+
+fn is_codex_model_slug(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= MAX_MODEL_SLUG_BYTES
+        && value.split(['-', '.']).all(|segment| {
+            !segment.is_empty()
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        })
 }
 
 fn accepts_hook_state(value: &toml::Value, profile_path: &Path) -> bool {
@@ -456,14 +496,24 @@ fn accepts_hook_state(value: &toml::Value, profile_path: &Path) -> bool {
         matches!(
             hook,
             "session_start:0:0" | "user_prompt_submit:0:0" | "stop:0:0" | "session_end:0:0"
-        ) && record.as_table().is_some_and(|table| {
-            table.len() == 1
-                && table
-                    .get("trusted_hash")
-                    .and_then(toml::Value::as_str)
-                    .is_some_and(is_sha256)
-        })
+        ) && accepts_hook_record(record)
     })
+}
+
+fn accepts_hook_record(record: &toml::Value) -> bool {
+    let Some(record) = record.as_table() else {
+        return false;
+    };
+    if record.len() != 1 && (record.len() != 2 || !record.contains_key("enabled")) {
+        return false;
+    }
+    record
+        .get("trusted_hash")
+        .and_then(toml::Value::as_str)
+        .is_some_and(is_sha256)
+        && record
+            .get("enabled")
+            .is_none_or(|enabled| enabled.as_bool() == Some(true))
 }
 
 fn has_complete_hook_trust(suffix: &toml::Table, profile_path: &Path) -> bool {
@@ -486,10 +536,7 @@ fn has_complete_hook_trust(suffix: &toml::Table, profile_path: &Path) -> bool {
         && expected.iter().all(|entry| {
             state
                 .get(&format!("{prefix}{entry}"))
-                .and_then(toml::Value::as_table)
-                .and_then(|record| record.get("trusted_hash"))
-                .and_then(toml::Value::as_str)
-                .is_some_and(is_sha256)
+                .is_some_and(accepts_hook_record)
         })
 }
 
@@ -583,17 +630,24 @@ mod tests {
         )
     }
 
-    fn complete_native_hook_suffix(manager: &ObserverProfile) -> String {
+    fn complete_native_hook_suffix_with_fields(
+        manager: &ObserverProfile,
+        additional_fields: &str,
+    ) -> String {
         let mut suffix = String::from("\n[hooks.state]\n");
         for hook in ["session_start", "user_prompt_submit", "stop", "session_end"] {
             let key = toml_string(&format!("{}:{hook}:0:0", manager.path().display()));
             write!(
                 suffix,
-                "\n[hooks.state.{key}]\ntrusted_hash = \"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n"
+                "\n[hooks.state.{key}]\ntrusted_hash = \"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\"\n{additional_fields}"
             )
             .expect("writing to a string cannot fail");
         }
         suffix
+    }
+
+    fn complete_native_hook_suffix(manager: &ObserverProfile) -> String {
+        complete_native_hook_suffix_with_fields(manager, "")
     }
 
     fn write_owned_document(
@@ -608,6 +662,17 @@ mod tests {
         )
         .unwrap();
         ownership
+    }
+
+    fn assert_native_suffix_modified(suffix: &str) {
+        let temporary = tempfile::tempdir().unwrap();
+        let manager = manager(temporary.path());
+        let suffix = format!("{}{suffix}", complete_native_hook_suffix(&manager));
+        let ownership = write_owned_document(&manager, "", &suffix);
+        assert!(matches!(
+            manager.verify_native_trust(&ownership),
+            Err(ProfileError::ModifiedPath(_))
+        ));
     }
 
     #[test]
@@ -674,6 +739,123 @@ mod tests {
             manager.inspect(Some(&ownership)).unwrap(),
             ProfileInspection::Ready
         );
+    }
+
+    #[test]
+    fn native_hook_trust_accepts_enabled_true_on_every_expected_record() {
+        let temporary = tempfile::tempdir().unwrap();
+        let manager = manager(temporary.path());
+        let suffix = complete_native_hook_suffix_with_fields(&manager, "enabled = true\n");
+        let ownership = write_owned_document(&manager, "", &suffix);
+
+        assert_eq!(
+            manager.inspect(Some(&ownership)).unwrap(),
+            ProfileInspection::Ready
+        );
+        manager.verify_native_trust(&ownership).unwrap();
+    }
+
+    #[test]
+    fn native_hook_trust_rejects_inactive_malformed_and_extended_records() {
+        for additional_fields in [
+            "enabled = false\n",
+            "enabled = \"true\"\n",
+            "enabled = 1\n",
+            "enabled = { value = true }\n",
+            "unknown = true\n",
+            "enabled = true\nunknown = true\n",
+        ] {
+            let temporary = tempfile::tempdir().unwrap();
+            let manager = manager(temporary.path());
+            let suffix = complete_native_hook_suffix_with_fields(&manager, additional_fields);
+            let ownership = write_owned_document(&manager, "", &suffix);
+
+            assert_eq!(
+                manager.inspect(Some(&ownership)).unwrap(),
+                ProfileInspection::Modified
+            );
+            assert!(matches!(
+                manager.verify_native_trust(&ownership),
+                Err(ProfileError::ModifiedPath(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn native_model_availability_nux_is_accepted_after_hook_and_project_state() {
+        let temporary = tempfile::tempdir().unwrap();
+        let manager = manager(temporary.path());
+        let project_key = toml_string(&temporary.path().join("project").display().to_string());
+        let suffix = format!(
+            "{}\n[projects.{project_key}]\ntrust_level = \"trusted\"\n\n[tui.model_availability_nux]\ngpt-6-astra = 1\no3 = 0\n\"gpt-5.4-codex\" = {MAX_MODEL_AVAILABILITY_NUX_COUNTER}\n",
+            complete_native_hook_suffix(&manager)
+        );
+        let ownership = write_owned_document(&manager, "", &suffix);
+
+        assert_eq!(
+            manager.inspect(Some(&ownership)).unwrap(),
+            ProfileInspection::Ready
+        );
+        manager.verify_native_trust(&ownership).unwrap();
+    }
+
+    #[test]
+    fn native_model_availability_nux_rejects_invalid_shape_keys_and_counters() {
+        let oversized = MAX_MODEL_AVAILABILITY_NUX_COUNTER + 1;
+        let overlong_slug = format!("gpt-{}", "x".repeat(MAX_MODEL_SLUG_BYTES));
+        let invalid_suffixes = [
+            "\n[tui]\nmodel_availability_nux = 1\n".to_owned(),
+            "\n[tui.model_availability_nux]\n".to_owned(),
+            "\n[tui.unknown]\ngpt-6-astra = 1\n".to_owned(),
+            "\n[tui.model_availability_nux.extra]\nseen = 1\n".to_owned(),
+            "\n[tui.model_availability_nux]\ngpt-6-astra = 1\n\n[tui.other]\nenabled = true\n"
+                .to_owned(),
+            "\n[tui.model_availability_nux]\ngpt-6-astra = -1\n".to_owned(),
+            "\n[tui.model_availability_nux]\ngpt-6-astra = 1.0\n".to_owned(),
+            "\n[tui.model_availability_nux]\ngpt-6-astra = true\n".to_owned(),
+            "\n[tui.model_availability_nux]\ngpt-6-astra = \"1\"\n".to_owned(),
+            format!("\n[tui.model_availability_nux]\ngpt-6-astra = {oversized}\n"),
+            "\n[tui.model_availability_nux]\nGpt-6-astra = 1\n".to_owned(),
+            "\n[tui.model_availability_nux]\n\"gpt--6-astra\" = 1\n".to_owned(),
+            "\n[tui.model_availability_nux]\n\"gpt_6_astra\" = 1\n".to_owned(),
+            "\n[tui.model_availability_nux]\n\"-gpt-6-astra\" = 1\n".to_owned(),
+            format!("\n[tui.model_availability_nux]\n\"{overlong_slug}\" = 1\n"),
+        ];
+
+        for suffix in invalid_suffixes {
+            assert_native_suffix_modified(&suffix);
+        }
+    }
+
+    #[test]
+    fn native_model_availability_nux_without_hook_state_remains_trust_pending() {
+        let temporary = tempfile::tempdir().unwrap();
+        let manager = manager(temporary.path());
+        let ownership = write_owned_document(
+            &manager,
+            "",
+            "\n[tui.model_availability_nux]\ngpt-6-astra = 1\n",
+        );
+
+        assert_eq!(
+            manager.inspect(Some(&ownership)).unwrap(),
+            ProfileInspection::TrustPending
+        );
+        assert!(matches!(
+            manager.verify_native_trust(&ownership),
+            Err(ProfileError::NativeTrustPending)
+        ));
+    }
+
+    #[test]
+    fn native_model_availability_nux_rejects_duplicate_keys_and_tables() {
+        for suffix in [
+            "\n[tui.model_availability_nux]\ngpt-6-astra = 1\ngpt-6-astra = 2\n",
+            "\n[tui.model_availability_nux]\ngpt-6-astra = 1\n\n[tui.model_availability_nux]\no3 = 1\n",
+            "\n[tui.model_availability_nux]\ngpt-6-astra = 1\n\n[tui]\nmodel_availability_nux = 2\n",
+        ] {
+            assert_native_suffix_modified(suffix);
+        }
     }
 
     #[test]

@@ -1436,6 +1436,18 @@ struct LinuxProcessStat {
     birth: String,
     process_group_id: u32,
     session_id: u32,
+    exit_code: i32,
+}
+
+/// Exact exit evidence retained by a zombie while tmux 3.3a has not yet
+/// recorded `pane_dead_status`. It is private to the Linux fallback: normal
+/// paths continue to require tmux metadata plus provider absence.
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct RetainedZombieExitEvidence {
+    birth: String,
+    raw_wait_status: i32,
+    exit_status: i32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1544,12 +1556,76 @@ where
         .ok_or(ProcessProbeError::Malformed)?
         .parse()
         .map_err(|_| ProcessProbeError::Malformed)?;
+    let exit_code = fields
+        .get(49)
+        .ok_or(ProcessProbeError::Malformed)?
+        .parse()
+        .map_err(|_| ProcessProbeError::Malformed)?;
     Ok(Some(LinuxProcessStat {
         state,
         birth,
         process_group_id,
         session_id,
+        exit_code,
     }))
+}
+
+/// Reads one atomic Linux stat record as fallback exit evidence. A retained
+/// zombie cannot execute provider work or be PID-reused; its raw wait status
+/// is accepted only for an ordinary exited process and is re-read by the
+/// caller before it can authorize cleanup.
+#[cfg(target_os = "linux")]
+fn retained_zombie_exit_evidence(
+    pid: u32,
+) -> Result<Option<RetainedZombieExitEvidence>, RuntimeError> {
+    retained_zombie_exit_evidence_from_stat(
+        read_linux_process_stat(pid).map_err(RuntimeError::ProcessProbe)?,
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn retained_zombie_exit_evidence_from_stat(
+    stat: Option<LinuxProcessStat>,
+) -> Result<Option<RetainedZombieExitEvidence>, RuntimeError> {
+    let Some(stat) = stat else {
+        return Ok(None);
+    };
+    if stat.state != 'Z' || stat.birth.is_empty() {
+        return Err(RuntimeError::InvalidTopology);
+    }
+    let exit_status =
+        decode_linux_wait_exit_status(stat.exit_code).ok_or(RuntimeError::InvalidTopology)?;
+    Ok(Some(RetainedZombieExitEvidence {
+        birth: stat.birth,
+        raw_wait_status: stat.exit_code,
+        exit_status,
+    }))
+}
+
+/// Decodes only Linux `WIFEXITED` wait statuses. Signalled, stopped, negative,
+/// and out-of-width raw words are never cleanup evidence.
+#[cfg(target_os = "linux")]
+fn decode_linux_wait_exit_status(raw_wait_status: i32) -> Option<i32> {
+    if raw_wait_status < 0 || raw_wait_status & !0xffff != 0 || raw_wait_status & 0x7f != 0 {
+        return None;
+    }
+    Some((raw_wait_status >> 8) & 0xff)
+}
+
+/// Chooses only corroborated evidence after tmux initially omitted both exit
+/// fields. The normal tmux path still requires absence; unchanged zombie
+/// evidence is the narrow 3.3a retained-pane fallback.
+#[cfg(target_os = "linux")]
+fn reconcile_missing_tmux_exit_evidence(
+    first_zombie: &RetainedZombieExitEvidence,
+    rechecked_tmux_status: Option<i32>,
+    rechecked_zombie: Option<RetainedZombieExitEvidence>,
+) -> Result<(i32, bool), RuntimeError> {
+    match (rechecked_tmux_status, rechecked_zombie) {
+        (Some(status), None) if status == first_zombie.exit_status => Ok((status, true)),
+        (None, Some(zombie)) if zombie == *first_zombie => Ok((first_zombie.exit_status, false)),
+        _ => Err(RuntimeError::InvalidTopology),
+    }
 }
 
 fn linux_process_stat_entry_vanished(
@@ -1861,14 +1937,18 @@ impl<'a> PrivateRuntime<'a> {
     /// provider pane and returns its native exit status.
     ///
     /// The provider PID and launch cwd are checked against tmux's retained
-    /// pane metadata, while the process probe must prove that PID absent. The
-    /// dead topology is checked again after reading those fields so a respawn
-    /// or shape change cannot be mistaken for provider exit.
+    /// pane metadata, while the normal tmux-status path must prove that PID
+    /// absent. When tmux 3.3a omits both exit fields, the Linux-only fallback
+    /// instead requires the same retained pane PID to remain an exact zombie
+    /// with a stable `WIFEXITED` raw wait status. The dead topology is checked
+    /// again after reading those fields so a respawn or shape change cannot be
+    /// mistaken for provider exit.
     ///
     /// # Errors
     ///
     /// Returns an error unless the exact private session, provider window,
-    /// dead pane, recorded PID, launch cwd, and absent process all agree.
+    /// dead pane, recorded PID, launch cwd, and either absent process or the
+    /// narrow exact-zombie fallback all agree.
     pub(crate) fn provider_exit_status(
         &self,
         expected_pane_pid: u32,
@@ -1919,15 +1999,6 @@ impl<'a> PrivateRuntime<'a> {
             "#{pane_start_path}",
             "pane start path",
         )?;
-        let exit_status = read_exact_pane_field(
-            self.tmux,
-            &self.paths.socket,
-            &pane_target,
-            "#{pane_dead_status}",
-            "pane exit status",
-        )?
-        .parse::<i32>()
-        .map_err(|_| RuntimeError::InvalidTopology)?;
         if promoted_cwd.is_some_and(|promoted_cwd| promoted_cwd != expected_cwd)
             || !Path::new(&pane_start_path).is_absolute()
         {
@@ -1935,9 +2006,62 @@ impl<'a> PrivateRuntime<'a> {
         }
         if pane_pid != expected_pane_pid
             || (promoted_cwd.is_none() && Path::new(&pane_start_path) != expected_cwd)
-            || self
+        {
+            return Err(RuntimeError::InvalidTopology);
+        }
+
+        let (exit_status, requires_provider_absence) =
+            match retained_pane_exit_status(self.tmux, &self.paths.socket, &pane_target)? {
+                Some(exit_status) => (exit_status, true),
+                None => {
+                    #[cfg(target_os = "linux")]
+                    {
+                        let first_zombie = retained_zombie_exit_evidence(expected_pane_pid)?
+                            .ok_or(RuntimeError::InvalidTopology)?;
+                        self.validate_exact_topology_with_pane_state(true)?;
+                        let rechecked_pane_pid = read_exact_pane_field(
+                            self.tmux,
+                            &self.paths.socket,
+                            &pane_target,
+                            "#{pane_pid}",
+                            "pane PID",
+                        )?
+                        .parse::<u32>()
+                        .map_err(|_| RuntimeError::InvalidTopology)?;
+                        let rechecked_start_path = read_exact_pane_field(
+                            self.tmux,
+                            &self.paths.socket,
+                            &pane_target,
+                            "#{pane_start_path}",
+                            "pane start path",
+                        )?;
+                        if rechecked_pane_pid != expected_pane_pid
+                            || !Path::new(&rechecked_start_path).is_absolute()
+                            || (promoted_cwd.is_none()
+                                && Path::new(&rechecked_start_path) != expected_cwd)
+                        {
+                            return Err(RuntimeError::InvalidTopology);
+                        }
+                        let rechecked_tmux_status =
+                            retained_pane_exit_status(self.tmux, &self.paths.socket, &pane_target)?;
+                        let rechecked_zombie = retained_zombie_exit_evidence(expected_pane_pid)?;
+                        reconcile_missing_tmux_exit_evidence(
+                            &first_zombie,
+                            rechecked_tmux_status,
+                            rechecked_zombie,
+                        )?
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    {
+                        return Err(RuntimeError::InvalidTopology);
+                    }
+                }
+            };
+        if requires_provider_absence
+            && self
                 .process_probe
-                .process_birth(expected_pane_pid)
+                .process_birth_checked(expected_pane_pid)
+                .map_err(RuntimeError::ProcessProbe)?
                 .is_some()
         {
             return Err(RuntimeError::InvalidTopology);
@@ -2268,6 +2392,28 @@ fn set_mode(_path: &Path, _mode: u32) -> Result<(), RuntimeError> {
     Ok(())
 }
 
+/// Reads the only pair of tmux facts that can prove a normally exited retained
+/// pane. A status and a signal are mutually exclusive; a missing pair is
+/// deliberately not treated as a successful zero exit.
+fn retained_pane_exit_status(
+    tmux: &dyn TmuxClient,
+    socket: &Path,
+    pane_target: &OsString,
+) -> Result<Option<i32>, RuntimeError> {
+    let status = read_optional_pane_field(tmux, socket, pane_target, "#{pane_dead_status}")?;
+    let signal = read_optional_pane_field(tmux, socket, pane_target, "#{pane_dead_signal}")?;
+    match (status, signal) {
+        (Some(_) | None, Some(_)) => Err(RuntimeError::InvalidTopology),
+        (Some(status), None) => status
+            .parse::<i32>()
+            .ok()
+            .filter(|status| (0..=255).contains(status))
+            .ok_or(RuntimeError::InvalidTopology)
+            .map(Some),
+        (None, None) => Ok(None),
+    }
+}
+
 /// Reads one tmux pane fact without relying on a separator in tmux format output.
 ///
 /// tmux 3.7b normalizes literal tab separators in format output, so a combined
@@ -2298,6 +2444,36 @@ fn read_pane_field(
         return Ok(Err(format!("private tmux {label} was malformed")));
     };
     Ok(Ok(value.to_owned()))
+}
+
+/// Reads one exact optional pane fact. An empty expansion is only useful for
+/// the retained-pane exit fields, where it proves neither status nor signal
+/// is available; every malformed or multi-line response remains a refusal.
+fn read_optional_pane_field(
+    tmux: &dyn TmuxClient,
+    socket: &Path,
+    pane_target: &OsString,
+    format: &str,
+) -> Result<Option<String>, RuntimeError> {
+    let response = tmux.invoke(&TmuxInvocation {
+        socket: socket.to_path_buf(),
+        config: None,
+        arguments: vec![
+            OsString::from("display-message"),
+            OsString::from("-p"),
+            OsString::from("-t"),
+            pane_target.clone(),
+            OsString::from(format),
+        ],
+    })?;
+    if !response.success {
+        return Err(RuntimeError::InvalidTopology);
+    }
+    let output = response.stdout.trim_end_matches(['\r', '\n']);
+    if output.contains(['\r', '\n']) {
+        return Err(RuntimeError::InvalidTopology);
+    }
+    Ok((!output.is_empty()).then(|| output.to_owned()))
 }
 
 fn read_exact_pane_field(
@@ -2400,6 +2576,7 @@ mod tests {
     use std::{
         cell::RefCell,
         collections::{BTreeSet, VecDeque},
+        io::Write,
         process::{Command, Stdio},
     };
 
@@ -2444,6 +2621,100 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
+    }
+
+    fn wait_for_private_control_client_ready(
+        socket: &Path,
+        session_name: &str,
+        client: &mut std::process::Child,
+        timeout: Duration,
+    ) {
+        wait_for_private_client_attachment(socket, session_name, client.id(), timeout);
+        // `list-clients` proves enrollment but can precede completion of the
+        // control client's initial `attach-session` command. Queue a benign
+        // session-local command through that exact client and observe its
+        // result from a separate private-tmux command before releasing the
+        // provider. This never reads provider-pane output.
+        let marker = "wsnav-control-ready";
+        client
+            .stdin
+            .as_mut()
+            .expect("control-mode client stdin is piped")
+            .write_all(format!("set-option -t {session_name} @{marker} attached\n").as_bytes())
+            .unwrap();
+        client
+            .stdin
+            .as_mut()
+            .expect("control-mode client stdin remains piped")
+            .flush()
+            .unwrap();
+
+        let deadline = Instant::now() + timeout;
+        loop {
+            let output = command_output(
+                Command::new("tmux")
+                    .env_remove("TMUX")
+                    .args(["-f", "/dev/null", "-S"])
+                    .arg(socket)
+                    .args([
+                        "show-options",
+                        "-t",
+                        session_name,
+                        "-v",
+                        &format!("@{marker}"),
+                    ]),
+            )
+            .unwrap();
+            if output.status.success()
+                && String::from_utf8(output.stdout)
+                    .unwrap()
+                    .trim_end_matches(['\r', '\n'])
+                    == "attached"
+            {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "private tmux control-mode client did not acknowledge attachment readiness"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn private_client_detach_diagnostics(socket: &Path, session_name: &str) -> String {
+        let describe = |arguments: &[&str]| {
+            let mut command = Command::new("tmux");
+            command
+                .env_remove("TMUX")
+                .args(["-f", "/dev/null", "-S"])
+                .arg(socket)
+                .args(arguments);
+            match output_bounded(&mut command, 4 * 1024, 4 * 1024) {
+                Ok(output) => format!(
+                    "status={:?} stdout={:?} stderr={:?}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                ),
+                Err(error) => format!("error={error}"),
+            }
+        };
+        format!(
+            "clients=[{}]; pane=[{}]; hook=[{}]",
+            describe(&[
+                "list-clients",
+                "-F",
+                "#{client_pid}|#{client_session}|#{client_control_mode}"
+            ]),
+            describe(&[
+                "list-panes",
+                "-t",
+                &format!("{session_name}:{PROVIDER_WINDOW}"),
+                "-F",
+                "#{pane_pid}|#{pane_dead}|#{pane_dead_status}|#{pane_dead_signal}",
+            ]),
+            describe(&["show-hooks", "-g", "pane-died"]),
+        )
     }
 
     fn binding_keys(socket: &Path, table: &str) -> BTreeSet<String> {
@@ -2788,6 +3059,11 @@ mod tests {
                     stdout: format!("{exit_status}\n"),
                     stderr: String::new(),
                 },
+                TmuxResponse {
+                    success: true,
+                    stdout: "\n".to_owned(),
+                    stderr: String::new(),
+                },
             ])
             .chain(dead_topology())
             .collect()
@@ -2849,6 +3125,62 @@ mod tests {
     }
 
     #[test]
+    fn retained_dead_pane_refuses_missing_exit_evidence_without_a_zombie_fallback() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let mut responses = dead_pane_responses(&paths.session_name, u32::MAX, temporary.path(), 0);
+        responses[5].stdout = "\n".to_owned();
+        let tmux = FakeTmux::with_responses(responses);
+        let runtime = PrivateRuntime::new(&tmux, &AbsentProcessProbe, paths);
+
+        assert!(matches!(
+            runtime.provider_exit_status(u32::MAX, temporary.path()),
+            Err(RuntimeError::InvalidTopology)
+        ));
+    }
+
+    #[test]
+    fn retained_dead_pane_refuses_conflicting_or_nonnumeric_exit_evidence() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let mut conflicting = dead_pane_responses(&paths.session_name, 77, temporary.path(), 7);
+        conflicting[6].stdout = "HUP\n".to_owned();
+        let tmux = FakeTmux::with_responses(conflicting);
+        let runtime = PrivateRuntime::new(&tmux, &AbsentProcessProbe, paths.clone());
+        assert!(matches!(
+            runtime.provider_exit_status(77, temporary.path()),
+            Err(RuntimeError::InvalidTopology)
+        ));
+
+        let mut nonnumeric = dead_pane_responses(&paths.session_name, 77, temporary.path(), 7);
+        nonnumeric[5].stdout = "seven\n".to_owned();
+        let tmux = FakeTmux::with_responses(nonnumeric);
+        let runtime = PrivateRuntime::new(&tmux, &AbsentProcessProbe, paths);
+        assert!(matches!(
+            runtime.provider_exit_status(77, temporary.path()),
+            Err(RuntimeError::InvalidTopology)
+        ));
+    }
+
+    #[test]
+    fn retained_dead_pane_with_status_never_uses_the_zombie_fallback() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let tmux = FakeTmux::with_responses(dead_pane_responses(
+            &paths.session_name,
+            77,
+            temporary.path(),
+            0,
+        ));
+        let runtime = PrivateRuntime::new(&tmux, &AbsentProcessProbe, paths);
+
+        assert_eq!(
+            runtime.provider_exit_status(77, temporary.path()).unwrap(),
+            0
+        );
+    }
+
+    #[test]
     fn retained_dead_pane_refuses_live_or_mismatched_identity() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
@@ -2885,6 +3217,115 @@ mod tests {
             birth: "birth".to_owned(),
             process_group_id,
             session_id,
+            exit_code: 0,
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn retained_zombie_exit_evidence_accepts_only_an_exited_raw_wait_status() {
+        let evidence = retained_zombie_exit_evidence_from_stat(Some(LinuxProcessStat {
+            state: 'Z',
+            birth: "birth-77".to_owned(),
+            process_group_id: 77,
+            session_id: 11,
+            exit_code: 7 << 8,
+        }))
+        .unwrap()
+        .unwrap();
+        assert_eq!(evidence.exit_status, 7);
+        assert_eq!(evidence.raw_wait_status, 7 << 8);
+
+        for stat in [
+            LinuxProcessStat {
+                state: 'Z',
+                birth: "birth-77".to_owned(),
+                process_group_id: 77,
+                session_id: 11,
+                exit_code: 9,
+            },
+            LinuxProcessStat {
+                state: 'Z',
+                birth: "birth-77".to_owned(),
+                process_group_id: 77,
+                session_id: 11,
+                exit_code: -1,
+            },
+            LinuxProcessStat {
+                state: 'Z',
+                birth: "birth-77".to_owned(),
+                process_group_id: 77,
+                session_id: 11,
+                exit_code: 0x1_0000,
+            },
+            LinuxProcessStat {
+                state: 'R',
+                birth: "birth-77".to_owned(),
+                process_group_id: 77,
+                session_id: 11,
+                exit_code: 7 << 8,
+            },
+            LinuxProcessStat {
+                state: 'Z',
+                birth: String::new(),
+                process_group_id: 77,
+                session_id: 11,
+                exit_code: 7 << 8,
+            },
+        ] {
+            assert!(matches!(
+                retained_zombie_exit_evidence_from_stat(Some(stat)),
+                Err(RuntimeError::InvalidTopology)
+            ));
+        }
+        assert!(
+            retained_zombie_exit_evidence_from_stat(None)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn missing_tmux_exit_evidence_requires_matching_zombie_or_absent_status() {
+        let first = RetainedZombieExitEvidence {
+            birth: "birth-77".to_owned(),
+            raw_wait_status: 7 << 8,
+            exit_status: 7,
+        };
+        assert_eq!(
+            reconcile_missing_tmux_exit_evidence(&first, None, Some(first.clone())).unwrap(),
+            (7, false)
+        );
+        assert_eq!(
+            reconcile_missing_tmux_exit_evidence(&first, Some(7), None).unwrap(),
+            (7, true)
+        );
+
+        for (status, zombie) in [
+            (Some(0), None),
+            (Some(7), Some(first.clone())),
+            (
+                None,
+                Some(RetainedZombieExitEvidence {
+                    birth: "birth-reused".to_owned(),
+                    ..first.clone()
+                }),
+            ),
+            (
+                None,
+                Some(RetainedZombieExitEvidence {
+                    raw_wait_status: 0,
+                    exit_status: 0,
+                    ..first.clone()
+                }),
+            ),
+            (None, None),
+        ] {
+            assert!(matches!(
+                reconcile_missing_tmux_exit_evidence(&first, status, zombie),
+                Err(RuntimeError::InvalidTopology)
+            ));
         }
     }
 
@@ -4040,10 +4481,10 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        wait_for_private_client_attachment(
+        wait_for_private_control_client_ready(
             &paths.socket,
             &paths.session_name,
-            client.id(),
+            &mut client,
             Duration::from_secs(2),
         );
         assert!(client.try_wait().unwrap().is_none());
@@ -4055,9 +4496,11 @@ mod tests {
                 break status;
             }
             if Instant::now() >= deadline {
+                let diagnostics =
+                    private_client_detach_diagnostics(&paths.socket, &paths.session_name);
                 let _ = client.kill();
                 let _ = client.wait();
-                panic!("provider exit hook did not detach the private client");
+                panic!("provider exit hook did not detach the private client: {diagnostics}");
             }
             thread::sleep(Duration::from_millis(10));
         };

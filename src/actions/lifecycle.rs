@@ -13,6 +13,7 @@ use super::{
     model::{ensure_workstream_revision, workstream_overview_authorized, workstream_revision},
 };
 use crate::domain::Clock;
+use crate::runtime::ProcessGroupProbe;
 
 /// Stops one exact live Runtime while preserving provider history and project
 /// files. This is an internal cleanup primitive used by Archive and recovery;
@@ -47,6 +48,60 @@ pub(crate) fn park_authorized(
     expected_revision: Option<Revision>,
     authorization: CatalogAuthorization,
 ) -> Result<Revision, ActionError> {
+    park_authorized_with_clean_exit_fence(
+        root,
+        registry,
+        workstream_id,
+        expected_revision,
+        authorization,
+        None,
+    )?
+    .ok_or(ActionError::RuntimeProbeAmbiguous)
+}
+
+/// Parks a Runtime only if this helper establishes that its exact native
+/// provider pane exited with status zero. The expected identity and revisions
+/// fence that proof to the Runtime the caller inspected. The proof is read
+/// again immediately before stopping the private server. Native clean exit is
+/// not authority to signal a now-absent provider process group.
+pub(crate) fn park_authorized_if_clean_provider_exit(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: Revision,
+    expected_runtime: &crate::state::RuntimeRecord,
+    authorization: CatalogAuthorization,
+) -> Result<Option<Revision>, ActionError> {
+    let fence = CleanExitFence {
+        id: expected_runtime.runtime_id,
+        generation: &expected_runtime.tmux_generation,
+        revision: expected_runtime.revision,
+    };
+    park_authorized_with_clean_exit_fence(
+        root,
+        registry,
+        workstream_id,
+        Some(expected_revision),
+        authorization,
+        Some(fence),
+    )
+}
+
+#[derive(Clone, Copy)]
+struct CleanExitFence<'a> {
+    id: RuntimeId,
+    generation: &'a str,
+    revision: Revision,
+}
+
+fn park_authorized_with_clean_exit_fence(
+    root: &crate::state::StateRoot,
+    registry: &mut HostRegistry,
+    workstream_id: WorkstreamId,
+    expected_revision: Option<Revision>,
+    authorization: CatalogAuthorization,
+    clean_exit_fence: Option<CleanExitFence<'_>>,
+) -> Result<Option<Revision>, ActionError> {
     let overview = workstream_overview_authorized(registry, workstream_id, authorization)?;
     if expected_revision.is_some_and(|expected| expected != overview.revision) {
         return Err(ActionError::WorkstreamRevisionConflict);
@@ -54,9 +109,12 @@ pub(crate) fn park_authorized(
     let mut record = registry
         .runtime_for_workstream(workstream_id)?
         .ok_or(ActionError::NoRuntime(workstream_id))?;
+    if clean_exit_fence.is_some_and(|fence| !clean_exit_fence_matches(&record, fence)) {
+        return Err(ActionError::RuntimeProbeAmbiguous);
+    }
     let tmux = SystemTmux::default();
     let process_probe = LinuxProcessProbe;
-    let runtime = PrivateRuntime::new(
+    let mut runtime = PrivateRuntime::new(
         &tmux,
         &process_probe,
         RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
@@ -69,6 +127,9 @@ pub(crate) fn park_authorized(
         &probe,
         promoted_cwd.as_deref(),
     )? == Some(0);
+    if clean_exit_fence.is_some() && !clean_provider_exit {
+        return Ok(None);
+    }
     match probe {
         probe @ RuntimeProbe::Live { .. } if matches_recorded_runtime(&record, &probe, false) => {}
         RuntimeProbe::Live { .. } | RuntimeProbe::Unknown { .. } if clean_provider_exit => {}
@@ -98,6 +159,62 @@ pub(crate) fn park_authorized(
             return Err(ActionError::RuntimeProbeAmbiguous);
         }
     }
+    if let Some(fence) = clean_exit_fence {
+        await_recorded_provider_group_empty(&record)?;
+        // Re-read durable records and retained-pane facts before cleanup.
+        let final_overview =
+            workstream_overview_authorized(registry, workstream_id, authorization)?;
+        if final_overview.revision != overview.revision {
+            return Err(ActionError::WorkstreamRevisionConflict);
+        }
+        let final_record = registry
+            .runtime_for_workstream(workstream_id)?
+            .ok_or(ActionError::NoRuntime(workstream_id))?;
+        if !clean_exit_fence_matches(&final_record, fence) {
+            return Err(ActionError::RuntimeProbeAmbiguous);
+        }
+        runtime = PrivateRuntime::new(
+            &tmux,
+            &process_probe,
+            RuntimePaths::for_record(
+                root.base(),
+                final_record.runtime_id,
+                &final_record.tmux_session,
+            )?,
+        );
+        let final_probe = runtime.probe()?;
+        let final_promoted_cwd = promoted_onboarding_cwd(root, registry, &final_record)?;
+        if clean_provider_exit_status_with_cwd_proof(
+            &runtime,
+            &final_record,
+            &final_probe,
+            final_promoted_cwd.as_deref(),
+        )? != Some(0)
+            || !recorded_provider_group_is_empty(&final_record)?
+        {
+            return Err(ActionError::RuntimeProbeAmbiguous);
+        }
+        record = final_record;
+    }
+    finalize_park(registry, &record, &runtime, clean_exit_fence.is_some())?;
+    workstream_revision(registry, workstream_id).map(Some)
+}
+
+fn clean_exit_fence_matches(
+    record: &crate::state::RuntimeRecord,
+    fence: CleanExitFence<'_>,
+) -> bool {
+    record.runtime_id == fence.id
+        && record.tmux_generation == fence.generation
+        && record.revision == fence.revision
+}
+
+fn finalize_park(
+    registry: &mut HostRegistry,
+    record: &crate::state::RuntimeRecord,
+    runtime: &PrivateRuntime<'_>,
+    provider_already_exited: bool,
+) -> Result<(), ActionError> {
     let opencode_handle = match record.provider {
         ProviderKind::Codex => None,
         ProviderKind::OpenCode => registry.opencode_runtime_handle(record.runtime_id)?,
@@ -105,7 +222,17 @@ pub(crate) fn park_authorized(
     let mut cleanup_error = opencode_handle
         .as_ref()
         .and_then(|handle| stop_opencode_observer(handle).err());
-    match stop_recorded_provider_if_present(&record) {
+    let stop_provider = if provider_already_exited {
+        // The exact retained-pane proof above includes the recorded pane PID,
+        // cwd, dead topology, zero native status, and its absence (or the
+        // narrow stable-zombie fallback). Re-running generic group shutdown
+        // after that native exit can observe a disappearing former member but
+        // cannot establish group ownership; leave that path fail-closed.
+        Ok(())
+    } else {
+        stop_recorded_provider_if_present(record)
+    };
+    match stop_provider {
         Ok(()) => {
             if let Err(error) = runtime.park() {
                 cleanup_error.get_or_insert(ActionError::Runtime(error));
@@ -116,22 +243,22 @@ pub(crate) fn park_authorized(
         }
     }
     if let Some(error) = cleanup_error {
-        return Err(fail_runtime_cleanup(registry, &record, error));
+        return Err(fail_runtime_cleanup(registry, record, error));
     }
     if opencode_handle.is_some()
         && let Err(error) = registry
             .delete_opencode_runtime_handle(record.runtime_id, &record.tmux_generation)
             .map_err(ActionError::State)
     {
-        return Err(fail_runtime_cleanup(registry, &record, error));
+        return Err(fail_runtime_cleanup(registry, record, error));
     }
     if let Err(error) = registry
         .park_runtime(record.runtime_id, record.revision)
         .map_err(ActionError::State)
     {
-        return Err(fail_runtime_cleanup(registry, &record, error));
+        return Err(fail_runtime_cleanup(registry, record, error));
     }
-    workstream_revision(registry, workstream_id)
+    Ok(())
 }
 
 /// Reconciles the return from one native tmux attachment. `false` means the
@@ -186,13 +313,15 @@ pub(crate) fn reconcile_provider_attachment_end(
     if exit_status != Some(0) {
         return Err(ActionError::RuntimeProbeAmbiguous);
     }
-    park_authorized(
+    park_authorized_if_clean_provider_exit(
         root,
         registry,
         workstream_id,
-        Some(overview.revision),
+        overview.revision,
+        &record,
         CatalogAuthorization::ArchivedAllowed,
-    )?;
+    )?
+    .ok_or(ActionError::RuntimeProbeAmbiguous)?;
     Ok(true)
 }
 
@@ -327,6 +456,52 @@ pub(super) fn clean_provider_exit_status_with_cwd_proof(
             .ok(),
         None => runtime.provider_exit_status(recorded_pid, &record.cwd).ok(),
     })
+}
+
+/// Waits only for the recorded numeric provider group to have no live
+/// members after a native clean-exit proof. The vanished leader means that a
+/// non-empty group cannot safely be signalled: wait for its observed members
+/// to drain, then refuse rather than infer historical ownership.
+fn await_recorded_provider_group_empty(
+    record: &crate::state::RuntimeRecord,
+) -> Result<(), ActionError> {
+    let deadline = Instant::now() + PARK_CONFIRM_TIMEOUT;
+    await_provider_group_empty_with(
+        || recorded_provider_group_is_empty(record),
+        || Instant::now() < deadline,
+        || thread::sleep(PARK_CONFIRM_POLL_INTERVAL),
+    )
+}
+
+pub(super) fn await_provider_group_empty_with<R, C, W>(
+    mut group_is_empty: R,
+    mut before_deadline: C,
+    mut wait: W,
+) -> Result<(), ActionError>
+where
+    R: FnMut() -> Result<bool, ActionError>,
+    C: FnMut() -> bool,
+    W: FnMut(),
+{
+    loop {
+        if group_is_empty()? {
+            return Ok(());
+        }
+        if !before_deadline() {
+            return Err(ActionError::RuntimeProbeAmbiguous);
+        }
+        wait();
+    }
+}
+
+fn recorded_provider_group_is_empty(
+    record: &crate::state::RuntimeRecord,
+) -> Result<bool, ActionError> {
+    let (provider_pid, _) = recorded_provider_identity(record)?;
+    LinuxProcessProbe
+        .process_group_members_by_id_checked(provider_pid)
+        .map(|members| members.is_empty())
+        .map_err(|_| ActionError::RuntimeProbeAmbiguous)
 }
 
 /// Returns the exact canonical project cwd from one still-starting,

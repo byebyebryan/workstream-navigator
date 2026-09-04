@@ -627,11 +627,31 @@ mod tests {
         fs::create_dir_all(&paths.directory).unwrap();
         plan.bootstrap().prepare(&paths).unwrap();
         let launch = plan.launch();
+        // The launch-plan tests above cover the exact interactive argv
+        // (-i, the private Bash rcfile, and the Zsh startup environment).
+        // Keep this wrapper-semantics test independent of the test runner's
+        // controlling TTY: disable ordinary startup, source the exact
+        // materialized wrapper by positional argv, and invoke the same
+        // codex function. No path is interpolated into the shell program.
+        let wrapper = paths.directory.join(match shell_name {
+            "bash" => BASH_WRAPPER_FILE,
+            "zsh" => ZSH_WRAPPER_FILE,
+            _ => unreachable!(),
+        });
         let mut command = Command::new(&launch.program[0]);
+        match shell_name {
+            "bash" => {
+                command.args(["--noprofile", "--norc", "-c"]);
+            }
+            "zsh" => {
+                command.args(["-f", "-c"]);
+            }
+            _ => unreachable!(),
+        }
         command
-            .args(&launch.program[1..])
-            .arg("-c")
-            .arg("codex")
+            .arg(r#"source "$1"; codex"#)
+            .arg("wsnav-account-shell-test")
+            .arg(wrapper)
             .current_dir(&seed_cwd)
             .env_clear()
             .envs(&launch.environment)

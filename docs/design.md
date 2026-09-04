@@ -4,15 +4,15 @@ Date: 2026-09-04
 
 Status: D25 is complete in this checkpoint, developed from `076b0a7`, with an
 immediate shell-first exit correction after operator falsification. The
-corrected full local/disposable gate passes, and its locked release is
-byte-identically installed for operator inspection with executable SHA-256
-`2ab6c705291d6140826e0a72c00c1668f03b7bf463b7d104c38e0dad5dfa1057`.
-Sanitized native-exit acceptance with Codex 0.153.2 and OpenCode 1.18.27 remains
-bound to the prior D25 artifact; it is not evidence for the corrected hash.
-Schema 15 and the D24 product surface are unchanged. No passing current-source
-remote-CI result is included in the D25 acceptance record. D18 checkpoint
-`c961c7e` retains the older separately accepted destructive-reset and native
-observer-trust evidence.
+corrected full local/disposable and declared Rust 1.88 gates pass. Its locked
+release is byte-identically installed for operator inspection with executable
+SHA-256
+`70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1`,
+and sanitized native-exit acceptance on that exact artifact passes with Codex
+0.153.2 and OpenCode 1.18.27. Schema 15 and the D24 product surface are
+unchanged. No passing current-source remote-CI result is included in the D25
+acceptance record. D18 checkpoint `c961c7e` retains the older separately
+accepted destructive-reset and native observer-trust evidence.
 
 ### D25 current-product stabilization
 
@@ -32,23 +32,62 @@ closed refusal.
 After that identity join, the helper delegates to the ordinary managed
 attachment-end reconciler. An exact running PID/birth remains a detach. Only a
 matching zombie or the narrow disappearance between two exact reads opens a
-bounded convergence window for the retained pane; status `0` with matching
-PID, topology, and process absence parks the Runtime. Ordinary Runtimes also
-require the pane launch cwd to equal the recorded cwd. A still-starting
-shell-promoted Runtime may instead bridge its canonical recorded project cwd
-to the earlier absolute pane seed cwd only through one exact current-generation
-`provider_exec_proven` onboarding target that independently proved the native
-provider cwd. Non-zero, reused, inaccessible, malformed, missing, duplicated,
-stale, or timed-out evidence remains unavailable. A prior stopped Runtime may
-shed an older retained private server only through the same exact status-zero
-proof before reserving its next generation.
+bounded convergence window for the retained pane. The ordinary proof requires
+status `0` from tmux with matching PID, topology, and process absence. On Linux
+only, when both tmux exit-status and exit-signal fields remain empty, one exact
+retained zombie may instead supply a stable birth plus field-52 raw wait status
+that decodes as normal exit `0`; topology, PID, cwd, and the same zombie
+evidence must survive a second exact read. Any signal evidence, malformed or
+conflicting status, process reuse, live process, inaccessible identity, or
+changed proof is refused. Ordinary Runtimes also require the pane launch cwd
+to equal the recorded cwd. A still-starting shell-promoted Runtime may instead
+bridge its canonical recorded project cwd to the earlier absolute pane seed
+cwd only through one exact current-generation `provider_exec_proven`
+onboarding target that independently proved the native provider cwd. Missing,
+duplicated, stale, or timed-out evidence remains unavailable. A prior stopped
+Runtime may shed an older retained private server only through the same exact
+clean-exit proof before reserving its next generation.
+
+Once native clean exit is exact, WSNav does not re-signal the now-absent
+provider group through the generic stop path. It waits boundedly and read-only
+for the recorded numeric group to have no visible live members, then re-reads
+the Workstream and Runtime revisions, exact retained pane PID/cwd/topology and
+zero-exit proof, and group emptiness immediately before stopping the private
+server. Persistent membership or inaccessible, changed, or mismatched
+evidence is refused. The ordinary Archive/internal-stop path keeps its existing
+exact process-group proof and signalling rules.
 
 Linux `ESRCH` is treated as a vanished `/proc` entry only while enumerating a
 process group; direct identity reads remain strict. Tests wait for the exact
-private client and retained dead-status metadata instead of fixed scheduling,
-and the focus regression polls the current terminal screen instead of relying
-on a recorder attached after the initial frame. These are deterministic test
-seams, not new product authority.
+private client plus a command-order acknowledgement through that client, and
+invoke production retained-exit proof as soon as exact dead topology exists,
+so both delayed tmux metadata and the Linux zombie fallback are exercised.
+Account-shell wrapper semantics source the exact generated
+wrapper through the provider shell's noninteractive command mode, avoiding
+controlling-terminal job-control races; separate argv/bootstrap tests retain
+the exact production interactive launch contract. The focus regression polls
+the current terminal screen instead of relying on a recorder attached after
+the initial frame. Archive postconditions accept only absence or the exact
+same-birth Linux zombie after a bounded wait; a running, reused, or unreadable
+process still fails. Disposable cycle fixtures drop their exact tmux cleanup
+guard before their temporary root so the private socket remains available
+through server shutdown; an exact process-identity regression covers both the
+server and provider pane. These are deterministic test seams, not new product
+authority.
+
+Codex 0.153.2 may also persist its model-availability tooltip counter into the
+selected observer profile while native hook review is in progress. The native
+suffix parser accepts only the exact `[tui.model_availability_nux]` shape: a
+nonempty map of bounded lowercase model slugs to unsigned 32-bit counters.
+After a reviewed hook is disabled and re-enabled, Codex may retain an explicit
+`enabled = true` beside that hook's exact trust hash; that active form is also
+accepted, while `enabled = false` remains non-ready. Every other hook-state or
+`tui` key, nested shape, scalar type, duplicate, malformed slug, or out-of-range
+counter remains `modified`. Provider-native UI state may exist before hook
+trust and therefore remains `trust_pending`; `ready` still requires all four
+exact lifecycle-hook trust hashes and no disabled hook. The generated
+declaration and the rest of the three-region ownership boundary remain
+unchanged.
 
 D25 adds no public command, key, page, lifecycle, provider-thread action,
 schema migration, transcript/capture storage, provider output mutation,
@@ -1478,11 +1517,12 @@ disclosed if it cannot be avoided.
 
 Native Codex hook review appends trust records to the selected profile itself:
 `[hooks.state]` records keyed to the exact generated hook entries and trusted
-`[projects]` entries. Native `/model` instead prepends the selected `model` and
-`model_reasoning_effort` to that same profile. WSNav therefore verifies the
-document as three independently owned regions: an optional provider prefix,
-the byte-exact generated declaration beginning at the managed marker, and a
-narrow schema-checked native trust suffix.
+`[projects]` entries. The TUI may additionally append its
+`[tui.model_availability_nux]` display counters. Native `/model` instead
+prepends the selected `model` and `model_reasoning_effort` to that same profile.
+WSNav therefore verifies the document as three independently owned regions: an
+optional provider prefix, the byte-exact generated declaration beginning at
+the managed marker, and a narrow schema-checked native state suffix.
 
 The provider prefix is at most 4096 bytes and must contain one or both of the
 top-level `model` and `model_reasoning_effort` keys as non-empty TOML strings
@@ -1494,11 +1534,13 @@ ambiguous managed marker, or model setting outside the prefix is `modified`
 and fails closed.
 
 The native suffix still permits only the four generated lifecycle hook keys,
-`sha256:` trusted hashes, and project records whose sole value is
-`trust_level = "trusted"`. A malformed record, unknown event, different hook
-path, changed declaration, or other suffix setting is `modified` and fails
-closed. This narrow mixed ownership preserves native model control without
-making model state WSNav metadata or giving WSNav authority over arbitrary
+`sha256:` trusted hashes with an optional provider-written `enabled = true`,
+project records whose sole value is `trust_level = "trusted"`, and the optional
+exact model-availability counter table described above. An inactive hook,
+malformed record, unknown event, different hook path, changed declaration, or
+other suffix setting is `modified` and fails closed.
+This narrow mixed ownership preserves native model and TUI control without
+making provider state WSNav metadata or giving WSNav authority over arbitrary
 profile configuration.
 
 Existing user-configured Codex hooks remain the user's integrations. Workstream
@@ -1509,16 +1551,16 @@ mutating the user's configuration.
 
 Profile update or removal requires no live WSNav-managed Codex Runtime. A
 contextually accepted update validates an exact legacy declaration, atomically
-replaces it, and discards its co-located native trust suffix before entering
+replaces it, and discards its co-located native state suffix before entering
 the same native review. A declaration-changing update preserves an accepted
 provider prefix byte for byte and returns the integration to `trust_pending`
 until native review succeeds again; an exact no-op preserves both prefix and
-trust. Setup and update remain internal entrypoints used by the guide, not
-public normal-workflow commands or a dedicated page.
+native state. Setup and update remain internal entrypoints used by the guide,
+not public normal-workflow commands or a dedicated page.
 
 Exact removal belongs to an exceptional documented uninstall/cleanup flow, not
 ordinary navigator navigation. It refuses while any managed Runtime is live,
-validates all three regions, removes the WSNav declaration and native trust
+validates all three regions, removes the WSNav declaration and native state
 suffix, and then removes the ownership record. With no provider prefix it
 deletes the profile; with an accepted prefix it atomically leaves only those
 provider-owned model settings at the same path. A foreign, modified, disabled,

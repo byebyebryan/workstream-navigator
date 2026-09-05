@@ -15,7 +15,7 @@ use std::process::ExitCode;
 pub(super) use std::{
     env,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
     str::FromStr,
 };
 

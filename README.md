@@ -6,9 +6,10 @@ organization, attachment, status, and a few compound workstream actions
 around the provider's native terminal UI.
 
 > **D25 status:** the immediate shell-first exit correction is locally and
-> declared-Rust-1.88 accepted, and its locked release is installed
-> byte-identically for operator inspection with executable SHA-256
-> `70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1`.
+> live-provider accepted; its current remote Rust 1.88 result remains pending.
+> The locked release is installed byte-identically for operator inspection
+> with executable SHA-256
+> `1cb2518100afdb2dd1944674a4e59c690495bb31d90673ae3a89b22c2a738e5d`.
 > Provider exit now converges through the initial Shell-to-provider promotion
 > path even when the provisional tmux pane was seeded before the shell changed
 > into the canonical project directory. That exception requires the exact
@@ -16,6 +17,10 @@ around the provider's native terminal UI.
 > strict launch-cwd proof. Linux process disappearance, tmux exit publication,
 > post-exit process-group drain, and marker-retirement races remain bounded
 > without converting ambiguity into absence or signaling an unproven group.
+> Native attachment also has an exact read-only process/dead-pane monitor for
+> tmux versions that can retain a dead pane without firing `pane-died`; only
+> one exact dead provider pane can detach clients, and reconciliation remains
+> separately revision-fenced.
 > Sanitized immediate native-exit acceptance with Codex 0.153.2 and OpenCode
 > 1.18.27 passes on this exact artifact. No passing current-source remote-CI
 > result is included in this acceptance record.

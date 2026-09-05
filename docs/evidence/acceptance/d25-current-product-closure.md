@@ -1,9 +1,9 @@
 # D25 Current-Product Stabilization and Closure
 
-Status: the immediate shell-first exit correction is locally,
-declared-Rust-1.88, and live-provider accepted. The corrected locked release is
-installed byte-identically for operator inspection. This record includes no
-passing current-source remote-CI result.
+Status: the immediate shell-first exit correction is locally and
+live-provider accepted. The corrected locked release is installed
+byte-identically for operator inspection. Its current remote Rust 1.88 result
+remains pending.
 
 ## Contract exercised
 
@@ -51,6 +51,17 @@ server. It does not signal an absent provider leader's unproven group.
 Persistent membership, process-table failure, or changed evidence is refused;
 generic Archive/internal-stop process-group semantics are unchanged.
 
+The native attachment helper keeps the private `pane-died` hook as its normal
+fast path but no longer assumes every supported tmux release delivers that
+hook. Before attachment it records the exact provider PID/birth, then observes
+only that process identity while the native client is running. Absence or the
+exact same-birth zombie opens one private-tmux topology read. Only the exact
+generated session with one dead `provider:0` pane authorizes detaching clients;
+live, changed, duplicated, malformed, inaccessible, or reused evidence is
+refused. The monitor does not inspect pane content or exit fields and performs
+no lifecycle classification or mutation. The separately fenced attachment-end
+proof retains that authority after the native client returns.
+
 Linux `ESRCH` maps to a vanished process only at the process-group enumeration
 seam after `/proc` already yielded that entry. Direct identity reads remain
 strict. The private-client regression waits for the exact client PID/session
@@ -82,6 +93,16 @@ authenticated GitHub CLI on Starship. Historical run `33883382546`, job
 `runtime::tests::provider_exit_hook_detaches_the_client_and_retains_dead_evidence`
 after 398 tests passed. That job is evidence for the diagnosed race only; it is
 not a result for D25.
+
+GitHub run `33931301731` at
+`993dc028c0818d40e861b3c3aae733bfcbae702a` passed its MSRV job but failed
+check job `101210258146` in
+`provider_exit_hook_detaches_the_client_and_retains_dead_evidence`. The exact
+private pane was dead, both tmux exit fields were blank, and the native client
+remained attached. A disposable hook marker was absent in a focused tmux 3.4
+reproduction, proving this was not another client-readiness race: the
+configured `pane-died` hook had not fired. That failed run is diagnosis
+evidence, not current-source acceptance.
 
 Local focused validation covered:
 
@@ -143,7 +164,7 @@ mutation authority.
 
 Focused promoted-cwd, state-before-marker, timeout, and live-detach regressions
 passed. The final uninterrupted `scripts/check` run passed formatting, strict
-Clippy, all 425 library tests, all 10 presentation tests, package
+Clippy, all 427 library tests, all 10 presentation tests, package
 verification, dependency license/advisory/source policy, documentation links,
 source/CLI acceptance, presentation/state acceptance, and diff checks. Cargo
 Deny again emitted only the accepted duplicate-version warnings; advisories,
@@ -186,12 +207,26 @@ refusal.
 The final Ubuntu full-suite run also exposed an insufficient readiness seam in
 the private control-client fixture. tmux could list the exact client before its
 initial `attach-session` command had completed, allowing a late attach to win
-after the correct `pane-died` hook detached it. The fixture now queues one
-session-local option write through that exact control client and observes the
-option externally before releasing the provider. This is a metadata-only
+after the correct `pane-died` hook detached it. The fixture now requires the
+exact control-mode `%session-changed` notification, then queues one
+session-local option write through that client and observes the option
+externally before releasing the provider. This is a metadata-only two-phase
 command-order barrier, not a timeout increase or production change. Two sets
 of 30 focused repetitions passed on tmux 3.4, the focused regression passed on
 tmux 3.3a, and both final all-target container suites passed afterward.
+
+The later remote hook-delivery falsification required a production fallback,
+not another fixture delay. The attachment helper now polls the exact provider
+PID/birth read-only and makes a single private-tmux query only after exact exit
+evidence. Exact unit tests prove one dead generated provider pane detaches and
+that live or ambiguous topology does not. The focused attachment regression
+passed 500 consecutive repetitions on Ubuntu 24.04 with Rust 1.88.0 and tmux
+3.4, then 200 on Debian Bookworm with Rust 1.88.0 and tmux 3.3a. The current
+poll cadence was subsequently set to 100 milliseconds to avoid unnecessary
+steady-state `/proc` traffic. That current cadence passed 200 consecutive
+focused repetitions on local tmux 3.7c, the full current local gate, and
+live-provider acceptance; the exact current remote Rust 1.88 result remains
+pending.
 
 The final Debian run exposed one additional assertion race after Archive had
 completed its exact stop: Linux could still expose the same-birth process as a
@@ -237,19 +272,28 @@ slugs; and out-of-range counters.
 ## Sanitized live-provider acceptance
 
 Explicit operator-authorized acceptance on corrected artifact SHA-256
-`70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1`
+`1cb2518100afdb2dd1944674a4e59c690495bb31d90673ae3a89b22c2a738e5d`
 used isolated mode-0700 homes, provider configuration, repositories, schema-15
 state roots, presentation sockets, and private Runtime servers with Codex
-0.153.2 and OpenCode 1.18.27. Configuration and credential source files were
-copied with mode `0600`; no values were output.
+0.153.2 and OpenCode 1.18.27. Credential source files were copied with mode
+`0600`, and minimal provider configuration was created with the same mode; no
+values were output.
+
+The accepted Codex run used a minimal empty base configuration plus the exact
+WSNav-owned profile; OpenCode used an empty isolated configuration. Only each
+provider's credential file was copied into its isolated home. Codex's native
+directory and hook-review surfaces recorded four exact trusted hooks before
+WSNav finalized the integration as ready. A pre-acceptance Codex specimen that
+copied unrelated user configuration was rejected, exact-stopped, and deleted
+before the accepted run.
 
 Each provider reached an exact `provider_exec_proven` onboarding target with
 no work prompt. The final Codex profile contained the exact reviewed hashes
 and bounded NUX counter; the earlier native disable/re-enable specimen supplied
 the `enabled = true` compatibility falsification. Codex was deliberately
 exited before a SessionStart binding existed, covering the immediate
-pre-binding edge. Native `/exit` then produced all of the following without
-provider-pane capture or content inspection:
+pre-binding edge. Human-paced native `/exit` keystrokes then produced all of
+the following without provider-pane capture or content inspection:
 
 - the Workstream became parked and its Runtime stopped;
 - the recorded provider process and exact private Runtime server disappeared;
@@ -267,16 +311,17 @@ was recorded in this evidence.
 
 The corrected locked release was atomically installed to
 `~/.local/bin/wsnav`. Source and installed artifacts are mode `0755`, size
-7,398,480 bytes, report `wsnav 0.1.0`, and are byte-identical:
+7,394,744 bytes, report `wsnav 0.1.0`, and are byte-identical:
 
 ```text
-70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1  target/release/wsnav
-70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1  ~/.local/bin/wsnav
+1cb2518100afdb2dd1944674a4e59c690495bb31d90673ae3a89b22c2a738e5d  target/release/wsnav
+1cb2518100afdb2dd1944674a4e59c690495bb31d90673ae3a89b22c2a738e5d  ~/.local/bin/wsnav
 ```
 
 ## Evidence boundaries
 
-- No passing current-source remote CI result is included in this record.
+- The exact current-source remote Rust 1.88 result is pending; failing run
+  `33931301731` is retained only as the hook-delivery falsification.
 - No current UI capture was generated. Capture selection and publication were
   explicitly left to the operator and are not a D25 exit gate.
 - No Fork, Rename, Ack, Park/Unpark, provider-thread archive/delete, transcript

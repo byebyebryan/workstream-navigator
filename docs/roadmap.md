@@ -4,10 +4,10 @@ Date: 2026-09-04
 
 Status: D0-D25 implementation is complete. D25, developed from `076b0a7`, now
 includes an immediate shell-first exit correction after operator
-falsification. The corrected source passes the full local/disposable and
-declared Rust 1.88 gates. Its locked release is byte-identically installed for
-operator inspection with executable SHA-256
-`70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1`,
+falsification. The corrected source passes the full local/disposable gate; its
+current remote Rust 1.88 result remains pending. Its locked release is
+byte-identically installed for operator inspection with executable SHA-256
+`1cb2518100afdb2dd1944674a4e59c690495bb31d90673ae3a89b22c2a738e5d`,
 and sanitized native-exit acceptance on that exact artifact passes with Codex
 0.153.2 and OpenCode 1.18.27. D25 stabilizes the existing D24 surface and
 schema 15; it adds no user-facing session-management capability. No passing
@@ -35,9 +35,9 @@ roadmap is preserved as
 
 ## Completed checkpoint: D25 current-product stabilization and closure
 
-Implementation status: the corrected source is locally, declared-baseline,
-and live-provider accepted, and installed for operator inspection. No passing
-current-source remote-CI result is included in this acceptance record.
+Implementation status: the corrected source is locally and live-provider
+accepted and installed for operator inspection. Its current remote Rust 1.88
+result remains pending.
 
 D25 closes deterministic and operational gaps found while reviewing the
 current simplified product. It does not change the D24 product surface. The
@@ -50,7 +50,13 @@ handling.
 Scope:
 
 - replace fixed scheduling in the private-client exit regression with exact
-  client PID/session identity plus a control-command ordering acknowledgement;
+  client PID/session identity plus an exact session-change notification and a
+  subsequent control-command ordering acknowledgement;
+- keep `pane-died` as the normal attachment-return path, but when the exact
+  provider PID disappears or becomes the same-birth zombie, allow one
+  read-only private-tmux topology check to detach clients only from the exact
+  generated session with one dead `provider:0` pane; lifecycle classification
+  and mutation remain in the separately fenced reconciler;
 - treat Linux `ESRCH` as a vanished process only for a `/proc` entry already
   found during process-group enumeration, while keeping direct identity,
   permission, malformed, and other I/O failures strict;
@@ -131,16 +137,20 @@ Exit gate:
   native `/exit` proved parked/stopped state, provider and private-server
   absence, and a live inert presentation surface; and
 - corrected source and installed `wsnav 0.1.0` binaries are mode `0755`, size
-  7,398,480 bytes, and SHA-256
-  `70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1`.
+  7,394,744 bytes, and SHA-256
+  `1cb2518100afdb2dd1944674a4e59c690495bb31d90673ae3a89b22c2a738e5d`.
 
 Remote evidence boundary:
 
 - authenticated GitHub inspection from Starship recovered historical run
   `33883382546`, job `101057180882`, whose MSRV failure was the private-client
-  detach timing regression; and
-- that historical failing job is diagnosis evidence only. This acceptance
-  record includes no passing remote-CI result for D25.
+  detach timing regression;
+- run `33931301731` at `993dc028c0818d40e861b3c3aae733bfcbae702a`
+  passed its MSRV job but failed check job `101210258146`: tmux exposed the
+  exact dead pane with blank exit fields while the configured `pane-died` hook
+  had not fired, leaving the native client attached; and
+- those failing runs are diagnosis evidence only. A passing current-source
+  remote-CI result is still pending.
 
 Evidence record:
 

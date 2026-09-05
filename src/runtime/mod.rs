@@ -5,7 +5,7 @@ use std::{
     ffi::OsString,
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
-    process::{Command, ExitStatus},
+    process::{Command, ExitStatus, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -28,6 +28,7 @@ const LAUNCH_BARRIER_FILE: &str = "launch.ready";
 const LAUNCH_BARRIER_TIMEOUT: Duration = Duration::from_secs(30);
 const LAUNCH_BARRIER_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const PROVIDER_SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const ATTACH_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const PROCESS_GROUP_STAT_READ_ATTEMPTS: usize = 3;
 const PROCESS_GROUP_STAT_RETRY_DELAY: Duration = Duration::from_millis(1);
 const RUNTIME_TMUX_CONFIG_PREFIX: &str = concat!(
@@ -1866,6 +1867,101 @@ impl<'a> PrivateRuntime<'a> {
         command
     }
 
+    /// Runs the native tmux attachment while retaining a read-only dead-pane
+    /// fallback for tmux versions that can omit both exit fields and defer the
+    /// `pane-died` hook. The fallback only detaches clients from this exact
+    /// private session; lifecycle mutation remains the caller's separately
+    /// fenced responsibility after the native client returns.
+    pub(crate) fn attach(&self) -> Result<ExitStatus, RuntimeError> {
+        let (pane_pid, process_birth) = match self.probe()? {
+            RuntimeProbe::Live {
+                pane_pid,
+                process_birth: Some(process_birth),
+                ..
+            } => (pane_pid, process_birth),
+            RuntimeProbe::Live {
+                process_birth: None,
+                ..
+            }
+            | RuntimeProbe::Missing
+            | RuntimeProbe::Unknown { .. } => return Err(RuntimeError::InvalidTopology),
+        };
+        let mut command = self.attach_command();
+        command.stderr(Stdio::null());
+        let mut client = command.spawn().map_err(|source| RuntimeError::Io {
+            path: PathBuf::from("tmux"),
+            source,
+        })?;
+        loop {
+            if let Some(status) = client.try_wait().map_err(|source| RuntimeError::Io {
+                path: PathBuf::from("tmux"),
+                source,
+            })? {
+                return Ok(status);
+            }
+            // The configured hook is the normal fast path. Avoid spawning tmux
+            // probes throughout a live provider session: only an absent or
+            // exact same-birth zombie can open the dead-topology fallback.
+            let provider_exited = match self.process_probe.process_observation_checked(pane_pid) {
+                Ok(None) => true,
+                Ok(Some(ProcessObservation {
+                    birth,
+                    state: ProcessState::Zombie,
+                })) if birth == process_birth => true,
+                Ok(Some(_)) | Err(_) => false,
+            };
+            if provider_exited {
+                // A failed or ambiguous topology grants no detach authority
+                // and is retried while the native client remains attached.
+                let _ = self.detach_clients_if_provider_pane_dead();
+            }
+            thread::sleep(ATTACH_EXIT_POLL_INTERVAL);
+        }
+    }
+
+    fn detach_clients_if_provider_pane_dead(&self) -> Result<bool, RuntimeError> {
+        let target = format!("{}:{PROVIDER_WINDOW}", self.paths.session_name);
+        let response = self.tmux.invoke(&TmuxInvocation {
+            socket: self.paths.socket.clone(),
+            config: None,
+            arguments: vec![
+                OsString::from("list-panes"),
+                OsString::from("-t"),
+                OsString::from(target),
+                OsString::from("-F"),
+                OsString::from(
+                    "#{session_name}|#{window_index}|#{window_name}|#{window_panes}|#{pane_index}|#{pane_dead}",
+                ),
+            ],
+        })?;
+        if !response.success {
+            return Err(RuntimeError::InvalidTopology);
+        }
+        let expected_live = format!("{}|0|{PROVIDER_WINDOW}|1|0|0", self.paths.session_name);
+        let expected_dead = format!("{}|0|{PROVIDER_WINDOW}|1|0|1", self.paths.session_name);
+        match response.stdout.trim_end_matches(['\r', '\n']) {
+            observed if observed == expected_live => Ok(false),
+            observed if observed == expected_dead => {
+                let detached = self.tmux.invoke(&TmuxInvocation {
+                    socket: self.paths.socket.clone(),
+                    config: None,
+                    arguments: vec![
+                        OsString::from("detach-client"),
+                        OsString::from("-s"),
+                        OsString::from(&self.paths.session_name),
+                    ],
+                })?;
+                if !detached.success {
+                    return Err(RuntimeError::TmuxRejected(trim_diagnostic(
+                        &detached.stderr,
+                    )));
+                }
+                Ok(true)
+            }
+            _ => Err(RuntimeError::InvalidTopology),
+        }
+    }
+
     /// Pre-sizes the exact private Runtime window from the invoking terminal,
     /// then returns tmux to its native `latest` sizing policy.
     ///
@@ -2576,8 +2672,9 @@ mod tests {
     use std::{
         cell::RefCell,
         collections::{BTreeSet, VecDeque},
-        io::Write,
+        io::{BufRead, BufReader, Write},
         process::{Command, Stdio},
+        sync::mpsc,
     };
 
     use super::*;
@@ -2629,12 +2726,41 @@ mod tests {
         client: &mut std::process::Child,
         timeout: Duration,
     ) {
+        let stdout = client
+            .stdout
+            .take()
+            .expect("control-mode client stdout is piped");
+        let expected_session = session_name.to_owned();
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let mut readiness_sent = false;
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else {
+                    break;
+                };
+                let line = line.trim_end_matches('\r');
+                let exact_attachment = line
+                    .strip_prefix("%session-changed $")
+                    .and_then(|value| value.split_once(' '))
+                    .is_some_and(|(session_id, session)| {
+                        !session_id.is_empty()
+                            && session_id.bytes().all(|byte| byte.is_ascii_digit())
+                            && session == expected_session
+                    });
+                if exact_attachment && !readiness_sent {
+                    let _ = ready_sender.send(());
+                    readiness_sent = true;
+                }
+            }
+        });
         wait_for_private_client_attachment(socket, session_name, client.id(), timeout);
-        // `list-clients` proves enrollment but can precede completion of the
-        // control client's initial `attach-session` command. Queue a benign
-        // session-local command through that exact client and observe its
-        // result from a separate private-tmux command before releasing the
-        // provider. This never reads provider-pane output.
+        ready_receiver.recv_timeout(timeout).expect(
+            "private tmux control-mode client did not publish its exact session attachment",
+        );
+        // The session-change notification is emitted during initial attach.
+        // Queue one benign command after that event and observe its result from
+        // a separate private-tmux client. This proves the initial attach queue
+        // completed before the provider is released.
         let marker = "wsnav-control-ready";
         client
             .stdin
@@ -4139,6 +4265,59 @@ mod tests {
     }
 
     #[test]
+    fn attach_monitor_detaches_only_one_exact_dead_provider_pane() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let tmux = FakeTmux::with_responses([
+            TmuxResponse {
+                success: true,
+                stdout: format!("{}|0|provider|1|0|1\n", paths.session_name),
+                stderr: String::new(),
+            },
+            successful(),
+        ]);
+        let runtime = PrivateRuntime::new(&tmux, &FakeProcessProbe, paths.clone());
+
+        assert!(runtime.detach_clients_if_provider_pane_dead().unwrap());
+        let calls = tmux.calls.borrow();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].socket, paths.socket);
+        assert_eq!(
+            calls[1].arguments,
+            vec![
+                OsString::from("detach-client"),
+                OsString::from("-s"),
+                OsString::from(paths.session_name),
+            ]
+        );
+    }
+
+    #[test]
+    fn attach_monitor_preserves_live_or_ambiguous_topology() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
+        let live = TmuxResponse {
+            success: true,
+            stdout: format!("{}|0|provider|1|0|0\n", paths.session_name),
+            stderr: String::new(),
+        };
+        let malformed = TmuxResponse {
+            success: true,
+            stdout: format!("{}|0|provider|2|0|1\n", paths.session_name),
+            stderr: String::new(),
+        };
+        let tmux = FakeTmux::with_responses([live, malformed]);
+        let runtime = PrivateRuntime::new(&tmux, &FakeProcessProbe, paths);
+
+        assert!(!runtime.detach_clients_if_provider_pane_dead().unwrap());
+        assert!(matches!(
+            runtime.detach_clients_if_provider_pane_dead(),
+            Err(RuntimeError::InvalidTopology)
+        ));
+        assert_eq!(tmux.calls.borrow().len(), 2);
+    }
+
+    #[test]
     fn attach_geometry_targets_exact_window_and_restores_latest() {
         let temporary = tempfile::tempdir().unwrap();
         let paths = RuntimePaths::for_runtime(temporary.path(), RuntimeId::new());
@@ -4477,7 +4656,7 @@ mod tests {
             .arg(&paths.socket)
             .args(["attach-session", "-t", &paths.session_name])
             .stdin(Stdio::piped())
-            .stdout(Stdio::null())
+            .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
@@ -4495,6 +4674,7 @@ mod tests {
             if let Some(status) = client.try_wait().unwrap() {
                 break status;
             }
+            let _ = runtime.detach_clients_if_provider_pane_dead();
             if Instant::now() >= deadline {
                 let diagnostics =
                     private_client_detach_diagnostics(&paths.socket, &paths.session_name);

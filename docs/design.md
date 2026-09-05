@@ -4,14 +4,14 @@ Date: 2026-09-04
 
 Status: D25 is complete in this checkpoint, developed from `076b0a7`, with an
 immediate shell-first exit correction after operator falsification. The
-corrected full local/disposable and declared Rust 1.88 gates pass. Its locked
-release is byte-identically installed for operator inspection with executable
+corrected full local/disposable gate and live-provider acceptance pass; its
+current remote Rust 1.88 result remains pending. The locked release is
+byte-identically installed for operator inspection with executable
 SHA-256
-`70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1`,
+`1cb2518100afdb2dd1944674a4e59c690495bb31d90673ae3a89b22c2a738e5d`,
 and sanitized native-exit acceptance on that exact artifact passes with Codex
 0.153.2 and OpenCode 1.18.27. Schema 15 and the D24 product surface are
-unchanged. No passing current-source remote-CI result is included in the D25
-acceptance record. D18 checkpoint `c961c7e` retains the older separately
+unchanged. D18 checkpoint `c961c7e` retains the older separately
 accepted destructive-reset and native observer-trust evidence.
 
 ### D25 current-product stabilization
@@ -56,6 +56,18 @@ zero-exit proof, and group emptiness immediately before stopping the private
 server. Persistent membership or inaccessible, changed, or mismatched
 evidence is refused. The ordinary Archive/internal-stop path keeps its existing
 exact process-group proof and signalling rules.
+
+The native attachment helper keeps `pane-died` as the normal fast path, but it
+does not assume that every supported tmux release will deliver that hook. It
+records the exact provider PID and birth before attachment, then polls only
+that process identity while the native client remains attached. Process
+absence or the exact same-birth zombie opens one private-tmux topology check.
+Only the exact generated session with one dead pane at `provider:0` authorizes
+`detach-client`; a live, changed, duplicated, malformed, inaccessible, or
+reused identity grants no detach authority. This monitor neither reads pane
+content or exit fields nor classifies, cleans, or mutates lifecycle state.
+Those decisions remain in the separately fenced attachment-end reconciler
+after the native client returns.
 
 Linux `ESRCH` is treated as a vanished `/proc` entry only while enumerating a
 process group; direct identity reads remain strict. Tests wait for the exact

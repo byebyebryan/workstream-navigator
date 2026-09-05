@@ -15,7 +15,11 @@ generation, and private paths it carried before launch. An unpromoted live
 shell detach remains state-free. Exact tmux status and process absence remain
 the ordinary authority to classify provider exit; a Linux-only same-zombie
 wait-status proof covers tmux versions that retain a dead pane without
-publishing either exit field.
+publishing either exit field. The native attachment helper also observes only
+the exact provider PID/birth while it waits. If that process disappears or is
+the same-birth zombie, one exact private-tmux topology read may detach clients
+from the single dead provider pane when `pane-died` was not delivered. It does
+not classify the exit or mutate lifecycle state.
 
 The shell-first correction also distinguishes the provisional pane's seed cwd
 from the canonical project cwd proven when the provider exec was adopted. Only
@@ -33,11 +37,11 @@ non-zero, reused, malformed, or inaccessible evidence remains fail-closed.
 
 D0-D25 are complete. The locked D25 release is installed byte-identically for
 operator inspection with SHA-256
-`70a6181a8746593e936012991e7e151181a43e3e3043be5c488eab23df72a3a1`.
-The corrected source passes the full local disposable and declared Rust 1.88
-gates. Sanitized immediate native-exit acceptance with Codex 0.153.2 and
-OpenCode 1.18.27 passes on the exact installed artifact. No passing
-current-source remote CI is included in that acceptance record.
+`1cb2518100afdb2dd1944674a4e59c690495bb31d90673ae3a89b22c2a738e5d`.
+The corrected source passes the full local disposable gate. Sanitized
+immediate native-exit acceptance with Codex 0.153.2 and OpenCode 1.18.27
+passes on the exact installed artifact; its current remote Rust 1.88 result
+remains pending.
 Current UI capture generation was left to the operator and is not acceptance
 evidence. See the
 [D25 acceptance record](evidence/acceptance/d25-current-product-closure.md).

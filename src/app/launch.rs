@@ -1,7 +1,8 @@
 use super::model::{AppError, parse_revision, parse_workstream};
 use super::{
     AttachmentPhase, Command, FromStr, LinuxProcessProbe, PathBuf, Presentation, PrivateRuntime,
-    ProviderSessionId, Revision, RuntimeId, RuntimePaths, StateRoot, Stdio, await_launch_release,
+    ProviderSessionId, Revision, RuntimeId, RuntimePaths, StateRoot, SystemTmux,
+    await_launch_release,
 };
 use crate::presentation::{
     AttachmentPurpose, PresentationAction, PresentationError, PresentationPaneRole,
@@ -422,7 +423,7 @@ pub(super) fn provider_attach(
                 )
             },
         );
-        let (mut command, record) = match prepared {
+        let (paths, record) = match prepared {
             Ok(prepared) => prepared,
             Err(error) => {
                 let _ = presentation.report_attachment_phase(attempt_id, AttachmentPhase::Failed);
@@ -438,9 +439,12 @@ pub(super) fn provider_attach(
             let _ = presentation.report_attachment_phase(attempt_id, AttachmentPhase::Failed);
             return Err(error.into());
         }
-        command
-            .status()
-            .map_err(AppError::Io)
+        let tmux = SystemTmux::default();
+        let process_probe = LinuxProcessProbe;
+        let runtime = PrivateRuntime::new(&tmux, &process_probe, paths);
+        runtime
+            .attach()
+            .map_err(AppError::from)
             .and_then(|status| finish_runtime_attachment(root, &record, status))
     } else {
         presentation.report_attachment_phase(attempt_id, AttachmentPhase::Running)?;
@@ -513,9 +517,7 @@ pub(super) fn provisional_provider_attach(
             &process_probe,
             RuntimePaths::for_runtime(root.base(), identity.candidate_runtime_id),
         );
-        let mut command = runtime.attach_command();
-        command.stderr(Stdio::null());
-        let status = command.status().map_err(AppError::Io)?;
+        let status = runtime.attach()?;
         let Some(record) = crate::shell_control::await_retired_provisional_attachment_record(
             root,
             &presentation,
@@ -606,9 +608,7 @@ fn attach_runtime_with_outcome(
         RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
     );
     runtime.prepare_attach()?;
-    let mut command = runtime.attach_command();
-    command.stderr(Stdio::null());
-    let status = command.status().map_err(AppError::Io)?;
+    let status = runtime.attach()?;
     finish_runtime_attachment(root, &record, status)
 }
 
@@ -688,7 +688,7 @@ fn prepare_runtime_attach_read_only(
     expected_workstream_revision: Revision,
     expected_runtime_id: RuntimeId,
     expected_runtime_revision: Revision,
-) -> Result<(Command, crate::state::RuntimeRecord), AppError> {
+) -> Result<(RuntimePaths, crate::state::RuntimeRecord), AppError> {
     let state = crate::state::open_current(&StateRoot::select(root.base()))?;
     if state
         .onboarding_workstream_projections()?
@@ -718,15 +718,10 @@ fn prepare_runtime_attach_read_only(
     }
     let tmux = super::SystemTmux::default();
     let process_probe = super::LinuxProcessProbe;
-    let runtime = PrivateRuntime::new(
-        &tmux,
-        &process_probe,
-        RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?,
-    );
+    let paths = RuntimePaths::for_record(root.base(), record.runtime_id, &record.tmux_session)?;
+    let runtime = PrivateRuntime::new(&tmux, &process_probe, paths.clone());
     runtime.prepare_attach()?;
-    let mut command = runtime.attach_command();
-    command.stderr(Stdio::null());
-    Ok((command, record))
+    Ok((paths, record))
 }
 
 pub(super) fn provider_wait() -> Result<(), AppError> {

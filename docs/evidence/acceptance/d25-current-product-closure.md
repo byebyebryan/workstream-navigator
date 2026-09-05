@@ -1,9 +1,8 @@
 # D25 Current-Product Stabilization and Closure
 
-Status: the immediate shell-first exit correction is locally and
-live-provider accepted. The corrected locked release is installed
-byte-identically for operator inspection. Its current remote Rust 1.88 result
-remains pending.
+Status: the immediate shell-first exit correction is locally, remotely,
+declared-Rust-1.88, and live-provider accepted. The corrected locked release
+is installed byte-identically for operator inspection.
 
 ## Contract exercised
 
@@ -103,6 +102,12 @@ remained attached. A disposable hook marker was absent in a focused tmux 3.4
 reproduction, proving this was not another client-readiness race: the
 configured `pane-died` hook had not fired. That failed run is diagnosis
 evidence, not current-source acceptance.
+
+GitHub run
+[`33934362831`](https://github.com/byebyebryan/wsnav/actions/runs/33934362831)
+at implementation commit `dbce1837e6a6d250b673f3f423f255e1b02af15f`
+then passed check job `101219278941` and declared Rust 1.88 job
+`101219278825`.
 
 Local focused validation covered:
 
@@ -225,8 +230,8 @@ passed 500 consecutive repetitions on Ubuntu 24.04 with Rust 1.88.0 and tmux
 poll cadence was subsequently set to 100 milliseconds to avoid unnecessary
 steady-state `/proc` traffic. That current cadence passed 200 consecutive
 focused repetitions on local tmux 3.7c, the full current local gate, and
-live-provider acceptance; the exact current remote Rust 1.88 result remains
-pending.
+live-provider acceptance. The exact implementation commit subsequently passed
+the remote full check and Rust 1.88 jobs recorded above.
 
 The final Debian run exposed one additional assertion race after Archive had
 completed its exact stop: Linux could still expose the same-birth process as a
@@ -320,8 +325,9 @@ The corrected locked release was atomically installed to
 
 ## Evidence boundaries
 
-- The exact current-source remote Rust 1.88 result is pending; failing run
-  `33931301731` is retained only as the hook-delivery falsification.
+- GitHub run `33934362831` is the passing remote full-check and declared Rust
+  1.88 result for implementation commit `dbce183`; failing run `33931301731`
+  is retained only as the hook-delivery falsification.
 - No current UI capture was generated. Capture selection and publication were
   explicitly left to the operator and are not a D25 exit gate.
 - No Fork, Rename, Ack, Park/Unpark, provider-thread archive/delete, transcript

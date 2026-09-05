@@ -4,14 +4,15 @@ Date: 2026-09-04
 
 Status: D25 is complete in this checkpoint, developed from `076b0a7`, with an
 immediate shell-first exit correction after operator falsification. The
-corrected full local/disposable gate and live-provider acceptance pass; its
-current remote Rust 1.88 result remains pending. The locked release is
-byte-identically installed for operator inspection with executable
+corrected full local/disposable, remote, declared Rust 1.88, and live-provider
+gates pass. The locked release is byte-identically installed for operator
+inspection with executable
 SHA-256
 `1cb2518100afdb2dd1944674a4e59c690495bb31d90673ae3a89b22c2a738e5d`,
 and sanitized native-exit acceptance on that exact artifact passes with Codex
 0.153.2 and OpenCode 1.18.27. Schema 15 and the D24 product surface are
-unchanged. D18 checkpoint `c961c7e` retains the older separately
+unchanged. GitHub CI run `33934362831` passes both jobs for implementation
+commit `dbce183`. D18 checkpoint `c961c7e` retains the older separately
 accepted destructive-reset and native observer-trust evidence.
 
 ### D25 current-product stabilization

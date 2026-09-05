@@ -4,14 +4,15 @@ Date: 2026-09-04
 
 Status: D0-D25 implementation is complete. D25, developed from `076b0a7`, now
 includes an immediate shell-first exit correction after operator
-falsification. The corrected source passes the full local/disposable gate; its
-current remote Rust 1.88 result remains pending. Its locked release is
-byte-identically installed for operator inspection with executable SHA-256
+falsification. The corrected source passes the full local/disposable, remote,
+and declared Rust 1.88 gates. Its locked release is byte-identically installed
+for operator inspection with executable SHA-256
 `1cb2518100afdb2dd1944674a4e59c690495bb31d90673ae3a89b22c2a738e5d`,
 and sanitized native-exit acceptance on that exact artifact passes with Codex
 0.153.2 and OpenCode 1.18.27. D25 stabilizes the existing D24 surface and
-schema 15; it adds no user-facing session-management capability. No passing
-current-source remote CI is included in the D25 acceptance record.
+schema 15; it adds no user-facing session-management capability. GitHub CI run
+`33934362831` passes the full check and declared Rust 1.88 jobs for
+implementation commit `dbce183`.
 D18 checkpoint `c961c7e` retains the older separately
 authorized destructive-reset and native observer-trust evidence.
 
@@ -35,9 +36,9 @@ roadmap is preserved as
 
 ## Completed checkpoint: D25 current-product stabilization and closure
 
-Implementation status: the corrected source is locally and live-provider
-accepted and installed for operator inspection. Its current remote Rust 1.88
-result remains pending.
+Implementation status: the corrected source is locally, remotely,
+declared-baseline, and live-provider accepted and installed for operator
+inspection.
 
 D25 closes deterministic and operational gaps found while reviewing the
 current simplified product. It does not change the D24 product surface. The
@@ -149,8 +150,10 @@ Remote evidence boundary:
   passed its MSRV job but failed check job `101210258146`: tmux exposed the
   exact dead pane with blank exit fields while the configured `pane-died` hook
   had not fired, leaving the native client attached; and
-- those failing runs are diagnosis evidence only. A passing current-source
-  remote-CI result is still pending.
+- those failing runs are diagnosis evidence only; and
+- run `33934362831` at
+  `dbce1837e6a6d250b673f3f423f255e1b02af15f` passed check job
+  `101219278941` and declared Rust 1.88 job `101219278825`.
 
 Evidence record:
 

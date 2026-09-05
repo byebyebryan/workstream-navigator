@@ -5,8 +5,8 @@ coding-agent workstreams on the machine where it is running. It adds
 organization, attachment, status, and a few compound workstream actions
 around the provider's native terminal UI.
 
-> **D25 status:** the immediate shell-first exit correction is locally and
-> live-provider accepted; its current remote Rust 1.88 result remains pending.
+> **D25 status:** the immediate shell-first exit correction is locally,
+> declared-Rust-1.88, remotely, and live-provider accepted.
 > The locked release is installed byte-identically for operator inspection
 > with executable SHA-256
 > `1cb2518100afdb2dd1944674a4e59c690495bb31d90673ae3a89b22c2a738e5d`.
@@ -22,8 +22,9 @@ around the provider's native terminal UI.
 > one exact dead provider pane can detach clients, and reconciliation remains
 > separately revision-fenced.
 > Sanitized immediate native-exit acceptance with Codex 0.153.2 and OpenCode
-> 1.18.27 passes on this exact artifact. No passing current-source remote-CI
-> result is included in this acceptance record.
+> 1.18.27 passes on this exact artifact. GitHub CI run `33934362831` passes
+> both the full check and declared Rust 1.88 jobs for implementation commit
+> `dbce1837e6a6d250b673f3f423f255e1b02af15f`.
 > No current UI capture was generated. See the
 > [D25 acceptance record](docs/evidence/acceptance/d25-current-product-closure.md).
 
@@ -225,8 +226,8 @@ the Archived `x` action.
 Ordinary work happens in the Navigator/provider presentation. D18 retains the
 historical destructive-reset and native observer-trust evidence. D25 records
 the current corrected installation and sanitized Codex/OpenCode lifecycle
-acceptance on that exact artifact; its acceptance record includes no passing
-current-source remote-CI result.
+acceptance on that exact artifact. GitHub CI run `33934362831` passes both the
+full check and declared Rust 1.88 jobs for the implementation commit.
 
 ## See it
 

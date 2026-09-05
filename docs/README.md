@@ -40,8 +40,8 @@ operator inspection with SHA-256
 `1cb2518100afdb2dd1944674a4e59c690495bb31d90673ae3a89b22c2a738e5d`.
 The corrected source passes the full local disposable gate. Sanitized
 immediate native-exit acceptance with Codex 0.153.2 and OpenCode 1.18.27
-passes on the exact installed artifact; its current remote Rust 1.88 result
-remains pending.
+passes on the exact installed artifact. GitHub CI run `33934362831` passes the
+full check and declared Rust 1.88 jobs for implementation commit `dbce183`.
 Current UI capture generation was left to the operator and is not acceptance
 evidence. See the
 [D25 acceptance record](evidence/acceptance/d25-current-product-closure.md).
